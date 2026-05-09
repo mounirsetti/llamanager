@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>llamanager — sign in</title>
+
+  <script>
+    (function () {
+      try {
+        var stored = localStorage.getItem('lm-theme');
+        var theme = stored || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        document.documentElement.setAttribute('data-theme', theme);
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    })();
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..700,0..100&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+
+  <style>
+    :root,
+    [data-theme="dark"] {
+      --bg-0: oklch(0.14 0.008 80);
+      --bg-1: oklch(0.18 0.008 80);
+      --bg-3: oklch(0.28 0.012 80);
+      --bg-4: oklch(0.40 0.010 80);
+      --fg-0: oklch(0.96 0.005 80);
+      --fg-1: oklch(0.82 0.005 80);
+      --fg-2: oklch(0.62 0.008 80);
+      --fg-3: oklch(0.46 0.010 80);
+      --accent: oklch(0.66 0.19 32);
+      --accent-soft: oklch(0.66 0.19 32 / 0.14);
+      --on-accent: oklch(0.14 0.008 80);
+    }
+    [data-theme="light"] {
+      --bg-0: oklch(0.97 0.006 80);
+      --bg-1: oklch(0.94 0.008 80);
+      --bg-3: oklch(0.84 0.012 80);
+      --bg-4: oklch(0.74 0.010 80);
+      --fg-0: oklch(0.20 0.010 80);
+      --fg-1: oklch(0.36 0.010 80);
+      --fg-2: oklch(0.50 0.010 80);
+      --fg-3: oklch(0.64 0.010 80);
+      --accent: oklch(0.56 0.20 32);
+      --accent-soft: oklch(0.56 0.20 32 / 0.10);
+      --on-accent: oklch(0.97 0.006 80);
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg-0);
+      color: var(--fg-0);
+      font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+      font-size: 0.9375rem;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      display: grid;
+      place-items: center;
+      padding: 32px 20px;
+    }
+    .card {
+      width: 100%;
+      max-width: 420px;
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+    }
+    .brand {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      font-family: 'Fraunces', Charter, Georgia, serif;
+      font-size: 1.5rem;
+      font-variation-settings: 'opsz' 96;
+      letter-spacing: -0.015em;
+    }
+    .brand::after {
+      content: '';
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--accent);
+      transform: translateY(-3px);
+    }
+    h1 {
+      font-family: 'Fraunces', Charter, Georgia, serif;
+      font-size: clamp(2rem, 2vw + 1rem, 2.5rem);
+      font-weight: 350;
+      font-variation-settings: 'opsz' 144;
+      letter-spacing: -0.025em;
+      line-height: 1.1;
+      margin: 0;
+    }
+    h1 em { font-style: italic; color: var(--fg-2); font-weight: 350; }
+    p.lede {
+      color: var(--fg-1);
+      margin: 12px 0 0;
+      max-width: 42ch;
+    }
+    form { display: flex; flex-direction: column; gap: 20px; }
+    .label {
+      font-size: 0.6875rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+      margin-bottom: 6px;
+    }
+    input[type="password"] {
+      width: 100%;
+      background: transparent;
+      border: 0;
+      border-bottom: 1px solid var(--bg-4);
+      padding: 9px 2px;
+      color: var(--fg-0);
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.9375rem;
+      letter-spacing: 0.02em;
+      transition: border-color 180ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    input[type="password"]:focus {
+      outline: 0;
+      border-bottom: 2px solid var(--accent);
+      padding-bottom: 8px;
+    }
+    button[type="submit"] {
+      align-self: flex-start;
+      background: var(--accent);
+      color: var(--on-accent);
+      border: 1px solid var(--accent);
+      padding: 9px 22px;
+      font: inherit;
+      font-size: 0.875rem;
+      font-weight: 500;
+      letter-spacing: 0.005em;
+      cursor: pointer;
+      border-radius: 2px;
+      transition: background 180ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    button[type="submit"]:hover {
+      background: oklch(from var(--accent) calc(l - 0.05) c h);
+    }
+    .error {
+      padding: 12px 14px;
+      box-shadow: inset 1px 0 0 0 var(--accent);
+      background: var(--accent-soft);
+      color: var(--fg-0);
+      font-size: 0.875rem;
+    }
+    .footnote {
+      font-size: 0.75rem;
+      color: var(--fg-2);
+      letter-spacing: 0.02em;
+    }
+    .footnote code {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      color: var(--fg-1);
+      font-size: 0.75rem;
+    }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">llamanager</div>
+    <div>
+      <h1>Sign in <em>with an admin key</em></h1>
+      <p class="lede">Paste a bearer key from <code class="footnote">~/.llamanager</code> or the bootstrap key printed on first launch.</p>
+    </div>
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <form method="post" action="/ui/login">
+      <div>
+        <div class="label">Admin API key</div>
+        <input type="password" name="api_key" autofocus required autocomplete="off" spellcheck="false">
+      </div>
+      <button type="submit">Sign in</button>
+    </form>
+    <div class="footnote">Sessions are server-side and last as long as the daemon does. Restart the daemon to sign everyone out.</div>
+  </div>
+</body>
+</html>

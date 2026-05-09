@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% set active = 'models' %}
+{% block title %}Models — llamanager{% endblock %}
+{% block content %}
+<div class="lm-eyebrow">Operate</div>
+<h1 class="lm-page-title">Models</h1>
+<p class="lm-page-lede">GGUF files on disk, plus a control to pull a new one from Hugging Face. Loading a model swaps the live worker; in-flight requests will see the swap.</p>
+
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">On disk</span>
+    <span class="lm-section-meta">{{ models|length }} model{{ '' if models|length == 1 else 's' }}</span>
+  </header>
+
+  {% if models %}
+  <table class="lm-table">
+    <thead>
+      <tr><th>Id</th><th>Size</th><th>Source</th><th></th></tr>
+    </thead>
+    <tbody>
+    {% for m in models %}
+    <tr>
+      <td data-label="Id">
+        <code>{{ m.model_id }}</code>
+        {% if m.model_id == current_model %}
+          <span class="lm-pill lm-pill--running" style="margin-left: 8px;">loaded</span>
+        {% endif %}
+      </td>
+      <td data-label="Size" class="num">{{ '%.2f GB' % (m.size / (1024**3)) }}</td>
+      <td data-label="Source"><code>{{ m.source or '—' }}</code></td>
+      <td class="actions" data-label="">
+        <form method="post" action="/ui/models/load">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="model_id" value="{{ m.model_id }}">
+          <button type="submit" class="lm-btn lm-btn--xs">Load</button>
+        </form>
+        <form method="post" action="/ui/models/delete"
+              data-confirm="Delete this model? This removes the file from disk.">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="model_id" value="{{ m.model_id }}">
+          {% if m.model_id == current_model %}<input type="hidden" name="force" value="true">{% endif %}
+          <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">
+            Delete{% if m.model_id == current_model %} (force){% endif %}
+          </button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="lm-empty">No models on disk yet. Pull one below.</p>
+  {% endif %}
+</section>
+
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Pull a model</span>
+    <span class="lm-section-meta">from Hugging Face or a URL</span>
+  </header>
+
+  <form class="lm-form lm-form--wide" method="post" action="/ui/models/pull">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-form-row">
+      <div class="lm-field">
+        <label class="lm-field-label" for="model-source">Source</label>
+        <input id="model-source" class="lm-input lm-input--mono"
+               type="text" name="source"
+               placeholder="hf://unsloth/Qwen3.5-4B-GGUF or https://..."
+               required>
+      </div>
+      <div class="lm-field">
+        <label class="lm-field-label" for="model-files">Files (comma-separated, required for HF)</label>
+        <input id="model-files" class="lm-input lm-input--mono"
+               type="text" name="files"
+               placeholder="Q4_K_M.gguf">
+      </div>
+      <button type="submit" class="lm-btn lm-btn--primary">Start pull</button>
+    </div>
+  </form>
+</section>
+
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Downloads</span>
+    <span class="lm-section-meta">{{ downloads|length }} active or recent</span>
+  </header>
+
+  {% if downloads %}
+  <table class="lm-table">
+    <thead>
+      <tr><th>Id</th><th>Source</th><th>Status</th><th>Progress</th></tr>
+    </thead>
+    <tbody>
+    {% for d in downloads %}
+    <tr>
+      <td data-label="Id"><code>{{ d.id }}</code></td>
+      <td data-label="Source"><code>{{ d.source }}</code></td>
+      <td data-label="Status"><span class="lm-pill lm-pill--{{ d.status }}">{{ d.status }}</span></td>
+      <td data-label="Progress" class="num">
+        {% if d.bytes_total %}
+          {{ '%.0f%%' % (100 * d.bytes_done / d.bytes_total) }}
+          <span style="color: var(--fg-2);">·
+            {{ '%.2f' % (d.bytes_done/(1024**3)) }} / {{ '%.2f' % (d.bytes_total/(1024**3)) }} GB
+          </span>
+        {% else %}
+          {{ '%.2f GB' % (d.bytes_done/(1024**3)) }}
+        {% endif %}
+        {% if d.error %}<div class="lm-error" style="margin-top: 8px;">{{ d.error }}</div>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="lm-empty">No downloads.</p>
+  {% endif %}
+</section>
+{% endblock %}

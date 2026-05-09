@@ -1,0 +1,773 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>{% block title %}llamanager{% endblock %}</title>
+
+  {# Theme is set before any paint to prevent a light-flash on dark
+     systems. localStorage wins; otherwise the OS preference applies. #}
+  <script>
+    (function () {
+      try {
+        var stored = localStorage.getItem('lm-theme');
+        var theme = stored || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        document.documentElement.setAttribute('data-theme', theme);
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    })();
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..700,0..100&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/htmx/1.9.12/htmx.min.js"
+          crossorigin="anonymous"
+          referrerpolicy="no-referrer"></script>
+
+  <style>
+    /* ---------- tokens: dark ---------- */
+    :root,
+    [data-theme="dark"] {
+      --bg-0: oklch(0.14 0.008 80);
+      --bg-1: oklch(0.18 0.008 80);
+      --bg-2: oklch(0.22 0.010 80);
+      --bg-3: oklch(0.28 0.012 80);
+      --bg-4: oklch(0.40 0.010 80);
+
+      --fg-0: oklch(0.96 0.005 80);
+      --fg-1: oklch(0.82 0.005 80);
+      --fg-2: oklch(0.62 0.008 80);
+      --fg-3: oklch(0.46 0.010 80);
+
+      --accent:      oklch(0.66 0.19 32);
+      --accent-soft: oklch(0.66 0.19 32 / 0.14);
+      --on-accent:   oklch(0.14 0.008 80);
+
+      --ok:   oklch(0.70 0.13 155);
+      --warn: oklch(0.78 0.14 80);
+      --bad:  oklch(0.62 0.18 28);
+
+      --shadow-1: 0 1px 0 0 oklch(0 0 0 / 0.18);
+    }
+
+    /* ---------- tokens: light ---------- */
+    [data-theme="light"] {
+      --bg-0: oklch(0.97 0.006 80);
+      --bg-1: oklch(0.94 0.008 80);
+      --bg-2: oklch(0.91 0.010 80);
+      --bg-3: oklch(0.84 0.012 80);
+      --bg-4: oklch(0.74 0.010 80);
+
+      --fg-0: oklch(0.20 0.010 80);
+      --fg-1: oklch(0.36 0.010 80);
+      --fg-2: oklch(0.50 0.010 80);
+      --fg-3: oklch(0.64 0.010 80);
+
+      --accent:      oklch(0.56 0.20 32);
+      --accent-soft: oklch(0.56 0.20 32 / 0.10);
+      --on-accent:   oklch(0.97 0.006 80);
+
+      --ok:   oklch(0.50 0.14 155);
+      --warn: oklch(0.55 0.14 70);
+      --bad:  oklch(0.52 0.20 28);
+
+      --shadow-1: 0 1px 0 0 oklch(0 0 0 / 0.06);
+    }
+
+    /* ---------- reset ---------- */
+    *, *::before, *::after { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0;
+      background: var(--bg-0);
+      color: var(--fg-0);
+      font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+      font-size: 0.9375rem;
+      line-height: 1.5;
+      font-feature-settings: 'cv11', 'ss01';
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: inherit; text-decoration: none; }
+    button { font: inherit; color: inherit; cursor: pointer; }
+    input, select, textarea { font: inherit; color: inherit; }
+    h1, h2, h3, h4 { margin: 0; font-weight: 500; }
+    p { margin: 0; }
+    code, pre, .mono { font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace; }
+    code { font-size: 0.8125rem; color: var(--fg-1); }
+    ::selection { background: var(--accent-soft); color: var(--fg-0); }
+    :focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 1px;
+    }
+
+    /* ---------- shell ---------- */
+    .lm-shell {
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      min-height: 100vh;
+    }
+    .lm-rail {
+      position: sticky;
+      top: 0;
+      align-self: start;
+      height: 100vh;
+      padding: 28px 20px 20px 28px;
+      border-right: 1px solid var(--bg-3);
+      background: var(--bg-0);
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+    }
+    .lm-brand {
+      font-family: 'Fraunces', 'Iowan Old Style', Charter, Georgia, serif;
+      font-size: 1.375rem;
+      font-weight: 400;
+      font-variation-settings: 'opsz' 96, 'SOFT' 30;
+      letter-spacing: -0.015em;
+      color: var(--fg-0);
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+    }
+    .lm-brand::after {
+      content: '';
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--accent);
+      transform: translateY(-2px);
+    }
+    .lm-meta {
+      font-size: 0.6875rem;
+      color: var(--fg-2);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-top: -22px;
+      padding-left: 1px;
+    }
+
+    /* ---------- nav ---------- */
+    .lm-nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+    .lm-nav-eyebrow {
+      font-size: 0.6875rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+      margin: 0 0 8px 12px;
+    }
+    .lm-nav-link {
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 12px;
+      color: var(--fg-1);
+      font-size: 0.9375rem;
+      letter-spacing: -0.005em;
+      transition: color 180ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    .lm-nav-link:hover { color: var(--fg-0); }
+    .lm-nav-link[aria-current="page"] {
+      color: var(--fg-0);
+      font-weight: 500;
+    }
+    .lm-nav-link[aria-current="page"]::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 8px;
+      bottom: 8px;
+      width: 2px;
+      background: var(--accent);
+    }
+
+    /* ---------- rail footer ---------- */
+    .lm-rail-foot {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding-top: 18px;
+      border-top: 1px solid var(--bg-3);
+    }
+    .lm-theme {
+      display: inline-flex;
+      gap: 0;
+      border: 1px solid var(--bg-3);
+      border-radius: 2px;
+      padding: 2px;
+      width: fit-content;
+    }
+    .lm-theme button {
+      background: transparent;
+      border: 0;
+      padding: 4px 10px;
+      font-size: 0.6875rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+      transition: color 180ms ease;
+    }
+    .lm-theme button[aria-pressed="true"] {
+      background: var(--bg-2);
+      color: var(--fg-0);
+    }
+    .lm-logout button {
+      background: transparent;
+      border: 0;
+      padding: 0;
+      font-size: 0.8125rem;
+      color: var(--fg-2);
+      text-decoration: none;
+      letter-spacing: 0.02em;
+      transition: color 180ms ease;
+    }
+    .lm-logout button:hover { color: var(--accent); }
+
+    /* ---------- canvas ---------- */
+    .lm-canvas { padding: 28px 40px 80px; min-width: 0; }
+    .lm-canvas-inner { max-width: 1180px; }
+
+    /* asymmetric 8-col layout helpers */
+    .lm-grid {
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      gap: 24px;
+    }
+    .lm-col-3 { grid-column: span 3; min-width: 0; }
+    .lm-col-4 { grid-column: span 4; min-width: 0; }
+    .lm-col-5 { grid-column: span 5; min-width: 0; }
+    .lm-col-6 { grid-column: span 6; min-width: 0; }
+    .lm-col-8 { grid-column: 1 / -1; min-width: 0; }
+
+    /* ---------- typography blocks ---------- */
+    .lm-eyebrow {
+      font-size: 0.6875rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+      margin-bottom: 10px;
+    }
+    .lm-page-title {
+      font-family: 'Fraunces', 'Iowan Old Style', Charter, Georgia, serif;
+      font-size: clamp(1.875rem, 1.4vw + 1rem, 2.25rem);
+      font-weight: 400;
+      font-variation-settings: 'opsz' 144;
+      letter-spacing: -0.02em;
+      color: var(--fg-0);
+      margin: 0 0 8px;
+    }
+    .lm-page-lede {
+      color: var(--fg-1);
+      max-width: 62ch;
+      font-size: 0.9375rem;
+    }
+
+    /* section markers */
+    .lm-section { margin-top: 56px; }
+    .lm-section:first-of-type { margin-top: 32px; }
+    .lm-section-head {
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+      margin-bottom: 18px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--bg-3);
+    }
+    .lm-section-marker {
+      font-family: 'Fraunces', 'Iowan Old Style', Charter, Georgia, serif;
+      font-style: italic;
+      font-weight: 400;
+      font-size: 1.375rem;
+      letter-spacing: -0.005em;
+      color: var(--fg-0);
+    }
+    .lm-section-meta {
+      font-size: 0.6875rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+      margin-left: auto;
+    }
+
+    /* ---------- hero (loaded model summary) ---------- */
+    .lm-hero {
+      padding: 6px 0 24px;
+      border-bottom: 1px solid var(--bg-3);
+      margin-bottom: 8px;
+    }
+    .lm-hero-title {
+      font-family: 'Fraunces', 'Iowan Old Style', Charter, Georgia, serif;
+      font-size: clamp(2.25rem, 3vw + 1rem, 3.5rem);
+      font-weight: 350;
+      font-variation-settings: 'opsz' 144;
+      letter-spacing: -0.025em;
+      line-height: 1.05;
+      color: var(--fg-0);
+      margin-bottom: 14px;
+      word-break: break-word;
+    }
+    .lm-hero-title em {
+      font-style: italic;
+      font-weight: 350;
+      color: var(--fg-2);
+    }
+    .lm-hero-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 20px;
+      font-size: 0.875rem;
+      color: var(--fg-1);
+      align-items: center;
+    }
+    .lm-hero-meta > span { display: inline-flex; gap: 6px; align-items: center; }
+    .lm-hero-meta .key {
+      font-size: 0.6875rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+    }
+
+    /* ---------- live dot ---------- */
+    .lm-live {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--accent);
+      box-shadow: 0 0 0 0 var(--accent);
+      animation: lm-pulse 1.6s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+      flex-shrink: 0;
+    }
+    @keyframes lm-pulse {
+      0%   { box-shadow: 0 0 0 0 var(--accent-soft); }
+      80%  { box-shadow: 0 0 0 6px transparent; }
+      100% { box-shadow: 0 0 0 0 transparent; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .lm-live { animation: none; }
+    }
+
+    /* ---------- pills ---------- */
+    .lm-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 9px 3px 8px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.6875rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--fg-1);
+      border: 1px solid var(--bg-3);
+      border-radius: 2px;
+      background: transparent;
+      vertical-align: middle;
+    }
+    .lm-pill::before {
+      content: '';
+      width: 5px;
+      height: 5px;
+      border-radius: 999px;
+      background: var(--fg-2);
+    }
+    .lm-pill--running {
+      color: var(--bg-0);
+      background: var(--ok);
+      border-color: var(--ok);
+    }
+    .lm-pill--running::before { background: var(--bg-0); }
+    .lm-pill--crashed,
+    .lm-pill--degraded {
+      color: var(--on-accent);
+      background: var(--bad);
+      border-color: var(--bad);
+    }
+    .lm-pill--crashed::before,
+    .lm-pill--degraded::before { background: var(--on-accent); }
+    .lm-pill--swapping,
+    .lm-pill--starting,
+    .lm-pill--paused {
+      color: var(--warn);
+      border-color: var(--warn);
+    }
+    .lm-pill--swapping::before,
+    .lm-pill--starting::before,
+    .lm-pill--paused::before { background: var(--warn); }
+    .lm-pill--stopped { color: var(--fg-2); }
+
+    /* ---------- tables ---------- */
+    .lm-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+    }
+    .lm-table thead th {
+      text-align: left;
+      font-weight: 500;
+      font-size: 0.6875rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--bg-3);
+      background: transparent;
+    }
+    .lm-table tbody td {
+      padding: 12px;
+      vertical-align: middle;
+      border-bottom: 1px solid var(--bg-2);
+      color: var(--fg-1);
+    }
+    .lm-table tbody tr:hover td { background: var(--bg-1); }
+    .lm-table tbody tr:last-child td { border-bottom: 0; }
+    .lm-table td.num { font-variant-numeric: tabular-nums; }
+    .lm-table td.actions { text-align: right; white-space: nowrap; }
+    .lm-table td.actions form { display: inline-block; margin: 0 0 0 8px; }
+    .lm-table td.actions form:first-child { margin-left: 0; }
+
+    /* ---------- buttons ---------- */
+    .lm-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 14px;
+      font-size: 0.8125rem;
+      font-weight: 500;
+      letter-spacing: 0.005em;
+      color: var(--fg-0);
+      background: transparent;
+      border: 1px solid var(--bg-4);
+      border-radius: 2px;
+      transition: border-color 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                  color 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                  background 180ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    .lm-btn:hover { border-color: var(--fg-1); }
+    .lm-btn--primary {
+      background: var(--accent);
+      color: var(--on-accent);
+      border-color: var(--accent);
+    }
+    .lm-btn--primary:hover {
+      background: oklch(from var(--accent) calc(l - 0.05) c h);
+      border-color: oklch(from var(--accent) calc(l - 0.05) c h);
+    }
+    .lm-btn--ghost { border-color: var(--bg-3); color: var(--fg-1); }
+    .lm-btn--ghost:hover { color: var(--fg-0); }
+    .lm-btn--danger {
+      border: 0;
+      padding: 7px 0;
+      color: var(--accent);
+      background: transparent;
+      box-shadow: inset 0 -1px 0 0 transparent;
+      border-radius: 0;
+    }
+    .lm-btn--danger:hover {
+      box-shadow: inset 0 -1px 0 0 var(--accent);
+    }
+    .lm-btn--xs { padding: 4px 9px; font-size: 0.75rem; }
+
+    /* ---------- forms ---------- */
+    .lm-form { display: flex; flex-direction: column; gap: 18px; max-width: 520px; }
+    .lm-form--wide { max-width: 100%; }
+    .lm-form-row { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-end; }
+    .lm-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
+    .lm-field-label {
+      font-size: 0.6875rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+    }
+    .lm-input,
+    .lm-select {
+      background: transparent;
+      border: 0;
+      border-bottom: 1px solid var(--bg-4);
+      padding: 7px 2px;
+      font-size: 0.9375rem;
+      color: var(--fg-0);
+      transition: border-color 180ms cubic-bezier(0.22, 1, 0.36, 1);
+      font-family: inherit;
+      width: 100%;
+      min-width: 0;
+    }
+    .lm-input:focus,
+    .lm-select:focus {
+      outline: 0;
+      border-bottom: 2px solid var(--accent);
+      padding-bottom: 6px;
+    }
+    .lm-input::placeholder { color: var(--fg-3); }
+    .lm-input--mono { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.875rem; }
+    .lm-checkbox-row {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      font-size: 0.875rem;
+      color: var(--fg-1);
+      cursor: pointer;
+    }
+    .lm-checkbox-row input { accent-color: var(--accent); }
+
+    /* ---------- key callout ---------- */
+    .lm-callout {
+      padding: 18px 20px;
+      border: 1px solid var(--accent);
+      background: var(--accent-soft);
+      margin: 24px 0;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .lm-callout-eyebrow {
+      font-size: 0.6875rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--accent);
+      font-weight: 500;
+    }
+    .lm-callout-title {
+      font-family: 'Fraunces', serif;
+      font-size: 1.125rem;
+      font-weight: 400;
+      letter-spacing: -0.01em;
+      color: var(--fg-0);
+    }
+    .lm-key {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.8125rem;
+      background: var(--bg-1);
+      border: 1px solid var(--bg-3);
+      padding: 12px 14px;
+      word-break: break-all;
+      color: var(--fg-0);
+      user-select: all;
+    }
+    .lm-error {
+      padding: 12px 14px 12px 16px;
+      border-left: 0;
+      box-shadow: inset 1px 0 0 0 var(--accent);
+      background: var(--accent-soft);
+      color: var(--fg-0);
+      font-size: 0.875rem;
+      margin-bottom: 24px;
+    }
+
+    /* ---------- log view ---------- */
+    .lm-log {
+      max-height: 70vh;
+      overflow: auto;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.8125rem;
+      line-height: 1.55;
+      background: var(--bg-1);
+      border: 1px solid var(--bg-3);
+      color: var(--fg-1);
+      padding: 16px 18px;
+      white-space: pre;
+      tab-size: 2;
+      margin: 0;
+    }
+
+    /* ---------- profile card ---------- */
+    .lm-profile {
+      padding: 18px 0 22px;
+      border-bottom: 1px solid var(--bg-3);
+    }
+    .lm-profile-title {
+      font-family: 'Fraunces', serif;
+      font-size: 1.25rem;
+      font-weight: 400;
+      letter-spacing: -0.01em;
+      margin-bottom: 6px;
+    }
+    .lm-profile-meta {
+      display: grid;
+      grid-template-columns: minmax(120px, max-content) 1fr;
+      gap: 4px 18px;
+      font-size: 0.8125rem;
+      color: var(--fg-1);
+      margin-bottom: 12px;
+    }
+    .lm-profile-meta dt {
+      font-size: 0.6875rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+      align-self: center;
+    }
+    .lm-profile-args {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.8125rem;
+      color: var(--fg-1);
+      background: var(--bg-1);
+      border: 1px solid var(--bg-3);
+      padding: 12px 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin: 0;
+    }
+
+    /* ---------- empty states ---------- */
+    .lm-empty {
+      color: var(--fg-2);
+      font-style: italic;
+      padding: 24px 0;
+    }
+
+    /* ---------- htmx swap fade ---------- */
+    .htmx-swapping { opacity: 0; transition: opacity 120ms cubic-bezier(0.22, 1, 0.36, 1); }
+    .htmx-settling { opacity: 1; transition: opacity 120ms cubic-bezier(0.22, 1, 0.36, 1); }
+
+    /* ---------- mobile top bar ---------- */
+    .lm-mobile-top { display: none; }
+    .lm-mobile-summary { display: none; }
+
+    @media (max-width: 960px) {
+      .lm-shell { grid-template-columns: 1fr; }
+      .lm-rail {
+        position: static;
+        height: auto;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 16px;
+        padding: 14px 20px;
+        border-right: 0;
+        border-bottom: 1px solid var(--bg-3);
+      }
+      .lm-meta { display: none; }
+      .lm-nav-eyebrow { display: none; }
+      .lm-nav { flex-direction: row; flex: 1 1 100%; gap: 4px; flex-wrap: wrap; }
+      .lm-nav-link { padding: 5px 10px; }
+      .lm-nav-link[aria-current="page"]::before {
+        left: 6px;
+        right: 6px;
+        top: auto;
+        bottom: 0;
+        width: auto;
+        height: 2px;
+      }
+      .lm-rail-foot {
+        flex-direction: row;
+        gap: 16px;
+        padding-top: 0;
+        border-top: 0;
+        margin-left: auto;
+        align-items: center;
+      }
+      .lm-canvas { padding: 24px 20px 64px; }
+      .lm-grid { gap: 18px; }
+      .lm-col-3, .lm-col-4, .lm-col-5, .lm-col-6 { grid-column: 1 / -1; }
+    }
+
+    @media (max-width: 640px) {
+      .lm-canvas { padding: 20px 16px 56px; }
+      .lm-rail { padding: 10px 14px; gap: 10px; }
+      .lm-brand { font-size: 1.125rem; }
+      .lm-rail-foot { width: 100%; margin-left: 0; }
+      .lm-table thead { display: none; }
+      .lm-table, .lm-table tbody, .lm-table tr, .lm-table td { display: block; width: 100%; }
+      .lm-table tr {
+        border-bottom: 1px solid var(--bg-3);
+        padding: 12px 0;
+      }
+      .lm-table tbody td {
+        border: 0;
+        padding: 4px 0;
+      }
+      .lm-table tbody td::before {
+        content: attr(data-label);
+        display: inline-block;
+        min-width: 90px;
+        font-size: 0.6875rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--fg-2);
+        margin-right: 12px;
+      }
+      .lm-table td.actions { padding-top: 8px; text-align: left; }
+      .lm-table td.actions form { margin-left: 0; margin-right: 8px; }
+      .lm-hero-title { font-size: 2rem; }
+    }
+  </style>
+</head>
+<body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+  <div class="lm-shell">
+    <aside class="lm-rail">
+      <div>
+        <div class="lm-brand">llamanager</div>
+        <div class="lm-meta">local inference, supervised</div>
+      </div>
+
+      <nav class="lm-nav" aria-label="Primary">
+        <span class="lm-nav-eyebrow">Operate</span>
+        <a class="lm-nav-link" href="/ui/" {% if active=='dashboard' %}aria-current="page"{% endif %}>Dashboard</a>
+        <a class="lm-nav-link" href="/ui/queue" {% if active=='queue' %}aria-current="page"{% endif %}>Queue</a>
+        <a class="lm-nav-link" href="/ui/models" {% if active=='models' %}aria-current="page"{% endif %}>Models</a>
+        <span class="lm-nav-eyebrow" style="margin-top: 16px;">Configure</span>
+        <a class="lm-nav-link" href="/ui/origins" {% if active=='origins' %}aria-current="page"{% endif %}>Origins</a>
+        <a class="lm-nav-link" href="/ui/profiles" {% if active=='profiles' %}aria-current="page"{% endif %}>Profiles</a>
+        <a class="lm-nav-link" href="/ui/logs" {% if active=='logs' %}aria-current="page"{% endif %}>Logs</a>
+      </nav>
+
+      <div class="lm-rail-foot">
+        <div class="lm-theme" role="group" aria-label="Theme">
+          <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
+          <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
+        </div>
+        <form class="lm-logout" method="post" action="/ui/logout">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit">Sign out</button>
+        </form>
+      </div>
+    </aside>
+
+    <main class="lm-canvas">
+      <div class="lm-canvas-inner">
+        {% block content %}{% endblock %}
+      </div>
+    </main>
+  </div>
+
+  <script>
+    /* Theme toggle: sync button state and persist on click. */
+    (function () {
+      var root = document.documentElement;
+      var btns = document.querySelectorAll('[data-theme-set]');
+      function sync() {
+        var current = root.getAttribute('data-theme');
+        btns.forEach(function (b) {
+          b.setAttribute('aria-pressed', b.getAttribute('data-theme-set') === current ? 'true' : 'false');
+        });
+      }
+      btns.forEach(function (b) {
+        b.addEventListener('click', function () {
+          var next = b.getAttribute('data-theme-set');
+          root.setAttribute('data-theme', next);
+          try { localStorage.setItem('lm-theme', next); } catch (e) {}
+          sync();
+        });
+      });
+      sync();
+    })();
+
+    /* Confirm dialog wired up via data-confirm rather than inline onsubmit
+       handlers, so attacker-controlled names/paths are never injected
+       into a JavaScript context. */
+    document.addEventListener('submit', function (e) {
+      var form = e.target;
+      if (!form || !form.getAttribute) return;
+      var msg = form.getAttribute('data-confirm');
+      if (msg && !window.confirm(msg)) {
+        e.preventDefault();
+      }
+    }, true);
+  </script>
+</body>
+</html>

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llamanager"
+version = "0.1.0"
+description = "Single-host manager + queueing OpenAI-compatible proxy for llama-server."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "llamanager contributors" }]
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "httpx>=0.27",
+    "jinja2>=3.1",
+    "itsdangerous>=2.1",
+    "python-multipart>=0.0.9",
+    "argon2-cffi>=23.1",
+    "huggingface_hub>=0.23",
+    "psutil>=5.9",
+    "aiosqlite>=0.19",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+windows-service = ["pywin32>=306; sys_platform == 'win32'"]
+
+[project.scripts]
+llamanager = "llamanager.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["llamanager"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"llamanager/templates" = "llamanager/templates"

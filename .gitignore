@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# venvs
+.venv/
+venv/
+env/
+
+# build / dist
+build/
+dist/
+
+# editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Claude Code per-user settings (machine-specific, never commit)
+.claude/
+
+# project-local data (the daemon's runtime dir lives in $HOME, but a
+# user might point --config at one inside the repo for testing)
+.llamanager/

@@ -1,0 +1,68 @@
+<div class="lm-section" style="margin-top: 32px;">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Status</span>
+    <span class="lm-section-meta">
+      {{ queue.depth }} pending{% if queue.in_flight %} · 1 in flight{% endif %}{% if queue.paused %} · <span class="lm-pill lm-pill--paused">paused</span>{% endif %}
+    </span>
+  </header>
+
+  {% if queue.in_flight %}
+  <div class="lm-eyebrow">In flight</div>
+  <table class="lm-table">
+    <thead>
+      <tr><th>Id</th><th>Origin</th><th>Prio</th><th>Model</th><th>Status</th><th></th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td data-label="Id"><code>{{ queue.in_flight.id[:12] }}</code></td>
+        <td data-label="Origin">{{ queue.in_flight.origin }}</td>
+        <td data-label="Prio" class="num">{{ queue.in_flight.priority }}</td>
+        <td data-label="Model"><code>{{ queue.in_flight.model_required or '(loaded)' }}</code></td>
+        <td data-label="Status"><span class="lm-pill lm-pill--{{ queue.in_flight.status }}">{{ queue.in_flight.status }}</span></td>
+        <td class="actions" data-label="">
+          <form hx-post="/ui/queue/{{ queue.in_flight.id }}/cancel"
+                hx-confirm="Cancel in-flight request?"
+                hx-target="closest div" hx-swap="outerHTML">
+            <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Cancel</button>
+          </form>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+<div class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Pending</span>
+    <span class="lm-section-meta">{{ queue.depth }} request{{ '' if queue.depth == 1 else 's' }}</span>
+  </header>
+
+  {% if queue.pending %}
+  <table class="lm-table">
+    <thead>
+      <tr><th>Id</th><th>Origin</th><th>Prio</th><th>Model</th><th>Status</th><th></th></tr>
+    </thead>
+    <tbody>
+    {% for r in queue.pending %}
+    <tr>
+      <td data-label="Id"><code>{{ r.id[:12] }}</code></td>
+      <td data-label="Origin">{{ r.origin }}</td>
+      <td data-label="Prio" class="num">{{ r.priority }}</td>
+      <td data-label="Model"><code>{{ r.model_required or '(loaded)' }}</code></td>
+      <td data-label="Status"><span class="lm-pill lm-pill--{{ r.status }}">{{ r.status }}</span></td>
+      <td class="actions" data-label="">
+        <form hx-post="/ui/queue/{{ r.id }}/cancel"
+              hx-confirm="Cancel queued request?"
+              hx-target="closest div" hx-swap="outerHTML">
+          <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Cancel</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="lm-empty">Nothing pending.</p>
+  {% endif %}
+</div>

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% set active = 'queue' %}
+{% block title %}Queue — llamanager{% endblock %}
+{% block content %}
+<div class="lm-eyebrow">Operate</div>
+<h1 class="lm-page-title">Queue</h1>
+<p class="lm-page-lede">A live view of pending and in-flight inference requests, grouped by origin priority. Auto-refreshes every two seconds.</p>
+
+<div hx-get="/ui/_partials/queue" hx-trigger="every 2s" hx-swap="innerHTML">
+  {% include "_queue_partial.html" %}
+</div>
+{% endblock %}

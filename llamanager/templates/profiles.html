@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% set active = 'profiles' %}
+{% block title %}Profiles — llamanager{% endblock %}
+{% block content %}
+<div class="lm-eyebrow">Configure</div>
+<h1 class="lm-page-title">Profiles</h1>
+<p class="lm-page-lede">
+  Profiles bind a model to a fixed set of <code>llama-server</code> arguments. They&rsquo;re defined in
+  <code>{{ config_path }}</code>; edit the file and call <code>POST /admin/reload</code> (or <code>SIGHUP</code> on POSIX) to refresh.
+</p>
+
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Defined</span>
+    <span class="lm-section-meta">{{ profiles|length }} profile{{ '' if profiles|length == 1 else 's' }}</span>
+  </header>
+
+  {% for p in profiles %}
+  <article class="lm-profile">
+    <h3 class="lm-profile-title">{{ p.name }}</h3>
+    <dl class="lm-profile-meta">
+      <dt>model</dt><dd><code>{{ p.model }}</code></dd>
+      {% if p.mmproj %}<dt>mmproj</dt><dd><code>{{ p.mmproj }}</code></dd>{% endif %}
+    </dl>
+    <pre class="lm-profile-args">{{ p.args }}</pre>
+  </article>
+  {% else %}
+  <p class="lm-empty">No profiles defined. Add one to <code>{{ config_path }}</code> and reload.</p>
+  {% endfor %}
+</section>
+{% endblock %}

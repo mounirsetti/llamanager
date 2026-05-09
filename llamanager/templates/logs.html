@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% set active = 'logs' %}
+{% block title %}Logs — llamanager{% endblock %}
+{% block content %}
+<div class="lm-eyebrow">Configure</div>
+<h1 class="lm-page-title">Logs</h1>
+<p class="lm-page-lede">Tail of the most recent log lines. Switch source between the daemon&rsquo;s own log and the captured <code>llama-server</code> stdout/stderr.</p>
+
+<form class="lm-form lm-form--wide" method="get" action="/ui/logs" style="margin-top: 24px;">
+  <div class="lm-form-row">
+    <div class="lm-field" style="max-width: 18rem;">
+      <label class="lm-field-label" for="log-source">Source</label>
+      <select id="log-source" class="lm-select" name="source">
+        <option value="llama-server" {% if source == 'llama-server' %}selected{% endif %}>llama-server</option>
+        <option value="llamanager" {% if source == 'llamanager' %}selected{% endif %}>llamanager</option>
+      </select>
+    </div>
+    <div class="lm-field" style="max-width: 9rem;">
+      <label class="lm-field-label" for="log-tail">Tail lines</label>
+      <input id="log-tail" class="lm-input" type="number" name="tail"
+             value="{{ tail }}" min="10" max="5000"
+             style="font-variant-numeric: tabular-nums;">
+    </div>
+    <button type="submit" class="lm-btn">Reload</button>
+  </div>
+</form>
+
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">{{ source }}</span>
+    <span class="lm-section-meta">tail · {{ tail }} lines</span>
+  </header>
+
+  <pre class="lm-log">{{ text }}</pre>
+</section>
+{% endblock %}

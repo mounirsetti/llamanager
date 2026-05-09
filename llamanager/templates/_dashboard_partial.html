@@ -1,0 +1,100 @@
+<section class="lm-hero">
+  <div class="lm-eyebrow">
+    {% if status.state == 'running' %}Now serving{% elif status.state == 'stopped' %}Idle{% elif status.state == 'crashed' %}Halted{% else %}{{ status.state }}{% endif %}
+    {% if status.state == 'running' %}<span aria-hidden="true"> · </span><span class="lm-live" aria-label="live"></span>{% endif %}
+  </div>
+
+  {% if status.current_model %}
+    <h1 class="lm-hero-title">{{ status.current_model }}</h1>
+  {% elif status.state == 'crashed' %}
+    <h1 class="lm-hero-title"><em>Crashed.</em> Restart pending.</h1>
+  {% elif status.state == 'swapping' %}
+    <h1 class="lm-hero-title"><em>Swapping models.</em></h1>
+  {% elif status.state == 'starting' %}
+    <h1 class="lm-hero-title"><em>Starting up.</em></h1>
+  {% else %}
+    <h1 class="lm-hero-title"><em>No model loaded.</em></h1>
+  {% endif %}
+
+  <div class="lm-hero-meta">
+    <span><span class="lm-pill lm-pill--{{ status.state }}">{{ status.state }}</span></span>
+    {% if status.current_profile %}<span><span class="key">profile</span><code>{{ status.current_profile }}</code></span>{% endif %}
+    {% if status.pid %}<span><span class="key">pid</span><code>{{ status.pid }}</code></span>{% endif %}
+    {% if status.uptime_s %}<span><span class="key">uptime</span><code>{{ '%ds' % status.uptime_s }}</code></span>{% endif %}
+    {% if status.mem_rss_mb %}<span><span class="key">rss</span><code>{{ '%.0f MB' % status.mem_rss_mb }}</code></span>{% endif %}
+  </div>
+</section>
+
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Queue</span>
+    <span class="lm-section-meta">
+      {{ queue.depth }} pending{% if queue.in_flight %} · 1 in flight{% endif %}
+    </span>
+  </header>
+
+  {% if queue.in_flight %}
+  <div class="lm-grid" style="margin-bottom: 18px;">
+    <div class="lm-col-8">
+      <div class="lm-eyebrow">In flight</div>
+      <div style="display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; font-size: 0.9375rem; color: var(--fg-1);">
+        <code>{{ queue.in_flight.id[:8] }}</code>
+        <span style="color: var(--fg-2);">from</span>
+        <strong style="color: var(--fg-0); font-weight: 500;">{{ queue.in_flight.origin }}</strong>
+        <span style="color: var(--fg-2);">·</span>
+        <code>{{ queue.in_flight.model_required or '(loaded)' }}</code>
+        <span class="lm-pill lm-pill--{{ queue.in_flight.status }}">{{ queue.in_flight.status }}</span>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if queue.pending %}
+  <table class="lm-table">
+    <thead>
+      <tr><th>Id</th><th>Origin</th><th>Prio</th><th>Model</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+    {% for r in queue.pending %}
+      <tr>
+        <td data-label="Id"><code>{{ r.id[:8] }}</code></td>
+        <td data-label="Origin">{{ r.origin }}</td>
+        <td data-label="Prio" class="num">{{ r.priority }}</td>
+        <td data-label="Model"><code>{{ r.model_required or '(loaded)' }}</code></td>
+        <td data-label="Status"><span class="lm-pill lm-pill--{{ r.status }}">{{ r.status }}</span></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% elif not queue.in_flight %}
+  <p class="lm-empty">Queue empty.</p>
+  {% endif %}
+</section>
+
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Recent</span>
+    <span class="lm-section-meta">last 10 requests</span>
+  </header>
+
+  {% if recent %}
+  <table class="lm-table">
+    <thead>
+      <tr><th>Id</th><th>Origin</th><th>Model</th><th>Status</th><th>Tokens in / out</th></tr>
+    </thead>
+    <tbody>
+    {% for r in recent %}
+    <tr>
+      <td data-label="Id"><code>{{ r.id[:8] }}</code></td>
+      <td data-label="Origin">{{ r.origin_id }}</td>
+      <td data-label="Model"><code>{{ r.model or '(loaded)' }}</code></td>
+      <td data-label="Status"><span class="lm-pill lm-pill--{{ r.status }}">{{ r.status }}</span></td>
+      <td data-label="Tokens" class="num">{{ r.prompt_tokens or '—' }} / {{ r.completion_tokens or '—' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="lm-empty">No requests yet.</p>
+  {% endif %}
+</section>

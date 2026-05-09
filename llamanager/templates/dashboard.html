@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% set active = 'dashboard' %}
+{% block title %}Dashboard — llamanager{% endblock %}
+{% block content %}
+<div hx-get="/ui/_partials/dashboard" hx-trigger="every 3s" hx-swap="innerHTML">
+  {% include "_dashboard_partial.html" %}
+</div>
+{% endblock %}

@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% set active = 'origins' %}
+{% block title %}Origins — llamanager{% endblock %}
+{% block content %}
+<div class="lm-eyebrow">Configure</div>
+<h1 class="lm-page-title">Origins</h1>
+<p class="lm-page-lede">One bearer key per client. Priority decides who gets the GPU first when the queue contests. Admin keys can also reach the control plane.</p>
+
+{% if error %}
+<div class="lm-error">{{ error }}</div>
+{% endif %}
+
+{% if new_key and new_key.key %}
+<aside class="lm-callout">
+  <div class="lm-callout-eyebrow">Shown once</div>
+  <div class="lm-callout-title">New API key for &ldquo;{{ new_key.name }}&rdquo;</div>
+  <p style="margin: 0; color: var(--fg-1); font-size: 0.875rem;">
+    Only the argon2id hash is stored. If you don&rsquo;t copy this now, you&rsquo;ll need to rotate the key to get a fresh one.
+  </p>
+  <div class="lm-key">{{ new_key.key }}</div>
+</aside>
+{% endif %}
+
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Existing</span>
+    <span class="lm-section-meta">{{ origins|length }} origin{{ '' if origins|length == 1 else 's' }}</span>
+  </header>
+
+  <table class="lm-table">
+    <thead>
+      <tr><th>Id</th><th>Name</th><th>Priority</th><th>Allowed models</th><th>Admin</th><th></th></tr>
+    </thead>
+    <tbody>
+    {% for o in origins %}
+    <tr>
+      <td data-label="Id" class="num">{{ o.id }}</td>
+      <td data-label="Name"><strong style="color: var(--fg-0); font-weight: 500;">{{ o.name }}</strong></td>
+      <td data-label="Priority">
+        <form hx-post="/ui/origins/{{ o.id }}/priority" hx-swap="outerHTML"
+              hx-target="this" style="display: inline-flex; gap: 6px; align-items: center;">
+          <input type="number" name="priority" value="{{ o.priority }}"
+                 min="0" max="100"
+                 class="lm-input"
+                 style="width: 4.5rem; font-variant-numeric: tabular-nums;">
+          <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Save</button>
+        </form>
+      </td>
+      <td data-label="Allowed models"><code>{{ o.allowed_models | join(', ') }}</code></td>
+      <td data-label="Admin">
+        {% if o.is_admin %}<span class="lm-pill lm-pill--running">admin</span>{% else %}<span style="color: var(--fg-3);">—</span>{% endif %}
+      </td>
+      <td class="actions" data-label="">
+        <form method="post" action="/ui/origins/{{ o.id }}/rotate"
+              data-confirm="Rotate this origin's key? The old key will stop working.">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Rotate</button>
+        </form>
+        <form method="post" action="/ui/origins/{{ o.id }}/delete"
+              data-confirm="Delete this origin? This is permanent.">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Create origin</span>
+    <span class="lm-section-meta">issues a new bearer key</span>
+  </header>
+
+  <form class="lm-form lm-form--wide" method="post" action="/ui/origins/create">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-form-row">
+      <div class="lm-field">
+        <label class="lm-field-label" for="origin-name">Name</label>
+        <input id="origin-name" class="lm-input" type="text" name="name" required>
+      </div>
+      <div class="lm-field" style="max-width: 9rem;">
+        <label class="lm-field-label" for="origin-priority">Priority</label>
+        <input id="origin-priority" class="lm-input" type="number" name="priority"
+               value="50" min="0" max="100"
+               style="font-variant-numeric: tabular-nums;">
+      </div>
+      <div class="lm-field">
+        <label class="lm-field-label" for="origin-allowed">Allowed models</label>
+        <input id="origin-allowed" class="lm-input lm-input--mono" type="text"
+               name="allowed_models" value="default"
+               placeholder='comma-separated; "default", "*", or paths'>
+      </div>
+    </div>
+    <div class="lm-form-row" style="align-items: center; gap: 28px;">
+      <label class="lm-checkbox-row">
+        <input type="checkbox" name="is_admin" value="true">
+        Admin (can reach the control plane)
+      </label>
+      <button type="submit" class="lm-btn lm-btn--primary">Create</button>
+    </div>
+  </form>
+</section>
+{% endblock %}
