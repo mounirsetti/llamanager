@@ -192,8 +192,7 @@ def _error_html(message: str, status_code: int = 400) -> HTMLResponse:
 
 @router.get("/login", response_class=HTMLResponse)
 async def login_get(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("login.html", {"request": request,
-                                                     "error": None})
+    return templates.TemplateResponse(request, "login.html", {"error": None})
 
 
 @router.post("/login", response_class=HTMLResponse)
@@ -202,7 +201,7 @@ async def login_post(request: Request, api_key: str = Form(...)) -> Response:
     origin = await am.verify(api_key.strip())
     if not origin or not origin.is_admin:
         return templates.TemplateResponse(
-            "login.html", {"request": request, "error": "invalid admin key"},
+            request, "login.html", {"error": "invalid admin key"},
             status_code=401,
         )
     resp = RedirectResponse(url="/ui/", status_code=303)
@@ -231,7 +230,7 @@ async def dashboard(request: Request, _: Origin = Depends(require_admin_ui)) -> 
         " finished_at, prompt_tokens, completion_tokens"
         " FROM requests ORDER BY enqueued_at DESC LIMIT 10"
     )
-    return templates.TemplateResponse("dashboard.html", _ctx(
+    return templates.TemplateResponse(request, "dashboard.html", _ctx(
         request,
         status=sm.status(),
         queue=qm.snapshot(),
@@ -249,7 +248,7 @@ async def dashboard_partial(request: Request, _: Origin = Depends(require_admin_
         " prompt_tokens, completion_tokens FROM requests"
         " ORDER BY enqueued_at DESC LIMIT 10"
     )
-    return templates.TemplateResponse("_dashboard_partial.html", _ctx(
+    return templates.TemplateResponse(request, "_dashboard_partial.html", _ctx(
         request,
         status=sm.status(),
         queue=qm.snapshot(),
@@ -262,7 +261,7 @@ async def dashboard_partial(request: Request, _: Origin = Depends(require_admin_
 @router.get("/queue", response_class=HTMLResponse)
 async def queue_view(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     qm: QueueManager = request.app.state.queue
-    return templates.TemplateResponse("queue.html", _ctx(
+    return templates.TemplateResponse(request, "queue.html", _ctx(
         request, queue=qm.snapshot(),
     ))
 
@@ -270,7 +269,7 @@ async def queue_view(request: Request, _: Origin = Depends(require_admin_ui)) ->
 @router.get("/_partials/queue", response_class=HTMLResponse)
 async def queue_partial(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     qm: QueueManager = request.app.state.queue
-    return templates.TemplateResponse("_queue_partial.html", _ctx(
+    return templates.TemplateResponse(request, "_queue_partial.html", _ctx(
         request, queue=qm.snapshot(),
     ))
 
@@ -280,7 +279,7 @@ async def queue_cancel_ui(request: Request, request_id: str,
                           _: None = Depends(require_csrf)) -> HTMLResponse:
     qm: QueueManager = request.app.state.queue
     qm.cancel(request_id)
-    return templates.TemplateResponse("_queue_partial.html", _ctx(
+    return templates.TemplateResponse(request, "_queue_partial.html", _ctx(
         request, queue=qm.snapshot(),
     ))
 
@@ -290,7 +289,7 @@ async def queue_cancel_ui(request: Request, request_id: str,
 @router.get("/models", response_class=HTMLResponse)
 async def models_view(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     reg: Registry = request.app.state.registry
-    return templates.TemplateResponse("models.html", _ctx(
+    return templates.TemplateResponse(request, "models.html", _ctx(
         request,
         models=[m.to_dict() for m in reg.list()],
         downloads=reg.list_downloads(),
@@ -348,7 +347,7 @@ async def models_pull_ui(request: Request, source: str = Form(...),
 @router.get("/origins", response_class=HTMLResponse)
 async def origins_view(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     am: AuthManager = request.app.state.auth
-    return templates.TemplateResponse("origins.html", _ctx(
+    return templates.TemplateResponse(request, "origins.html", _ctx(
         request,
         origins=[o.to_public() for o in am.list_origins()],
         new_key=None,
@@ -364,7 +363,7 @@ async def origins_create_ui(request: Request, name: str = Form(...),
     am: AuthManager = request.app.state.auth
     if am.get_origin_by_name(name):
         # Render a normal page with an inline notice; no f-string HTML.
-        return templates.TemplateResponse("origins.html", _ctx(
+        return templates.TemplateResponse(request, "origins.html", _ctx(
             request,
             origins=[o.to_public() for o in am.list_origins()],
             new_key=None,
@@ -373,7 +372,7 @@ async def origins_create_ui(request: Request, name: str = Form(...),
     al = [a.strip() for a in allowed_models.split(",") if a.strip()] or ["default"]
     origin, key = am.create_origin(name=name, priority=priority,
                                    allowed_models=al, is_admin=is_admin)
-    return templates.TemplateResponse("origins.html", _ctx(
+    return templates.TemplateResponse(request, "origins.html", _ctx(
         request,
         origins=[o.to_public() for o in am.list_origins()],
         new_key={"name": origin.name, "key": key},
@@ -404,7 +403,7 @@ async def origins_rotate_ui(request: Request, origin_id: int,
     am: AuthManager = request.app.state.auth
     key = am.rotate_key(origin_id)
     origin = am.get_origin(origin_id)
-    return templates.TemplateResponse("origins.html", _ctx(
+    return templates.TemplateResponse(request, "origins.html", _ctx(
         request,
         origins=[o.to_public() for o in am.list_origins()],
         new_key={"name": origin.name if origin else f"#{origin_id}", "key": key},
@@ -420,7 +419,7 @@ async def profiles_view(request: Request, _: Origin = Depends(require_admin_ui))
     for name, p in cfg.profiles.items():
         rows.append({"name": name, "model": p.model, "mmproj": p.mmproj,
                      "args": json.dumps(p.args, indent=2, sort_keys=True)})
-    return templates.TemplateResponse("profiles.html", _ctx(
+    return templates.TemplateResponse(request, "profiles.html", _ctx(
         request, profiles=rows, config_path=str(cfg.config_path),
     ))
 
@@ -450,7 +449,7 @@ async def logs_view(request: Request, source: str = "llama-server",
                 text = b"\n".join(data.splitlines()[-tail:]).decode("utf-8", errors="replace")
         except OSError as e:
             text = f"(error reading log: {e})"
-    return templates.TemplateResponse("logs.html", _ctx(
+    return templates.TemplateResponse(request, "logs.html", _ctx(
         request, source=source, tail=tail, text=text,
     ))
 

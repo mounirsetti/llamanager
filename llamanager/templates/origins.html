@@ -4,7 +4,7 @@
 {% block content %}
 <div class="lm-eyebrow">Configure</div>
 <h1 class="lm-page-title">Origins</h1>
-<p class="lm-page-lede">One bearer key per client. Priority decides who gets the GPU first when the queue contests. Admin keys can also reach the control plane.</p>
+<p class="lm-page-lede">An origin is a named client identity — a script, an app, or a user — that is issued one bearer API key. When multiple origins send requests at the same time, priority (0–100, higher wins) decides who gets the GPU first. Origins marked admin can also call the control plane (start/stop the model, manage other origins, etc.).</p>
 
 {% if error %}
 <div class="lm-error">{{ error }}</div>
@@ -26,6 +26,9 @@
     <span class="lm-section-marker">Existing</span>
     <span class="lm-section-meta">{{ origins|length }} origin{{ '' if origins|length == 1 else 's' }}</span>
   </header>
+  <p style="margin-bottom: 18px; font-size: 0.875rem; color: var(--fg-1); max-width: 72ch;">
+    The <strong style="color: var(--fg-0); font-weight: 500;">bootstrap</strong> origin is created automatically the first time llamanager starts. Its API key was printed to the terminal (and saved to <code>bootstrap-key.txt</code> in your data directory). It exists so you can log in and set up real origins — once you have done that, you should rotate or delete it.
+  </p>
 
   <table class="lm-table">
     <thead>
@@ -73,6 +76,9 @@
     <span class="lm-section-marker">Create origin</span>
     <span class="lm-section-meta">issues a new bearer key</span>
   </header>
+  <p style="margin-bottom: 24px; font-size: 0.875rem; color: var(--fg-1); max-width: 72ch;">
+    Give the origin a name that identifies the client (e.g. <code>my-app</code> or <code>alice</code>). A bearer API key is generated and shown once — copy it immediately. The client uses this key in the <code>Authorization: Bearer &lt;key&gt;</code> header on every request to the OpenAI-compatible endpoint.
+  </p>
 
   <form class="lm-form lm-form--wide" method="post" action="/ui/origins/create">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
