@@ -1,0 +1,113 @@
+{% set active_downloads = downloads | selectattr('status', 'equalto', 'running') | list %}
+{% set active_downloads = active_downloads + (downloads | selectattr('status', 'equalto', 'pending') | list) %}
+<div id="models-list"
+     {% if active_downloads %}
+     hx-get="/ui/models/_list"
+     hx-trigger="every 2s"
+     hx-swap="outerHTML"
+     {% endif %}>
+
+  {% if models or active_downloads or (downloads | selectattr('status', 'equalto', 'done') | list) or (downloads | selectattr('status', 'equalto', 'failed') | list) %}
+  <table class="lm-table">
+    <thead>
+      <tr><th>Model</th><th>Size</th><th>Source</th><th></th></tr>
+    </thead>
+    <tbody>
+    {# ---- Active / pending downloads ---- #}
+    {% for d in downloads if d.status in ('running', 'pending') %}
+    <tr>
+      <td data-label="Model">
+        <code style="color: var(--fg-2);">{{ d.source }}</code>
+        <span class="lm-pill lm-pill--swapping" style="margin-left: 8px;">downloading</span>
+      </td>
+      <td data-label="Size" class="num">
+        {% if d.bytes_total %}
+        <div style="display: flex; flex-direction: column; gap: 4px; min-width: 140px;">
+          <div style="height: 4px; background: var(--bg-3); border-radius: 2px;">
+            <div style="height: 4px; background: var(--ok); border-radius: 2px; width: {{ '%.0f' % (100 * d.bytes_done / d.bytes_total) }}%; transition: width 0.3s ease;"></div>
+          </div>
+          <span style="font-size: 0.75rem; color: var(--fg-2);">
+            {{ '%.1f' % (d.bytes_done / (1024**3)) }} / {{ '%.1f' % (d.bytes_total / (1024**3)) }} GB
+            ({{ '%.0f' % (100 * d.bytes_done / d.bytes_total) }}%)
+          </span>
+        </div>
+        {% elif d.bytes_done %}
+        <span style="font-size: 0.8125rem; color: var(--fg-2);">{{ '%.2f GB' % (d.bytes_done / (1024**3)) }}&hellip;</span>
+        {% else %}
+        <span style="font-size: 0.8125rem; color: var(--fg-2);">starting&hellip;</span>
+        {% endif %}
+      </td>
+      <td data-label="Source"><code>{{ d.source }}</code></td>
+      <td class="actions" data-label="">
+        <form method="post" action="/ui/downloads/{{ d.id }}/cancel"
+              data-confirm="Cancel this download and remove partial files?">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Cancel</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+
+    {# ---- On-disk models ---- #}
+    {% for m in models %}
+    <tr>
+      <td data-label="Model">
+        <code>{{ m.model_id }}</code>
+        {% if m.model_id == current_model %}
+          <span class="lm-pill lm-pill--running" style="margin-left: 8px;">loaded</span>
+        {% endif %}
+      </td>
+      <td data-label="Size" class="num">{{ '%.2f GB' % (m.size / (1024**3)) }}</td>
+      <td data-label="Source"><code>{{ m.source or '-' }}</code></td>
+      <td class="actions" data-label="">
+        <form method="post" action="/ui/models/load" style="display:inline;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="model_id" value="{{ m.model_id }}">
+          <button type="submit" class="lm-btn lm-btn--xs">Load</button>
+        </form>
+        <form method="post" action="/ui/models/locate" style="display:inline;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="model_id" value="{{ m.model_id }}">
+          <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Locate</button>
+        </form>
+        <form method="post" action="/ui/models/delete"
+              data-confirm="Delete this model? This removes the file from disk."
+              style="display:inline;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="model_id" value="{{ m.model_id }}">
+          {% if m.model_id == current_model %}<input type="hidden" name="force" value="true">{% endif %}
+          <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">
+            Delete{% if m.model_id == current_model %} (force){% endif %}
+          </button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+
+    {# ---- Failed / cancelled downloads ---- #}
+    {% for d in downloads if d.status in ('failed', 'cancelled') %}
+    <tr>
+      <td data-label="Model">
+        <code style="color: var(--fg-2);">{{ d.source }}</code>
+        <span class="lm-pill lm-pill--crashed" style="margin-left: 8px;">{{ d.status }}</span>
+      </td>
+      <td data-label="Size" class="num"><span style="color: var(--fg-3);">-</span></td>
+      <td data-label="Source">
+        {% if d.error %}<span style="font-size: 0.8125rem; color: var(--bad);">{{ d.error[:80] }}{% if d.error|length > 80 %}&hellip;{% endif %}</span>{% endif %}
+      </td>
+      <td class="actions" data-label="">
+        <form method="post" action="/ui/downloads/{{ d.id }}/delete"
+              data-confirm="Remove this entry and clean up any partial files?"
+              style="display:inline;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Remove</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="lm-empty">No models on disk yet. Pull one below, or add an existing .gguf file from your computer.</p>
+  {% endif %}
+</div>

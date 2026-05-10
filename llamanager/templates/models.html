@@ -1,62 +1,38 @@
 {% extends "base.html" %}
 {% set active = 'models' %}
-{% block title %}Models — llamanager{% endblock %}
+{% block title %}Models - llamanager{% endblock %}
 {% block content %}
 <div class="lm-eyebrow">Operate</div>
 <h1 class="lm-page-title">Models</h1>
 
-<section class="lm-section">
+{# ---- Models (unified: on-disk + downloads) ---- #}
+<section class="lm-section" style="margin-top: 32px;">
   <header class="lm-section-head">
-    <span class="lm-section-marker">On disk</span>
-    <span class="lm-section-meta">{{ models|length }} model{{ '' if models|length == 1 else 's' }}</span>
+    <span class="lm-section-marker">Models</span>
+    <span class="lm-section-meta">{{ models|length }} on disk</span>
   </header>
 
-  {% if models %}
-  <table class="lm-table">
-    <thead>
-      <tr><th>Id</th><th>Size</th><th>Source</th><th></th></tr>
-    </thead>
-    <tbody>
-    {% for m in models %}
-    <tr>
-      <td data-label="Id">
-        <code>{{ m.model_id }}</code>
-        {% if m.model_id == current_model %}
-          <span class="lm-pill lm-pill--running" style="margin-left: 8px;">loaded</span>
-        {% endif %}
-      </td>
-      <td data-label="Size" class="num">{{ '%.2f GB' % (m.size / (1024**3)) }}</td>
-      <td data-label="Source"><code>{{ m.source or '—' }}</code></td>
-      <td class="actions" data-label="">
-        <form method="post" action="/ui/models/load">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="model_id" value="{{ m.model_id }}">
-          <button type="submit" class="lm-btn lm-btn--xs">Load</button>
-        </form>
-        <form method="post" action="/ui/models/delete"
-              data-confirm="Delete this model? This removes the file from disk.">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="model_id" value="{{ m.model_id }}">
-          {% if m.model_id == current_model %}<input type="hidden" name="force" value="true">{% endif %}
-          <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">
-            Delete{% if m.model_id == current_model %} (force){% endif %}
-          </button>
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="lm-empty">No models on disk yet. Pull one below.</p>
-  {% endif %}
+  <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 16px; font-size: 0.8125rem; color: var(--fg-2);">
+    <span>Location: <code style="color: var(--fg-1);">{{ models_dir }}</code></span>
+    <form method="post" action="/ui/models/open-dir" style="margin: 0;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">{{ open_label }}</button>
+    </form>
+  </div>
+
+  {% include "_models_list_partial.html" %}
 </section>
 
+{# ---- Pull a model ---- #}
 <section class="lm-section">
   <header class="lm-section-head">
     <span class="lm-section-marker">Pull a model</span>
     <span class="lm-section-meta">from Hugging Face or a URL</span>
   </header>
+
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
+    Enter a Hugging Face repo and the specific GGUF file you want. Downloads run in the background and progress is shown live in the models list above.
+  </p>
 
   <form class="lm-form lm-form--wide" method="post" action="/ui/models/pull">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -69,7 +45,7 @@
                required>
       </div>
       <div class="lm-field">
-        <label class="lm-field-label" for="model-files">Files (comma-separated, required for HF)</label>
+        <label class="lm-field-label" for="model-files">File (required for HF repos)</label>
         <input id="model-files" class="lm-input lm-input--mono"
                type="text" name="files"
                placeholder="Q4_K_M.gguf">
@@ -79,40 +55,61 @@
   </form>
 </section>
 
+{# ---- Add existing model ---- #}
 <section class="lm-section">
   <header class="lm-section-head">
-    <span class="lm-section-marker">Downloads</span>
-    <span class="lm-section-meta">{{ downloads|length }} active or recent</span>
+    <span class="lm-section-marker">Add existing model</span>
   </header>
 
-  {% if downloads %}
-  <table class="lm-table">
-    <thead>
-      <tr><th>Id</th><th>Source</th><th>Status</th><th>Progress</th></tr>
-    </thead>
-    <tbody>
-    {% for d in downloads %}
-    <tr>
-      <td data-label="Id"><code>{{ d.id }}</code></td>
-      <td data-label="Source"><code>{{ d.source }}</code></td>
-      <td data-label="Status"><span class="lm-pill lm-pill--{{ d.status }}">{{ d.status }}</span></td>
-      <td data-label="Progress" class="num">
-        {% if d.bytes_total %}
-          {{ '%.0f%%' % (100 * d.bytes_done / d.bytes_total) }}
-          <span style="color: var(--fg-2);">·
-            {{ '%.2f' % (d.bytes_done/(1024**3)) }} / {{ '%.2f' % (d.bytes_total/(1024**3)) }} GB
-          </span>
-        {% else %}
-          {{ '%.2f GB' % (d.bytes_done/(1024**3)) }}
-        {% endif %}
-        {% if d.error %}<div class="lm-error" style="margin-top: 8px;">{{ d.error }}</div>{% endif %}
-      </td>
-    </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="lm-empty">No downloads.</p>
-  {% endif %}
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
+    If you already have a GGUF file on disk, enter its full path here. The file will be symlinked into the models directory so it appears in the list above without copying.
+  </p>
+
+  <form class="lm-form" method="post" action="/ui/models/add-existing">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-field">
+      <label class="lm-field-label" for="existing-path">Path to .gguf file</label>
+      <input id="existing-path"
+             class="lm-input lm-input--mono"
+             type="text"
+             name="file_path"
+             placeholder="/path/to/model.gguf"
+             required
+             style="max-width: 480px;">
+    </div>
+    <div>
+      <button type="submit" class="lm-btn lm-btn--primary">Add model</button>
+    </div>
+  </form>
+</section>
+
+{# ---- Storage location ---- #}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Storage location</span>
+  </header>
+
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
+    By default models are stored in <code>~/.llamanager/models</code>. If you have a separate drive or prefer a different path, change it here. The directory will be created if it does not exist.
+  </p>
+
+  <form class="lm-form" method="post" action="/ui/models/set-dir">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-field">
+      <label class="lm-field-label" for="models-dir-input">Models directory</label>
+      <input id="models-dir-input"
+             class="lm-input lm-input--mono"
+             type="text"
+             name="models_dir"
+             value="{{ models_dir }}"
+             style="max-width: 480px;">
+    </div>
+    <div>
+      <button type="submit" class="lm-btn lm-btn--primary"
+              data-confirm="Change the models directory? Existing models in the old location will not be moved.">
+        Save location
+      </button>
+    </div>
+  </form>
 </section>
 {% endblock %}

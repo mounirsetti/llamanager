@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% set active = 'setup' %}
+{% block title %}Setup - llamanager{% endblock %}
+{% block content %}
+<div class="lm-eyebrow">Configure</div>
+<h1 class="lm-page-title">Setup</h1>
+<p class="lm-page-lede">Verify that llama-server is installed and reachable, configure the binary path, and control the inference server process.</p>
+
+{# ---- Section 1: Binary status ---- #}
+<section class="lm-section" style="margin-top: 32px;">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Binary</span>
+  </header>
+
+  <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 24px;">
+    {% if binary_path %}
+    <span class="lm-pill lm-pill--running">found</span>
+    <code style="font-size: 0.875rem; color: var(--fg-1);">{{ binary_path }}</code>
+    {% else %}
+    <span class="lm-pill" style="color: var(--bad); border-color: var(--bad);">not found</span>
+    <span style="font-size: 0.875rem; color: var(--fg-1);">Configured as <code>{{ configured_binary }}</code>. Not found on PATH or at the default install location.</span>
+    {% endif %}
+  </div>
+
+  <details style="margin-bottom: 0;">
+    <summary style="cursor: pointer; font-size: 0.875rem; color: var(--fg-1); user-select: none; padding: 6px 0; list-style: none; display: flex; align-items: center; gap: 6px;">
+      <span style="font-size: 0.75rem; color: var(--fg-2);">&#9656;</span>
+      Set binary path manually
+    </summary>
+    <div style="padding: 16px 0 8px;">
+      <form class="lm-form" method="post" action="/ui/setup/binary-path">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="lm-field">
+          <label class="lm-field-label" for="binary-path-input">Binary path</label>
+          <input id="binary-path-input"
+                 class="lm-input lm-input--mono"
+                 type="text"
+                 name="binary_path"
+                 value="{{ configured_binary }}"
+                 placeholder="llama-server or /usr/local/bin/llama-server"
+                 style="max-width: 480px;">
+        </div>
+        <div>
+          <button type="submit" class="lm-btn lm-btn--primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </details>
+</section>
+
+{# ---- Section 2: Install llama-server ---- #}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Install llama-server</span>
+  </header>
+
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 24px;">
+    llama-server is the inference engine from <a href="https://github.com/ggerganov/llama.cpp" style="color: var(--accent);">llama.cpp</a>. llamanager manages and proxies it. It does not bundle the binary. Install it separately using one of the methods below.
+  </p>
+
+  <div style="display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start;">
+    {# Platform instructions (collapsible) #}
+    <details style="flex: 1; min-width: 260px; max-width: 480px;">
+      <summary class="lm-btn lm-btn--ghost" style="list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;">
+        View instructions
+        <span style="font-size: 0.75rem; color: var(--fg-2);">&#9662;</span>
+      </summary>
+      <div style="margin-top: 16px; padding: 18px; background: var(--bg-1); border: 1px solid var(--bg-3);">
+        <div class="lm-eyebrow" style="margin-bottom: 10px;">{{ instructions.platform }}</div>
+        <div style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px;">
+          {% for step in instructions.steps %}
+          <code style="display: block; font-size: 0.8125rem; background: var(--bg-2); padding: 8px 12px; color: var(--fg-0); white-space: pre-wrap; word-break: break-all;">{{ step }}</code>
+          {% endfor %}
+        </div>
+        <p style="font-size: 0.8125rem; color: var(--fg-2); margin: 0;">{{ instructions.note }}</p>
+      </div>
+    </details>
+
+    {# Auto-install button #}
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <form method="post" action="/ui/setup/install">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit"
+                class="lm-btn lm-btn--primary"
+                {% if install.status == 'running' %}disabled{% endif %}>
+          {% if install.status == 'running' %}Installing&hellip;{% else %}Auto-install from GitHub{% endif %}
+        </button>
+      </form>
+      <p style="font-size: 0.75rem; color: var(--fg-2); max-width: 28ch; margin: 0;">Downloads the latest CPU build for <strong>{{ instructions.platform }}</strong> from the official llama.cpp releases.</p>
+    </div>
+  </div>
+
+  {# Install progress area — shared partial #}
+  {% include "_install_progress.html" %}
+</section>
+
+{# ---- Section 3: Server controls ---- #}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Server controls</span>
+  </header>
+
+  <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 24px;">
+    <span style="font-size: 0.875rem; color: var(--fg-2);">Status</span>
+    <span class="lm-pill lm-pill--{{ status.state }}">{{ status.state }}</span>
+    {% if status.current_model %}
+    <code style="font-size: 0.8125rem; color: var(--fg-1);">{{ status.current_model }}</code>
+    {% endif %}
+  </div>
+
+  {% if status.state == 'running' or status.state == 'starting' or status.state == 'swapping' %}
+  <div style="margin-bottom: 24px; display: flex; align-items: center; gap: 14px;">
+    <form method="post" action="/ui/setup/server/stop">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="lm-btn lm-btn--ghost"
+              data-confirm="Stop the inference server?">Stop server</button>
+    </form>
+    <a href="/ui/" class="lm-btn lm-btn--ghost">Go to dashboard &rarr;</a>
+  </div>
+  {% else %}
+  {% if binary_path and not profiles %}
+  <div style="padding: 14px 16px; background: var(--bg-1); border: 1px solid var(--bg-3); margin-bottom: 20px; font-size: 0.875rem; color: var(--fg-1);">
+    No profiles configured. Before launching, <a href="/ui/models" style="color: var(--accent);">pull a model</a> first, then the default profile will be used automatically.
+  </div>
+  {% endif %}
+  <form method="post" action="/ui/setup/server/start" style="margin-bottom: 24px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-form-row" style="align-items: flex-end; gap: 14px; flex-wrap: wrap;">
+      {% if profiles %}
+      <div class="lm-field" style="max-width: 280px;">
+        <label class="lm-field-label" for="profile-select">Profile</label>
+        <select id="profile-select" name="profile" class="lm-select">
+          <option value="">default</option>
+          {% for p in profiles %}
+          <option value="{{ p }}">{{ p }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% else %}
+      <input type="hidden" name="profile" value="">
+      {% endif %}
+      <button type="submit" class="lm-btn lm-btn--primary"
+              {% if not binary_path %}disabled title="llama-server not found"{% endif %}>
+        Launch server
+      </button>
+      {% if binary_path %}
+      <a href="/ui/models" class="lm-btn lm-btn--ghost">Pull a model first &rarr;</a>
+      {% endif %}
+    </div>
+    {% if not binary_path %}
+    <p style="margin-top: 8px; font-size: 0.8125rem; color: var(--bad);">llama-server must be installed before the server can start.</p>
+    {% endif %}
+  </form>
+  {% endif %}
+
+  {# Auto-restart toggle #}
+  <div style="padding-top: 18px; border-top: 1px solid var(--bg-3);">
+    <div style="font-size: 0.875rem; color: var(--fg-1); margin-bottom: 10px; font-weight: 500;">Auto-restart (crash supervisor)</div>
+    <form method="post" action="/ui/setup/autorestart">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label class="lm-checkbox-row">
+        <input type="checkbox" name="enabled" value="on" {% if autorestart %}checked{% endif %}
+               onchange="this.form.submit()">
+        Automatically restart llama-server on crash (up to {{ max_restarts }} restarts per window)
+      </label>
+    </form>
+    <p style="margin-top: 8px; font-size: 0.8125rem; color: var(--fg-2);">
+      Disable to prevent automatic restarts. Useful when debugging a bad model or config.
+    </p>
+  </div>
+</section>
+{% endblock %}

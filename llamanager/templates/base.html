@@ -135,22 +135,45 @@
       align-items: baseline;
       gap: 8px;
     }
-    .lm-brand::after {
-      content: '';
-      width: 6px;
-      height: 6px;
+    .lm-brand::after { display: none; }
+    .lm-status-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
       border-radius: 999px;
-      background: var(--accent);
-      transform: translateY(-2px);
+      margin-left: 6px;
+      vertical-align: middle;
+      transform: translateY(-1px);
+      flex-shrink: 0;
+    }
+    .lm-status-dot--running {
+      background: var(--ok);
+      box-shadow: 0 0 0 0 var(--ok);
+      animation: lm-pulse 1.6s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+    }
+    .lm-status-dot--idle {
+      background: var(--warn);
+    }
+    .lm-status-dot--missing {
+      background: var(--bad);
     }
     .lm-meta {
       font-size: 0.6875rem;
       color: var(--fg-2);
       letter-spacing: 0.08em;
       text-transform: uppercase;
-      margin-top: 3px;
       padding-left: 1px;
     }
+    .lm-meta-action {
+      font-size: 0.6875rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding-left: 1px;
+      color: var(--accent);
+      font-weight: 500;
+      transition: opacity 180ms ease;
+    }
+    .lm-meta-action:hover { opacity: 0.75; }
 
     /* ---------- nav ---------- */
     .lm-nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
@@ -700,9 +723,21 @@
 <body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
   <div class="lm-shell">
     <aside class="lm-rail">
-      <div style="display:flex;flex-direction:column;gap:3px;">
-        <div class="lm-brand">llamanager</div>
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        <div class="lm-brand" style="position:relative;">
+          llamanager
+          {# Override the ::after dot with a status-coloured one #}
+          <span class="lm-status-dot lm-status-dot--{{ dot_status }}" aria-label="llama-server {{ dot_status }}"></span>
+        </div>
+        {% if dot_status == 'running' %}
         <div class="lm-meta">local inference, supervised</div>
+        {% elif dot_status == 'missing' %}
+        <a href="/ui/setup" class="lm-meta-action">Install llama-server &rarr;</a>
+        {% elif not has_models %}
+        <a href="/ui/models" class="lm-meta-action">Pull a model &rarr;</a>
+        {% else %}
+        <a href="/ui/setup" class="lm-meta-action">Launch llama-server &rarr;</a>
+        {% endif %}
       </div>
 
       <nav class="lm-nav" aria-label="Primary">
@@ -714,6 +749,7 @@
         <a class="lm-nav-link" href="/ui/origins" {% if active=='origins' %}aria-current="page"{% endif %}>Origins</a>
         <a class="lm-nav-link" href="/ui/profiles" {% if active=='profiles' %}aria-current="page"{% endif %}>Profiles</a>
         <a class="lm-nav-link" href="/ui/logs" {% if active=='logs' %}aria-current="page"{% endif %}>Logs</a>
+        <a class="lm-nav-link" href="/ui/setup" {% if active=='setup' %}aria-current="page"{% endif %}>Setup</a>
       </nav>
 
       <div class="lm-rail-foot">

@@ -237,7 +237,7 @@ async def model_delete(request: Request, model_id: str, force: bool = False,
         if err == "loaded":
             raise HTTPException(
                 status_code=409,
-                detail="model is currently loaded — pass ?force=true to stop server first",
+                detail="model is currently loaded. Pass ?force=true to stop server first",
             )
         if err == "not_found":
             raise HTTPException(status_code=404, detail="model not found")

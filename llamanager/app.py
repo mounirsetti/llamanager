@@ -23,6 +23,7 @@ from .queue_mgr import QueueManager
 from .registry import Registry
 from .server_manager import ServerManager
 from .supervisor import Supervisor
+from .llama_installer import detect_binary, InstallState
 
 log = logging.getLogger(__name__)
 
@@ -115,6 +116,14 @@ def create_app(config_path: Path | None = None,
     supervisor = Supervisor(cfg, sm)
     registry = Registry(cfg, db)
 
+    # Warn if llama-server binary is not found
+    if not detect_binary(cfg.llama_server_binary):
+        log.warning(
+            "llama-server binary not found (configured: %r). "
+            "Open the UI > Setup to install it or set the path.",
+            cfg.llama_server_binary,
+        )
+
     boot_key = auth.ensure_bootstrap()
     if boot_key and print_bootstrap:
         _emit_bootstrap_key(cfg, boot_key)
@@ -157,6 +166,7 @@ def create_app(config_path: Path | None = None,
     app.state.queue = queue
     app.state.supervisor = supervisor
     app.state.registry = registry
+    app.state.install_state = InstallState()
     app.state.session_secret = _load_or_create_session_secret(cfg)
     # Server-side admin UI session store. Lives in-process; restart logs
     # everyone out, which is acceptable for a single-host operator UI.

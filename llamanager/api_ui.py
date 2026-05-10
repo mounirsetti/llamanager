@@ -12,9 +12,13 @@ No build step — Pico CSS + HTMX, Jinja2 templates, escape-by-default.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import secrets
 import time
+
+log = logging.getLogger(__name__)
 from html import escape as html_escape
 from pathlib import Path
 from typing import Any
@@ -25,9 +29,17 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from .auth import AuthManager, Origin
+from .llama_installer import (
+    InstallState,
+    detect_binary,
+    install_instructions,
+    install_llama_server,
+    patch_config_binary,
+)
 from .queue_mgr import QueueManager
 from .registry import Registry
 from .server_manager import ServerManager, resolve_spec, ServerError
+from .supervisor import Supervisor
 
 router = APIRouter(prefix="/ui", tags=["ui"])
 
@@ -122,18 +134,32 @@ async def require_admin_ui(request: Request) -> Origin:
 
 # ---------- CSRF helpers ----------
 
+def _normalise_host(netloc: str) -> str:
+    """Treat localhost and 127.0.0.1 as the same host."""
+    return netloc.lower().replace("localhost", "127.0.0.1")
+
+
 def _same_origin(request: Request) -> bool:
-    """Best-effort same-origin check on the Origin/Referer header."""
-    ref = request.headers.get("origin") or request.headers.get("referer")
+    """Best-effort same-origin check on the Origin/Referer header.
+
+    When Referrer-Policy: no-referrer is active (which we set), Chrome sends
+    Origin: null on form POSTs. In that case we skip the origin check and rely
+    solely on the CSRF token, which is the real protection.
+    """
+    origin = request.headers.get("origin")
+    # "null" origin is sent by browsers when referrer policy suppresses it.
+    # Treat it as same-origin; CSRF token validation is the actual guard.
+    if origin == "null":
+        return True
+    ref = origin or request.headers.get("referer")
     if not ref:
-        # No Origin/Referer at all -> conservatively reject for browser POSTs.
         return False
     try:
         netloc = urlparse(ref).netloc
     except Exception:
         return False
     host = request.headers.get("host", "")
-    return bool(netloc) and bool(host) and netloc.lower() == host.lower()
+    return bool(netloc) and bool(host) and _normalise_host(netloc) == _normalise_host(host)
 
 
 async def _extract_csrf_token(request: Request) -> str | None:
@@ -172,8 +198,26 @@ async def require_csrf(request: Request,
 def _ctx(request: Request, **extra: Any) -> dict[str, Any]:
     """Build a base template context that always includes the CSRF token
     when an authenticated session is in flight."""
-    base: dict[str, Any] = {"request": request,
-                            "csrf_token": getattr(request.state, "csrf_token", "")}
+    cfg = request.app.state.cfg
+    binary_path = detect_binary(cfg.llama_server_binary)
+    sm: ServerManager = request.app.state.sm
+    server_state = sm.runtime.state  # stopped | starting | running | swapping | crashed | degraded
+    has_models = bool(request.app.state.registry.list())
+    # Dot color: red = no binary, orange = binary but not running, green = running
+    if not binary_path:
+        dot_status = "missing"
+    elif server_state == "running":
+        dot_status = "running"
+    else:
+        dot_status = "idle"
+    base: dict[str, Any] = {
+        "request": request,
+        "csrf_token": getattr(request.state, "csrf_token", ""),
+        "binary_missing": not binary_path,
+        "server_state": server_state,
+        "dot_status": dot_status,
+        "has_models": has_models,
+    }
     base.update(extra)
     return base
 
@@ -286,10 +330,36 @@ async def queue_cancel_ui(request: Request, request_id: str,
 
 # ---------- models ----------
 
+def _models_ctx(request: Request) -> dict:
+    import sys as _sys
+    reg: Registry = request.app.state.registry
+    cfg = request.app.state.cfg
+    if _sys.platform == "darwin":
+        open_label = "Open in Finder"
+    elif _sys.platform == "win32":
+        open_label = "Open in Explorer"
+    else:
+        open_label = "Open folder"
+    return _ctx(
+        request,
+        models=[m.to_dict() for m in reg.list()],
+        downloads=reg.list_downloads(),
+        current_model=request.app.state.sm.runtime.current_model,
+        models_dir=str(cfg.models_dir),
+        open_label=open_label,
+    )
+
+
 @router.get("/models", response_class=HTMLResponse)
 async def models_view(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    return templates.TemplateResponse(request, "models.html", _models_ctx(request))
+
+
+@router.get("/models/_list", response_class=HTMLResponse)
+async def models_list_partial(request: Request,
+                              _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     reg: Registry = request.app.state.registry
-    return templates.TemplateResponse(request, "models.html", _ctx(
+    return templates.TemplateResponse(request, "_models_list_partial.html", _ctx(
         request,
         models=[m.to_dict() for m in reg.list()],
         downloads=reg.list_downloads(),
@@ -329,6 +399,30 @@ async def models_delete_ui(request: Request, model_id: str = Form(...),
     return RedirectResponse("/ui/models", status_code=303)
 
 
+@router.post("/models/add-existing", response_class=HTMLResponse)
+async def models_add_existing(request: Request,
+                              file_path: str = Form(...),
+                              _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    src = Path(file_path.strip()).expanduser().resolve()
+    if not src.exists():
+        return _error_html(f"file not found: {src}", status_code=400)
+    if not src.is_file():
+        return _error_html(f"not a file: {src}", status_code=400)
+    if not src.name.lower().endswith(".gguf"):
+        return _error_html("only .gguf files are supported", status_code=400)
+    dest = cfg.models_dir / src.name
+    if dest.exists():
+        return _error_html(f"a model named {src.name} already exists", status_code=409)
+    try:
+        dest.symlink_to(src)
+    except OSError:
+        # Symlinks may fail on some Windows setups; fall back to copy
+        import shutil
+        shutil.copy2(src, dest)
+    return RedirectResponse("/ui/models", status_code=303)
+
+
 @router.post("/models/pull", response_class=HTMLResponse)
 async def models_pull_ui(request: Request, source: str = Form(...),
                          files: str = Form(""),
@@ -339,6 +433,79 @@ async def models_pull_ui(request: Request, source: str = Form(...),
         reg.start_pull(source=source.strip(), files=file_list)
     except Exception as e:
         return _error_html(f"pull failed: {e}", status_code=400)
+    # Render immediately so the HTMX polling div is present from the start
+    return templates.TemplateResponse(request, "models.html", _models_ctx(request))
+
+
+@router.post("/models/set-dir", response_class=HTMLResponse)
+async def models_set_dir(request: Request,
+                         models_dir: str = Form(...),
+                         _: None = Depends(require_csrf)) -> Response:
+    import re as _re
+    cfg = request.app.state.cfg
+    new_dir = Path(models_dir.strip()).expanduser().resolve()
+    new_dir.mkdir(parents=True, exist_ok=True)
+    cfg.models_dir_override = new_dir
+    cfg.registry = request.app.state.registry
+    request.app.state.registry.models_dir = new_dir
+    # Persist to config.toml
+    config_path = cfg.config_path
+    text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    new_line = f'models_dir = {json.dumps(str(new_dir))}'
+    text, n = _re.subn(r'^models_dir\s*=\s*.*$', new_line, text, flags=_re.MULTILINE)
+    if n == 0:
+        server_match = _re.search(r'^\[server\]', text, flags=_re.MULTILINE)
+        if server_match:
+            text = text[:server_match.end()] + f"\n{new_line}" + text[server_match.end():]
+        else:
+            text = text.rstrip("\n") + f"\n\n[server]\n{new_line}\n"
+    config_path.write_text(text, encoding="utf-8")
+    return RedirectResponse("/ui/models", status_code=303)
+
+
+@router.post("/downloads/{download_id}/cancel", response_class=HTMLResponse)
+async def download_cancel_ui(request: Request, download_id: str,
+                              _: None = Depends(require_csrf)) -> Response:
+    reg: Registry = request.app.state.registry
+    reg.cancel_pull(download_id)
+    return RedirectResponse("/ui/models", status_code=303)
+
+
+@router.post("/downloads/{download_id}/delete", response_class=HTMLResponse)
+async def download_delete_ui(request: Request, download_id: str,
+                              _: None = Depends(require_csrf)) -> Response:
+    reg: Registry = request.app.state.registry
+    reg.delete_download(download_id)
+    return RedirectResponse("/ui/models", status_code=303)
+
+
+def _open_path(path: str) -> None:
+    import subprocess, sys as _sys
+    if _sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", path])
+    elif _sys.platform == "win32":
+        subprocess.Popen(["explorer", "/select,", path])
+    else:
+        # xdg-open opens the parent directory
+        subprocess.Popen(["xdg-open", str(Path(path).parent)])
+
+
+@router.post("/models/open-dir", response_class=HTMLResponse)
+async def models_open_dir(request: Request,
+                          _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    _open_path(str(cfg.models_dir))
+    return RedirectResponse("/ui/models", status_code=303)
+
+
+@router.post("/models/locate", response_class=HTMLResponse)
+async def models_locate(request: Request,
+                        model_id: str = Form(...),
+                        _: None = Depends(require_csrf)) -> Response:
+    reg: Registry = request.app.state.registry
+    m = reg.get(model_id)
+    if m:
+        _open_path(str(m.path))
     return RedirectResponse("/ui/models", status_code=303)
 
 
@@ -459,3 +626,98 @@ async def logs_partial(request: Request, source: str = "llama-server",
                        tail: int = 200,
                        _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     return await logs_view(request, source=source, tail=tail, _=_)
+
+
+# ---------- setup ----------
+
+@router.get("/setup", response_class=HTMLResponse)
+async def setup_get(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    return templates.TemplateResponse(request, "setup.html", _setup_ctx(request))
+
+
+@router.post("/setup/binary-path", response_class=HTMLResponse)
+async def setup_set_binary(request: Request,
+                           binary_path: str = Form(...),
+                           _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    binary_path = binary_path.strip()
+    cfg.llama_server_binary = binary_path
+    patch_config_binary(cfg.config_path, binary_path)
+    return RedirectResponse("/ui/setup", status_code=303)
+
+
+def _setup_ctx(request: Request) -> dict:
+    cfg = request.app.state.cfg
+    sm: ServerManager = request.app.state.sm
+    supervisor: Supervisor = request.app.state.supervisor
+    return _ctx(
+        request,
+        binary_path=detect_binary(cfg.llama_server_binary),
+        configured_binary=cfg.llama_server_binary,
+        instructions=install_instructions(),
+        install=request.app.state.install_state.to_dict(),
+        status=sm.status(),
+        profiles=list(cfg.profiles.keys()),
+        autorestart=supervisor.enabled,
+        max_restarts=cfg.max_restarts_in_window,
+    )
+
+
+@router.post("/setup/install", response_class=HTMLResponse)
+async def setup_install(request: Request,
+                        _: None = Depends(require_csrf)) -> Response:
+    state: InstallState = request.app.state.install_state
+    if state.status != "running":
+        state.status = "running"
+        state.lines = []
+        state.error = None
+        state.installed_path = None
+        asyncio.create_task(install_llama_server(state))
+    # Render immediately so the HTMX polling div is present from the start
+    return templates.TemplateResponse(request, "setup.html", _setup_ctx(request))
+
+
+@router.get("/setup/_install_progress", response_class=HTMLResponse)
+async def setup_install_progress(request: Request,
+                                 _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    state: InstallState = request.app.state.install_state
+    cfg = request.app.state.cfg
+    if state.status == "done" and state.installed_path:
+        cfg.llama_server_binary = state.installed_path
+        patch_config_binary(cfg.config_path, state.installed_path)
+    binary_path = detect_binary(cfg.llama_server_binary)
+    return templates.TemplateResponse(request, "_install_progress.html", _ctx(
+        request,
+        install=state.to_dict(),
+        binary_path=binary_path,
+    ))
+
+
+@router.post("/setup/autorestart", response_class=HTMLResponse)
+async def setup_autorestart(request: Request,
+                            enabled: str = Form("off"),
+                            _: None = Depends(require_csrf)) -> Response:
+    request.app.state.supervisor.enabled = (enabled == "on")
+    return RedirectResponse("/ui/setup", status_code=303)
+
+
+@router.post("/setup/server/start", response_class=HTMLResponse)
+async def setup_server_start(request: Request,
+                             profile: str = Form(""),
+                             _: None = Depends(require_csrf)) -> Response:
+    sm: ServerManager = request.app.state.sm
+    cfg = request.app.state.cfg
+    try:
+        spec = resolve_spec(cfg, profile=profile or None)
+        await sm.start(spec)
+    except (ServerError, ValueError) as e:
+        return _error_html(str(e), status_code=400)
+    return RedirectResponse("/ui/setup", status_code=303)
+
+
+@router.post("/setup/server/stop", response_class=HTMLResponse)
+async def setup_server_stop(request: Request,
+                            _: None = Depends(require_csrf)) -> Response:
+    sm: ServerManager = request.app.state.sm
+    await sm.stop()
+    return RedirectResponse("/ui/setup", status_code=303)

@@ -16,6 +16,7 @@ class Supervisor:
     def __init__(self, cfg: Config, sm: ServerManager):
         self.cfg = cfg
         self.sm = sm
+        self.enabled: bool = True
         self.exits: deque[float] = deque()
         self.consecutive_failures = 0
         self.last_success_start: float | None = None
@@ -45,6 +46,10 @@ class Supervisor:
             await self._handle_exit(rc)
 
     async def _handle_exit(self, rc: int) -> None:
+        if not self.enabled:
+            log.debug("supervisor: auto-restart disabled, skipping restart (rc=%d)", rc)
+            return
+
         now = time.time()
 
         # Did we just have a successful long-enough run? Reset counter.

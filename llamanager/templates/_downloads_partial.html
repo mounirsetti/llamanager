@@ -1,0 +1,59 @@
+{% set active_downloads = downloads | selectattr('status', 'equalto', 'running') | list %}
+{% set active_downloads = active_downloads + (downloads | selectattr('status', 'equalto', 'pending') | list) %}
+<div id="downloads-section"
+     {% if active_downloads %}
+     hx-get="/ui/models/_downloads"
+     hx-trigger="every 2s"
+     hx-swap="outerHTML"
+     {% endif %}>
+  {% if downloads %}
+  <table class="lm-table">
+    <thead>
+      <tr><th>Source</th><th>Status</th><th>Progress</th><th></th></tr>
+    </thead>
+    <tbody>
+    {% for d in downloads %}
+    <tr>
+      <td data-label="Source"><code style="word-break: break-all;">{{ d.source }}</code></td>
+      <td data-label="Status">
+        <span class="lm-pill lm-pill--{{ d.status }}">{{ d.status }}</span>
+      </td>
+      <td data-label="Progress" class="num">
+        {% if d.status == 'running' and d.bytes_total %}
+          <div style="display: flex; flex-direction: column; gap: 4px;">
+            <div style="height: 4px; background: var(--bg-3); border-radius: 2px; min-width: 120px;">
+              <div style="height: 4px; background: var(--ok); border-radius: 2px; width: {{ '%.0f' % (100 * d.bytes_done / d.bytes_total) }}%;"></div>
+            </div>
+            <span style="font-size: 0.8125rem; color: var(--fg-2);">
+              {{ '%.1f' % (d.bytes_done / (1024**3)) }} / {{ '%.1f' % (d.bytes_total / (1024**3)) }} GB
+              ({{ '%.0f%%' % (100 * d.bytes_done / d.bytes_total) }})
+            </span>
+          </div>
+        {% elif d.status == 'running' %}
+          <span style="font-size: 0.8125rem; color: var(--fg-2);">{{ '%.2f GB' % (d.bytes_done / (1024**3)) }} downloaded&hellip;</span>
+        {% elif d.status == 'done' %}
+          <span style="color: var(--ok); font-size: 0.8125rem;">{{ '%.2f GB' % (d.bytes_done / (1024**3)) }}</span>
+        {% elif d.bytes_done %}
+          {{ '%.2f GB' % (d.bytes_done / (1024**3)) }}
+        {% else %}
+          <span style="color: var(--fg-3);">-</span>
+        {% endif %}
+        {% if d.error %}<div class="lm-error" style="margin-top: 8px;">{{ d.error }}</div>{% endif %}
+      </td>
+      <td class="actions" data-label="">
+        {% if d.status == 'running' or d.status == 'pending' %}
+        <form method="post" action="/ui/downloads/{{ d.id }}/cancel"
+              data-confirm="Cancel this download?">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Cancel</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="lm-empty">No downloads yet.</p>
+  {% endif %}
+</div>

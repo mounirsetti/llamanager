@@ -243,6 +243,59 @@ class Registry:
         ev.set()
         return True
 
+    def delete_download(self, download_id: str) -> bool:
+        """Remove a download record and clean up any partial files."""
+        row = self.db.query_one("SELECT * FROM downloads WHERE id=?", (download_id,))
+        if not row:
+            return False
+        # Cancel if still running
+        self.cancel_pull(download_id)
+        # Clean up partial files in _direct/
+        files_json = row.get("files_json", "[]")
+        try:
+            files = json.loads(files_json) if files_json else []
+        except (json.JSONDecodeError, TypeError):
+            files = []
+        direct_dir = self.models_dir / "_direct"
+        # Try to infer filename from source or files list
+        source = row.get("source", "")
+        candidates: list[str] = list(files)
+        if not candidates:
+            tail = source.rsplit("/", 1)[-1].split("?", 1)[0]
+            if tail:
+                candidates.append(tail)
+        for fn in candidates:
+            base = os.path.basename(fn.replace("\\", "/"))
+            if not base:
+                continue
+            for suffix in ("", ".part"):
+                p = direct_dir / (base + suffix)
+                if p.exists():
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+            mp = direct_dir / (base + ".meta.json")
+            if mp.exists():
+                try:
+                    mp.unlink()
+                except OSError:
+                    pass
+        # Also clean HF-style downloads: models_dir/<repo>/
+        if source.startswith("hf://") or source.startswith("hf:"):
+            repo = source.removeprefix("hf://").removeprefix("hf:")
+            repo_dir = self.models_dir / repo
+            if repo_dir.exists():
+                for fn in candidates:
+                    base = os.path.basename(fn.replace("\\", "/"))
+                    for p in repo_dir.rglob(base + "*"):
+                        try:
+                            p.unlink()
+                        except OSError:
+                            pass
+        self.db.execute("DELETE FROM downloads WHERE id=?", (download_id,))
+        return True
+
     def get_download(self, download_id: str) -> dict[str, Any] | None:
         row = self.db.query_one("SELECT * FROM downloads WHERE id=?", (download_id,))
         if not row:
@@ -285,10 +338,33 @@ class Registry:
             (*fields.values(), did),
         )
 
+    @staticmethod
+    def _normalise_hf_url(source: str, files: list[str]
+                          ) -> tuple[str, list[str]]:
+        """Convert a HuggingFace web URL into an hf:// source + files list.
+
+        Handles patterns like:
+          https://huggingface.co/org/repo/blob/main/file.gguf
+          https://huggingface.co/org/repo
+        """
+        m = re.match(
+            r'https?://huggingface\.co/([^/]+/[^/]+)(?:/(?:blob|resolve)/[^/]+/(.+))?$',
+            source,
+        )
+        if m:
+            repo = m.group(1)
+            filename = m.group(2)
+            source = f"hf://{repo}"
+            if filename and filename not in files:
+                files = [filename] + files
+        return source, files
+
     async def _run_pull(self, did: str, source: str, files: list[str],
                         cancel: asyncio.Event) -> None:
         try:
             self._set_download(did, status="running")
+            # Convert HF web URLs to hf:// sources automatically
+            source, files = self._normalise_hf_url(source, files)
             if source.startswith("hf://") or source.startswith("hf:"):
                 await self._pull_hf(did, source, files, cancel)
             elif source.startswith("http://") or source.startswith("https://"):
@@ -369,6 +445,10 @@ class Registry:
 
     async def _pull_http(self, did: str, url: str, filename: str | None,
                          cancel: asyncio.Event) -> None:
+        # HF blob URLs return an HTML page — rewrite to the resolve URL
+        # which returns the actual file content.
+        if "huggingface.co/" in url and "/blob/" in url:
+            url = url.replace("/blob/", "/resolve/")
         if not filename:
             filename = url.rsplit("/", 1)[-1].split("?", 1)[0]
             if not filename:

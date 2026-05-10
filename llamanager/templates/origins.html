@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 {% set active = 'origins' %}
-{% block title %}Origins — llamanager{% endblock %}
+{% block title %}Origins - llamanager{% endblock %}
 {% block content %}
 <div class="lm-eyebrow">Configure</div>
 <h1 class="lm-page-title">Origins</h1>
-<p class="lm-page-lede">An origin is a named client identity — a script, an app, or a user — that is issued one bearer API key. When multiple origins send requests at the same time, priority (0–100, higher wins) decides who gets the GPU first. Origins marked admin can also call the control plane (start/stop the model, manage other origins, etc.).</p>
+<p class="lm-page-lede">An origin is a named client identity (a script, an app, or a user) that is issued one bearer API key. When multiple origins send requests at the same time, priority (0–100, higher wins) decides who gets the GPU first. Origins marked admin can also call the control plane (start/stop the model, manage other origins, etc.).</p>
 
 {% if error %}
 <div class="lm-error">{{ error }}</div>
@@ -27,7 +27,7 @@
     <span class="lm-section-meta">{{ origins|length }} origin{{ '' if origins|length == 1 else 's' }}</span>
   </header>
   <p style="margin-bottom: 18px; font-size: 0.875rem; color: var(--fg-1); max-width: 72ch;">
-    The <strong style="color: var(--fg-0); font-weight: 500;">bootstrap</strong> origin is created automatically the first time llamanager starts. Its API key was printed to the terminal (and saved to <code>bootstrap-key.txt</code> in your data directory). It exists so you can log in and set up real origins — once you have done that, you should rotate or delete it.
+    The <strong style="color: var(--fg-0); font-weight: 500;">bootstrap</strong> origin is created automatically the first time llamanager starts. Its API key was printed to the terminal (and saved to <code>bootstrap-key.txt</code> in your data directory). It exists so you can log in and set up real origins. Once you have done that, you should rotate or delete it.
   </p>
 
   <table class="lm-table">
@@ -51,7 +51,7 @@
       </td>
       <td data-label="Allowed models"><code>{{ o.allowed_models | join(', ') }}</code></td>
       <td data-label="Admin">
-        {% if o.is_admin %}<span class="lm-pill lm-pill--running">admin</span>{% else %}<span style="color: var(--fg-3);">—</span>{% endif %}
+        {% if o.is_admin %}<span class="lm-pill lm-pill--running">admin</span>{% else %}<span style="color: var(--fg-3);">no</span>{% endif %}
       </td>
       <td class="actions" data-label="">
         <form method="post" action="/ui/origins/{{ o.id }}/rotate"
@@ -77,7 +77,7 @@
     <span class="lm-section-meta">issues a new bearer key</span>
   </header>
   <p style="margin-bottom: 24px; font-size: 0.875rem; color: var(--fg-1); max-width: 72ch;">
-    Give the origin a name that identifies the client (e.g. <code>my-app</code> or <code>alice</code>). A bearer API key is generated and shown once — copy it immediately. The client uses this key in the <code>Authorization: Bearer &lt;key&gt;</code> header on every request to the OpenAI-compatible endpoint.
+    Give the origin a name that identifies the client (e.g. <code>my-app</code> or <code>alice</code>). A bearer API key is generated and shown once. Copy it immediately. The client uses this key in the <code>Authorization: Bearer &lt;key&gt;</code> header on every request to the OpenAI-compatible endpoint.
   </p>
 
   <form class="lm-form lm-form--wide" method="post" action="/ui/origins/create">

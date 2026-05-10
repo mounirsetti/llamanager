@@ -30,12 +30,24 @@ Full design notes are in [`llamanager-spec.md`](llamanager-spec.md).
 
 Python 3.11 or newer is required. The daemon uses `tomllib` and recent asyncio features.
 
+## prerequisites
+
+llamanager requires `llama-server` — the inference engine from [llama.cpp](https://github.com/ggerganov/llama.cpp) — to be installed separately. llamanager manages and proxies it; it does not bundle the binary.
+
+| os      | easiest install                                    |
+|---------|----------------------------------------------------|
+| macOS   | `brew install llama.cpp`                           |
+| Linux   | auto-install via the llamanager UI (CPU build), or download a CUDA/ROCm/Vulkan build from [releases](https://github.com/ggerganov/llama.cpp/releases) |
+| Windows | auto-install via the llamanager UI (AVX2 CPU build), or download a CUDA build from [releases](https://github.com/ggerganov/llama.cpp/releases) |
+
+After installing llamanager, open **http://localhost:7200/ui/setup** to verify detection, set the binary path if needed, or trigger an automatic install directly from the UI.
+
+If `llama-server` is already installed but not on `PATH`, you can point llamanager at it by setting `llama_server_binary` in `~/.llamanager/config.toml`, or using the path field on the Setup page.
+
 ## install
 
 ```bash
-cd /path/to/Llamanager
-
-python -m venv .venv
+python3 -m venv .venv                      # python 3.11 or newer required
 source .venv/bin/activate                  # macos / linux
 # .\.venv\Scripts\Activate.ps1             # windows powershell
 # .\.venv\Scripts\activate.bat             # windows cmd
