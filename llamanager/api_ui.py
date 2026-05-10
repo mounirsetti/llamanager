@@ -271,17 +271,22 @@ async def logout(request: Request,
 async def dashboard(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     sm: ServerManager = request.app.state.sm
     qm: QueueManager = request.app.state.queue
+    cfg = request.app.state.cfg
     db = request.app.state.db
     recent = db.query(
         "SELECT id, origin_id, model, status, enqueued_at, started_at,"
         " finished_at, prompt_tokens, completion_tokens"
         " FROM requests ORDER BY enqueued_at DESC LIMIT 10"
     )
+    # Build the base URL for cheat sheet examples
+    host = request.headers.get("host", f"{cfg.bind}:{cfg.port}")
+    base_url = f"http://{host}"
     return templates.TemplateResponse(request, "dashboard.html", _ctx(
         request,
         status=sm.status(),
         queue=qm.snapshot(),
         recent=[dict(r) for r in recent],
+        base_url=base_url,
     ))
 
 
@@ -588,6 +593,24 @@ async def profiles_redirect(request: Request,
     return RedirectResponse("/ui/launch", status_code=301)
 
 
+# ---------- chat ----------
+
+@router.get("/chat", response_class=HTMLResponse)
+async def chat_view(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    cfg = request.app.state.cfg
+    sm: ServerManager = request.app.state.sm
+    sess = _read_session(request)
+    profiles = []
+    for name, p in cfg.profiles.items():
+        profiles.append({"name": name})
+    return templates.TemplateResponse(request, "chat.html", _ctx(
+        request,
+        status=sm.status(),
+        profiles=profiles,
+        api_key=sess["key"] if sess else "",
+    ))
+
+
 # ---------- logs ----------
 
 @router.get("/logs", response_class=HTMLResponse)
@@ -700,6 +723,24 @@ def _reload_config(request: Request) -> None:
     request.app.state.registry.models_dir = new_cfg.models_dir
 
 
+def _read_log_tail(cfg, lines: int = 15) -> str:
+    log_path = cfg.logs_dir / "llama-server.log"
+    if not log_path.exists():
+        return ""
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            block = min(4096, size)
+            if block <= 0:
+                return ""
+            f.seek(size - block)
+            data = f.read(block)
+            return b"\n".join(data.splitlines()[-lines:]).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def _launch_ctx(request: Request) -> dict:
     cfg = request.app.state.cfg
     sm: ServerManager = request.app.state.sm
@@ -727,6 +768,7 @@ def _launch_ctx(request: Request) -> dict:
         default_profile=cfg.default_profile,
         autorestart=supervisor.enabled,
         max_restarts=cfg.max_restarts_in_window,
+        log_tail=_read_log_tail(cfg),
     )
 
 
@@ -744,10 +786,35 @@ async def launch_server_start(request: Request,
     cfg = request.app.state.cfg
     try:
         spec = resolve_spec(cfg, profile=profile or None)
-        await sm.start(spec)
     except (ServerError, ValueError) as e:
         return _error_html(str(e), status_code=400)
-    return RedirectResponse("/ui/launch", status_code=303)
+    # Fire and forget — the page will poll for status
+    asyncio.create_task(_start_server_bg(sm, spec))
+    # Wait briefly so the state transitions from stopped to starting
+    await asyncio.sleep(0.3)
+    ctx = _launch_ctx(request)
+    # Force-show the status partial even if state hasn't transitioned yet
+    ctx["launching"] = True
+    return templates.TemplateResponse(request, "launch.html", ctx)
+
+
+async def _start_server_bg(sm: ServerManager, spec) -> None:
+    try:
+        await sm.start(spec)
+    except Exception:
+        pass  # state is already set to crashed/stopped by ServerManager
+
+
+@router.get("/launch/_server_status", response_class=HTMLResponse)
+async def launch_server_status(request: Request,
+                               _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    cfg = request.app.state.cfg
+    sm: ServerManager = request.app.state.sm
+    return templates.TemplateResponse(request, "_server_status.html", _ctx(
+        request,
+        status=sm.status(),
+        log_tail=_read_log_tail(cfg),
+    ))
 
 
 @router.post("/launch/server/stop", response_class=HTMLResponse)

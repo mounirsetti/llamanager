@@ -1,0 +1,54 @@
+{% if status.state in ('starting', 'swapping') or (status.state == 'stopped' and launching) %}
+<div id="server-status"
+     hx-get="/ui/launch/_server_status"
+     hx-trigger="every 1s"
+     hx-swap="outerHTML">
+  <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 14px;">
+    <span class="lm-pill lm-pill--starting">{{ status.state if status.state != 'stopped' else 'starting' }}</span>
+    {% if status.current_model %}
+    <code style="font-size: 0.8125rem; color: var(--fg-1);">{{ status.current_model }}</code>
+    {% endif %}
+  </div>
+  {% if log_tail %}
+  <pre class="lm-log" style="max-height: 180px; font-size: 0.75rem;">{{ log_tail }}</pre>
+  {% else %}
+  <p style="font-size: 0.8125rem; color: var(--fg-2);">Launching llama-server...</p>
+  {% endif %}
+</div>
+{% elif status.state == 'running' %}
+<div id="server-status">
+  <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 14px;">
+    <span class="lm-pill lm-pill--running">running</span>
+    {% if status.current_model %}
+    <code style="font-size: 0.8125rem; color: var(--fg-1);">{{ status.current_model }}</code>
+    {% endif %}
+    {% if status.current_profile %}
+    <span style="font-size: 0.8125rem; color: var(--fg-2);">profile: <strong style="color: var(--fg-1);">{{ status.current_profile }}</strong></span>
+    {% endif %}
+  </div>
+  <div style="padding: 12px 16px; background: oklch(from var(--ok) l c h / 0.08); border: 1px solid var(--ok); font-size: 0.875rem; color: var(--fg-1); margin-bottom: 14px;">
+    llama-server is ready and accepting requests.
+  </div>
+  {% if log_tail %}
+  <details>
+    <summary style="cursor: pointer; font-size: 0.8125rem; color: var(--fg-2); user-select: none; padding: 4px 0; list-style: none;">Show server log</summary>
+    <pre class="lm-log" style="max-height: 180px; font-size: 0.75rem; margin-top: 8px;">{{ log_tail }}</pre>
+  </details>
+  {% endif %}
+</div>
+{% elif status.state == 'crashed' or status.state == 'degraded' %}
+<div id="server-status"
+     hx-get="/ui/launch/_server_status"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML">
+  <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 14px;">
+    <span class="lm-pill lm-pill--crashed">{{ status.state }}</span>
+  </div>
+  <div class="lm-error" style="margin-bottom: 14px;">llama-server {{ status.state }}. Check the log below for details.</div>
+  {% if log_tail %}
+  <pre class="lm-log" style="max-height: 200px; font-size: 0.75rem;">{{ log_tail }}</pre>
+  {% endif %}
+</div>
+{% else %}
+<div id="server-status"></div>
+{% endif %}

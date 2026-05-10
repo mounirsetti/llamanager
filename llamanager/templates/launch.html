@@ -12,18 +12,10 @@
     <span class="lm-section-marker">Server</span>
   </header>
 
-  <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 24px;">
-    <span style="font-size: 0.875rem; color: var(--fg-2);">Status</span>
-    <span class="lm-pill lm-pill--{{ status.state }}">{{ status.state }}</span>
-    {% if status.current_model %}
-    <code style="font-size: 0.8125rem; color: var(--fg-1);">{{ status.current_model }}</code>
-    {% endif %}
-    {% if status.current_profile %}
-    <span style="font-size: 0.8125rem; color: var(--fg-2);">profile: <strong style="color: var(--fg-1);">{{ status.current_profile }}</strong></span>
-    {% endif %}
-  </div>
+  {% if status.state in ('starting', 'swapping', 'running', 'crashed', 'degraded') or launching %}
+  {% include "_server_status.html" %}
 
-  {% if status.state == 'running' or status.state == 'starting' or status.state == 'swapping' %}
+  {% if status.state in ('running', 'starting', 'swapping') or launching %}
   <div style="margin-bottom: 24px; display: flex; align-items: center; gap: 14px;">
     <form method="post" action="/ui/launch/server/stop">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -32,6 +24,7 @@
     </form>
     <a href="/ui/" class="lm-btn lm-btn--ghost">Go to dashboard &rarr;</a>
   </div>
+  {% endif %}
   {% else %}
   <form method="post" action="/ui/launch/server/start" style="margin-bottom: 24px;">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

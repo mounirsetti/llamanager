@@ -751,6 +751,7 @@
         <a class="lm-nav-link" href="/ui/queue" {% if active=='queue' %}aria-current="page"{% endif %}>Queue</a>
         <a class="lm-nav-link" href="/ui/models" {% if active=='models' %}aria-current="page"{% endif %}>Models</a>
         <a class="lm-nav-link" href="/ui/launch" {% if active=='launch' %}aria-current="page"{% endif %}>Launch</a>
+        <a class="lm-nav-link" href="/ui/chat" {% if active=='chat' %}aria-current="page"{% endif %}>Chat</a>
         <span class="lm-nav-eyebrow" style="margin-top: 16px;">Configure</span>
         <a class="lm-nav-link" href="/ui/origins" {% if active=='origins' %}aria-current="page"{% endif %}>Origins</a>
         <a class="lm-nav-link" href="/ui/logs" {% if active=='logs' %}aria-current="page"{% endif %}>Logs</a>
@@ -758,9 +759,14 @@
       </nav>
 
       <div class="lm-rail-foot">
-        <div class="lm-theme" role="group" aria-label="Theme">
-          <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
-          <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div class="lm-theme" role="group" aria-label="Theme">
+            <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
+            <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
+          </div>
+          <button type="button" onclick="location.reload()"
+                  style="background: transparent; border: 1px solid var(--bg-3); border-radius: 2px; padding: 4px 10px; font-size: 0.6875rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-2); cursor: pointer; transition: color 180ms ease;"
+                  title="Refresh page">Refresh</button>
         </div>
         <form class="lm-logout" method="post" action="/ui/logout">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

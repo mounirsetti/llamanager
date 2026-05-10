@@ -217,9 +217,19 @@ def create_app(config_path: Path | None = None,
             "disk_free_gb": free_gb,
         })
 
+    @app.get("/chat")
+    async def chat_public(request: Request):
+        from fastapi.responses import HTMLResponse
+        from fastapi.templating import Jinja2Templates
+        from pathlib import Path as _Path
+        _templates = Jinja2Templates(directory=str(_Path(__file__).parent / "templates"))
+        return _templates.TemplateResponse(request, "chat_public.html", {
+            "request": request,
+        })
+
     @app.get("/")
     async def root() -> JSONResponse:
         return JSONResponse({"name": "llamanager", "version": "0.1.0",
-                             "ui": "/ui/"})
+                             "ui": "/ui/", "chat": "/chat"})
 
     return app
