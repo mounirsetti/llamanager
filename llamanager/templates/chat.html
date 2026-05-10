@@ -158,8 +158,13 @@
     return { el: div, bubble: bubble };
   }
 
+  var userScrolledUp = false;
+  messagesEl.addEventListener('scroll', function () {
+    var atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 40;
+    userScrolledUp = !atBottom;
+  });
   function scrollToBottom() {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (!userScrolledUp) messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
   function send() {

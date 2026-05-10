@@ -89,7 +89,7 @@
       <td data-label="Origin">{{ r.origin_id }}</td>
       <td data-label="Model"><code>{{ r.model or '(loaded)' }}</code></td>
       <td data-label="Status"><span class="lm-pill lm-pill--{{ r.status }}">{{ r.status }}</span></td>
-      <td data-label="Tokens" class="num">{{ r.prompt_tokens or '-' }} / {{ r.completion_tokens or '-' }}</td>
+      <td data-label="Tokens" class="num">{% if r.prompt_tokens is not none %}{{ r.prompt_tokens }}{% else %}-{% endif %} / {% if r.completion_tokens is not none %}{{ r.completion_tokens }}{% else %}-{% endif %}</td>
     </tr>
     {% endfor %}
     </tbody>
