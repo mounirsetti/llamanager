@@ -218,11 +218,14 @@ def _download_asset(url: str, emit) -> Path:
 
 
 def _extract_binary(archive_path: Path) -> Path:
-    dest = _default_install_path()
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    """Extract llama-server and all sibling files (shared libraries, etc.)
+    from the archive into ~/.llamanager/bin/."""
+    dest_dir = _default_install_path().parent
+    dest_dir.mkdir(parents=True, exist_ok=True)
 
     if archive_path.suffix == ".gz" or str(archive_path).endswith(".tar.gz"):
         with tarfile.open(archive_path, "r:gz") as tf:
+            # Find the binary to determine its directory prefix
             candidates = [m for m in tf.getmembers()
                           if Path(m.name).name == BINARY_NAME and m.isfile()]
             if not candidates:
@@ -231,11 +234,21 @@ def _extract_binary(archive_path: Path) -> Path:
                     f"Contents: {[m.name for m in tf.getmembers()[:20]]}"
                 )
             entry = min(candidates, key=lambda m: len(m.name))
-            src = tf.extractfile(entry)
-            if src is None:
-                raise RuntimeError(f"Could not read {entry.name} from archive")
-            with open(dest, "wb") as out:
-                out.write(src.read())
+            prefix = str(Path(entry.name).parent)
+            # Extract all files from the same directory (libs, etc.)
+            for m in tf.getmembers():
+                if not m.isfile():
+                    continue
+                m_parent = str(Path(m.name).parent)
+                if m_parent == prefix:
+                    src = tf.extractfile(m)
+                    if src is None:
+                        continue
+                    out_path = dest_dir / Path(m.name).name
+                    with open(out_path, "wb") as out:
+                        out.write(src.read())
+                    if sys.platform != "win32":
+                        os.chmod(out_path, 0o755)
     else:
         with zipfile.ZipFile(archive_path, "r") as zf:
             candidates = [n for n in zf.namelist() if Path(n).name == BINARY_NAME]
@@ -245,18 +258,60 @@ def _extract_binary(archive_path: Path) -> Path:
                     f"Contents: {zf.namelist()[:20]}"
                 )
             entry = min(candidates, key=lambda n: len(n))
-            with zf.open(entry) as src, open(dest, "wb") as out:
-                out.write(src.read())
+            prefix = str(Path(entry).parent)
+            for name in zf.namelist():
+                if name.endswith("/"):
+                    continue
+                if str(Path(name).parent) == prefix:
+                    out_path = dest_dir / Path(name).name
+                    with zf.open(name) as src, open(out_path, "wb") as out:
+                        out.write(src.read())
+                    if sys.platform != "win32":
+                        os.chmod(out_path, 0o755)
 
-    if sys.platform != "win32":
-        os.chmod(dest, 0o755)
+    # Create versioned-to-short symlinks for shared libraries.
+    # e.g. libllama-common.0.0.9097.dylib -> libllama-common.0.dylib
+    # The binary links against the short names via @rpath.
+    _create_lib_symlinks(dest_dir)
 
     try:
         os.unlink(archive_path)
     except OSError:
         pass
 
-    return dest
+    return _default_install_path()
+
+
+def _create_lib_symlinks(dest_dir: Path) -> None:
+    """Create short-name symlinks for versioned shared libraries.
+
+    Archives ship files like libfoo.0.11.1.dylib but the binary
+    references @rpath/libfoo.0.dylib. Create the missing symlinks.
+    Same pattern applies to .so files on Linux.
+    """
+    import re as _re
+    for p in dest_dir.iterdir():
+        if not p.is_file():
+            continue
+        name = p.name
+        # Match: libfoo.0.11.1.dylib or libfoo.0.0.9097.dylib or libfoo.so.0.11.1
+        # Create: libfoo.0.dylib or libfoo.so.0
+        if ".dylib" in name:
+            # libggml-base.0.11.1.dylib -> libggml-base.0.dylib
+            m = _re.match(r'^(lib[^.]+\.\d+)\.\d+(?:\.\d+)?\.dylib$', name)
+            if m:
+                short = m.group(1) + ".dylib"
+                link = dest_dir / short
+                if not link.exists():
+                    link.symlink_to(p.name)
+        elif ".so." in name:
+            # libfoo.so.0.11.1 -> libfoo.so.0
+            m = _re.match(r'^(lib[^.]+\.so\.\d+)\.\d+(?:\.\d+)?$', name)
+            if m:
+                short = m.group(1)
+                link = dest_dir / short
+                if not link.exists():
+                    link.symlink_to(p.name)
 
 
 def patch_config_binary(config_path: Path, binary: str) -> None:

@@ -689,30 +689,40 @@ async def setup_install_progress(request: Request,
 def _reload_config(request: Request) -> None:
     """Reload config.toml into app.state.cfg, preserving runtime-only fields."""
     cfg = request.app.state.cfg
-    new_cfg = load_config(cfg.path)
+    new_cfg = load_config(cfg.config_path)
     new_cfg.bind = cfg.bind
     new_cfg.port = cfg.port
+    # Preserve models_dir if it was overridden at runtime
+    if hasattr(cfg, 'models_dir_override'):
+        new_cfg.models_dir_override = cfg.models_dir_override
     request.app.state.cfg = new_cfg
+    # Update registry to use potentially new models_dir
+    request.app.state.registry.models_dir = new_cfg.models_dir
 
 
 def _launch_ctx(request: Request) -> dict:
     cfg = request.app.state.cfg
     sm: ServerManager = request.app.state.sm
     supervisor: Supervisor = request.app.state.supervisor
+    reg: Registry = request.app.state.registry
+    model_ids = [m.model_id for m in reg.list()]
     profiles = []
     for name, p in cfg.profiles.items():
+        available = p.model in model_ids
         profiles.append({
             "name": name,
             "model": p.model,
             "mmproj": p.mmproj,
             "args": p.args,
             "args_json": json.dumps(p.args, indent=2, sort_keys=True),
+            "available": available,
         })
     return _ctx(
         request,
         status=sm.status(),
         profiles=profiles,
         profile_names=list(cfg.profiles.keys()),
+        model_ids=model_ids,
         default_model=cfg.default_model,
         default_profile=cfg.default_profile,
         autorestart=supervisor.enabled,
@@ -780,6 +790,7 @@ async def launch_profile_create(request: Request,
 
 @router.post("/launch/profiles/{profile_name}/update", response_class=HTMLResponse)
 async def launch_profile_update(request: Request, profile_name: str,
+                                new_name: str = Form(""),
                                 model: str = Form(...),
                                 mmproj: str = Form(""),
                                 args_json: str = Form("{}"),
@@ -789,8 +800,14 @@ async def launch_profile_update(request: Request, profile_name: str,
         args = json.loads(args_json.strip() or "{}")
     except json.JSONDecodeError as e:
         return _error_html(f"invalid JSON in args: {e}", status_code=400)
+    target_name = new_name.strip().lower() or profile_name
+    # If renamed, check for conflicts and delete the old profile
+    if target_name != profile_name:
+        if target_name in cfg.profiles:
+            return _error_html(f"profile '{target_name}' already exists", status_code=409)
+        delete_profile(cfg.config_path, profile_name)
     try:
-        save_profile(cfg.config_path, profile_name, model.strip(), mmproj.strip(), args)
+        save_profile(cfg.config_path, target_name, model.strip(), mmproj.strip(), args)
     except ValueError as e:
         return _error_html(str(e), status_code=400)
     _reload_config(request)

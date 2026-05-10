@@ -133,7 +133,7 @@
       color: var(--fg-0);
       display: flex;
       align-items: baseline;
-      gap: 8px;
+      gap: 3px;
     }
     .lm-brand::after { display: none; }
     .lm-status-dot {
@@ -422,6 +422,11 @@
     .lm-pill--starting::before,
     .lm-pill--paused::before { background: var(--warn); }
     .lm-pill--stopped { color: var(--fg-2); }
+
+    /* dimmed rows — dim text color instead of opacity so nested popups stay readable */
+    .lm-row-dimmed > td { color: var(--fg-3); }
+    .lm-row-dimmed > td code { color: var(--fg-3); }
+    .lm-row-dimmed > td strong { color: var(--fg-3); }
 
     /* ---------- tables ---------- */
     .lm-table {
