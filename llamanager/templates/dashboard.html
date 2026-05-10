@@ -2,6 +2,16 @@
 {% set active = 'dashboard' %}
 {% block title %}Dashboard - llamanager{% endblock %}
 {% block content %}
+<style>
+  @media (max-width: 640px) {
+    .lm-ref-grid { grid-template-columns: 1fr !important; }
+    .lm-ref-grid > div { padding: 16px !important; }
+    .lm-ref-grid pre { font-size: 0.625rem !important; }
+  }
+  @media (max-width: 960px) {
+    .lm-ref-grid { grid-template-columns: 1fr !important; }
+  }
+</style>
 <div hx-get="/ui/_partials/dashboard" hx-trigger="every 3s" hx-swap="innerHTML">
   {% include "_dashboard_partial.html" %}
 </div>
@@ -13,7 +23,7 @@
     <span class="lm-section-meta">copy-paste examples</span>
   </header>
 
-  <div style="
+  <div class="lm-ref-grid" style="
     display: grid;
     grid-template-columns: repeat(2, 1fr);
     gap: 2px;
@@ -281,8 +291,9 @@ print(r.choices[0].message.content)</pre>
   </div>
 
   {# Footnote #}
-  <div style="
+  <div class="lm-ref-footnote" style="
     display: flex;
+    flex-wrap: wrap;
     gap: 20px;
     margin-top: 18px;
     padding: 14px 0 0;
@@ -291,10 +302,10 @@ print(r.choices[0].message.content)</pre>
     color: var(--fg-3);
     line-height: 1.6;
   ">
-    <div style="flex: 1;">
+    <div style="flex: 1; min-width: 240px;">
       Replace <code style="color: var(--fg-2); font-size: 0.6875rem;">$KEY</code> with your origin's API key from the <a href="/ui/origins" style="color: var(--accent);">Origins</a> page.
     </div>
-    <div style="flex: 1;">
+    <div style="flex: 1; min-width: 240px;">
       The <code style="color: var(--fg-2); font-size: 0.6875rem;">"model"</code> field in the request body is required by the OpenAI format but llamanager ignores it. Use <code style="color: var(--fg-2); font-size: 0.6875rem;">X-Llamanager-Model</code> to select a specific model or profile.
     </div>
   </div>

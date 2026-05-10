@@ -317,6 +317,21 @@ class Registry:
         return [d for d in (self.get_download(r["id"]) for r in rows) if d]
 
     # ---- internals ----
+    @staticmethod
+    def _scan_dir_size(path: Path) -> int:
+        """Total size of all files in a directory (non-recursive, fast)."""
+        total = 0
+        try:
+            for f in path.iterdir():
+                if f.is_file():
+                    try:
+                        total += f.stat().st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return total
+
     def _check_disk(self, estimate_bytes: int) -> str | None:
         free = _free_bytes(self.models_dir)
         if estimate_bytes + SAFETY_MARGIN_BYTES > free:
@@ -390,37 +405,61 @@ class Registry:
 
     async def _pull_hf(self, did: str, source: str, files: list[str],
                        cancel: asyncio.Event) -> None:
-        """Use huggingface_hub.hf_hub_download in a thread, one file at a time
-        (so we can update progress)."""
+        """Use huggingface_hub.hf_hub_download in a thread, one file at a time.
+
+        Monitors incomplete download files to report progress while the
+        blocking hf_hub_download runs in a thread.
+        """
         from huggingface_hub import hf_hub_download  # type: ignore
 
         # source: hf://repo/id or hf:repo/id
         repo = _sanitize_hf_repo(source.removeprefix("hf://").removeprefix("hf:"))
         if not files:
             raise ValueError("HF source requires at least one file in `files`")
-        # Validate every requested file before kicking off any IO.
         files = [_sanitize_hf_file(f) for f in files]
 
         token = os.environ.get(self.cfg.hf_token_env or "", None) or None
         target_root = _ensure_under(self.models_dir, self.models_dir / repo)
         target_root.mkdir(parents=True, exist_ok=True)
 
-        # We don't know exact sizes a priori. Skip the disk-cap pre-check here
-        # and rely on the post-download size + max_disk_gb after each file.
         bytes_done = 0
         for fn in files:
             if cancel.is_set():
                 return
             self._set_download(did, bytes_done=bytes_done)
             log.info("pull[%s] downloading %s/%s", did, repo, fn)
-            local = await asyncio.to_thread(
-                hf_hub_download,
-                repo_id=repo,
-                filename=fn,
-                local_dir=str(target_root),
-                token=token,
-                resume_download=True,
+
+            # Start the blocking download in a thread
+            import concurrent.futures
+            loop = asyncio.get_running_loop()
+            future = loop.run_in_executor(
+                None,
+                lambda: hf_hub_download(
+                    repo_id=repo,
+                    filename=fn,
+                    local_dir=str(target_root),
+                    token=token,
+                    resume_download=True,
+                ),
             )
+
+            # Poll for progress while the download runs by checking
+            # incomplete files (.incomplete) in the HF cache or local_dir
+            while not future.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(future), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
+                except Exception:
+                    break
+                # Scan for .incomplete or partial files to estimate progress
+                cur = self._scan_dir_size(target_root)
+                self._set_download(did, bytes_done=bytes_done + cur)
+                if cancel.is_set():
+                    future.cancel()
+                    return
+
+            local = future.result()
             local_path = Path(local)
             # Defense in depth: even though we sanitized fn, confirm
             # huggingface_hub didn't write outside the sandbox.

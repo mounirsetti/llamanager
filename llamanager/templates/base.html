@@ -652,9 +652,38 @@
     .htmx-swapping { opacity: 0; transition: opacity 120ms cubic-bezier(0.22, 1, 0.36, 1); }
     .htmx-settling { opacity: 1; transition: opacity 120ms cubic-bezier(0.22, 1, 0.36, 1); }
 
-    /* ---------- mobile top bar ---------- */
+    /* ---------- touch-friendly sizing ---------- */
+    @media (pointer: coarse) {
+      .lm-btn { min-height: 44px; padding: 10px 16px; }
+      .lm-btn--xs { min-height: 36px; padding: 8px 12px; }
+      .lm-nav-link { min-height: 40px; }
+      .lm-input, .lm-select { min-height: 44px; padding: 10px 2px; }
+    }
+
+    /* ---------- mobile nav toggle ---------- */
     .lm-mobile-top { display: none; }
     .lm-mobile-summary { display: none; }
+    .lm-nav-toggle { display: none; }
+    @media (max-width: 640px) {
+      .lm-nav-toggle {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: transparent;
+        border: 1px solid var(--bg-3);
+        border-radius: 2px;
+        padding: 6px 10px;
+        font-size: 0.6875rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--fg-2);
+        cursor: pointer;
+        margin-left: auto;
+      }
+      .lm-nav-toggle:hover { color: var(--fg-0); border-color: var(--fg-2); }
+      .lm-nav[aria-hidden="true"] { display: none; }
+      .lm-rail-foot[aria-hidden="true"] { display: none; }
+    }
 
     @media (max-width: 960px) {
       .lm-shell { grid-template-columns: 1fr; }
@@ -692,13 +721,16 @@
       .lm-canvas { padding: 24px 20px 64px; }
       .lm-grid { gap: 18px; }
       .lm-col-3, .lm-col-4, .lm-col-5, .lm-col-6 { grid-column: 1 / -1; }
+      .lm-canvas-inner { overflow-x: hidden; }
     }
 
     @media (max-width: 640px) {
       .lm-canvas { padding: 20px 16px 56px; }
-      .lm-rail { padding: 10px 14px; gap: 10px; }
+      .lm-rail { padding: 10px 14px; gap: 8px; }
       .lm-brand { font-size: 1.125rem; }
       .lm-rail-foot { width: 100%; margin-left: 0; }
+      .lm-nav { gap: 2px; }
+      .lm-nav-link { padding: 5px 8px; font-size: 0.8125rem; }
       .lm-table thead { display: none; }
       .lm-table, .lm-table tbody, .lm-table tr, .lm-table td { display: block; width: 100%; }
       .lm-table tr {
@@ -722,6 +754,13 @@
       .lm-table td.actions { padding-top: 8px; text-align: left; }
       .lm-table td.actions form { margin-left: 0; margin-right: 8px; }
       .lm-hero-title { font-size: 2rem; }
+      .lm-form-row { flex-direction: column; gap: 14px; }
+      .lm-field { max-width: 100% !important; }
+      .lm-grid { gap: 14px; }
+      .lm-section { margin-top: 36px; }
+      .lm-log { font-size: 0.6875rem; padding: 12px 14px; white-space: pre-wrap; word-break: break-all; }
+      .lm-callout { padding: 14px 16px; }
+      .lm-profile-meta { grid-template-columns: 1fr; gap: 4px 0; }
     }
   </style>
 </head>
@@ -745,7 +784,8 @@
         {% endif %}
       </div>
 
-      <nav class="lm-nav" aria-label="Primary">
+      <button class="lm-nav-toggle" type="button" aria-expanded="true" aria-controls="lm-main-nav">Menu</button>
+      <nav class="lm-nav" id="lm-main-nav" aria-label="Primary">
         <span class="lm-nav-eyebrow">Operate</span>
         <a class="lm-nav-link" href="/ui/" {% if active=='dashboard' %}aria-current="page"{% endif %}>Dashboard</a>
         <a class="lm-nav-link" href="/ui/queue" {% if active=='queue' %}aria-current="page"{% endif %}>Queue</a>
@@ -783,6 +823,27 @@
   </div>
 
   <script>
+    /* Mobile nav toggle */
+    (function () {
+      var toggle = document.querySelector('.lm-nav-toggle');
+      var nav = document.getElementById('lm-main-nav');
+      var foot = document.querySelector('.lm-rail-foot');
+      if (!toggle || !nav) return;
+      // Start collapsed on mobile
+      if (window.innerWidth <= 640) {
+        nav.setAttribute('aria-hidden', 'true');
+        if (foot) foot.setAttribute('aria-hidden', 'true');
+        toggle.setAttribute('aria-expanded', 'false');
+      }
+      toggle.addEventListener('click', function () {
+        var expanded = toggle.getAttribute('aria-expanded') === 'true';
+        toggle.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+        nav.setAttribute('aria-hidden', expanded ? 'true' : 'false');
+        if (foot) foot.setAttribute('aria-hidden', expanded ? 'true' : 'false');
+        toggle.textContent = expanded ? 'Menu' : 'Close';
+      });
+    })();
+
     /* Theme toggle: sync button state and persist on click. */
     (function () {
       var root = document.documentElement;

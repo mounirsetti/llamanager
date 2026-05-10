@@ -2,8 +2,63 @@
 {% set active = 'chat' %}
 {% block title %}Chat - llamanager{% endblock %}
 {% block content %}
+<style>
+  @media (max-width: 640px) {
+    #chat-app { height: calc(100vh - 140px) !important; min-height: 300px !important; }
+    #chat-system { min-width: 0 !important; max-width: 100% !important; width: 100% !important; }
+    #chat-profile { min-width: 0 !important; width: 100% !important; }
+    .chat-settings-bar { flex-direction: column !important; align-items: stretch !important; gap: 10px !important; }
+    .chat-settings-bar > div { width: 100%; }
+    .chat-settings-bar select, .chat-settings-bar input { width: 100%; }
+    .chat-history-rail { display: none !important; }
+  }
+  .chat-history-rail {
+    width: 200px; flex-shrink: 0; border-right: 1px solid var(--bg-2);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .chat-history-header {
+    padding: 10px 12px; border-bottom: 1px solid var(--bg-2);
+    display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+  }
+  .chat-history-header span { font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); }
+  .chat-history-list { flex: 1; overflow-y: auto; padding: 6px 0; }
+  .chat-history-item {
+    display: flex; align-items: center; gap: 4px; width: 100%; text-align: left;
+    background: transparent; border: 0; padding: 6px 12px; font-size: 0.75rem;
+    color: var(--fg-2); cursor: pointer; transition: color 120ms ease;
+  }
+  .chat-history-item:hover { color: var(--fg-0); background: var(--bg-2); }
+  .chat-history-item--active { color: var(--fg-0); background: var(--bg-2); font-weight: 500; }
+  .chat-history-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chat-history-del {
+    flex-shrink: 0; background: transparent; border: 0; color: var(--fg-3);
+    font-size: 0.6875rem; cursor: pointer; padding: 0 3px; display: none;
+  }
+  .chat-history-item:hover .chat-history-del { display: inline; }
+  .chat-history-del:hover { color: var(--bad); }
+  .chat-history-foot {
+    padding: 8px 12px; border-top: 1px solid var(--bg-2);
+    display: flex; flex-direction: column; gap: 6px; flex-shrink: 0;
+  }
+  .chat-md-toggle { display: flex; align-items: center; gap: 6px; font-size: 0.6875rem; color: var(--fg-2); }
+  .chat-md-toggle input { accent-color: var(--accent); }
+  /* markdown rendered content */
+  .chat-md p { margin: 0 0 0.5em; }
+  .chat-md p:last-child { margin-bottom: 0; }
+  .chat-md pre {
+    background: var(--bg-1); border: 1px solid var(--bg-2);
+    padding: 10px 12px; font-size: 0.8125rem; overflow-x: auto; margin: 0.5em 0; line-height: 1.5;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
+  .chat-md code { font-size: 0.8125rem; background: var(--bg-2); padding: 1px 5px; border-radius: 2px; }
+  .chat-md pre code { background: transparent; padding: 0; }
+  .chat-md ul, .chat-md ol { margin: 0.5em 0; padding-left: 1.5em; }
+  .chat-md blockquote { margin: 0.5em 0; padding: 0 0 0 12px; border-left: 2px solid var(--bg-3); color: var(--fg-2); }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/15.0.7/marked.min.js"
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 
-{# ---- Header bar with status + model selector ---- #}
+{# ---- Header ---- #}
 <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 4px; flex-wrap: wrap;">
   <div class="lm-eyebrow" style="margin-bottom: 0;">Chat</div>
   <span class="lm-pill lm-pill--{{ status.state }}">{{ status.state }}</span>
@@ -21,247 +76,313 @@
 </div>
 {% endif %}
 
-{# ---- Chat container ---- #}
-<div id="chat-app" style="
-  display: flex;
-  flex-direction: column;
-  height: calc(100vh - 180px);
-  min-height: 400px;
-  margin-top: 12px;
-">
-  {# Settings bar #}
-  <div style="
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 0;
-    margin-bottom: 8px;
-    border-bottom: 1px solid var(--bg-2);
-    flex-wrap: wrap;
-  ">
-    <div style="display: flex; align-items: center; gap: 6px;">
-      <label style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2);">Profile</label>
-      <select id="chat-profile" class="lm-select" style="font-size: 0.8125rem; padding: 4px 8px; min-width: 160px;">
-        <option value="">current (no swap)</option>
-        {% for p in profiles %}
-        <option value="profile:{{ p.name }}">{{ p.name }}</option>
-        {% endfor %}
-      </select>
+{# ---- Chat app with history sidebar ---- #}
+<div id="chat-app" style="display: flex; height: calc(100vh - 180px); min-height: 400px; margin-top: 12px;">
+
+  {# History sidebar #}
+  <div class="chat-history-rail">
+    <div class="chat-history-header">
+      <span>Chats</span>
+      <button id="history-new" type="button" style="margin-left: auto; background: transparent; border: 1px solid var(--bg-3); border-radius: 2px; padding: 3px 8px; font-size: 0.625rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-2); cursor: pointer;">New</button>
     </div>
-    <div style="display: flex; align-items: center; gap: 6px;">
-      <label style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2);">System</label>
-      <input id="chat-system" type="text" class="lm-input" value="You are a helpful assistant."
-             style="font-size: 0.8125rem; padding: 4px 8px; min-width: 240px; max-width: 400px; border-bottom-width: 1px;">
+    <div id="history-list" class="chat-history-list"></div>
+    <div class="chat-history-foot">
+      <label class="chat-md-toggle">
+        <input type="checkbox" id="toggle-md"> Markdown
+      </label>
     </div>
-    <button id="chat-clear" type="button" class="lm-btn lm-btn--ghost lm-btn--xs" style="margin-left: auto;">Clear chat</button>
   </div>
 
-  {# Messages area #}
-  <div id="chat-messages" style="
-    flex: 1;
-    overflow-y: auto;
-    padding: 16px 0;
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-  ">
-    <div id="chat-empty" style="
-      color: var(--fg-3);
-      font-style: italic;
-      padding: 40px 0;
-      text-align: center;
-      font-size: 0.875rem;
-    ">Send a message to start chatting.</div>
-  </div>
+  {# Main chat area #}
+  <div style="flex: 1; display: flex; flex-direction: column; min-width: 0;">
+    {# Settings bar #}
+    <div class="chat-settings-bar" style="display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--bg-2); flex-wrap: wrap;">
+      <div style="display: flex; align-items: center; gap: 6px;">
+        <label style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2);">Profile</label>
+        <select id="chat-profile" class="lm-select" style="font-size: 0.8125rem; padding: 4px 8px; min-width: 140px;">
+          <option value="">current (no swap)</option>
+          {% for p in profiles %}
+          <option value="profile:{{ p.name }}">{{ p.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div style="display: flex; align-items: center; gap: 6px;">
+        <label style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2);">Model</label>
+        <select id="chat-model" class="lm-select" style="font-size: 0.8125rem; padding: 4px 8px; min-width: 140px;">
+          <option value="">current (no swap)</option>
+          {% for mid in model_ids %}
+          <option value="{{ mid }}">{{ mid }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div style="display: flex; align-items: center; gap: 6px;">
+        <label style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2);">System</label>
+        <input id="chat-system" type="text" class="lm-input" value="You are a helpful assistant."
+               style="font-size: 0.8125rem; padding: 4px 8px; min-width: 200px; max-width: 360px; border-bottom-width: 1px;">
+      </div>
+    </div>
 
-  {# Input area #}
-  <div style="
-    padding: 14px 0 0;
-    border-top: 1px solid var(--bg-2);
-    display: flex;
-    gap: 10px;
-    align-items: flex-end;
-  ">
-    <textarea id="chat-input" class="lm-input" rows="1" placeholder="Type a message..."
-              style="
-                flex: 1;
-                resize: none;
-                font-size: 0.9375rem;
-                padding: 10px 2px;
-                line-height: 1.5;
-                max-height: 150px;
-                overflow-y: auto;
-                border-bottom-width: 1px;
-              "
-              {% if status.state != 'running' %}disabled{% endif %}></textarea>
-    <button id="chat-send" type="button" class="lm-btn lm-btn--primary"
-            style="flex-shrink: 0; padding: 9px 18px;"
-            {% if status.state != 'running' %}disabled{% endif %}>Send</button>
+    {# Messages #}
+    <div id="chat-messages" style="flex: 1; overflow-y: auto; padding: 16px 12px; display: flex; flex-direction: column; gap: 20px;">
+      <div id="chat-empty" style="color: var(--fg-3); font-style: italic; padding: 40px 0; text-align: center; font-size: 0.875rem;">Send a message to start chatting.</div>
+    </div>
+
+    {# Input #}
+    <div style="padding: 14px 12px 0; border-top: 1px solid var(--bg-2); display: flex; gap: 10px; align-items: flex-end;">
+      <textarea id="chat-input" class="lm-input" rows="1" placeholder="Type a message..."
+                style="flex: 1; resize: none; font-size: 0.9375rem; padding: 10px 2px; line-height: 1.5; max-height: 150px; overflow-y: auto; border-bottom-width: 1px;"
+                {% if status.state != 'running' %}disabled{% endif %}></textarea>
+      <button id="chat-send" type="button" class="lm-btn lm-btn--primary"
+              style="flex-shrink: 0; padding: 9px 18px;"
+              {% if status.state != 'running' %}disabled{% endif %}>Send</button>
+    </div>
   </div>
 </div>
 
 <script>
 (function () {
-  var messages = [];
   var messagesEl = document.getElementById('chat-messages');
   var inputEl = document.getElementById('chat-input');
   var sendBtn = document.getElementById('chat-send');
-  var clearBtn = document.getElementById('chat-clear');
   var profileEl = document.getElementById('chat-profile');
+  var modelSelectEl = document.getElementById('chat-model');
   var systemEl = document.getElementById('chat-system');
-  var emptyEl = document.getElementById('chat-empty');
-  var streaming = false;
+  var historyListEl = document.getElementById('history-list');
+  var historyNewBtn = document.getElementById('history-new');
+  var toggleMd = document.getElementById('toggle-md');
   var apiKey = {{ api_key | tojson }};
+  var streaming = false;
+  var userScrolledUp = false;
 
+  // ---- Chat history (localStorage) ----
+  var STORAGE_KEY = 'lm-admin-chat-history';
+  var chats = [];
+  var activeChat = null;
+
+  function loadHistory() { try { chats = JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch (e) { chats = []; } }
+  function saveHistory() { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(chats)); } catch (e) {} }
+  function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+
+  function newChat() {
+    var chat = { id: genId(), title: 'New chat', messages: [], system: systemEl.value };
+    chats.unshift(chat);
+    saveHistory();
+    switchTo(chat.id);
+  }
+
+  function switchTo(id) {
+    activeChat = chats.find(function (c) { return c.id === id; }) || null;
+    if (!activeChat) { if (chats.length) switchTo(chats[0].id); return; }
+    systemEl.value = activeChat.system || 'You are a helpful assistant.';
+    renderMessages();
+    renderHistoryList();
+  }
+
+  function deleteChat(id) {
+    chats = chats.filter(function (c) { return c.id !== id; });
+    saveHistory();
+    if (activeChat && activeChat.id === id) {
+      activeChat = null;
+      if (chats.length) switchTo(chats[0].id); else newChat();
+    } else { renderHistoryList(); }
+  }
+
+  function renderHistoryList() {
+    historyListEl.innerHTML = '';
+    for (var i = 0; i < chats.length; i++) {
+      var c = chats[i];
+      var btn = document.createElement('button');
+      btn.className = 'chat-history-item' + (activeChat && c.id === activeChat.id ? ' chat-history-item--active' : '');
+      btn.setAttribute('data-id', c.id);
+      var label = document.createElement('span');
+      label.className = 'chat-history-label';
+      label.textContent = c.title;
+      var del = document.createElement('span');
+      del.className = 'chat-history-del';
+      del.textContent = '\u00d7';
+      del.setAttribute('data-id', c.id);
+      btn.appendChild(label);
+      btn.appendChild(del);
+      historyListEl.appendChild(btn);
+    }
+  }
+
+  historyListEl.addEventListener('click', function (e) {
+    var del = e.target.closest('.chat-history-del');
+    if (del) { e.stopPropagation(); deleteChat(del.getAttribute('data-id')); return; }
+    var item = e.target.closest('.chat-history-item');
+    if (item) switchTo(item.getAttribute('data-id'));
+  });
+  historyNewBtn.addEventListener('click', newChat);
+
+  // ---- Markdown toggle ----
+  var renderMarkdown = false;
+  try { renderMarkdown = localStorage.getItem('lm-admin-chat-md') === '1'; } catch (e) {}
+  toggleMd.checked = renderMarkdown;
+  toggleMd.addEventListener('change', function () {
+    renderMarkdown = toggleMd.checked;
+    try { localStorage.setItem('lm-admin-chat-md', renderMarkdown ? '1' : '0'); } catch (e) {}
+    renderMessages();
+  });
+
+  // ---- Profile/Model mutual exclusion ----
+  profileEl.addEventListener('change', function () { if (profileEl.value) modelSelectEl.value = ''; });
+  modelSelectEl.addEventListener('change', function () { if (modelSelectEl.value) profileEl.value = ''; });
+
+  // ---- Scroll management ----
+  messagesEl.addEventListener('scroll', function () {
+    var atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 40;
+    userScrolledUp = !atBottom;
+  });
+  function scrollToBottom() { if (!userScrolledUp) messagesEl.scrollTop = messagesEl.scrollHeight; }
+
+  // ---- Rendering ----
+  function setContent(el, text, isAI) {
+    if (isAI && renderMarkdown && typeof marked !== 'undefined') {
+      el.innerHTML = marked.parse(text);
+      el.classList.add('chat-md');
+      el.style.whiteSpace = 'normal';
+    } else {
+      el.textContent = text;
+      el.classList.remove('chat-md');
+      el.style.whiteSpace = 'pre-wrap';
+    }
+  }
+
+  function renderMessages() {
+    messagesEl.innerHTML = '';
+    if (!activeChat || !activeChat.messages.length) {
+      var empty = document.createElement('div');
+      empty.style.cssText = 'color:var(--fg-3);font-style:italic;padding:40px 0;text-align:center;font-size:0.875rem;';
+      empty.textContent = 'Send a message to start chatting.';
+      messagesEl.appendChild(empty);
+      return;
+    }
+    for (var i = 0; i < activeChat.messages.length; i++) {
+      var m = activeChat.messages[i];
+      var el = buildMsgEl(m.role, m.content);
+      messagesEl.appendChild(el.el);
+    }
+    userScrolledUp = false;
+    scrollToBottom();
+  }
+
+  function buildMsgEl(role, content) {
+    var isUser = role === 'user';
+    var div = document.createElement('div');
+    div.style.cssText = 'display:flex;gap:12px;' + (isUser ? 'flex-direction:row-reverse;' : '');
+    var badge = document.createElement('div');
+    badge.style.cssText = 'flex-shrink:0;width:28px;height:28px;border-radius:2px;display:flex;align-items:center;justify-content:center;font-size:0.6875rem;font-weight:500;letter-spacing:0.06em;text-transform:uppercase;';
+    badge.style.background = isUser ? 'var(--accent-soft)' : 'var(--bg-2)';
+    badge.style.color = isUser ? 'var(--accent)' : 'var(--fg-2)';
+    badge.textContent = isUser ? 'You' : 'AI';
+    var bubble = document.createElement('div');
+    bubble.style.cssText = 'flex:1;min-width:0;font-size:0.9375rem;line-height:1.6;color:var(--fg-1);word-break:break-word;';
+    setContent(bubble, content || '', !isUser);
+    div.appendChild(badge);
+    div.appendChild(bubble);
+    return { el: div, bubble: bubble };
+  }
+
+  // ---- Auto-resize ----
   function autoResize() {
     inputEl.style.height = 'auto';
     inputEl.style.height = Math.min(inputEl.scrollHeight, 150) + 'px';
   }
   inputEl.addEventListener('input', autoResize);
 
-  function escapeHtml(s) {
-    var d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
-  }
-
-  function renderMessage(role, content, isStreaming) {
-    var isUser = role === 'user';
-    var div = document.createElement('div');
-    div.style.cssText = 'display:flex;gap:12px;' + (isUser ? 'flex-direction:row-reverse;' : '');
-
-    var badge = document.createElement('div');
-    badge.style.cssText = 'flex-shrink:0;width:28px;height:28px;border-radius:2px;display:flex;align-items:center;justify-content:center;font-size:0.6875rem;font-weight:500;letter-spacing:0.06em;text-transform:uppercase;';
-    if (isUser) {
-      badge.style.background = 'var(--accent-soft)';
-      badge.style.color = 'var(--accent)';
-      badge.textContent = 'You';
-    } else {
-      badge.style.background = 'var(--bg-2)';
-      badge.style.color = 'var(--fg-2)';
-      badge.textContent = 'AI';
-    }
-
-    var bubble = document.createElement('div');
-    bubble.style.cssText = 'flex:1;min-width:0;font-size:0.9375rem;line-height:1.6;color:var(--fg-1);white-space:pre-wrap;word-break:break-word;';
-    if (!isUser) {
-      bubble.style.fontFamily = "'Inter', system-ui, sans-serif";
-    }
-    bubble.textContent = content || '';
-    if (isStreaming && !content) {
-      bubble.style.color = 'var(--fg-3)';
-      bubble.textContent = '...';
-    }
-
-    div.appendChild(badge);
-    div.appendChild(bubble);
-    return { el: div, bubble: bubble };
-  }
-
-  var userScrolledUp = false;
-  messagesEl.addEventListener('scroll', function () {
-    var atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 40;
-    userScrolledUp = !atBottom;
-  });
-  function scrollToBottom() {
-    if (!userScrolledUp) messagesEl.scrollTop = messagesEl.scrollHeight;
-  }
-
+  // ---- Send ----
   function send() {
     var text = inputEl.value.trim();
-    if (!text || streaming) return;
-
-    if (emptyEl) { emptyEl.remove(); emptyEl = null; }
-
-    messages.push({ role: 'user', content: text });
-    var userMsg = renderMessage('user', text);
-    messagesEl.appendChild(userMsg.el);
-
+    if (!text || streaming || !activeChat) return;
+    activeChat.system = systemEl.value;
+    if (!activeChat.messages.length) {
+      activeChat.title = text.length > 40 ? text.slice(0, 40) + '...' : text;
+      saveHistory();
+      renderHistoryList();
+    }
+    activeChat.messages.push({ role: 'user', content: text });
+    // Remove empty placeholder
+    var emptyPlaceholder = messagesEl.querySelector('[style*="font-style:italic"]');
+    if (emptyPlaceholder) emptyPlaceholder.remove();
+    var userEl = buildMsgEl('user', text);
+    messagesEl.appendChild(userEl.el);
     inputEl.value = '';
     autoResize();
+    userScrolledUp = false;
     scrollToBottom();
 
     streaming = true;
     sendBtn.disabled = true;
     sendBtn.textContent = '...';
 
-    var assistantMsg = renderMessage('assistant', '', true);
-    messagesEl.appendChild(assistantMsg.el);
+    var assistantEl = buildMsgEl('assistant', '');
+    assistantEl.bubble.style.color = 'var(--fg-3)';
+    assistantEl.bubble.textContent = '...';
+    assistantEl.bubble.style.whiteSpace = 'pre-wrap';
+    messagesEl.appendChild(assistantEl.el);
     scrollToBottom();
 
-    var body = {
-      model: 'any',
-      stream: true,
-      messages: []
-    };
-    var sys = systemEl.value.trim();
+    var body = { model: 'any', stream: true, messages: [] };
+    var sys = activeChat.system || systemEl.value.trim();
     if (sys) body.messages.push({ role: 'system', content: sys });
-    for (var i = 0; i < messages.length; i++) {
-      body.messages.push({ role: messages[i].role, content: messages[i].content });
+    for (var i = 0; i < activeChat.messages.length; i++) {
+      body.messages.push({ role: activeChat.messages[i].role, content: activeChat.messages[i].content });
     }
 
-    var headers = {
-      'Authorization': 'Bearer ' + apiKey,
-      'Content-Type': 'application/json'
-    };
+    var headers = { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' };
     var profile = profileEl.value;
+    var model = modelSelectEl.value;
     if (profile) headers['X-Llamanager-Model'] = profile;
+    else if (model) headers['X-Llamanager-Model'] = model;
 
     var fullContent = '';
 
-    fetch('/v1/chat/completions', {
-      method: 'POST',
-      headers: headers,
-      body: JSON.stringify(body)
-    }).then(function (resp) {
-      if (!resp.ok) {
-        return resp.text().then(function (t) { throw new Error('HTTP ' + resp.status + ': ' + t); });
-      }
-      var reader = resp.body.getReader();
-      var decoder = new TextDecoder();
-      var buffer = '';
-
-      function read() {
-        return reader.read().then(function (result) {
-          if (result.done) {
-            finish();
-            return;
-          }
-          buffer += decoder.decode(result.value, { stream: true });
-          var lines = buffer.split('\n');
-          buffer = lines.pop();
-
-          for (var i = 0; i < lines.length; i++) {
-            var line = lines[i].trim();
-            if (!line || line.startsWith(':')) continue;
-            if (!line.startsWith('data: ')) continue;
-            var data = line.slice(6);
-            if (data === '[DONE]') { finish(); return; }
-            try {
-              var parsed = JSON.parse(data);
-              var delta = parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
-              if (delta && delta.content) {
-                fullContent += delta.content;
-                assistantMsg.bubble.textContent = fullContent;
-                assistantMsg.bubble.style.color = 'var(--fg-1)';
-                scrollToBottom();
-              }
-            } catch (e) {}
-          }
-          return read();
-        });
-      }
-
-      return read();
-    }).catch(function (err) {
-      assistantMsg.bubble.textContent = 'Error: ' + err.message;
-      assistantMsg.bubble.style.color = 'var(--bad)';
-      finish();
-    });
+    fetch('/v1/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body) })
+      .then(function (resp) {
+        if (!resp.ok) return resp.text().then(function (t) { throw new Error('HTTP ' + resp.status + ': ' + t); });
+        var reader = resp.body.getReader();
+        var decoder = new TextDecoder();
+        var buf = '';
+        function read() {
+          return reader.read().then(function (result) {
+            if (result.done) { finish(); return; }
+            buf += decoder.decode(result.value, { stream: true });
+            var lines = buf.split('\n'); buf = lines.pop();
+            for (var i = 0; i < lines.length; i++) {
+              var line = lines[i].trim();
+              if (!line || line.startsWith(':')) continue;
+              if (!line.startsWith('data: ')) continue;
+              var data = line.slice(6);
+              if (data === '[DONE]') { finish(); return; }
+              try {
+                var parsed = JSON.parse(data);
+                var delta = parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
+                if (delta && delta.content) {
+                  fullContent += delta.content;
+                  assistantEl.bubble.textContent = fullContent;
+                  assistantEl.bubble.style.color = 'var(--fg-1)';
+                  scrollToBottom();
+                }
+              } catch (e) {}
+            }
+            return read();
+          });
+        }
+        return read();
+      })
+      .catch(function (err) {
+        assistantEl.bubble.textContent = 'Error: ' + err.message;
+        assistantEl.bubble.style.color = 'var(--bad)';
+        finish();
+      });
 
     function finish() {
       if (fullContent) {
-        messages.push({ role: 'assistant', content: fullContent });
+        activeChat.messages.push({ role: 'assistant', content: fullContent });
+        setContent(assistantEl.bubble, fullContent, true);
+        assistantEl.bubble.style.color = '';
+        saveHistory();
       }
       streaming = false;
       sendBtn.disabled = false;
@@ -271,23 +392,12 @@
   }
 
   sendBtn.addEventListener('click', send);
-  inputEl.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      send();
-    }
-  });
+  inputEl.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+  systemEl.addEventListener('change', function () { if (activeChat) { activeChat.system = systemEl.value; saveHistory(); } });
 
-  clearBtn.addEventListener('click', function () {
-    messages = [];
-    messagesEl.innerHTML = '';
-    var empty = document.createElement('div');
-    empty.id = 'chat-empty';
-    empty.style.cssText = 'color:var(--fg-3);font-style:italic;padding:40px 0;text-align:center;font-size:0.875rem;';
-    empty.textContent = 'Send a message to start chatting.';
-    messagesEl.appendChild(empty);
-    emptyEl = empty;
-  });
+  // Init
+  loadHistory();
+  if (!chats.length) newChat(); else switchTo(chats[0].id);
 })();
 </script>
 {% endblock %}

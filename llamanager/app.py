@@ -219,12 +219,16 @@ def create_app(config_path: Path | None = None,
 
     @app.get("/chat")
     async def chat_public(request: Request):
-        from fastapi.responses import HTMLResponse
         from fastapi.templating import Jinja2Templates
         from pathlib import Path as _Path
+        import json as _json
         _templates = Jinja2Templates(directory=str(_Path(__file__).parent / "templates"))
+        profile_names = list(cfg.profiles.keys())
+        model_ids = [m.model_id for m in registry.list()]
         return _templates.TemplateResponse(request, "chat_public.html", {
             "request": request,
+            "profiles_json": _json.dumps(profile_names),
+            "models_json": _json.dumps(model_ids),
         })
 
     @app.get("/")

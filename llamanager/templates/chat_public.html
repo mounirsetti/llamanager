@@ -222,6 +222,18 @@
       .history-rail { display: none; }
       .chat-topbar, .chat-controls, .chat-messages, .chat-input-area { padding-left: 16px; padding-right: 16px; }
     }
+    @media (max-width: 480px) {
+      .chat-topbar { gap: 8px; padding: 10px 12px; }
+      .chat-controls { gap: 8px; padding: 6px 12px; flex-direction: column; align-items: stretch; }
+      .chat-controls > div { width: 100%; }
+      .chat-controls select, .chat-controls input[type="text"] { width: 100%; }
+      .chat-messages { padding: 14px 12px; gap: 16px; }
+      .chat-input-area { padding: 10px 12px 14px; }
+      .chat-msg-badge { width: 24px; height: 24px; font-size: 0.5625rem; }
+      .chat-msg-text { font-size: 0.875rem; }
+      .chat-msg-text pre { font-size: 0.6875rem; padding: 8px 10px; }
+      .chat-login-box { padding: 0 16px; }
+    }
   </style>
 </head>
 <body>
@@ -270,8 +282,20 @@
 
       <div class="chat-controls">
         <div style="display: flex; align-items: center; gap: 6px;">
+          <label>Profile</label>
+          <select id="chat-profile" style="background: transparent; border: 0; border-bottom: 1px solid var(--bg-3); padding: 4px 6px; font: inherit; font-size: 0.8125rem; color: var(--fg-0); min-width: 120px;">
+            <option value="">current</option>
+          </select>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <label>Model</label>
+          <select id="chat-model-select" style="background: transparent; border: 0; border-bottom: 1px solid var(--bg-3); padding: 4px 6px; font: inherit; font-size: 0.8125rem; color: var(--fg-0); min-width: 120px;">
+            <option value="">current</option>
+          </select>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px;">
           <label>System</label>
-          <input id="chat-system" type="text" value="You are a helpful assistant." style="min-width: 220px; max-width: 400px;">
+          <input id="chat-system" type="text" value="You are a helpful assistant." style="min-width: 180px; max-width: 360px;">
         </div>
       </div>
 
@@ -300,9 +324,30 @@
   var inputEl = document.getElementById('chat-input');
   var sendBtn = document.getElementById('chat-send');
   var systemEl = document.getElementById('chat-system');
+  var profileEl = document.getElementById('chat-profile');
+  var modelSelectEl = document.getElementById('chat-model-select');
   var historyListEl = document.getElementById('history-list');
   var historyNewBtn = document.getElementById('history-new');
   var toggleMd = document.getElementById('toggle-md');
+
+  // Populate profile and model dropdowns from server-rendered JSON
+  var profileNames = {{ profiles_json }};
+  var modelIds = {{ models_json }};
+  profileNames.forEach(function (n) {
+    var o = document.createElement('option');
+    o.value = 'profile:' + n;
+    o.textContent = n;
+    profileEl.appendChild(o);
+  });
+  modelIds.forEach(function (mid) {
+    var o = document.createElement('option');
+    o.value = mid;
+    o.textContent = mid;
+    modelSelectEl.appendChild(o);
+  });
+  // Mutual exclusion: selecting a profile clears model and vice versa
+  profileEl.addEventListener('change', function () { if (profileEl.value) modelSelectEl.value = ''; });
+  modelSelectEl.addEventListener('change', function () { if (modelSelectEl.value) profileEl.value = ''; });
 
   var apiKey = '';
   var streaming = false;
@@ -581,6 +626,10 @@
     }
 
     var headers = { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' };
+    var profile = profileEl.value;
+    var model = modelSelectEl.value;
+    if (profile) headers['X-Llamanager-Model'] = profile;
+    else if (model) headers['X-Llamanager-Model'] = model;
     var fullContent = '';
 
     fetch('/v1/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body) })

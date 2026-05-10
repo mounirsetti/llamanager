@@ -93,4 +93,29 @@
   {# Install progress area — shared partial #}
   {% include "_install_progress.html" %}
 </section>
+
+{# ---- Section 3: Config file ---- #}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Configuration</span>
+  </header>
+
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
+    Server settings like bind address, port, and admin keys live in <code>config.toml</code>. Edit it directly and restart llamanager for changes to take effect.
+  </p>
+
+  <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px;">
+    <code style="font-size: 0.8125rem; color: var(--fg-1); background: var(--bg-1); border: 1px solid var(--bg-3); padding: 8px 12px; word-break: break-all;">{{ config_file }}</code>
+  </div>
+
+  <form method="post" action="/ui/setup/open-config">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="lm-btn lm-btn--ghost" style="display: inline-flex; align-items: center; gap: 8px;">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;">
+        <path d="M2 13.5V4a1.5 1.5 0 0 1 1.5-1.5h3.172a1.5 1.5 0 0 1 1.06.44L9.329 4.5H12.5A1.5 1.5 0 0 1 14 6v7.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 13.5Z"/>
+      </svg>
+      {{ open_config_label }}
+    </button>
+  </form>
+</section>
 {% endblock %}

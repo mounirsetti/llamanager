@@ -296,8 +296,8 @@ async def dashboard_partial(request: Request, _: Origin = Depends(require_admin_
     qm: QueueManager = request.app.state.queue
     db = request.app.state.db
     recent = db.query(
-        "SELECT id, origin_id, model, status, enqueued_at, finished_at,"
-        " prompt_tokens, completion_tokens FROM requests"
+        "SELECT id, origin_id, model, status, enqueued_at, started_at,"
+        " finished_at, prompt_tokens, completion_tokens FROM requests"
         " ORDER BY enqueued_at DESC LIMIT 10"
     )
     return templates.TemplateResponse(request, "_dashboard_partial.html", _ctx(
@@ -599,14 +599,15 @@ async def profiles_redirect(request: Request,
 async def chat_view(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     cfg = request.app.state.cfg
     sm: ServerManager = request.app.state.sm
+    reg: Registry = request.app.state.registry
     sess = _read_session(request)
-    profiles = []
-    for name, p in cfg.profiles.items():
-        profiles.append({"name": name})
+    profiles = [{"name": name} for name in cfg.profiles]
+    model_ids = [m.model_id for m in reg.list()]
     return templates.TemplateResponse(request, "chat.html", _ctx(
         request,
         status=sm.status(),
         profiles=profiles,
+        model_ids=model_ids,
         api_key=sess["key"] if sess else "",
     ))
 
@@ -667,13 +668,23 @@ async def setup_set_binary(request: Request,
 
 
 def _setup_ctx(request: Request) -> dict:
+    import sys as _sys
     cfg = request.app.state.cfg
+    if _sys.platform == "darwin":
+        open_config_label = "Open in Finder"
+    elif _sys.platform == "win32":
+        open_config_label = "Open in Explorer"
+    else:
+        open_config_label = "Open folder"
     return _ctx(
         request,
         binary_path=detect_binary(cfg.llama_server_binary),
         configured_binary=cfg.llama_server_binary,
         instructions=install_instructions(),
         install=request.app.state.install_state.to_dict(),
+        config_dir=str(cfg.config_path.parent),
+        config_file=str(cfg.config_path),
+        open_config_label=open_config_label,
     )
 
 
@@ -705,6 +716,14 @@ async def setup_install_progress(request: Request,
         install=state.to_dict(),
         binary_path=binary_path,
     ))
+
+
+@router.post("/setup/open-config", response_class=HTMLResponse)
+async def setup_open_config(request: Request,
+                            _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    _open_path(str(cfg.config_path))
+    return RedirectResponse("/ui/setup", status_code=303)
 
 
 # ---------- launch ----------

@@ -201,11 +201,26 @@ async def _handle_inference(
 
         async def gen() -> AsyncIterator[bytes]:
             error: str | None = None
+            usage: dict[str, Any] = {}
+            buffer = ""
             try:
                 async for chunk in _stream_with_keepalives(
                     qm, qr, sm, path, body, client_disconnected
                 ):
                     yield chunk
+                    # Parse SSE chunks to extract usage from the final event
+                    try:
+                        buffer += chunk.decode("utf-8", errors="replace")
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            line = line.strip()
+                            if line.startswith("data: ") and line != "data: [DONE]":
+                                parsed = json.loads(line[6:])
+                                u = parsed.get("usage")
+                                if u:
+                                    usage = u
+                    except Exception:
+                        pass
             except Exception as e:
                 error = str(e)
                 log.exception("stream error for %s", qr.request_id)
@@ -218,8 +233,8 @@ async def _handle_inference(
                     qr,
                     error=error,
                     cancelled=cancelled,
-                    prompt_tokens=None,
-                    completion_tokens=None,
+                    prompt_tokens=usage.get("prompt_tokens"),
+                    completion_tokens=usage.get("completion_tokens"),
                 )
 
         headers = {

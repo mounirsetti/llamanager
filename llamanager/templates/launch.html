@@ -2,6 +2,20 @@
 {% set active = 'launch' %}
 {% block title %}Launch - llamanager{% endblock %}
 {% block content %}
+<style>
+  @media (max-width: 640px) {
+    .lm-profile-edit-popup {
+      position: fixed !important;
+      left: 16px !important;
+      right: 16px !important;
+      top: 50% !important;
+      transform: translateY(-50%) !important;
+      width: auto !important;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+  }
+</style>
 <div class="lm-eyebrow">Operate</div>
 <h1 class="lm-page-title">Launch</h1>
 <p class="lm-page-lede">Start and stop llama-server, manage inference profiles, and configure defaults.</p>
@@ -115,7 +129,7 @@
       <td class="actions" data-label="">
         <details style="display: inline;">
           <summary class="lm-btn lm-btn--ghost lm-btn--xs" style="list-style: none; cursor: pointer;">Edit</summary>
-          <div style="position: absolute; right: 0; z-index: 10; background: var(--bg-0); border: 1px solid var(--bg-3); padding: 20px; margin-top: 8px; width: 440px; box-shadow: 0 8px 24px oklch(0 0 0 / 0.35);">
+          <div class="lm-profile-edit-popup" style="position: absolute; right: 0; z-index: 10; background: var(--bg-0); border: 1px solid var(--bg-3); padding: 20px; margin-top: 8px; width: 440px; max-width: calc(100vw - 32px); box-shadow: 0 8px 24px oklch(0 0 0 / 0.35);">
             <form class="lm-form" method="post" action="/ui/launch/profiles/{{ p.name }}/update">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <div class="lm-field">

@@ -80,7 +80,7 @@
   {% if recent %}
   <table class="lm-table">
     <thead>
-      <tr><th>Id</th><th>Origin</th><th>Model</th><th>Status</th><th>Tokens in / out</th></tr>
+      <tr><th>Id</th><th>Origin</th><th>Model</th><th>Status</th><th>Tokens in / out</th><th>tok/s</th></tr>
     </thead>
     <tbody>
     {% for r in recent %}
@@ -90,6 +90,7 @@
       <td data-label="Model"><code>{{ r.model or '(loaded)' }}</code></td>
       <td data-label="Status"><span class="lm-pill lm-pill--{{ r.status }}">{{ r.status }}</span></td>
       <td data-label="Tokens" class="num">{% if r.prompt_tokens is not none %}{{ r.prompt_tokens }}{% else %}-{% endif %} / {% if r.completion_tokens is not none %}{{ r.completion_tokens }}{% else %}-{% endif %}</td>
+      <td data-label="tok/s" class="num">{% if r.completion_tokens and r.started_at and r.finished_at and r.finished_at > r.started_at %}{{ '%.1f' % (r.completion_tokens / (r.finished_at - r.started_at)) }}{% else %}-{% endif %}</td>
     </tr>
     {% endfor %}
     </tbody>
