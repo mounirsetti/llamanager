@@ -111,6 +111,22 @@ curl -X POST http://localhost:7200/admin/models/pull \
 
 The response returns a `download_id`. Poll `GET /admin/downloads/{id}` for progress.
 
+## listing available models
+
+Query the OpenAI-compatible models endpoint to see what is on disk:
+
+```bash
+curl http://localhost:7200/v1/models \
+  -H "Authorization: Bearer $ORIGIN_KEY"
+```
+
+Or use the admin endpoint for more detail (size, source, sha256):
+
+```bash
+curl http://localhost:7200/admin/models \
+  -H "Authorization: Bearer $ADMIN_KEY"
+```
+
 ## sending an inference request
 
 Any OpenAI-compatible client works. With `curl`:
@@ -126,11 +142,31 @@ curl -N http://localhost:7200/v1/chat/completions \
   }'
 ```
 
-To force a specific model (subject to the origin's permissions), add:
+### requesting a specific model
 
+By default, requests use whatever model is currently loaded (or the default profile if nothing is running yet). To request a different model, add the `X-Llamanager-Model` header. llamanager will hot-swap automatically if needed.
+
+**By model ID** (the path relative to the models directory):
+
+```bash
+curl -N http://localhost:7200/v1/chat/completions \
+  -H "Authorization: Bearer $ORIGIN_KEY" \
+  -H "X-Llamanager-Model: unsloth/Qwen3.5-4B-GGUF/Q4_K_M.gguf" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "any", "messages": [{"role": "user", "content": "Hi!"}]}'
 ```
-X-Llamanager-Model: unsloth/Qwen3.5-4B-GGUF/Q4_K_M.gguf
+
+**By profile name** (uses the profile's model, mmproj, and args):
+
+```bash
+curl -N http://localhost:7200/v1/chat/completions \
+  -H "Authorization: Bearer $ORIGIN_KEY" \
+  -H "X-Llamanager-Model: profile:qwen35-4b-vision" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "any", "messages": [{"role": "user", "content": "Hi!"}]}'
 ```
+
+Each origin's `allowed_models` setting restricts which models it can request. Set to `*` to allow any model, `default` to allow only the default, or a comma-separated list of specific model IDs.
 
 While a request is queued or a model swap is happening, llamanager emits SSE comment lines (`: status=swapping_model`, `: keepalive`) every 10 seconds so client connections do not time out.
 

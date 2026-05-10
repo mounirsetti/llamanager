@@ -29,6 +29,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from .auth import AuthManager, Origin
+from .config import (
+    load_config, save_profile, delete_profile, update_defaults,
+)
 from .llama_installer import (
     InstallState,
     detect_binary,
@@ -577,18 +580,12 @@ async def origins_rotate_ui(request: Request, origin_id: int,
     ))
 
 
-# ---------- profiles ----------
+# ---------- profiles (redirect to launch) ----------
 
-@router.get("/profiles", response_class=HTMLResponse)
-async def profiles_view(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    cfg = request.app.state.cfg
-    rows: list[dict[str, Any]] = []
-    for name, p in cfg.profiles.items():
-        rows.append({"name": name, "model": p.model, "mmproj": p.mmproj,
-                     "args": json.dumps(p.args, indent=2, sort_keys=True)})
-    return templates.TemplateResponse(request, "profiles.html", _ctx(
-        request, profiles=rows, config_path=str(cfg.config_path),
-    ))
+@router.get("/profiles")
+async def profiles_redirect(request: Request,
+                            _: Origin = Depends(require_admin_ui)) -> Response:
+    return RedirectResponse("/ui/launch", status_code=301)
 
 
 # ---------- logs ----------
@@ -648,18 +645,12 @@ async def setup_set_binary(request: Request,
 
 def _setup_ctx(request: Request) -> dict:
     cfg = request.app.state.cfg
-    sm: ServerManager = request.app.state.sm
-    supervisor: Supervisor = request.app.state.supervisor
     return _ctx(
         request,
         binary_path=detect_binary(cfg.llama_server_binary),
         configured_binary=cfg.llama_server_binary,
         instructions=install_instructions(),
         install=request.app.state.install_state.to_dict(),
-        status=sm.status(),
-        profiles=list(cfg.profiles.keys()),
-        autorestart=supervisor.enabled,
-        max_restarts=cfg.max_restarts_in_window,
     )
 
 
@@ -693,18 +684,52 @@ async def setup_install_progress(request: Request,
     ))
 
 
-@router.post("/setup/autorestart", response_class=HTMLResponse)
-async def setup_autorestart(request: Request,
-                            enabled: str = Form("off"),
-                            _: None = Depends(require_csrf)) -> Response:
-    request.app.state.supervisor.enabled = (enabled == "on")
-    return RedirectResponse("/ui/setup", status_code=303)
+# ---------- launch ----------
+
+def _reload_config(request: Request) -> None:
+    """Reload config.toml into app.state.cfg, preserving runtime-only fields."""
+    cfg = request.app.state.cfg
+    new_cfg = load_config(cfg.path)
+    new_cfg.bind = cfg.bind
+    new_cfg.port = cfg.port
+    request.app.state.cfg = new_cfg
 
 
-@router.post("/setup/server/start", response_class=HTMLResponse)
-async def setup_server_start(request: Request,
-                             profile: str = Form(""),
-                             _: None = Depends(require_csrf)) -> Response:
+def _launch_ctx(request: Request) -> dict:
+    cfg = request.app.state.cfg
+    sm: ServerManager = request.app.state.sm
+    supervisor: Supervisor = request.app.state.supervisor
+    profiles = []
+    for name, p in cfg.profiles.items():
+        profiles.append({
+            "name": name,
+            "model": p.model,
+            "mmproj": p.mmproj,
+            "args": p.args,
+            "args_json": json.dumps(p.args, indent=2, sort_keys=True),
+        })
+    return _ctx(
+        request,
+        status=sm.status(),
+        profiles=profiles,
+        profile_names=list(cfg.profiles.keys()),
+        default_model=cfg.default_model,
+        default_profile=cfg.default_profile,
+        autorestart=supervisor.enabled,
+        max_restarts=cfg.max_restarts_in_window,
+    )
+
+
+@router.get("/launch", response_class=HTMLResponse)
+async def launch_view(request: Request,
+                      _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    return templates.TemplateResponse(request, "launch.html", _launch_ctx(request))
+
+
+@router.post("/launch/server/start", response_class=HTMLResponse)
+async def launch_server_start(request: Request,
+                              profile: str = Form(""),
+                              _: None = Depends(require_csrf)) -> Response:
     sm: ServerManager = request.app.state.sm
     cfg = request.app.state.cfg
     try:
@@ -712,12 +737,86 @@ async def setup_server_start(request: Request,
         await sm.start(spec)
     except (ServerError, ValueError) as e:
         return _error_html(str(e), status_code=400)
-    return RedirectResponse("/ui/setup", status_code=303)
+    return RedirectResponse("/ui/launch", status_code=303)
 
 
-@router.post("/setup/server/stop", response_class=HTMLResponse)
-async def setup_server_stop(request: Request,
-                            _: None = Depends(require_csrf)) -> Response:
+@router.post("/launch/server/stop", response_class=HTMLResponse)
+async def launch_server_stop(request: Request,
+                             _: None = Depends(require_csrf)) -> Response:
     sm: ServerManager = request.app.state.sm
     await sm.stop()
-    return RedirectResponse("/ui/setup", status_code=303)
+    return RedirectResponse("/ui/launch", status_code=303)
+
+
+@router.post("/launch/autorestart", response_class=HTMLResponse)
+async def launch_autorestart(request: Request,
+                             enabled: str = Form("off"),
+                             _: None = Depends(require_csrf)) -> Response:
+    request.app.state.supervisor.enabled = (enabled == "on")
+    return RedirectResponse("/ui/launch", status_code=303)
+
+
+@router.post("/launch/profiles/create", response_class=HTMLResponse)
+async def launch_profile_create(request: Request,
+                                name: str = Form(...),
+                                model: str = Form(...),
+                                mmproj: str = Form(""),
+                                args_json: str = Form("{}"),
+                                _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    try:
+        args = json.loads(args_json.strip() or "{}")
+    except json.JSONDecodeError as e:
+        return _error_html(f"invalid JSON in args: {e}", status_code=400)
+    if name.strip().lower() in cfg.profiles:
+        return _error_html(f"profile '{name}' already exists", status_code=409)
+    try:
+        save_profile(cfg.config_path, name, model.strip(), mmproj.strip(), args)
+    except ValueError as e:
+        return _error_html(str(e), status_code=400)
+    _reload_config(request)
+    return RedirectResponse("/ui/launch", status_code=303)
+
+
+@router.post("/launch/profiles/{profile_name}/update", response_class=HTMLResponse)
+async def launch_profile_update(request: Request, profile_name: str,
+                                model: str = Form(...),
+                                mmproj: str = Form(""),
+                                args_json: str = Form("{}"),
+                                _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    try:
+        args = json.loads(args_json.strip() or "{}")
+    except json.JSONDecodeError as e:
+        return _error_html(f"invalid JSON in args: {e}", status_code=400)
+    try:
+        save_profile(cfg.config_path, profile_name, model.strip(), mmproj.strip(), args)
+    except ValueError as e:
+        return _error_html(str(e), status_code=400)
+    _reload_config(request)
+    return RedirectResponse("/ui/launch", status_code=303)
+
+
+@router.post("/launch/profiles/{profile_name}/delete", response_class=HTMLResponse)
+async def launch_profile_delete(request: Request, profile_name: str,
+                                _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    delete_profile(cfg.config_path, profile_name)
+    _reload_config(request)
+    return RedirectResponse("/ui/launch", status_code=303)
+
+
+@router.post("/launch/defaults", response_class=HTMLResponse)
+async def launch_defaults(request: Request,
+                          default_model: str = Form(""),
+                          default_profile: str = Form(""),
+                          _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    update_defaults(
+        cfg.config_path,
+        default_model=default_model.strip() or None,
+        default_profile=default_profile.strip() or None,
+    )
+    _reload_config(request)
+    return RedirectResponse("/ui/launch", status_code=303)
+

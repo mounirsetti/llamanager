@@ -736,7 +736,7 @@
         {% elif not has_models %}
         <a href="/ui/models" class="lm-meta-action">Pull a model &rarr;</a>
         {% else %}
-        <a href="/ui/setup" class="lm-meta-action">Launch llama-server &rarr;</a>
+        <a href="/ui/launch" class="lm-meta-action">Launch llama-server &rarr;</a>
         {% endif %}
       </div>
 
@@ -745,9 +745,9 @@
         <a class="lm-nav-link" href="/ui/" {% if active=='dashboard' %}aria-current="page"{% endif %}>Dashboard</a>
         <a class="lm-nav-link" href="/ui/queue" {% if active=='queue' %}aria-current="page"{% endif %}>Queue</a>
         <a class="lm-nav-link" href="/ui/models" {% if active=='models' %}aria-current="page"{% endif %}>Models</a>
+        <a class="lm-nav-link" href="/ui/launch" {% if active=='launch' %}aria-current="page"{% endif %}>Launch</a>
         <span class="lm-nav-eyebrow" style="margin-top: 16px;">Configure</span>
         <a class="lm-nav-link" href="/ui/origins" {% if active=='origins' %}aria-current="page"{% endif %}>Origins</a>
-        <a class="lm-nav-link" href="/ui/profiles" {% if active=='profiles' %}aria-current="page"{% endif %}>Profiles</a>
         <a class="lm-nav-link" href="/ui/logs" {% if active=='logs' %}aria-current="page"{% endif %}>Logs</a>
         <a class="lm-nav-link" href="/ui/setup" {% if active=='setup' %}aria-current="page"{% endif %}>Setup</a>
       </nav>

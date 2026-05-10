@@ -1,0 +1,254 @@
+{% extends "base.html" %}
+{% set active = 'launch' %}
+{% block title %}Launch - llamanager{% endblock %}
+{% block content %}
+<div class="lm-eyebrow">Operate</div>
+<h1 class="lm-page-title">Launch</h1>
+<p class="lm-page-lede">Start and stop llama-server, manage inference profiles, and configure defaults.</p>
+
+{# ---- Section 1: Server ---- #}
+<section class="lm-section" style="margin-top: 32px;">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Server</span>
+  </header>
+
+  <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 24px;">
+    <span style="font-size: 0.875rem; color: var(--fg-2);">Status</span>
+    <span class="lm-pill lm-pill--{{ status.state }}">{{ status.state }}</span>
+    {% if status.current_model %}
+    <code style="font-size: 0.8125rem; color: var(--fg-1);">{{ status.current_model }}</code>
+    {% endif %}
+    {% if status.current_profile %}
+    <span style="font-size: 0.8125rem; color: var(--fg-2);">profile: <strong style="color: var(--fg-1);">{{ status.current_profile }}</strong></span>
+    {% endif %}
+  </div>
+
+  {% if status.state == 'running' or status.state == 'starting' or status.state == 'swapping' %}
+  <div style="margin-bottom: 24px; display: flex; align-items: center; gap: 14px;">
+    <form method="post" action="/ui/launch/server/stop">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="lm-btn lm-btn--ghost"
+              data-confirm="Stop the inference server?">Stop server</button>
+    </form>
+    <a href="/ui/" class="lm-btn lm-btn--ghost">Go to dashboard &rarr;</a>
+  </div>
+  {% else %}
+  <form method="post" action="/ui/launch/server/start" style="margin-bottom: 24px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-form-row" style="align-items: flex-end; gap: 14px; flex-wrap: wrap;">
+      {% if profile_names %}
+      <div class="lm-field" style="max-width: 280px;">
+        <label class="lm-field-label" for="launch-profile">Profile</label>
+        <select id="launch-profile" name="profile" class="lm-select">
+          <option value="">default ({{ default_profile }})</option>
+          {% for p in profile_names %}
+          <option value="{{ p }}">{{ p }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% else %}
+      <input type="hidden" name="profile" value="">
+      {% endif %}
+      <button type="submit" class="lm-btn lm-btn--primary"
+              {% if binary_missing %}disabled title="llama-server not found"{% endif %}>
+        Launch server
+      </button>
+      {% if not binary_missing %}
+      <a href="/ui/models" class="lm-btn lm-btn--ghost">Pull a model &rarr;</a>
+      {% endif %}
+    </div>
+    {% if binary_missing %}
+    <p style="margin-top: 8px; font-size: 0.8125rem; color: var(--bad);">
+      llama-server is not installed. <a href="/ui/setup" style="color: var(--accent);">Go to Setup</a> to install it.
+    </p>
+    {% endif %}
+  </form>
+  {% endif %}
+
+  {# Auto-restart toggle #}
+  <div style="padding-top: 18px; border-top: 1px solid var(--bg-3);">
+    <form method="post" action="/ui/launch/autorestart">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label class="lm-checkbox-row">
+        <input type="checkbox" name="enabled" value="on" {% if autorestart %}checked{% endif %}
+               onchange="this.form.submit()">
+        Auto-restart on crash (up to {{ max_restarts }} restarts per window)
+      </label>
+    </form>
+  </div>
+</section>
+
+{# ---- Section 2: Profiles ---- #}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Profiles</span>
+    <span class="lm-section-meta">{{ profiles|length }} profile{{ '' if profiles|length == 1 else 's' }}</span>
+  </header>
+
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
+    A profile bundles a model, optional multimodal projector, and llama-server parameters into a reusable configuration. Select a profile when launching, or let clients request one via the API.
+  </p>
+
+  {% if profiles %}
+  <table class="lm-table">
+    <thead>
+      <tr><th>Name</th><th>Model</th><th>Args</th><th></th></tr>
+    </thead>
+    <tbody>
+    {% for p in profiles %}
+    <tr>
+      <td data-label="Name">
+        <strong style="color: var(--fg-0); font-weight: 500;">{{ p.name }}</strong>
+        {% if p.name == default_profile %}
+        <span class="lm-pill lm-pill--running" style="margin-left: 6px;">default</span>
+        {% endif %}
+      </td>
+      <td data-label="Model"><code style="font-size: 0.8125rem;">{{ p.model }}</code></td>
+      <td data-label="Args">
+        <code style="font-size: 0.75rem; color: var(--fg-2);">
+          {% set arg_str = p.args_json if p.args_json != '{}' else '-' %}
+          {{ arg_str[:60] }}{% if arg_str|length > 60 %}&hellip;{% endif %}
+        </code>
+      </td>
+      <td class="actions" data-label="">
+        <details style="display: inline;">
+          <summary class="lm-btn lm-btn--ghost lm-btn--xs" style="list-style: none; cursor: pointer;">Edit</summary>
+          <div style="position: absolute; right: 0; z-index: 10; background: var(--bg-1); border: 1px solid var(--bg-3); padding: 20px; margin-top: 8px; width: 440px;">
+            <form class="lm-form" method="post" action="/ui/launch/profiles/{{ p.name }}/update">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <div class="lm-field">
+                <label class="lm-field-label">Model</label>
+                <input class="lm-input lm-input--mono" type="text" name="model" value="{{ p.model }}" required>
+              </div>
+              <div class="lm-field">
+                <label class="lm-field-label">Multimodal projector (optional)</label>
+                <input class="lm-input lm-input--mono" type="text" name="mmproj" value="{{ p.mmproj }}">
+              </div>
+              <div class="lm-field">
+                <label class="lm-field-label">Args (JSON)</label>
+                <textarea class="lm-input lm-input--mono" name="args_json" rows="4" style="resize: vertical; font-size: 0.8125rem;">{{ p.args_json }}</textarea>
+              </div>
+              <div style="display: flex; gap: 10px;">
+                <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Save</button>
+              </div>
+            </form>
+          </div>
+        </details>
+        <form method="post" action="/ui/launch/profiles/{{ p.name }}/delete"
+              data-confirm="Delete profile '{{ p.name }}'? This cannot be undone."
+              style="display: inline;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="lm-empty">No profiles configured yet. Create one below.</p>
+  {% endif %}
+
+  {# Create profile form #}
+  <div style="margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--bg-3);">
+    <div style="font-size: 0.875rem; color: var(--fg-1); margin-bottom: 14px; font-weight: 500;">Create a profile</div>
+    <form class="lm-form lm-form--wide" method="post" action="/ui/launch/profiles/create">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="lm-form-row">
+        <div class="lm-field" style="max-width: 200px;">
+          <label class="lm-field-label" for="new-profile-name">Name</label>
+          <input id="new-profile-name" class="lm-input" type="text" name="name"
+                 placeholder="my-profile" required
+                 pattern="[a-z0-9][a-z0-9\-]*"
+                 title="lowercase letters, digits, and hyphens">
+        </div>
+        <div class="lm-field">
+          <label class="lm-field-label" for="new-profile-model">Model</label>
+          <input id="new-profile-model" class="lm-input lm-input--mono" type="text" name="model"
+                 placeholder="unsloth/Qwen3.5-4B-GGUF/Q4_K_M.gguf" required>
+        </div>
+      </div>
+      <div class="lm-form-row">
+        <div class="lm-field">
+          <label class="lm-field-label" for="new-profile-mmproj">Multimodal projector (optional)</label>
+          <input id="new-profile-mmproj" class="lm-input lm-input--mono" type="text" name="mmproj"
+                 placeholder="repo/mmproj-BF16.gguf">
+        </div>
+      </div>
+      <div class="lm-field">
+        <label class="lm-field-label" for="new-profile-args">Args (JSON)</label>
+        <textarea id="new-profile-args" class="lm-input lm-input--mono" name="args_json" rows="3"
+                  style="resize: vertical; font-size: 0.8125rem;"
+                  placeholder='{ "ctx-size": 16384, "temp": 0.7 }'>{{ '{}' }}</textarea>
+      </div>
+      <div>
+        <button type="submit" class="lm-btn lm-btn--primary">Create profile</button>
+      </div>
+    </form>
+  </div>
+</section>
+
+{# ---- Section 3: Defaults ---- #}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Defaults</span>
+  </header>
+
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
+    When a request arrives without specifying a model, and no server is running yet, llamanager starts with this default profile and model.
+  </p>
+
+  <form class="lm-form" method="post" action="/ui/launch/defaults">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-form-row">
+      <div class="lm-field" style="max-width: 280px;">
+        <label class="lm-field-label" for="default-profile-select">Default profile</label>
+        <select id="default-profile-select" name="default_profile" class="lm-select">
+          <option value="">none</option>
+          {% for p in profiles %}
+          <option value="{{ p.name }}" {% if p.name == default_profile %}selected{% endif %}>{{ p.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="lm-field">
+        <label class="lm-field-label" for="default-model-input">Default model</label>
+        <input id="default-model-input" class="lm-input lm-input--mono" type="text"
+               name="default_model" value="{{ default_model }}"
+               placeholder="repo/file.gguf">
+      </div>
+    </div>
+    <div>
+      <button type="submit" class="lm-btn lm-btn--primary">Save defaults</button>
+    </div>
+  </form>
+</section>
+
+{# ---- Section 4: Request-level overrides ---- #}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Model overrides</span>
+    <span class="lm-section-meta">for API clients</span>
+  </header>
+
+  <div style="padding: 18px 20px; border: 1px solid var(--bg-3); background: var(--bg-1); max-width: 72ch;">
+    <div style="font-size: 0.875rem; color: var(--fg-1); line-height: 1.6;">
+      <p style="margin: 0 0 14px;">
+        API clients can request a specific model or profile on a per-request basis by sending the
+        <code style="background: var(--bg-2); padding: 2px 6px;">X-Llamanager-Model</code> header.
+        If the requested model differs from what is currently loaded, llamanager will hot-swap automatically.
+      </p>
+
+      <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 6px;">Load by profile name</div>
+      <code style="display: block; background: var(--bg-2); padding: 8px 12px; margin-bottom: 14px; font-size: 0.8125rem; color: var(--fg-0);">X-Llamanager-Model: profile:qwen35-4b-default</code>
+
+      <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 6px;">Load by model ID</div>
+      <code style="display: block; background: var(--bg-2); padding: 8px 12px; margin-bottom: 14px; font-size: 0.8125rem; color: var(--fg-0);">X-Llamanager-Model: unsloth/Qwen3.5-4B-GGUF/Q4_K_M.gguf</code>
+
+      <p style="margin: 0; color: var(--fg-2); font-size: 0.8125rem;">
+        Each origin's <code>allowed_models</code> setting restricts which models it can request.
+        Set to <code>*</code> on the <a href="/ui/origins" style="color: var(--accent);">Origins page</a> to allow any model.
+      </p>
+    </div>
+  </div>
+</section>
+{% endblock %}

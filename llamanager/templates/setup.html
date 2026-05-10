@@ -4,7 +4,7 @@
 {% block content %}
 <div class="lm-eyebrow">Configure</div>
 <h1 class="lm-page-title">Setup</h1>
-<p class="lm-page-lede">Verify that llama-server is installed and reachable, configure the binary path, and control the inference server process.</p>
+<p class="lm-page-lede">Verify that llama-server is installed and reachable, or install it from here.</p>
 
 {# ---- Section 1: Binary status ---- #}
 <section class="lm-section" style="margin-top: 32px;">
@@ -92,81 +92,5 @@
 
   {# Install progress area — shared partial #}
   {% include "_install_progress.html" %}
-</section>
-
-{# ---- Section 3: Server controls ---- #}
-<section class="lm-section">
-  <header class="lm-section-head">
-    <span class="lm-section-marker">Server controls</span>
-  </header>
-
-  <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 24px;">
-    <span style="font-size: 0.875rem; color: var(--fg-2);">Status</span>
-    <span class="lm-pill lm-pill--{{ status.state }}">{{ status.state }}</span>
-    {% if status.current_model %}
-    <code style="font-size: 0.8125rem; color: var(--fg-1);">{{ status.current_model }}</code>
-    {% endif %}
-  </div>
-
-  {% if status.state == 'running' or status.state == 'starting' or status.state == 'swapping' %}
-  <div style="margin-bottom: 24px; display: flex; align-items: center; gap: 14px;">
-    <form method="post" action="/ui/setup/server/stop">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit" class="lm-btn lm-btn--ghost"
-              data-confirm="Stop the inference server?">Stop server</button>
-    </form>
-    <a href="/ui/" class="lm-btn lm-btn--ghost">Go to dashboard &rarr;</a>
-  </div>
-  {% else %}
-  {% if binary_path and not profiles %}
-  <div style="padding: 14px 16px; background: var(--bg-1); border: 1px solid var(--bg-3); margin-bottom: 20px; font-size: 0.875rem; color: var(--fg-1);">
-    No profiles configured. Before launching, <a href="/ui/models" style="color: var(--accent);">pull a model</a> first, then the default profile will be used automatically.
-  </div>
-  {% endif %}
-  <form method="post" action="/ui/setup/server/start" style="margin-bottom: 24px;">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <div class="lm-form-row" style="align-items: flex-end; gap: 14px; flex-wrap: wrap;">
-      {% if profiles %}
-      <div class="lm-field" style="max-width: 280px;">
-        <label class="lm-field-label" for="profile-select">Profile</label>
-        <select id="profile-select" name="profile" class="lm-select">
-          <option value="">default</option>
-          {% for p in profiles %}
-          <option value="{{ p }}">{{ p }}</option>
-          {% endfor %}
-        </select>
-      </div>
-      {% else %}
-      <input type="hidden" name="profile" value="">
-      {% endif %}
-      <button type="submit" class="lm-btn lm-btn--primary"
-              {% if not binary_path %}disabled title="llama-server not found"{% endif %}>
-        Launch server
-      </button>
-      {% if binary_path %}
-      <a href="/ui/models" class="lm-btn lm-btn--ghost">Pull a model first &rarr;</a>
-      {% endif %}
-    </div>
-    {% if not binary_path %}
-    <p style="margin-top: 8px; font-size: 0.8125rem; color: var(--bad);">llama-server must be installed before the server can start.</p>
-    {% endif %}
-  </form>
-  {% endif %}
-
-  {# Auto-restart toggle #}
-  <div style="padding-top: 18px; border-top: 1px solid var(--bg-3);">
-    <div style="font-size: 0.875rem; color: var(--fg-1); margin-bottom: 10px; font-weight: 500;">Auto-restart (crash supervisor)</div>
-    <form method="post" action="/ui/setup/autorestart">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label class="lm-checkbox-row">
-        <input type="checkbox" name="enabled" value="on" {% if autorestart %}checked{% endif %}
-               onchange="this.form.submit()">
-        Automatically restart llama-server on crash (up to {{ max_restarts }} restarts per window)
-      </label>
-    </form>
-    <p style="margin-top: 8px; font-size: 0.8125rem; color: var(--fg-2);">
-      Disable to prevent automatic restarts. Useful when debugging a bad model or config.
-    </p>
-  </div>
 </section>
 {% endblock %}

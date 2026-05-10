@@ -19,6 +19,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "argon2-cffi>=23.1",
     "huggingface_hub>=0.23",
+    "tomlkit>=0.12",
     "psutil>=5.9",
     "aiosqlite>=0.19",
 ]

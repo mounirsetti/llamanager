@@ -251,14 +251,14 @@ class Registry:
         # Cancel if still running
         self.cancel_pull(download_id)
         # Clean up partial files in _direct/
-        files_json = row.get("files_json", "[]")
+        files_json = row["files_json"] if "files_json" in row.keys() else "[]"
         try:
             files = json.loads(files_json) if files_json else []
         except (json.JSONDecodeError, TypeError):
             files = []
         direct_dir = self.models_dir / "_direct"
         # Try to infer filename from source or files list
-        source = row.get("source", "")
+        source = row["source"] if "source" in row.keys() else ""
         candidates: list[str] = list(files)
         if not candidates:
             tail = source.rsplit("/", 1)[-1].split("?", 1)[0]

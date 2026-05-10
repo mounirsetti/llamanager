@@ -180,3 +180,77 @@ def write_default_config(path: Path) -> Path:
         return path
     path.write_text(DEFAULT_CONFIG_TOML, encoding="utf-8")
     return path
+
+
+# ---------------------------------------------------------------------------
+# Profile CRUD — round-trip editing of config.toml via tomlkit
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+_PROFILE_NAME_RE = _re.compile(r"^[a-z0-9][a-z0-9\-]*$")
+
+
+def _load_tomlkit(path: Path):
+    """Load a TOML file with tomlkit (preserves comments/formatting)."""
+    import tomlkit
+    if not path.exists():
+        return tomlkit.parse(DEFAULT_CONFIG_TOML)
+    return tomlkit.load(path.open("rb"))
+
+
+def _save_tomlkit(path: Path, doc) -> None:
+    import tomlkit
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+
+
+def _validate_profile_name(name: str) -> str:
+    name = name.strip().lower()
+    if not _PROFILE_NAME_RE.match(name):
+        raise ValueError(
+            f"profile name must be lowercase alphanumeric with hyphens: {name!r}"
+        )
+    return name
+
+
+def save_profile(cfg_path: Path, name: str, model: str,
+                 mmproj: str, args: dict[str, Any]) -> None:
+    """Create or overwrite a profile in config.toml."""
+    import tomlkit
+    name = _validate_profile_name(name)
+    doc = _load_tomlkit(cfg_path)
+    if "profiles" not in doc:
+        doc.add("profiles", tomlkit.table(is_super_table=True))
+    prof = tomlkit.table()
+    prof.add("model", model)
+    if mmproj:
+        prof.add("mmproj", mmproj)
+    if args:
+        prof.add("args", args)
+    doc["profiles"][name] = prof
+    _save_tomlkit(cfg_path, doc)
+
+
+def delete_profile(cfg_path: Path, name: str) -> None:
+    """Remove a profile from config.toml."""
+    doc = _load_tomlkit(cfg_path)
+    profiles = doc.get("profiles")
+    if profiles and name in profiles:
+        del profiles[name]
+        _save_tomlkit(cfg_path, doc)
+
+
+def update_defaults(cfg_path: Path, *,
+                    default_model: str | None = None,
+                    default_profile: str | None = None) -> None:
+    """Update the [defaults] section in config.toml."""
+    import tomlkit
+    doc = _load_tomlkit(cfg_path)
+    if "defaults" not in doc:
+        doc.add("defaults", tomlkit.table())
+    if default_model is not None:
+        doc["defaults"]["model"] = default_model
+    if default_profile is not None:
+        doc["defaults"]["profile"] = default_profile
+    _save_tomlkit(cfg_path, doc)
