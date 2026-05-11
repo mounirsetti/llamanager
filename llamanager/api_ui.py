@@ -948,6 +948,26 @@ async def profiles_redirect(request: Request,
 
 # ---------- about ----------
 
+
+def _parse_version(v: str) -> tuple[int, ...]:
+    """Parse a version string like '0.2.1' into (major, minor, patch).
+
+    Pre-release suffixes (e.g. '0.2.1-beta', '0.2.1-rc1') are ignored
+    so comparison is purely on the numeric core.
+    """
+    import re as _re
+    # Take only the leading dotted-number portion (e.g. "0.2.1" from "0.2.1-rc1")
+    m = _re.match(r"(\d+(?:\.\d+)*)", v.strip())
+    if not m:
+        return (0,)
+    return tuple(int(p) for p in m.group(1).split("."))
+
+
+def _version_newer(remote: str, local: str) -> bool:
+    """Return True only if *remote* is strictly greater than *local*."""
+    return _parse_version(remote) > _parse_version(local)
+
+
 LLAMANAGER_VERSION = "0.1.0"
 GITHUB_REPO = "mounirsetti/llamanager"
 
@@ -1006,7 +1026,7 @@ async def about_check_update(request: Request,
 
         if not latest:
             raise ValueError("no releases or tags found on GitHub")
-        is_newer = latest != LLAMANAGER_VERSION
+        is_newer = _version_newer(latest, LLAMANAGER_VERSION)
         return templates.TemplateResponse(request, "_update_area.html", _about_ctx(
             request,
             update_available=is_newer,
