@@ -145,6 +145,31 @@ class DB:
             f"UPDATE requests SET {', '.join(cols)} WHERE id=?", tuple(vals)
         )
 
+    def prune(self, max_age_days: int = 90) -> dict[str, int]:
+        """Delete old requests, events, and completed downloads.
+
+        Returns a dict with the number of rows deleted per table.
+        """
+        cutoff = time.time() - (max_age_days * 86400)
+        counts: dict[str, int] = {}
+        for table, col in [
+            ("requests", "enqueued_at"),
+            ("events", "ts"),
+        ]:
+            cur = self.conn.execute(
+                f"DELETE FROM {table} WHERE {col} < ?", (cutoff,)
+            )
+            counts[table] = cur.rowcount
+        # Only prune finished downloads (done/failed/cancelled)
+        cur = self.conn.execute(
+            "DELETE FROM downloads WHERE finished_at IS NOT NULL AND finished_at < ?",
+            (cutoff,),
+        )
+        counts["downloads"] = cur.rowcount
+        # Reclaim disk space
+        self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return counts
+
     def close(self) -> None:
         try:
             self.conn.close()

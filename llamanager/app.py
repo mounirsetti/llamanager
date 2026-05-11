@@ -144,6 +144,20 @@ def create_app(config_path: Path | None = None,
             except Exception as e:
                 log.warning("autolaunch failed: %s", e)
 
+        # Periodic database maintenance (daily prune of old records)
+        async def _periodic_prune() -> None:
+            import asyncio as _aio
+            while True:
+                await _aio.sleep(86400)  # 24 hours
+                try:
+                    counts = db.prune(max_age_days=90)
+                    if any(v > 0 for v in counts.values()):
+                        log.info("db prune: deleted %s", counts)
+                except Exception as e:
+                    log.warning("db prune failed: %s", e)
+
+        prune_task = asyncio.create_task(_periodic_prune())
+
         # SIGHUP -> reload config (POSIX only)
         loop = None
         try:
@@ -164,6 +178,7 @@ def create_app(config_path: Path | None = None,
         try:
             yield
         finally:
+            prune_task.cancel()
             await queue.stop()
             await supervisor.stop()
             await sm.stop()
