@@ -11,9 +11,14 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
+  <img src="https://img.shields.io/badge/version-0.1.0-green.svg" alt="Version 0.1.0">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
+</p>
+
+<p align="center">
+  Created by <a href="https://github.com/mounirsetti">Mounir Ould Setti</a> at <a href="https://soulthread.group">SoulThread Technologies</a>
 </p>
 
 ---
@@ -466,3 +471,23 @@ On windows, `~` resolves to `%USERPROFILE%`, e.g. `C:\Users\<you>\.llamanager`.
 **Crash loop, `state: crashed` and 503s.** The 3-in-5 restart policy gave up. Check `~/.llamanager/logs/llama-server.log`, fix the cause, then `POST /admin/server/start` (or use the UI).
 
 **Windows: argon2-cffi fails to install.** Python 3.11+ ships prebuilt wheels for argon2-cffi on Windows. If you hit a build error, upgrade pip (`python -m pip install -U pip`) and retry. As a last resort, install Microsoft's [Build Tools for Visual Studio](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
+
+## Credits
+
+llamanager is built on top of excellent open-source projects:
+
+| component | project |
+|-----------|---------|
+| Inference | [llama.cpp / llama-server](https://github.com/ggerganov/llama.cpp) |
+| Alternative engine | [Atomic TurboQuant](https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant) |
+| Web framework | [FastAPI](https://fastapi.tiangolo.com) |
+| Templates | [Jinja2](https://jinja.palletsprojects.com) |
+| Interactivity | [HTMX](https://htmx.org) |
+| Model hub | [Hugging Face](https://huggingface.co) (huggingface_hub) |
+| Typography | [Fraunces](https://fonts.google.com/specimen/Fraunces), [Inter](https://fonts.google.com/specimen/Inter), [JetBrains Mono](https://fonts.google.com/specimen/JetBrains+Mono) |
+
+## License
+
+Copyright 2025 Mounir Ould Setti / [SoulThread Technologies](https://soulthread.group)
+
+Licensed under the [Apache License, Version 2.0](LICENSE). See `LICENSE` for the full text.

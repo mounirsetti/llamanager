@@ -21,7 +21,7 @@ from typing import Any
 
 import httpx
 
-from .config import Config
+from .config import Config, save_profile, update_defaults
 from .db import DB
 
 log = logging.getLogger(__name__)
@@ -374,6 +374,95 @@ class Registry:
                 files = [filename] + files
         return source, files
 
+    def _maybe_create_profile(self, source: str) -> None:
+        """After a successful pull, create a default profile if none exists
+        yet for the downloaded model.
+
+        Scans the repo directory for a main GGUF file and an optional mmproj
+        file. Skips if no main model is found (e.g. user only pulled an
+        mmproj) or if a profile already references this model.
+        """
+        # Only handle HF pulls where files land in a repo subdirectory
+        if not (source.startswith("hf://") or source.startswith("hf:")):
+            return
+        repo = source.removeprefix("hf://").removeprefix("hf:")
+        repo_dir = self.models_dir / repo
+        if not repo_dir.is_dir():
+            return
+
+        # Collect GGUF files, separate main models from mmproj files
+        main_models: list[str] = []
+        mmproj_files: list[str] = []
+        for p in sorted(repo_dir.rglob("*.gguf")):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(self.models_dir).as_posix()
+            name_lower = p.name.lower()
+            if "mmproj" in name_lower:
+                mmproj_files.append(rel)
+            else:
+                main_models.append(rel)
+
+        if not main_models:
+            return  # only mmproj files — nothing to launch
+
+        # Pick the first main model (alphabetically — usually the best quant)
+        model_id = main_models[0]
+
+        # Check if any existing profile already references this model
+        for prof in self.cfg.profiles.values():
+            if prof.model == model_id:
+                return
+
+        # Build a profile name from the repo + filename
+        # e.g. "bartowski/Llama-3.2-1B-Instruct-GGUF/Q4_K_M.gguf"
+        #   -> "llama-3-2-1b-instruct-q4-k-m"
+        stem = Path(model_id).stem  # "Q4_K_M"
+        repo_name = repo.split("/")[-1]  # "Llama-3.2-1B-Instruct-GGUF"
+        # Strip common suffixes from repo name
+        for suffix in ("-GGUF", "-gguf", "_GGUF", "_gguf"):
+            if repo_name.endswith(suffix):
+                repo_name = repo_name[: -len(suffix)]
+                break
+        raw_name = f"{repo_name}-{stem}"
+        # Normalise to lowercase, replace non-alnum with hyphens, collapse
+        profile_name = re.sub(r"[^a-z0-9]+", "-", raw_name.lower()).strip("-")
+        # Ensure uniqueness
+        base_name = profile_name
+        counter = 2
+        while profile_name in self.cfg.profiles:
+            profile_name = f"{base_name}-{counter}"
+            counter += 1
+
+        # Pick the first mmproj if one exists in the same repo
+        mmproj = mmproj_files[0] if mmproj_files else ""
+
+        args: dict[str, object] = {"ctx-size": 4096, "temp": 0.7}
+
+        try:
+            save_profile(self.cfg.config_path, profile_name, model_id, mmproj, args)
+            # Hot-reload into the running config so the profile is immediately
+            # visible without a restart
+            from .config import Profile
+            self.cfg.profiles[profile_name] = Profile(
+                name=profile_name, model=model_id, mmproj=mmproj, args=args,
+            )
+            # If no default profile is set yet, make this the default
+            if not self.cfg.default_profile:
+                self.cfg.default_profile = profile_name
+                self.cfg.default_model = model_id
+                update_defaults(
+                    self.cfg.config_path,
+                    default_model=model_id,
+                    default_profile=profile_name,
+                )
+            log.info("auto-created profile %r for %s", profile_name, model_id)
+            self.db.log_event("profile_auto_created", {
+                "profile": profile_name, "model": model_id, "mmproj": mmproj,
+            })
+        except Exception:
+            log.exception("failed to auto-create profile for %s", model_id)
+
     async def _run_pull(self, did: str, source: str, files: list[str],
                         cancel: asyncio.Event) -> None:
         try:
@@ -389,6 +478,7 @@ class Registry:
             if cancel.is_set():
                 self._set_download(did, status="cancelled", finished_at=time.time())
             else:
+                self._maybe_create_profile(source)
                 self._set_download(did, status="done", finished_at=time.time())
                 self.db.log_event("download_done", {"id": did, "source": source})
         except asyncio.CancelledError:

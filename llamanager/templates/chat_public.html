@@ -220,6 +220,20 @@
     .chat-login-box input::placeholder { color: var(--fg-3); }
     .chat-login-error { font-size: 0.8125rem; color: var(--bad); display: none; }
 
+    /* Thinking blocks */
+    .chat-thinking-wrap { margin-bottom: 6px; }
+    .chat-thinking-label {
+      font-size: 0.6875rem; color: var(--fg-3); cursor: pointer;
+      background: transparent; border: 0; padding: 0;
+    }
+    .chat-thinking-label:hover { color: var(--fg-2); }
+    .chat-thinking-content {
+      margin-top: 4px; border-left: 2px solid var(--bg-3);
+      padding: 4px 12px; color: var(--fg-3); font-size: 0.8125rem;
+      line-height: 1.5; white-space: pre-wrap;
+    }
+    .chat-stats { font-size: 0.6875rem; color: var(--fg-3); margin-top: 6px; }
+
     @media (max-width: 700px) {
       .history-rail { display: none; }
       .chat-topbar, .chat-controls, .chat-messages, .chat-input-area { padding-left: 16px; padding-right: 16px; }
@@ -266,6 +280,9 @@
       <div class="history-foot">
         <label class="toggle-row">
           <input type="checkbox" id="toggle-md"> Render markdown
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="toggle-thinking"> Show thinking
         </label>
         <div class="theme-btns" role="group">
           <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
@@ -331,6 +348,7 @@
   var historyListEl = document.getElementById('history-list');
   var historyNewBtn = document.getElementById('history-new');
   var toggleMd = document.getElementById('toggle-md');
+  var toggleThinking = document.getElementById('toggle-thinking');
 
   // Populate profile and model dropdowns from server-rendered JSON
   var profileNames = {{ profiles_json }};
@@ -356,9 +374,9 @@
   var statusPoll = null;
   var userScrolledUp = false;
 
-  // ---- Chat history (localStorage) ----
-  var STORAGE_KEY = 'lm-chat-history';
-  var chats = []; // [{id, title, messages:[{role,content}], system}]
+  // ---- Chat history (localStorage, per-origin) ----
+  var STORAGE_KEY = '';  // set after login with key suffix
+  var chats = [];
   var activeChat = null;
 
   function loadHistory() {
@@ -437,6 +455,16 @@
     renderMessages();
   });
 
+  // ---- Thinking toggle ----
+  var showThinking = false;
+  try { showThinking = localStorage.getItem('lm-chat-thinking') === '1'; } catch (e) {}
+  toggleThinking.checked = showThinking;
+  toggleThinking.addEventListener('change', function () {
+    showThinking = toggleThinking.checked;
+    try { localStorage.setItem('lm-chat-thinking', showThinking ? '1' : '0'); } catch (e) {}
+    renderMessages();
+  });
+
   // ---- Theme toggle ----
   var themeBtns = document.querySelectorAll('[data-theme-set]');
   function syncTheme() {
@@ -468,6 +496,7 @@
       })
       .then(function () {
         apiKey = key;
+        STORAGE_KEY = 'lm-chat-' + key.slice(-8);
         try { localStorage.setItem('lm-chat-key', key); } catch (e) {}
         loginScreen.style.display = 'none';
         chatScreen.style.display = 'flex';
@@ -492,6 +521,7 @@
 
   logoutBtn.addEventListener('click', function () {
     apiKey = '';
+    STORAGE_KEY = '';
     try { localStorage.removeItem('lm-chat-key'); } catch (e) {}
     if (statusPoll) clearInterval(statusPoll);
     chatScreen.style.display = 'none';
@@ -532,6 +562,15 @@
     }
   }
 
+  // ---- Thinking parser ----
+  function parseThinking(text) {
+    if (!text) return { thinking: '', content: text || '', done: true };
+    var m = text.match(/^<think>([\s\S]*?)<\/think>\s*([\s\S]*)$/);
+    if (m) return { thinking: m[1].trim(), content: m[2].trim(), done: true };
+    if (text.startsWith('<think>')) return { thinking: text.slice(7), content: '', done: false };
+    return { thinking: '', content: text, done: true };
+  }
+
   // ---- Rendering ----
   function setContent(el, text, isAI) {
     if (isAI && renderMarkdown && typeof marked !== 'undefined') {
@@ -554,26 +593,68 @@
     }
     for (var i = 0; i < activeChat.messages.length; i++) {
       var m = activeChat.messages[i];
-      var el = buildMsgEl(m.role, m.content);
+      var el = buildMsgEl(m.role, m.content, m.stats);
       messagesEl.appendChild(el.el);
     }
     userScrolledUp = false;
     scrollToBottom();
   }
 
-  function buildMsgEl(role, content) {
+  function buildMsgEl(role, content, msgStats) {
     var isUser = role === 'user';
     var div = document.createElement('div');
     div.className = 'chat-msg' + (isUser ? ' chat-msg--user' : '');
     var badge = document.createElement('div');
     badge.className = 'chat-msg-badge ' + (isUser ? 'chat-msg-badge--user' : 'chat-msg-badge--ai');
     badge.textContent = isUser ? 'You' : 'AI';
+
+    var wrap = document.createElement('div');
+    wrap.style.cssText = 'flex:1;min-width:0;';
+
+    // Thinking block (AI only)
+    var thinkingWrap = null;
+    var thinkingContentEl = null;
+    var parsed = !isUser ? parseThinking(content || '') : null;
+    if (!isUser && parsed && parsed.thinking && showThinking) {
+      thinkingWrap = document.createElement('div');
+      thinkingWrap.className = 'chat-thinking-wrap';
+      var tLabel = document.createElement('button');
+      tLabel.className = 'chat-thinking-label';
+      tLabel.textContent = '\u25B6 Thinking';
+      thinkingContentEl = document.createElement('div');
+      thinkingContentEl.className = 'chat-thinking-content';
+      thinkingContentEl.style.display = 'none';
+      thinkingContentEl.textContent = parsed.thinking;
+      tLabel.addEventListener('click', function () {
+        var hidden = thinkingContentEl.style.display === 'none';
+        thinkingContentEl.style.display = hidden ? 'block' : 'none';
+        tLabel.textContent = (hidden ? '\u25BC ' : '\u25B6 ') + 'Thinking';
+      });
+      thinkingWrap.appendChild(tLabel);
+      thinkingWrap.appendChild(thinkingContentEl);
+      wrap.appendChild(thinkingWrap);
+    }
+
     var bubble = document.createElement('div');
     bubble.className = 'chat-msg-text';
-    setContent(bubble, content || '', !isUser);
+    var displayContent = (!isUser && parsed) ? parsed.content : (content || '');
+    setContent(bubble, displayContent, !isUser);
+    wrap.appendChild(bubble);
+
+    // Stats line (AI only)
+    var statsEl = document.createElement('div');
+    statsEl.className = 'chat-stats';
+    if (!isUser && msgStats && msgStats.tok_s > 0) {
+      statsEl.textContent = msgStats.tok_s.toFixed(1) + ' tok/s';
+    } else {
+      statsEl.style.display = 'none';
+    }
+    wrap.appendChild(statsEl);
+
     div.appendChild(badge);
-    div.appendChild(bubble);
-    return { el: div, bubble: bubble };
+    div.appendChild(wrap);
+    return { el: div, bubble: bubble, statsEl: statsEl, wrap: wrap,
+             thinkingWrap: thinkingWrap, thinkingContentEl: thinkingContentEl };
   }
 
   // ---- Send ----
@@ -632,7 +713,10 @@
     var model = modelSelectEl.value;
     if (profile) headers['X-Llamanager-Model'] = profile;
     else if (model) headers['X-Llamanager-Model'] = model;
+
     var fullContent = '';
+    var tokenCount = 0;
+    var streamStart = 0;
 
     fetch('/v1/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body) })
       .then(function (resp) {
@@ -656,11 +740,47 @@
                 var parsed = JSON.parse(data);
                 var delta = parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
                 if (delta && delta.content) {
+                  if (!streamStart) streamStart = Date.now();
+                  tokenCount++;
                   fullContent += delta.content;
-                  // During streaming, always render as plain text for performance
-                  assistantEl.bubble.textContent = fullContent;
+                  // Parse thinking during stream
+                  var p = parseThinking(fullContent);
+                  if (p.thinking) {
+                    if (showThinking) {
+                      // Create thinking display on first detection
+                      if (!assistantEl.thinkingWrap) {
+                        assistantEl.thinkingWrap = document.createElement('div');
+                        assistantEl.thinkingWrap.className = 'chat-thinking-wrap';
+                        var tl = document.createElement('span');
+                        tl.className = 'chat-thinking-label';
+                        tl.style.cursor = 'default';
+                        assistantEl.thinkingWrap.appendChild(tl);
+                        assistantEl.thinkingContentEl = document.createElement('div');
+                        assistantEl.thinkingContentEl.className = 'chat-thinking-content';
+                        assistantEl.thinkingWrap.appendChild(assistantEl.thinkingContentEl);
+                        assistantEl.wrap.insertBefore(assistantEl.thinkingWrap, assistantEl.bubble);
+                        assistantEl._thinkLabel = tl;
+                      }
+                      assistantEl.thinkingContentEl.textContent = p.thinking;
+                      assistantEl._thinkLabel.textContent = p.done ? '\u25BC Thinking' : '\u25BC Thinking\u2026';
+                      assistantEl.bubble.textContent = p.content;
+                    } else {
+                      // Thinking hidden: show placeholder or main content
+                      assistantEl.bubble.textContent = p.done ? p.content : 'Thinking\u2026';
+                    }
+                  } else {
+                    assistantEl.bubble.textContent = fullContent;
+                  }
                   assistantEl.bubble.style.color = 'var(--fg-1)';
                   assistantEl.bubble.classList.add('chat-msg-text--plain');
+                  // Live tok/s
+                  if (streamStart) {
+                    var elapsed = (Date.now() - streamStart) / 1000;
+                    if (elapsed > 0.3) {
+                      assistantEl.statsEl.textContent = (tokenCount / elapsed).toFixed(1) + ' tok/s';
+                      assistantEl.statsEl.style.display = '';
+                    }
+                  }
                   scrollToBottom();
                 }
               } catch (e) {}
@@ -677,11 +797,17 @@
       });
 
     function finish() {
+      var msgStats = null;
+      if (streamStart && tokenCount > 0) {
+        var elapsed = (Date.now() - streamStart) / 1000;
+        msgStats = { tok_s: elapsed > 0 ? tokenCount / elapsed : 0 };
+      }
       if (fullContent) {
-        activeChat.messages.push({ role: 'assistant', content: fullContent });
-        // Re-render with markdown if enabled
-        setContent(assistantEl.bubble, fullContent, true);
-        assistantEl.bubble.style.color = '';
+        activeChat.messages.push({ role: 'assistant', content: fullContent, stats: msgStats });
+        // Re-render with proper formatting
+        var parent = assistantEl.el.parentNode;
+        var newEl = buildMsgEl('assistant', fullContent, msgStats);
+        parent.replaceChild(newEl.el, assistantEl.el);
         saveHistory();
       }
       streaming = false;
