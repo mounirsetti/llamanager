@@ -742,14 +742,123 @@ async def profiles_redirect(request: Request,
 
 # ---------- about ----------
 
+LLAMANAGER_VERSION = "0.1.0"
+GITHUB_REPO = "mounirsetti/llamanager"
+
+
+def _about_ctx(request: Request, **extra: Any) -> dict:
+    import datetime
+    ctx = _ctx(
+        request,
+        version=LLAMANAGER_VERSION,
+        year=datetime.date.today().year,
+        update_available=None,
+        latest_version=None,
+        update_check_error=None,
+        update_log=None,
+    )
+    ctx.update(extra)
+    return ctx
+
+
 @router.get("/about", response_class=HTMLResponse)
 async def about_view(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    import datetime
-    return templates.TemplateResponse(request, "about.html", _ctx(
-        request,
-        version="0.1.0",
-        year=datetime.date.today().year,
-    ))
+    return templates.TemplateResponse(request, "about.html", _about_ctx(request))
+
+
+@router.post("/about/check-update", response_class=HTMLResponse)
+async def about_check_update(request: Request,
+                             _: None = Depends(require_csrf)) -> HTMLResponse:
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+            headers={"User-Agent": "llamanager", "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            import json as _json
+            data = _json.loads(r.read())
+        latest = data.get("tag_name", "").lstrip("v")
+        if not latest:
+            raise ValueError("no tag_name in release")
+        is_newer = latest != LLAMANAGER_VERSION
+        return templates.TemplateResponse(request, "about.html", _about_ctx(
+            request,
+            update_available=is_newer,
+            latest_version=latest,
+        ))
+    except Exception as e:
+        return templates.TemplateResponse(request, "about.html", _about_ctx(
+            request,
+            update_check_error=f"Could not check for updates: {e}",
+        ))
+
+
+@router.post("/about/update", response_class=HTMLResponse)
+async def about_update(request: Request,
+                       _: None = Depends(require_csrf)) -> Response:
+    import subprocess, sys, os, signal
+
+    project_dir = Path(__file__).parent.parent
+    log_lines: list[str] = []
+
+    try:
+        # Step 1: git pull
+        result = subprocess.run(
+            ["git", "pull", "--ff-only"],
+            cwd=str(project_dir),
+            capture_output=True, text=True, timeout=60,
+        )
+        log_lines.append("$ git pull --ff-only")
+        log_lines.append(result.stdout.strip())
+        if result.stderr.strip():
+            log_lines.append(result.stderr.strip())
+        if result.returncode != 0:
+            raise RuntimeError(f"git pull failed (exit {result.returncode})")
+
+        # Step 2: pip install
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-e", "."],
+            cwd=str(project_dir),
+            capture_output=True, text=True, timeout=120,
+        )
+        log_lines.append("\n$ pip install -e .")
+        # Only show last few lines of pip output
+        pip_lines = result.stdout.strip().splitlines()
+        log_lines.extend(pip_lines[-5:])
+        if result.stderr.strip():
+            err_lines = result.stderr.strip().splitlines()
+            log_lines.extend(l for l in err_lines if "WARNING" not in l)
+        if result.returncode != 0:
+            raise RuntimeError(f"pip install failed (exit {result.returncode})")
+
+        log_lines.append("\nUpdate complete. Restarting...")
+
+        # Step 3: stop llama-server and restart
+        sm: ServerManager = request.app.state.sm
+        if sm.is_running:
+            await sm.stop()
+
+        # Send SIGTERM after a brief delay to let the response reach the browser
+        async def _delayed_restart():
+            await asyncio.sleep(1)
+            os.kill(os.getpid(), signal.SIGTERM)
+        asyncio.create_task(_delayed_restart())
+
+        return templates.TemplateResponse(request, "about.html", _about_ctx(
+            request,
+            update_log="\n".join(log_lines),
+            update_available=False,
+            latest_version="restarting",
+        ))
+
+    except Exception as e:
+        log_lines.append(f"\nError: {e}")
+        return templates.TemplateResponse(request, "about.html", _about_ctx(
+            request,
+            update_check_error=str(e),
+            update_log="\n".join(log_lines),
+        ))
 
 
 # ---------- chat ----------

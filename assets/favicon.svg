@@ -1,15 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" fill="none">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 284 160" fill="none">
   <defs>
     <style>
       @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,400,30&amp;display=swap');
     </style>
   </defs>
-  <text x="4" y="142"
+  <text x="4" y="130"
         font-family="'Fraunces', Georgia, serif"
         font-size="128"
         font-weight="400"
         font-variation-settings="'opsz' 96, 'SOFT' 30"
         letter-spacing="-1"
         fill="#181510">llam</text>
-  <circle cx="172" cy="120" r="12" fill="#cf2f13"/>
+  <circle cx="266" cy="110" r="14" fill="#cf2f13"/>
 </svg>

@@ -1,0 +1,8 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]: SVG text measurement (wait for font to load)
+    - img [ref=e4]:
+      - generic [ref=e5]: llamanager
+  - img [ref=e7]:
+    - generic [ref=e8]: llam
+  - generic [ref=e9]: "Full \"llamanager\" BBox: x=0.0 y=5.0 w=256.5 h=64.0 \"llam\" BBox: x=4.0 y=5.0 w=213.3 h=158.0"

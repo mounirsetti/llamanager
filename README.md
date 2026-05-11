@@ -1,26 +1,42 @@
-# llamanager
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/logo.svg">
+    <img alt="llamanager" src="assets/logo.svg" width="340">
+  </picture>
+</p>
 
-Queue AI work against a local model and reach it from anywhere on your network.
+<p align="center">
+  <strong>Queue AI work against a local model and reach it from anywhere on your network.</strong>
+</p>
 
-llamanager wraps `llama-server` (from llama.cpp) so a single GPU can serve a phone, a laptop, a CI job, and whatever else you point at it, without those clients trampling each other. Requests land on a per-origin priority queue, the loaded model swaps on demand, and the whole thing is reachable through one OpenAI-compatible endpoint.
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
+</p>
 
-## why this exists
+---
+
+llamanager wraps `llama-server` (from llama.cpp) so a single GPU can serve a phone, a laptop, a CI job, and whatever else you point at it — without those clients trampling each other. Requests land on a per-origin priority queue, the loaded model swaps on demand, and the whole thing is reachable through one OpenAI-compatible endpoint.
+
+## Why this exists
 
 `llama-server` is great at running a model. It is not great at being shared. Two processes hitting it directly will collide on context, you cannot swap models without restarting, and there is no auth. If you want your home workstation to act as a small private inference service for everything you own, you need a queue, a supervisor, a key per client, and a way to swap models without dropping in-flight work. That is what this is.
 
-## what you get
+## What you get
 
-- OpenAI-compatible `/v1/*` proxy, so any existing client library works
-- per-origin priority queue with cancellation, so a long batch job cannot block your editor
-- model lifecycle: start, stop, restart, hot-swap by model alias on a per-request header
-- crash supervisor with a 3-in-5-minutes restart cap, so a broken GGUF cannot melt the box
-- Hugging Face GGUF puller with disk-space checks
-- HTMX web UI that is usable from a phone over Tailscale
-- bearer-token auth, one key per origin, hashed with argon2id at rest
+- **OpenAI-compatible `/v1/*` proxy** — any existing client library works out of the box
+- **Per-origin priority queue** with cancellation, so a long batch job cannot block your editor
+- **Model lifecycle** — start, stop, restart, hot-swap by model alias on a per-request header
+- **Crash supervisor** with a 3-in-5-minutes restart cap, so a broken GGUF cannot melt the box
+- **Hugging Face GGUF puller** with disk-space checks
+- **HTMX web UI** that is usable from a phone over Tailscale
+- **Bearer-token auth** — one key per origin, hashed with argon2id at rest
 
 Full design notes are in [`llamanager-spec.md`](llamanager-spec.md).
 
-## platforms
+## Platforms
 
 | os      | status         | auto-start                                                                              | `llama-server` binary                          |
 |---------|----------------|-----------------------------------------------------------------------------------------|------------------------------------------------|
@@ -30,7 +46,7 @@ Full design notes are in [`llamanager-spec.md`](llamanager-spec.md).
 
 Python 3.11 or newer is required. The daemon uses `tomllib` and recent asyncio features.
 
-## prerequisites
+## Prerequisites
 
 llamanager requires `llama-server` — the inference engine from [llama.cpp](https://github.com/ggerganov/llama.cpp) — to be installed separately. llamanager manages and proxies it; it does not bundle the binary.
 
@@ -44,7 +60,7 @@ After installing llamanager, open **http://localhost:7200/ui/setup** to verify d
 
 If `llama-server` is already installed but not on `PATH`, you can point llamanager at it by setting `llama_server_binary` in `~/.llamanager/config.toml`, or using the path field on the Setup page.
 
-## install
+## Install
 
 ```bash
 python3 -m venv .venv                      # python 3.11 or newer required
@@ -68,7 +84,7 @@ You can also call it without activating the venv:
 .venv\Scripts\llamanager.exe serve         # windows
 ```
 
-## first run
+## First run
 
 ```bash
 llamanager init-config                     # writes ~/.llamanager/config.toml
@@ -98,7 +114,7 @@ Open the web UI at <http://localhost:7200/ui/login> and paste the bootstrap key.
 
 > **Exposing on a LAN or Tailnet.** llamanager binds to loopback by default because bearer tokens travel in cleartext. To listen elsewhere, set `[server].bind = "0.0.0.0"` (or a specific IP) in `config.toml` and put a TLS-terminating proxy in front of it (Caddy, nginx, or `tailscale serve`). Do not put plain HTTP on a hostile network.
 
-## quick dev uninstall & reinstall commands (macOS)
+## Quick dev uninstall & reinstall (macOS)
 
 ```bash
   deactivate
@@ -109,7 +125,7 @@ Open the web UI at <http://localhost:7200/ui/login> and paste the bootstrap key.
   llamanager serve
 ```
 
-## pulling a model
+## Pulling a model
 
 Either through the web UI (Models → "Pull a model") or the API:
 
@@ -122,7 +138,7 @@ curl -X POST http://localhost:7200/admin/models/pull \
 
 The response returns a `download_id`. Poll `GET /admin/downloads/{id}` for progress.
 
-## listing available models
+## Listing available models
 
 Query the OpenAI-compatible models endpoint to see what is on disk:
 
@@ -138,7 +154,7 @@ curl http://localhost:7200/admin/models \
   -H "Authorization: Bearer $ADMIN_KEY"
 ```
 
-## sending an inference request
+## Sending an inference request
 
 Any OpenAI-compatible client works. With `curl`:
 
@@ -153,7 +169,7 @@ curl -N http://localhost:7200/v1/chat/completions \
   }'
 ```
 
-### requesting a specific model
+### Requesting a specific model
 
 By default, requests use whatever model is currently loaded (or the default profile if nothing is running yet). To request a different model, add the `X-Llamanager-Model` header. llamanager will hot-swap automatically if needed.
 
@@ -181,7 +197,7 @@ Each origin's `allowed_models` setting restricts which models it can request. Se
 
 While a request is queued or a model swap is happening, llamanager emits SSE comment lines (`: status=swapping_model`, `: keepalive`) every 10 seconds so client connections do not time out.
 
-## chat in the browser
+## Chat in the browser
 
 llamanager includes a built-in chat interface at <http://localhost:7200/chat>. Any user with a valid origin API key can use it. No admin access required.
 
@@ -196,9 +212,9 @@ Features:
 
 The admin panel also has a chat page at `/ui/chat` that uses the admin session key automatically.
 
-## auto-start at boot or login
+## Auto-start at boot or login
 
-### macos, launchd
+### macOS — launchd
 
 ```bash
 llamanager install-launchd
@@ -211,7 +227,7 @@ To unload:
 launchctl unload -w ~/Library/LaunchAgents/com.llamanager.plist
 ```
 
-### linux, user systemd unit
+### Linux — user systemd unit
 
 ```bash
 llamanager install-systemd
@@ -222,11 +238,11 @@ journalctl --user -u llamanager.service -f
 
 For a system-wide service, copy the generated unit file to `/etc/systemd/system/` and use `sudo systemctl ...`.
 
-### windows
+### Windows
 
 Two options. Pick a real Windows service if you want it always-on with no logon required, or a Task Scheduler entry if you want fewer dependencies.
 
-#### option A: real Windows service (recommended for headless boxes)
+#### Option A — real Windows service (recommended for headless boxes)
 
 Needs the `pywin32` extra and an elevated PowerShell or cmd.
 
@@ -255,7 +271,7 @@ llamanager install-windows-service --username "DOMAIN\svc-llamanager" --password
 
 > **Important:** before installing the service for the first time, run `llamanager serve` once interactively so the bootstrap admin key prints to a console you can copy from. The service has no stdout. If it generates the bootstrap key, the key is gone.
 
-#### option B: Task Scheduler (no extra deps, logon-triggered)
+#### Option B — Task Scheduler (no extra deps, logon-triggered)
 
 ```powershell
 llamanager install-windows
@@ -269,7 +285,7 @@ The task is logon-triggered (closer to the macOS LaunchAgent than to a system se
 schtasks /Delete /TN llamanager /F
 ```
 
-## cli
+## CLI
 
 Daemon and installer commands:
 
@@ -286,7 +302,7 @@ llamanager remove-windows-service
 llamanager --config /path/to/config.toml <subcommand>
 ```
 
-### admin verbs (drive a running daemon)
+### Admin verbs (drive a running daemon)
 
 These talk to a running `llamanager serve` over `/admin/*`, so an agent or
 shell script can manage models, queue, and origins without a custom client.
@@ -346,7 +362,7 @@ llamanager queue list
 llamanager server swap --profile qwen35-4b-default
 ```
 
-## configuration
+## Configuration
 
 Lives at `~/.llamanager/config.toml` (windows: `%USERPROFILE%\.llamanager\config.toml`). Hot-reload with `POST /admin/reload` or `SIGHUP` (POSIX only). Full schema is in spec §7.
 
@@ -369,7 +385,7 @@ model = "unsloth/Qwen3.5-4B-GGUF/Q4_K_M.gguf"
 args = { ctx-size = 16384, temp = 0.7, alias = "qwen3.5-4b" }
 ```
 
-## api
+## API
 
 | path        | purpose                                 | auth               |
 |-------------|-----------------------------------------|--------------------|
@@ -380,7 +396,7 @@ args = { ctx-size = 16384, temp = 0.7, alias = "qwen3.5-4b" }
 
 Full endpoint list is in spec §5.
 
-## filesystem layout
+## Filesystem layout
 
 ```
 ~/.llamanager/
@@ -397,7 +413,7 @@ Full endpoint list is in spec §5.
 
 On windows, `~` resolves to `%USERPROFILE%`, e.g. `C:\Users\<you>\.llamanager`.
 
-## troubleshooting
+## Troubleshooting
 
 **`llama-server: command not found` on launch.** The binary is not on `PATH`. Either add it, or set `[server].llama_server_binary` in `config.toml` to the absolute path.
 

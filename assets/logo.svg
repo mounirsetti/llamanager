@@ -1,15 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 52" fill="none">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 272 64" fill="none">
   <defs>
     <style>
       @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,400,30&amp;display=swap');
     </style>
   </defs>
-  <text x="0" y="46"
+  <text x="0" y="54"
         font-family="'Fraunces', Georgia, serif"
         font-size="52"
         font-weight="400"
         font-variation-settings="'opsz' 96, 'SOFT' 30"
         letter-spacing="-0.8"
         fill="#181510">llamanager</text>
-  <circle cx="230" cy="36" r="5" fill="#cf2f13"/>
+  <circle cx="261" cy="44" r="5.5" fill="#cf2f13"/>
 </svg>
