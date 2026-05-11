@@ -279,6 +279,23 @@ def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
     info["ram_available_gb"] = round(mem.available / (1024**3), 1)
     info["ram_used_pct"] = mem.percent
 
+    # Top 5 memory-consuming processes
+    try:
+        procs = []
+        for p in psutil.process_iter(["pid", "name", "memory_info"]):
+            try:
+                mi = p.info["memory_info"]
+                if mi is None:
+                    continue
+                mem_mb = round(mi.rss / (1024**2), 1)
+                procs.append({"name": p.info["name"], "pid": p.info["pid"], "mem_mb": mem_mb})
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, AttributeError):
+                continue
+        procs.sort(key=lambda x: x["mem_mb"], reverse=True)
+        info["top_mem_procs"] = procs[:5]
+    except Exception:
+        info["top_mem_procs"] = []
+
     # Swap
     swap = psutil.swap_memory()
     info["swap_total_gb"] = round(swap.total / (1024**3), 1)

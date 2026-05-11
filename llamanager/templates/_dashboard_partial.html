@@ -126,6 +126,19 @@
       <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">Close other apps to free RAM</div>
       {% endif %}
     </div>
+
+    {# Top memory consumers #}
+    {% if sysinfo.top_mem_procs %}
+    <div style="background: var(--bg-0); padding: 16px 18px;">
+      <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 8px;">Top memory usage</div>
+      {% for proc in sysinfo.top_mem_procs %}
+      <div style="display: flex; justify-content: space-between; font-size: 0.8125rem; color: var(--fg-1); padding: 2px 0;" title="PID {{ proc.pid }}">
+        <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 12px;">{{ proc.name }}</span>
+        <span style="white-space: nowrap; flex-shrink: 0;">{% if proc.mem_mb >= 1024 %}{{ (proc.mem_mb / 1024) | round(1) }} GB{% else %}{{ proc.mem_mb | round(0) | int }} MB{% endif %}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
   </div>
 </section>
 {% endif %}
