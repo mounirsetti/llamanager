@@ -1,0 +1,12 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]: logo.svg (light)
+    - img [ref=e4]
+  - generic [ref=e5]:
+    - generic [ref=e6]: logo-dark.svg (on dark background)
+    - img [ref=e8]
+  - generic [ref=e9]:
+    - generic [ref=e10]: favicon.svg (32x32 / 64x64 / 128x128)
+    - img [ref=e11]
+    - img [ref=e12]
+    - img [ref=e13]

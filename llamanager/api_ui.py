@@ -740,6 +740,18 @@ async def profiles_redirect(request: Request,
     return RedirectResponse("/ui/launch", status_code=301)
 
 
+# ---------- about ----------
+
+@router.get("/about", response_class=HTMLResponse)
+async def about_view(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    import datetime
+    return templates.TemplateResponse(request, "about.html", _ctx(
+        request,
+        version="0.1.0",
+        year=datetime.date.today().year,
+    ))
+
+
 # ---------- chat ----------
 
 @router.get("/chat", response_class=HTMLResponse)
@@ -871,6 +883,31 @@ async def setup_open_config(request: Request,
     cfg = request.app.state.cfg
     _open_path(str(cfg.config_path))
     return RedirectResponse("/ui/setup", status_code=303)
+
+
+@router.post("/setup/restart", response_class=HTMLResponse)
+async def setup_restart(request: Request,
+                        _: None = Depends(require_csrf)) -> Response:
+    """Restart the llamanager process.
+
+    Stops llama-server cleanly, then exits with code 0. When running under
+    a service manager (launchd, systemd, Task Scheduler), the manager
+    restarts the process automatically. When running interactively, the
+    user will need to run `llamanager serve` again.
+    """
+    import os, signal
+    sm: ServerManager = request.app.state.sm
+    # Stop llama-server first so it exits cleanly
+    if sm.is_running:
+        await sm.stop()
+    log.info("restart requested via UI, shutting down")
+    # Send SIGTERM to ourselves — uvicorn handles this gracefully
+    os.kill(os.getpid(), signal.SIGTERM)
+    return HTMLResponse(
+        "<p style='padding:40px;font-family:sans-serif;color:#999;text-align:center;'>"
+        "Restarting llamanager. This page will reload automatically.</p>"
+        "<script>setTimeout(function(){location.href='/ui/';},5000);</script>",
+    )
 
 
 # ---------- launch ----------

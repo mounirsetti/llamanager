@@ -1,0 +1,16 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]: Full logo (light)
+    - generic [ref=e5]: llamanager
+  - generic [ref=e7]:
+    - generic [ref=e8]: Full logo (dark)
+    - generic [ref=e11]: llamanager
+  - generic [ref=e13]:
+    - generic [ref=e14]: Favicon mark â€” 128px
+    - generic [ref=e16]: llam
+  - generic [ref=e18]:
+    - generic [ref=e19]: Favicon mark â€” 64px / 32px / 16px (scaled down)
+    - generic [ref=e20]:
+      - generic [ref=e22]: llam
+      - generic [ref=e25]: llam
+      - generic [ref=e28]: llam

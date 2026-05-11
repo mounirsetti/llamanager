@@ -87,7 +87,7 @@
       <label class="lm-checkbox-row">
         <input type="checkbox" name="enabled" value="on" {% if autorestart %}checked{% endif %}
                onchange="this.form.submit()">
-        Auto-restart on crash (up to {{ max_restarts }} restarts per window)
+        Auto-restart on crash (retries with increasing cooldowns if repeated failures)
       </label>
     </form>
   </div>

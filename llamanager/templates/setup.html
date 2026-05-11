@@ -118,4 +118,23 @@
     </button>
   </form>
 </section>
+
+{# ---- Section 4: Restart llamanager ---- #}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Restart llamanager</span>
+  </header>
+
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
+    Restart the llamanager daemon. This stops llama-server, reloads config.toml, and starts fresh. If autolaunch is enabled, the default profile will start automatically.
+  </p>
+
+  <form method="post" action="/ui/setup/restart">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="lm-btn lm-btn--danger"
+            data-confirm="Restart llamanager? This will briefly disconnect all clients and stop llama-server.">
+      Restart llamanager
+    </button>
+  </form>
+</section>
 {% endblock %}

@@ -181,6 +181,21 @@ Each origin's `allowed_models` setting restricts which models it can request. Se
 
 While a request is queued or a model swap is happening, llamanager emits SSE comment lines (`: status=swapping_model`, `: keepalive`) every 10 seconds so client connections do not time out.
 
+## chat in the browser
+
+llamanager includes a built-in chat interface at <http://localhost:7200/chat>. Any user with a valid origin API key can use it. No admin access required.
+
+Features:
+
+- streaming responses with real-time token display
+- chat history stored in the browser (localStorage), with multiple conversations
+- system prompt configuration
+- profile and model selection per conversation
+- markdown rendering toggle
+- dark/light theme
+
+The admin panel also has a chat page at `/ui/chat` that uses the admin session key automatically.
+
 ## auto-start at boot or login
 
 ### macos, launchd

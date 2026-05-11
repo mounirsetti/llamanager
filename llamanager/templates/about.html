@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% set active = 'about' %}
+{% block title %}About - llamanager{% endblock %}
+{% block content %}
+<div class="lm-eyebrow">llamanager</div>
+<h1 class="lm-page-title">About</h1>
+
+{# ---- Project ---- #}
+<section class="lm-section" style="margin-top: 32px;">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Project</span>
+  </header>
+
+  <p style="font-size: 0.9375rem; color: var(--fg-1); max-width: 62ch; line-height: 1.7; margin-bottom: 20px;">
+    llamanager is a single-host manager and queueing proxy for
+    <a href="https://github.com/ggerganov/llama.cpp" style="color: var(--accent);">llama-server</a>.
+    It wraps a local inference engine so a single GPU can serve multiple clients through one
+    OpenAI-compatible endpoint, with per-origin priority queuing, hot model swaps,
+    crash supervision, and a web UI.
+  </p>
+
+  <div style="display: grid; grid-template-columns: max-content 1fr; gap: 6px 24px; font-size: 0.875rem; color: var(--fg-1); max-width: 480px;">
+    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Version</span>
+    <code>{{ version }}</code>
+
+    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Author</span>
+    <span>Mounir Ould Setti &middot; <a href="https://github.com/mounirsetti" style="color: var(--accent);">github.com/mounirsetti</a></span>
+
+    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Company</span>
+    <span>SoulThread Technologies &middot; <a href="https://soulthread.group" style="color: var(--accent);">soulthread.group</a></span>
+
+    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Source</span>
+    <a href="https://github.com/mounirsetti/llamanager" style="color: var(--accent);">github.com/mounirsetti/llamanager</a>
+
+    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">License</span>
+    <span>Apache License 2.0</span>
+  </div>
+</section>
+
+{# ---- License ---- #}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">License</span>
+    <span class="lm-section-meta">Apache 2.0</span>
+  </header>
+
+  <div style="font-size: 0.8125rem; color: var(--fg-2); max-width: 62ch; line-height: 1.7;">
+    <p style="margin: 0 0 14px;">
+      Copyright {{ year }} Mounir Ould Setti / SoulThread Technologies
+    </p>
+    <p style="margin: 0 0 14px;">
+      Licensed under the Apache License, Version 2.0 (the "License");
+      you may not use this file except in compliance with the License.
+      You may obtain a copy of the License at
+    </p>
+    <p style="margin: 0 0 14px;">
+      <a href="http://www.apache.org/licenses/LICENSE-2.0" style="color: var(--accent);">http://www.apache.org/licenses/LICENSE-2.0</a>
+    </p>
+    <p style="margin: 0;">
+      Unless required by applicable law or agreed to in writing, software
+      distributed under the License is distributed on an "AS IS" basis,
+      without warranties or conditions of any kind, either express or implied.
+      See the License for the specific language governing permissions and
+      limitations under the License.
+    </p>
+  </div>
+</section>
+
+{# ---- Credits ---- #}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Credits</span>
+  </header>
+
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 62ch; margin-bottom: 18px;">
+    llamanager is built on top of excellent open-source projects.
+  </p>
+
+  <div style="display: grid; grid-template-columns: max-content 1fr; gap: 6px 24px; font-size: 0.875rem; color: var(--fg-1); max-width: 520px;">
+    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Inference</span>
+    <a href="https://github.com/ggerganov/llama.cpp" style="color: var(--accent);">llama.cpp / llama-server</a>
+
+    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Web framework</span>
+    <a href="https://fastapi.tiangolo.com" style="color: var(--accent);">FastAPI</a>
+
+    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Templates</span>
+    <a href="https://jinja.palletsprojects.com" style="color: var(--accent);">Jinja2</a>
+
+    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Interactivity</span>
+    <a href="https://htmx.org" style="color: var(--accent);">HTMX</a>
+
+    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Model hub</span>
+    <a href="https://huggingface.co" style="color: var(--accent);">Hugging Face (huggingface_hub)</a>
+
+    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Typography</span>
+    <span><a href="https://fonts.google.com/specimen/Fraunces" style="color: var(--accent);">Fraunces</a>, <a href="https://fonts.google.com/specimen/Inter" style="color: var(--accent);">Inter</a>, <a href="https://fonts.google.com/specimen/JetBrains+Mono" style="color: var(--accent);">JetBrains Mono</a></span>
+  </div>
+</section>
+{% endblock %}
