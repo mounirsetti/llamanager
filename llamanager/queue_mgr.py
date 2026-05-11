@@ -68,7 +68,8 @@ class QueueManager:
         self.sm = sm
         self._heap: list[tuple[tuple[int, float, int], QueuedRequest]] = []
         self._by_id: dict[str, QueuedRequest] = {}
-        self._in_flight: QueuedRequest | None = None
+        self._in_flight: dict[str, QueuedRequest] = {}
+        self._cancelled_in_heap: int = 0
         self._cv = asyncio.Condition()
         self._seq = itertools.count()
         self._dispatcher_task: asyncio.Task[None] | None = None
@@ -92,7 +93,8 @@ class QueueManager:
     # ---- enqueue / cancel ----
     async def enqueue(self, *, origin: Origin, model_required: str | None,
                       ) -> QueuedRequest:
-        if len(self._heap) + (1 if self._in_flight else 0) >= self.cfg.max_queue_depth:
+        active_pending = len(self._heap) - self._cancelled_in_heap
+        if active_pending + len(self._in_flight) >= self.cfg.max_queue_depth:
             raise QueueFull("queue is full")
         req = QueuedRequest(
             request_id=str(uuid.uuid4()),
@@ -122,6 +124,8 @@ class QueueManager:
             return True
         req.cancel.set()
         if req.status in ("queued", "swapping_model"):
+            if req.status == "queued":
+                self._cancelled_in_heap += 1
             req.status = "cancelled"
         if not req.ready.is_set():
             req.ready.set()  # wake the waiter so it can observe cancel
@@ -154,9 +158,10 @@ class QueueManager:
             if req.status == "cancelled":
                 continue
             pending.append(_request_public(req))
+        in_flight = [_request_public(r) for r in self._in_flight.values()]
         return {
             "depth": len(pending),
-            "in_flight": _request_public(self._in_flight) if self._in_flight else None,
+            "in_flight": in_flight,
             "pending": pending,
             "paused": self._paused,
         }
@@ -169,8 +174,10 @@ class QueueManager:
         """Called by the request handler. Returns when it's safe to proxy.
 
         Raises Cancelled if the request was cancelled before its turn.
-        Raises RuntimeError if the dispatcher errored out (e.g. swap failed)."""
-        await req.ready.wait()
+        Raises RuntimeError if the dispatcher errored out (e.g. swap failed).
+        Raises asyncio.TimeoutError if queue_timeout_s is exceeded."""
+        timeout = self.cfg.queue_timeout_s if self.cfg.queue_timeout_s > 0 else None
+        await asyncio.wait_for(req.ready.wait(), timeout=timeout)
         if req.cancel.is_set():
             raise Cancelled()
         if req.error:
@@ -197,27 +204,66 @@ class QueueManager:
                                           finished_at=req.finished_at,
                                           prompt_tokens=prompt_tokens,
                                           completion_tokens=completion_tokens)
-        # release dispatcher slot
-        try:
+        # Release dispatcher slot only if one was actually acquired (i.e.,
+        # the request progressed past "queued" — it was dispatched).
+        if req.request_id in self._in_flight or req.status in (
+            "running", "swapping_model", "done", "failed",
+        ):
             self._slot.release()
-        except ValueError:
-            pass
         # remove from registry
         self._by_id.pop(req.request_id, None)
-        if self._in_flight is req:
-            self._in_flight = None
+        self._in_flight.pop(req.request_id, None)
 
     # ---- dispatcher ----
+    def _pop_next(self) -> QueuedRequest | None:
+        """Pop the next request, applying starvation protection.
+
+        If max_wait_s > 0, any request waiting longer than that threshold
+        is promoted ahead of higher-priority items (oldest-starved first).
+        Cancelled entries are drained as encountered.
+        """
+        now = time.time()
+        max_wait = self.cfg.max_wait_s
+
+        # Check for starved requests when anti-starvation is enabled.
+        if max_wait > 0:
+            starved_idx: int | None = None
+            starved_at: float = now  # track the oldest starved entry
+            for i, (_, r) in enumerate(self._heap):
+                if r.cancel.is_set() or r.status == "cancelled":
+                    continue
+                wait = now - r.enqueued_at
+                if wait > max_wait and r.enqueued_at < starved_at:
+                    starved_at = r.enqueued_at
+                    starved_idx = i
+            if starved_idx is not None:
+                _, req = self._heap[starved_idx]
+                # Remove from heap and re-heapify.
+                self._heap[starved_idx] = self._heap[-1]
+                self._heap.pop()
+                if self._heap:
+                    heapq.heapify(self._heap)
+                return req
+
+        # Normal priority-ordered pop, skipping cancelled entries.
+        while self._heap:
+            _, req = heapq.heappop(self._heap)
+            if req.cancel.is_set() or req.status == "cancelled":
+                self._cancelled_in_heap = max(0, self._cancelled_in_heap - 1)
+                continue
+            return req
+        return None
+
     async def _dispatch_loop(self) -> None:
         while True:
             try:
                 async with self._cv:
                     while self._paused or not self._heap:
                         await self._cv.wait()
-                    _, req = heapq.heappop(self._heap)
-                    if req.cancel.is_set() or req.status == "cancelled":
+                    req = self._pop_next()
+                    if req is None:
                         continue
-                # Acquire the single slot before deciding on swap.
+                # Acquire slot before deciding on swap.
                 await self._slot.acquire()
                 try:
                     await self._prepare_and_release(req)
@@ -226,7 +272,8 @@ class QueueManager:
                     req.error = str(e)
                     req.status = "failed"
                     req.ready.set()
-                    self._slot.release()
+                    # Don't release slot here — the handler owns slot
+                    # release via mark_in_flight_done in its finally block.
             except asyncio.CancelledError:
                 return
             except Exception:
@@ -284,7 +331,7 @@ class QueueManager:
                                "duration_s": round(time.time() - t0, 2)})
 
         # Mark in-flight and signal handler.
-        self._in_flight = req
+        self._in_flight[req.request_id] = req
         req.status = "running"
         req.started_at = time.time()
         self.db.update_request_status(req.request_id, "running",

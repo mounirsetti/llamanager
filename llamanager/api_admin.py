@@ -42,6 +42,7 @@ async def status(request: Request, _: Origin = Depends(admin_origin)) -> JSONRes
     base.update({
         "queue_depth": snap["depth"],
         "in_flight": snap["in_flight"],
+        "in_flight_count": len(snap["in_flight"]),
         "paused": snap["paused"],
     })
     return JSONResponse(base)

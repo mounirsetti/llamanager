@@ -24,6 +24,11 @@ llama_server_binary = "llama-server"
 llama_server_port = 7201
 data_dir = "~/.llamanager"
 
+# HTTPS: a locally-trusted certificate is auto-generated on first run
+# via mkcert (brew install mkcert). No browser warnings.
+ssl_certfile = "~/.llamanager/tls/cert.pem"
+ssl_keyfile = "~/.llamanager/tls/key.pem"
+
 [defaults]
 model = ""
 profile = ""
@@ -41,6 +46,8 @@ hf_token_env = "HF_TOKEN"
 [queue]
 max_concurrent = 1
 max_queue_depth = 200
+max_wait_s = 300
+queue_timeout_s = 300
 """
 
 
@@ -76,8 +83,13 @@ class Config:
     max_disk_gb: int = 80
     hf_token_env: str = "HF_TOKEN"
 
+    ssl_certfile: str = "~/.llamanager/tls/cert.pem"
+    ssl_keyfile: str = "~/.llamanager/tls/key.pem"
+
     max_concurrent: int = 1
     max_queue_depth: int = 200
+    max_wait_s: int = 300
+    queue_timeout_s: int = 300
 
     profiles: dict[str, Profile] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
@@ -134,6 +146,8 @@ def load_config(path: Path | None = None) -> Config:
         llama_server_binary=server.get("llama_server_binary", "llama-server"),
         llama_server_port=int(server.get("llama_server_port", 7201)),
         data_dir=expand(server.get("data_dir", "~/.llamanager")),
+        ssl_certfile=server.get("ssl_certfile", "~/.llamanager/tls/cert.pem"),
+        ssl_keyfile=server.get("ssl_keyfile", "~/.llamanager/tls/key.pem"),
         default_model=defaults.get("model", ""),
         default_profile=defaults.get("profile", ""),
         default_origin_priority=int(defaults.get("origin_priority", 50)),
@@ -145,6 +159,8 @@ def load_config(path: Path | None = None) -> Config:
         hf_token_env=dl.get("hf_token_env", "HF_TOKEN"),
         max_concurrent=int(q.get("max_concurrent", 1)),
         max_queue_depth=int(q.get("max_queue_depth", 200)),
+        max_wait_s=int(q.get("max_wait_s", 300)),
+        queue_timeout_s=int(q.get("queue_timeout_s", 300)),
         raw=raw,
         path=cfg_path,
     )

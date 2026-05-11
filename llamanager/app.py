@@ -11,7 +11,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from .api_admin import router as admin_router
 from .api_ui import SessionStore, router as ui_router
@@ -24,6 +24,7 @@ from .registry import Registry
 from .server_manager import ServerManager
 from .supervisor import Supervisor
 from .llama_installer import detect_binary, InstallState, FORKS
+from . import __version__
 
 log = logging.getLogger(__name__)
 
@@ -184,7 +185,7 @@ def create_app(config_path: Path | None = None,
             await sm.stop()
             db.close()
 
-    app = FastAPI(title="llamanager", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="llamanager", version=__version__, lifespan=lifespan)
     app.state.cfg = cfg
     app.state.db = db
     app.state.auth = auth
@@ -246,13 +247,89 @@ def create_app(config_path: Path | None = None,
 
     _assets_dir = Path(__file__).resolve().parent.parent / "assets"
 
-    @app.get("/favicon.ico", include_in_schema=False)
-    async def favicon_ico():
-        return FileResponse(_assets_dir / "favicon.ico", media_type="image/x-icon")
-
     @app.get("/favicon.svg", include_in_schema=False)
     async def favicon_svg():
         return FileResponse(_assets_dir / "favicon.svg", media_type="image/svg+xml")
+
+    @app.get("/logo.svg", include_in_schema=False)
+    async def logo_svg():
+        return FileResponse(_assets_dir / "logo.svg", media_type="image/svg+xml")
+
+    @app.get("/logo-dark.svg", include_in_schema=False)
+    async def logo_dark_svg():
+        return FileResponse(_assets_dir / "logo-dark.svg", media_type="image/svg+xml")
+
+    # ---- PWA support ----
+
+    @app.get("/manifest.json", include_in_schema=False)
+    async def pwa_manifest():
+        import json as _json
+        manifest = {
+            "name": "llamanager",
+            "short_name": "llamanager",
+            "description": "Local LLM inference manager",
+            "start_url": "/ui/",
+            "scope": "/",
+            "display": "standalone",
+            "background_color": "#201e17",
+            "theme_color": "#201e17",
+            "icons": [
+                {"src": "/favicon.svg", "type": "image/svg+xml", "sizes": "any"},
+                {"src": "/icon-192.png", "type": "image/png", "sizes": "192x192"},
+                {"src": "/icon-512.png", "type": "image/png", "sizes": "512x512"},
+            ],
+        }
+        return Response(
+            content=_json.dumps(manifest),
+            media_type="application/manifest+json",
+        )
+
+    @app.get("/sw.js", include_in_schema=False)
+    async def service_worker():
+        sw_js = (
+            "// llamanager service worker — enables PWA install\n"
+            "self.addEventListener('install', e => self.skipWaiting());\n"
+            "self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));\n"
+            "self.addEventListener('fetch', e => e.respondWith(fetch(e.request)));\n"
+        )
+        return Response(content=sw_js, media_type="application/javascript",
+                        headers={"Service-Worker-Allowed": "/"})
+
+    def _make_png_icon(size: int) -> bytes:
+        """Generate a solid-color PNG icon with the brand red (#cf2f13)."""
+        import struct
+        import zlib
+        r, g, b = 207, 47, 19  # brand accent
+        # PNG signature
+        sig = b'\x89PNG\r\n\x1a\n'
+        # IHDR
+        ihdr_data = struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0)
+        ihdr = _png_chunk(b'IHDR', ihdr_data)
+        # IDAT — solid colour rows
+        row = bytes([0] + [r, g, b] * size)
+        compressed = zlib.compress(row * size)
+        idat = _png_chunk(b'IDAT', compressed)
+        iend = _png_chunk(b'IEND', b'')
+        return sig + ihdr + idat + iend
+
+    def _png_chunk(ctype: bytes, data: bytes) -> bytes:
+        import struct, zlib as _zlib
+        raw = ctype + data
+        return struct.pack('>I', len(data)) + raw + struct.pack('>I', _zlib.crc32(raw) & 0xffffffff)
+
+    _icon_cache: dict[int, bytes] = {}
+
+    @app.get("/icon-192.png", include_in_schema=False)
+    async def icon_192():
+        if 192 not in _icon_cache:
+            _icon_cache[192] = _make_png_icon(192)
+        return Response(content=_icon_cache[192], media_type="image/png")
+
+    @app.get("/icon-512.png", include_in_schema=False)
+    async def icon_512():
+        if 512 not in _icon_cache:
+            _icon_cache[512] = _make_png_icon(512)
+        return Response(content=_icon_cache[512], media_type="image/png")
 
     @app.get("/health")
     async def health() -> JSONResponse:
@@ -282,7 +359,7 @@ def create_app(config_path: Path | None = None,
 
     @app.get("/")
     async def root() -> JSONResponse:
-        return JSONResponse({"name": "llamanager", "version": "0.1.0",
+        return JSONResponse({"name": "llamanager", "version": __version__,
                              "ui": "/ui/", "chat": "/chat"})
 
     return app

@@ -170,7 +170,7 @@
   <header class="lm-section-head">
     <span class="lm-section-marker">Queue</span>
     <span class="lm-section-meta">
-      {{ queue.depth }} pending{% if queue.in_flight %} · 1 in flight{% endif %}
+      {{ queue.depth }} pending{% if queue.in_flight %} · {{ queue.in_flight|length }} in flight{% endif %}
     </span>
   </header>
 
@@ -178,14 +178,16 @@
   <div class="lm-grid" style="margin-bottom: 18px;">
     <div class="lm-col-8">
       <div class="lm-eyebrow">In flight</div>
-      <div style="display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; font-size: 0.9375rem; color: var(--fg-1);">
-        <code>{{ queue.in_flight.id[:8] }}</code>
+      {% for r in queue.in_flight %}
+      <div style="display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; font-size: 0.9375rem; color: var(--fg-1);{% if not loop.last %} margin-bottom: 8px;{% endif %}">
+        <code>{{ r.id[:8] }}</code>
         <span style="color: var(--fg-2);">from</span>
-        <strong style="color: var(--fg-0); font-weight: 500;">{{ queue.in_flight.origin }}</strong>
+        <strong style="color: var(--fg-0); font-weight: 500;">{{ r.origin }}</strong>
         <span style="color: var(--fg-2);">·</span>
-        <code>{{ queue.in_flight.model_required or '(loaded)' }}</code>
-        <span class="lm-pill lm-pill--{{ queue.in_flight.status }}">{{ queue.in_flight.status }}</span>
+        <code>{{ r.model_required or '(loaded)' }}</code>
+        <span class="lm-pill lm-pill--{{ r.status }}">{{ r.status }}</span>
       </div>
+      {% endfor %}
     </div>
   </div>
   {% endif %}

@@ -2,7 +2,7 @@
   <header class="lm-section-head">
     <span class="lm-section-marker">Status</span>
     <span class="lm-section-meta">
-      {{ queue.depth }} pending{% if queue.in_flight %} · 1 in flight{% endif %}{% if queue.paused %} · <span class="lm-pill lm-pill--paused">paused</span>{% endif %}
+      {{ queue.depth }} pending{% if queue.in_flight %} · {{ queue.in_flight|length }} in flight{% endif %}{% if queue.paused %} · <span class="lm-pill lm-pill--paused">paused</span>{% endif %}
     </span>
   </header>
 
@@ -13,20 +13,22 @@
       <tr><th>Id</th><th>Origin</th><th>Prio</th><th>Model</th><th>Status</th><th></th></tr>
     </thead>
     <tbody>
+    {% for r in queue.in_flight %}
       <tr>
-        <td data-label="Id"><code>{{ queue.in_flight.id[:12] }}</code></td>
-        <td data-label="Origin">{{ queue.in_flight.origin }}</td>
-        <td data-label="Prio" class="num">{{ queue.in_flight.priority }}</td>
-        <td data-label="Model"><code>{{ queue.in_flight.model_required or '(loaded)' }}</code></td>
-        <td data-label="Status"><span class="lm-pill lm-pill--{{ queue.in_flight.status }}">{{ queue.in_flight.status }}</span></td>
+        <td data-label="Id"><code>{{ r.id[:12] }}</code></td>
+        <td data-label="Origin">{{ r.origin }}</td>
+        <td data-label="Prio" class="num">{{ r.priority }}</td>
+        <td data-label="Model"><code>{{ r.model_required or '(loaded)' }}</code></td>
+        <td data-label="Status"><span class="lm-pill lm-pill--{{ r.status }}">{{ r.status }}</span></td>
         <td class="actions" data-label="">
-          <form hx-post="/ui/queue/{{ queue.in_flight.id }}/cancel"
+          <form hx-post="/ui/queue/{{ r.id }}/cancel"
                 hx-confirm="Cancel in-flight request?"
                 hx-target="closest div" hx-swap="outerHTML">
             <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Cancel</button>
           </form>
         </td>
       </tr>
+    {% endfor %}
     </tbody>
   </table>
   {% endif %}

@@ -14,13 +14,78 @@ from .config import expand, load_config, write_default_config
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
     from .app import create_app
+    from .config import expand
 
     cfg_path = Path(args.config) if args.config else None
     app = create_app(cfg_path)
     cfg = app.state.cfg
+
+    ssl_certfile = args.ssl_certfile or cfg.ssl_certfile or None
+    ssl_keyfile = args.ssl_keyfile or cfg.ssl_keyfile or None
+
+    # Auto-generate a locally-trusted cert via mkcert if the configured
+    # cert files don't exist yet (first run).
+    if ssl_certfile and ssl_keyfile:
+        cert_path = expand(ssl_certfile)
+        key_path = expand(ssl_keyfile)
+        if not cert_path.exists() or not key_path.exists():
+            if _auto_generate_cert(cert_path, key_path):
+                print(f"  certificate: {cert_path}")
+                print(f"  private key: {key_path}")
+                print()
+            else:
+                ssl_certfile = None
+                ssl_keyfile = None
+        ssl_certfile = str(cert_path) if ssl_certfile else None
+        ssl_keyfile = str(key_path) if ssl_keyfile else None
+
     uvicorn.run(app, host=args.host or cfg.bind, port=args.port or cfg.port,
-                log_level=args.log_level)
+                log_level=args.log_level,
+                ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
     return 0
+
+
+def _auto_generate_cert(cert_path: Path, key_path: Path,
+                        extra_hosts: list[str] | None = None) -> bool:
+    """Generate a locally-trusted cert using mkcert. Returns True on success."""
+    import subprocess
+    import shutil
+    if not shutil.which("mkcert"):
+        print("  mkcert is not installed. Install it for automatic HTTPS:",
+              file=sys.stderr)
+        print("    brew install mkcert    (macOS)", file=sys.stderr)
+        print("    choco install mkcert   (Windows)", file=sys.stderr)
+        print("    apt install mkcert     (Debian/Ubuntu)", file=sys.stderr)
+        print("  Then run: mkcert -install", file=sys.stderr)
+        print("  Falling back to HTTP.", file=sys.stderr)
+        print()
+        return False
+    cert_path.parent.mkdir(parents=True, exist_ok=True)
+    hosts = ["localhost", "127.0.0.1", "::1"] + (extra_hosts or [])
+    try:
+        # Try to install the local CA (needs sudo the first time).
+        # If it fails (no tty for sudo), the cert will still be created
+        # but won't be trusted until the user runs `mkcert -install`.
+        ca_result = subprocess.run(["mkcert", "-install"], capture_output=True)
+        subprocess.run([
+            "mkcert",
+            "-cert-file", str(cert_path),
+            "-key-file", str(key_path),
+            *hosts,
+        ], check=True, capture_output=True)
+        import os
+        os.chmod(key_path, 0o600)
+        if ca_result.returncode != 0:
+            print("  created TLS certificate via mkcert")
+            print("  note: run `mkcert -install` in a terminal to trust it "
+                  "(needs your password once)")
+        else:
+            print("  created locally-trusted TLS certificate via mkcert")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"  mkcert failed: {e}", file=sys.stderr)
+        print("  Falling back to HTTP.", file=sys.stderr)
+        return False
 
 
 def cmd_init_config(args: argparse.Namespace) -> int:
@@ -118,6 +183,20 @@ def cmd_remove_windows_service(args: argparse.Namespace) -> int:
     # stop first if running; ignore failure (service might not be running)
     _run_win_service_module(["stop"])
     return _run_win_service_module(["remove"])
+
+
+def cmd_generate_cert(args: argparse.Namespace) -> int:
+    """Generate or regenerate the locally-trusted TLS certificate via mkcert."""
+    cfg = load_config(Path(args.config) if args.config else None)
+    certfile = expand(cfg.ssl_certfile) if cfg.ssl_certfile else cfg.data_dir / "tls" / "cert.pem"
+    keyfile = expand(cfg.ssl_keyfile) if cfg.ssl_keyfile else cfg.data_dir / "tls" / "key.pem"
+    if certfile.exists() and keyfile.exists() and not args.force:
+        print(f"certificate already exists at {certfile}")
+        print("use --force to overwrite")
+        return 1
+    if _auto_generate_cert(certfile, keyfile, extra_hosts=args.host):
+        return 0
+    return 2
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -370,11 +449,23 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--host", default=None)
     sp.add_argument("--port", type=int, default=None)
     sp.add_argument("--log-level", default="info")
+    sp.add_argument("--ssl-certfile", default=None,
+                    help="path to TLS certificate (PEM)")
+    sp.add_argument("--ssl-keyfile", default=None,
+                    help="path to TLS private key (PEM)")
     sp.set_defaults(func=cmd_serve)
 
     sp = sub.add_parser("init-config", help="write a default config.toml")
     sp.add_argument("--path", default=None)
     sp.set_defaults(func=cmd_init_config)
+
+    sp = sub.add_parser("generate-cert",
+                        help="generate a locally-trusted TLS certificate via mkcert")
+    sp.add_argument("--force", action="store_true",
+                    help="overwrite existing certificate")
+    sp.add_argument("--host", action="append", default=None,
+                    help="extra hostname or IP to include (repeatable)")
+    sp.set_defaults(func=cmd_generate_cert)
 
     sp = sub.add_parser("status", help="print last persisted runtime state")
     sp.set_defaults(func=cmd_status)

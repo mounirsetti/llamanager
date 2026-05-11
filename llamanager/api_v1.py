@@ -247,11 +247,12 @@ async def _handle_inference(
 
     # non-streaming
     error: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
     try:
         await qm.wait_for_slot(qr)
         resp = await _proxy_non_streaming(qr, sm, path, body)
         # Try to extract token usage from the response body for stats.
-        prompt_tokens = completion_tokens = None
         try:
             if resp.media_type and "json" in resp.media_type:
                 parsed = json.loads(resp.body)
@@ -268,6 +269,13 @@ async def _handle_inference(
             content={"error": {"message": "request cancelled",
                                "type": "llamanager_error"}},
         )
+    except asyncio.TimeoutError:
+        error = "queue timeout"
+        qm.cancel(qr.request_id)
+        raise HTTPException(
+            status_code=504,
+            detail="request timed out waiting in queue",
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -277,8 +285,8 @@ async def _handle_inference(
     finally:
         qm.mark_in_flight_done(
             qr, error=error, cancelled=(error == "cancelled"),
-            prompt_tokens=locals().get("prompt_tokens"),
-            completion_tokens=locals().get("completion_tokens"),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
 
 
