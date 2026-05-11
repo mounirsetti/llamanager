@@ -20,7 +20,7 @@
     <span><span class="lm-pill lm-pill--{{ status.state }}">{{ status.state }}</span></span>
     {% if status.current_profile %}<span><span class="key">profile</span><code>{{ status.current_profile }}</code></span>{% endif %}
     {% if status.pid %}<span><span class="key">pid</span><code>{{ status.pid }}</code></span>{% endif %}
-    {% if status.uptime_s %}<span><span class="key">uptime</span><code>{{ '%ds' % status.uptime_s }}</code></span>{% endif %}
+    {% if status.uptime_s %}<span><span class="key">uptime</span><code>{% set u = status.uptime_s | int %}{% if u >= 86400 %}{{ '%dd %dh' % (u // 86400, (u % 86400) // 3600) }}{% elif u >= 3600 %}{{ '%dh %dm' % (u // 3600, (u % 3600) // 60) }}{% elif u >= 60 %}{{ '%dm %ds' % (u // 60, u % 60) }}{% else %}{{ '%ds' % u }}{% endif %}</code></span>{% endif %}
     {% if status.mem_rss_mb %}<span><span class="key">rss</span><code>{{ '%.0f MB' % status.mem_rss_mb }}</code></span>{% endif %}
   </div>
 </section>
