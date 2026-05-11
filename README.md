@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.1.0-green.svg" alt="Version 0.1.0">
+  <img src="https://img.shields.io/badge/version-0.1.3-green.svg" alt="Version 0.1.3">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -178,7 +178,7 @@ Either through the web UI (Models → "Pull a model") or the API:
 curl -X POST http://localhost:7200/admin/models/pull \
   -H "Authorization: Bearer $ADMIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"source": "hf://unsloth/Qwen3.5-4B-GGUF", "files": ["Q4_K_M.gguf"]}'
+  -d '{"source": "hf://bartowski/Llama-3.2-1B-Instruct-GGUF", "files": ["Llama-3.2-1B-Instruct-Q4_K_M.gguf"]}'
 ```
 
 The response returns a `download_id`. Poll `GET /admin/downloads/{id}` for progress.
@@ -208,7 +208,7 @@ curl -N http://localhost:7200/v1/chat/completions \
   -H "Authorization: Bearer $ORIGIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen3.5-4b",
+    "model": "my-model",
     "stream": true,
     "messages": [{"role": "user", "content": "Hi!"}]
   }'
@@ -223,7 +223,7 @@ By default, requests use whatever model is currently loaded (or the default prof
 ```bash
 curl -N http://localhost:7200/v1/chat/completions \
   -H "Authorization: Bearer $ORIGIN_KEY" \
-  -H "X-Llamanager-Model: unsloth/Qwen3.5-4B-GGUF/Q4_K_M.gguf" \
+  -H "X-Llamanager-Model: bartowski/Llama-3.2-1B-Instruct-GGUF/Llama-3.2-1B-Instruct-Q4_K_M.gguf" \
   -H "Content-Type: application/json" \
   -d '{"model": "any", "messages": [{"role": "user", "content": "Hi!"}]}'
 ```
@@ -233,7 +233,7 @@ curl -N http://localhost:7200/v1/chat/completions \
 ```bash
 curl -N http://localhost:7200/v1/chat/completions \
   -H "Authorization: Bearer $ORIGIN_KEY" \
-  -H "X-Llamanager-Model: profile:qwen35-4b-vision" \
+  -H "X-Llamanager-Model: profile:my-vision-profile" \
   -H "Content-Type: application/json" \
   -d '{"model": "any", "messages": [{"role": "user", "content": "Hi!"}]}'
 ```
@@ -401,10 +401,10 @@ after can do this without writing any HTTP code:
 
 ```bash
 export LLAMANAGER_ADMIN_KEY=lm_...
-llamanager server swap --profile qwen35-4b-vision
+llamanager server swap --profile my-vision-profile
 llamanager models list | jq '.[].model_id'
 llamanager queue list
-llamanager server swap --profile qwen35-4b-default
+llamanager server swap --profile my-default-profile
 ```
 
 ## Configuration
@@ -422,12 +422,13 @@ llama_server_port = 7201
 data_dir = "~/.llamanager"
 
 [defaults]
-model = "unsloth/Qwen3.5-4B-GGUF/Q4_K_M.gguf"
-profile = "qwen35-4b-default"
+model = ""       # set after pulling your first model
+profile = ""     # auto-created when you pull a model
 
-[profiles.qwen35-4b-default]
-model = "unsloth/Qwen3.5-4B-GGUF/Q4_K_M.gguf"
-args = { ctx-size = 16384, temp = 0.7, alias = "qwen3.5-4b" }
+# Profiles are auto-created when you pull a model, or you can add them manually:
+# [profiles.my-model]
+# model = "org/repo-GGUF/Q4_K_M.gguf"
+# args = { ctx-size = 4096, temp = 0.7 }
 ```
 
 ## API
@@ -471,6 +472,70 @@ On windows, `~` resolves to `%USERPROFILE%`, e.g. `C:\Users\<you>\.llamanager`.
 **Crash loop, `state: crashed` and 503s.** The 3-in-5 restart policy gave up. Check `~/.llamanager/logs/llama-server.log`, fix the cause, then `POST /admin/server/start` (or use the UI).
 
 **Windows: argon2-cffi fails to install.** Python 3.11+ ships prebuilt wheels for argon2-cffi on Windows. If you hit a build error, upgrade pip (`python -m pip install -U pip`) and retry. As a last resort, install Microsoft's [Build Tools for Visual Studio](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
+
+## Releasing a new version
+
+The version is defined in one place: the `version` field in `pyproject.toml`. Both `llamanager.__version__` and the web UI read it automatically from package metadata at runtime.
+
+### 1. Bump the version
+
+Edit `pyproject.toml`:
+
+```toml
+version = "0.2.0"
+```
+
+Reinstall so package metadata is updated:
+
+```bash
+pip install -e .
+```
+
+Verify:
+
+```bash
+python -c "import llamanager; print(llamanager.__version__)"
+# 0.2.0
+```
+
+### 2. Commit and tag
+
+```bash
+git add pyproject.toml
+git commit -m "Bump version to 0.2.0"
+git tag v0.2.0
+git push origin main
+git push origin v0.2.0
+```
+
+### 3. Create a GitHub release
+
+Tags are just pointers — a GitHub **Release** adds release notes and makes the version visible on the repo's Releases page. The llamanager update checker looks for releases first, then falls back to tags.
+
+**Option A — GitHub web UI** (recommended)
+
+1. Go to the repo → **Releases** → **Draft a new release**
+2. Click **Choose a tag** → select `v0.2.0`
+3. Set the title (e.g. `v0.2.0`)
+4. Write release notes (what changed, any breaking changes)
+5. Click **Publish release**
+
+**Option B — GitHub CLI** (`gh`)
+
+```bash
+gh release create v0.2.0 --title "v0.2.0" --notes "Release notes here."
+```
+
+> **Note:** `gh` requires the [GitHub CLI](https://cli.github.com/) to be installed and authenticated (`gh auth login`). If `gh release create` fails with a permission error, use the web UI instead.
+
+### How the update checker works
+
+When a user clicks **Check for updates** on the About page, llamanager:
+
+1. Queries `https://api.github.com/repos/{repo}/releases/latest`
+2. If no releases exist (404), falls back to `https://api.github.com/repos/{repo}/tags`
+3. Compares the remote version against the local version using semver (major.minor.patch)
+4. Only shows the update banner if the remote version is **strictly greater** — it will never suggest downgrading
 
 ## Credits
 
