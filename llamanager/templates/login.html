@@ -179,9 +179,13 @@
         <div class="label">Admin API key</div>
         <input type="password" name="api_key" autofocus required autocomplete="off" spellcheck="false">
       </div>
+      <label style="display: inline-flex; align-items: center; gap: 8px; font-size: 0.875rem; color: var(--fg-1); cursor: pointer;">
+        <input type="checkbox" name="remember" value="on" style="accent-color: var(--accent);">
+        Remember me for 30 days
+      </label>
       <button type="submit">Sign in</button>
     </form>
-    <div class="footnote">Sessions are server-side and last as long as the daemon does. Restart the daemon to sign everyone out.</div>
+    <div class="footnote">Your session persists across server restarts when "Remember me" is checked.</div>
   </div>
 </body>
 </html>

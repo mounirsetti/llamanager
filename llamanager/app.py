@@ -186,6 +186,18 @@ def create_app(config_path: Path | None = None,
     @app.middleware("http")
     async def _security_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
         response = await call_next(request)
+        # If a remember-me auto-login happened, set the session cookie
+        new_sid = getattr(request.state, "_new_session_sid", None)
+        if new_sid:
+            from .api_ui import COOKIE_NAME, SESSION_TTL_S
+            response.set_cookie(
+                COOKIE_NAME,
+                new_sid,
+                httponly=True,
+                samesite="lax",
+                secure=(request.url.scheme == "https"),
+                max_age=SESSION_TTL_S,
+            )
         # Restrictive CSP scoped to the admin UI: third-party origins are
         # explicitly listed (HTMX on cdnjs, Google Fonts CSS + woff2). The
         # `'unsafe-inline'` allowance covers the inline <style>/<script>

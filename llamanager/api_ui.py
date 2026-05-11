@@ -53,7 +53,9 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 COOKIE_NAME = "llamanager_session"
+REMEMBER_COOKIE = "llamanager_remember"
 SESSION_TTL_S = 60 * 60 * 24 * 7  # 7 days
+REMEMBER_TTL_S = 60 * 60 * 24 * 30  # 30 days
 
 
 # ---------- session store (server-side) ----------
@@ -102,20 +104,53 @@ def _session_store(request: Request) -> SessionStore:
     return request.app.state.sessions
 
 
-def _set_session(request: Request, response: Response, key: str) -> str:
+def _set_session(request: Request, response: Response, key: str,
+                  remember: bool = False) -> str:
     sid, csrf = _session_store(request).create(key)
+    is_secure = (request.url.scheme == "https")
     response.set_cookie(
         COOKIE_NAME,
         sid,
         httponly=True,
         samesite="lax",
-        # Mark Secure when the request looks HTTPS-y. Behind a TLS proxy
-        # the X-Forwarded-Proto header tells us; uvicorn's `proxy_headers`
-        # surfaces that as request.url.scheme.
-        secure=(request.url.scheme == "https"),
+        secure=is_secure,
         max_age=SESSION_TTL_S,
     )
+    if remember:
+        # Store a signed token so the session survives server restarts.
+        # The token is the key signed with itsdangerous using the
+        # session secret that persists on disk.
+        from itsdangerous import URLSafeTimedSerializer
+        secret = request.app.state.session_secret
+        s = URLSafeTimedSerializer(secret)
+        token = s.dumps(key, salt="remember")
+        response.set_cookie(
+            REMEMBER_COOKIE,
+            token,
+            httponly=True,
+            samesite="lax",
+            secure=is_secure,
+            max_age=REMEMBER_TTL_S,
+        )
     return csrf
+
+
+def _try_remember(request: Request) -> str | None:
+    """Try to recover a session from the remember-me cookie.
+
+    Returns the API key if valid, None otherwise.
+    """
+    token = request.cookies.get(REMEMBER_COOKIE)
+    if not token:
+        return None
+    try:
+        from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+        secret = request.app.state.session_secret
+        s = URLSafeTimedSerializer(secret)
+        key = s.loads(token, salt="remember", max_age=REMEMBER_TTL_S)
+        return key
+    except Exception:
+        return None
 
 
 def _read_session(request: Request) -> dict[str, Any] | None:
@@ -125,15 +160,28 @@ def _read_session(request: Request) -> dict[str, Any] | None:
 
 async def require_admin_ui(request: Request) -> Origin:
     sess = _read_session(request)
+
+    # If no active session, try to restore from remember-me cookie
+    if not sess:
+        remembered_key = _try_remember(request)
+        if remembered_key:
+            am: AuthManager = request.app.state.auth
+            origin = await am.verify(remembered_key)
+            if origin and origin.is_admin:
+                # Recreate session in-memory (cookie already exists from last login)
+                sid, csrf = _session_store(request).create(remembered_key)
+                # Stash the new session id so the response middleware can set the cookie
+                request.state._new_session_sid = sid
+                request.state.csrf_token = csrf
+                return origin
+
     if not sess:
         raise HTTPException(status_code=302, headers={"Location": "/ui/login"})
-    am: AuthManager = request.app.state.auth
-    origin = await am.verify(sess["key"])
+    am_: AuthManager = request.app.state.auth
+    origin = await am_.verify(sess["key"])
     if not origin or not origin.is_admin:
-        # Key rotated, origin removed, or admin scope dropped.
         _session_store(request).delete(request.cookies.get(COOKIE_NAME))
         raise HTTPException(status_code=302, headers={"Location": "/ui/login"})
-    # Surface the CSRF token to handlers that render templates.
     request.state.csrf_token = sess["csrf"]
     return origin
 
@@ -335,7 +383,8 @@ async def login_get(request: Request) -> HTMLResponse:
 
 
 @router.post("/login", response_class=HTMLResponse)
-async def login_post(request: Request, api_key: str = Form(...)) -> Response:
+async def login_post(request: Request, api_key: str = Form(...),
+                     remember: str = Form("off")) -> Response:
     am: AuthManager = request.app.state.auth
     origin = await am.verify(api_key.strip())
     if not origin or not origin.is_admin:
@@ -344,7 +393,7 @@ async def login_post(request: Request, api_key: str = Form(...)) -> Response:
             status_code=401,
         )
     resp = RedirectResponse(url="/ui/", status_code=303)
-    _set_session(request, resp, api_key.strip())
+    _set_session(request, resp, api_key.strip(), remember=(remember == "on"))
     return resp
 
 
@@ -354,6 +403,7 @@ async def logout(request: Request,
     _session_store(request).delete(request.cookies.get(COOKIE_NAME))
     resp = RedirectResponse(url="/ui/login", status_code=303)
     resp.delete_cookie(COOKIE_NAME)
+    resp.delete_cookie(REMEMBER_COOKIE)
     return resp
 
 
