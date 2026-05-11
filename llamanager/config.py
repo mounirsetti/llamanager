@@ -77,6 +77,7 @@ class Config:
     default_model: str = "unsloth/Qwen3.5-4B-GGUF/Q4_K_M.gguf"
     default_profile: str = "qwen35-4b-default"
     default_origin_priority: int = 50
+    autolaunch: bool = False
 
     max_restarts_in_window: int = 3
     window_seconds: int = 300
@@ -146,6 +147,7 @@ def load_config(path: Path | None = None) -> Config:
         default_model=defaults.get("model", "unsloth/Qwen3.5-4B-GGUF/Q4_K_M.gguf"),
         default_profile=defaults.get("profile", "qwen35-4b-default"),
         default_origin_priority=int(defaults.get("origin_priority", 50)),
+        autolaunch=bool(defaults.get("autolaunch", False)),
         max_restarts_in_window=int(rp.get("max_restarts_in_window", 3)),
         window_seconds=int(rp.get("window_seconds", 300)),
         success_run_seconds=int(rp.get("success_run_seconds", 300)),
@@ -243,7 +245,8 @@ def delete_profile(cfg_path: Path, name: str) -> None:
 
 def update_defaults(cfg_path: Path, *,
                     default_model: str | None = None,
-                    default_profile: str | None = None) -> None:
+                    default_profile: str | None = None,
+                    autolaunch: bool | None = None) -> None:
     """Update the [defaults] section in config.toml."""
     import tomlkit
     doc = _load_tomlkit(cfg_path)
@@ -253,4 +256,6 @@ def update_defaults(cfg_path: Path, *,
         doc["defaults"]["model"] = default_model
     if default_profile is not None:
         doc["defaults"]["profile"] = default_profile
+    if autolaunch is not None:
+        doc["defaults"]["autolaunch"] = autolaunch
     _save_tomlkit(cfg_path, doc)

@@ -133,6 +133,17 @@ def create_app(config_path: Path | None = None,
         queue.start()
         supervisor.start()
 
+        # Autolaunch default profile if configured and binary is available
+        if cfg.autolaunch and detect_binary(cfg.llama_server_binary):
+            try:
+                from .server_manager import resolve_spec
+                spec = resolve_spec(cfg, profile=cfg.default_profile or None)
+                import asyncio
+                asyncio.create_task(sm.start(spec))
+                log.info("autolaunch: starting default profile %r", cfg.default_profile)
+            except Exception as e:
+                log.warning("autolaunch failed: %s", e)
+
         # SIGHUP -> reload config (POSIX only)
         loop = None
         try:

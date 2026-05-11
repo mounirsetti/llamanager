@@ -72,8 +72,16 @@
   </form>
   {% endif %}
 
-  {# Auto-restart toggle #}
-  <div style="padding-top: 18px; border-top: 1px solid var(--bg-3);">
+  {# Autolaunch + auto-restart toggles #}
+  <div style="padding-top: 18px; border-top: 1px solid var(--bg-3); display: flex; flex-direction: column; gap: 10px;">
+    <form method="post" action="/ui/launch/autolaunch">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label class="lm-checkbox-row">
+        <input type="checkbox" name="enabled" value="on" {% if autolaunch %}checked{% endif %}
+               onchange="this.form.submit()">
+        Auto-launch default profile when llamanager starts
+      </label>
+    </form>
     <form method="post" action="/ui/launch/autorestart">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label class="lm-checkbox-row">

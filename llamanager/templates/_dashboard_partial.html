@@ -25,6 +25,111 @@
   </div>
 </section>
 
+{% if sysinfo %}
+<section class="lm-section" style="margin-top: 24px;">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">System</span>
+    <span class="lm-section-meta">{{ sysinfo.arch }}{% if sysinfo.gpu_type %} · {{ sysinfo.gpu_type }}{% endif %}</span>
+  </header>
+
+  <div class="lm-sysinfo-grid" style="
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 2px;
+    background: var(--bg-3);
+    border: 1px solid var(--bg-3);
+  ">
+    {# CPU #}
+    <div style="background: var(--bg-0); padding: 16px 18px;">
+      <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 8px;">CPU</div>
+      <div style="font-size: 0.9375rem; color: var(--fg-0); font-weight: 500; word-break: break-word;">{{ sysinfo.cpu }}</div>
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">
+        {{ sysinfo.cpu_cores }} cores · {{ sysinfo.cpu_threads }} threads
+      </div>
+    </div>
+
+    {# RAM #}
+    <div style="background: var(--bg-0); padding: 16px 18px;">
+      <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 8px;">Memory</div>
+      <div style="font-size: 0.9375rem; color: var(--fg-0); font-weight: 500;">{{ sysinfo.ram_total_gb }} GB total</div>
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">
+        {{ sysinfo.ram_available_gb }} GB available
+      </div>
+      <div style="margin-top: 8px; height: 4px; background: var(--bg-3); border-radius: 2px;">
+        <div style="height: 4px; border-radius: 2px; width: {{ sysinfo.ram_used_pct }}%; background: {% if sysinfo.ram_used_pct > 90 %}var(--bad){% elif sysinfo.ram_used_pct > 70 %}var(--warn){% else %}var(--ok){% endif %};"></div>
+      </div>
+    </div>
+
+    {# GPU #}
+    <div style="background: var(--bg-0); padding: 16px 18px;">
+      <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 8px;">GPU</div>
+      {% if sysinfo.gpu_name %}
+      <div style="font-size: 0.9375rem; color: var(--fg-0); font-weight: 500;">{{ sysinfo.gpu_name }}</div>
+      {% endif %}
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">
+        {{ sysinfo.gpu_type }}
+        {% if sysinfo.gpu_cores %} · {{ sysinfo.gpu_cores }} cores{% endif %}
+      </div>
+      {% if sysinfo.gpu_vram_total_gb is defined %}
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 2px;">
+        {{ sysinfo.gpu_vram_free_gb }} / {{ sysinfo.gpu_vram_total_gb }} GB VRAM free
+      </div>
+      {% endif %}
+    </div>
+
+    {# Disk #}
+    <div style="background: var(--bg-0); padding: 16px 18px;">
+      <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 8px;">Disk (models)</div>
+      <div style="font-size: 0.9375rem; color: var(--fg-0); font-weight: 500;">{{ sysinfo.disk_free_gb }} GB free</div>
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">
+        {{ sysinfo.disk_total_gb }} GB total
+      </div>
+      {% set disk_used_pct = ((sysinfo.disk_total_gb - sysinfo.disk_free_gb) / sysinfo.disk_total_gb * 100) | round | int if sysinfo.disk_total_gb else 0 %}
+      <div style="margin-top: 8px; height: 4px; background: var(--bg-3); border-radius: 2px;">
+        <div style="height: 4px; border-radius: 2px; width: {{ disk_used_pct }}%; background: {% if disk_used_pct > 90 %}var(--bad){% elif disk_used_pct > 80 %}var(--warn){% else %}var(--ok){% endif %};"></div>
+      </div>
+    </div>
+
+    {# Swap #}
+    {% if sysinfo.swap_total_gb > 0 %}
+    <div style="background: var(--bg-0); padding: 16px 18px;">
+      <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 8px;">Swap</div>
+      <div style="font-size: 0.9375rem; color: var(--fg-0); font-weight: 500;">
+        {{ sysinfo.swap_used_gb }} GB used
+      </div>
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">
+        {{ sysinfo.swap_total_gb }} GB total
+      </div>
+      {% if sysinfo.swap_used_gb > 0.5 %}
+      <div style="font-size: 0.75rem; color: var(--warn); margin-top: 6px;">
+        Swap pressure — inference may be slow
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {# Model capacity estimate #}
+    <div style="background: var(--bg-0); padding: 16px 18px;">
+      <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 8px;">Capacity estimate</div>
+      {% set avail = sysinfo.ram_available_gb %}
+      {% if avail >= 16 %}
+      <div style="font-size: 0.9375rem; color: var(--ok); font-weight: 500;">Large models OK</div>
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">~{{ (avail * 0.85) | round(0) | int }}B param Q4 fits in {{ avail }} GB free</div>
+      {% elif avail >= 8 %}
+      <div style="font-size: 0.9375rem; color: var(--ok); font-weight: 500;">Medium models OK</div>
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">7-13B Q4 fits comfortably</div>
+      {% elif avail >= 4 %}
+      <div style="font-size: 0.9375rem; color: var(--warn); font-weight: 500;">Small models only</div>
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">Up to ~7B Q4 with tight headroom</div>
+      {% else %}
+      <div style="font-size: 0.9375rem; color: var(--bad); font-weight: 500;">Low memory</div>
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">Close other apps to free RAM</div>
+      {% endif %}
+    </div>
+  </div>
+</section>
+{% endif %}
+
 <section class="lm-section">
   <header class="lm-section-head">
     <span class="lm-section-marker">Queue</span>

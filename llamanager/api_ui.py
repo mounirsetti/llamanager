@@ -15,7 +15,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import platform
 import secrets
+import shutil
+import subprocess
 import time
 
 log = logging.getLogger(__name__)
@@ -198,6 +201,95 @@ async def require_csrf(request: Request,
         raise HTTPException(status_code=403, detail="invalid csrf token")
 
 
+def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
+    """Gather hardware info relevant to llama-server inference."""
+    import psutil
+
+    info: dict[str, Any] = {}
+
+    # CPU
+    info["cpu"] = platform.processor() or platform.machine()
+    info["cpu_cores"] = psutil.cpu_count(logical=False) or 0
+    info["cpu_threads"] = psutil.cpu_count(logical=True) or 0
+    info["arch"] = platform.machine()
+
+    # On macOS, get the chip name from sysctl
+    if platform.system() == "Darwin":
+        try:
+            chip = subprocess.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                text=True, timeout=2,
+            ).strip()
+            if chip:
+                info["cpu"] = chip
+        except Exception:
+            pass
+
+    # RAM
+    mem = psutil.virtual_memory()
+    info["ram_total_gb"] = round(mem.total / (1024**3), 1)
+    info["ram_available_gb"] = round(mem.available / (1024**3), 1)
+    info["ram_used_pct"] = mem.percent
+
+    # Swap
+    swap = psutil.swap_memory()
+    info["swap_total_gb"] = round(swap.total / (1024**3), 1)
+    info["swap_used_gb"] = round(swap.used / (1024**3), 1)
+
+    # GPU info
+    system = platform.system()
+    if system == "Darwin":
+        # Apple Silicon uses Metal with unified memory
+        info["gpu_type"] = "Metal (unified memory)"
+        info["gpu_name"] = ""
+        try:
+            sp = subprocess.check_output(
+                ["system_profiler", "SPDisplaysDataType", "-json"],
+                text=True, timeout=5,
+            )
+            displays = json.loads(sp).get("SPDisplaysDataType", [])
+            if displays:
+                gpu = displays[0]
+                info["gpu_name"] = gpu.get("sppci_model", "")
+                cores = gpu.get("sppci_cores", "")
+                if cores:
+                    info["gpu_cores"] = cores
+        except Exception:
+            pass
+    else:
+        # Try nvidia-smi for CUDA GPUs
+        info["gpu_type"] = "unknown"
+        info["gpu_name"] = ""
+        try:
+            nv = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=name,memory.total,memory.free",
+                 "--format=csv,noheader,nounits"],
+                text=True, timeout=5,
+            ).strip()
+            if nv:
+                parts = nv.split(",")
+                info["gpu_type"] = "CUDA"
+                info["gpu_name"] = parts[0].strip()
+                info["gpu_vram_total_gb"] = round(int(parts[1].strip()) / 1024, 1)
+                info["gpu_vram_free_gb"] = round(int(parts[2].strip()) / 1024, 1)
+        except Exception:
+            info["gpu_type"] = "CPU-only (no CUDA detected)"
+
+    # Disk free in models dir
+    try:
+        disk = shutil.disk_usage(str(models_dir))
+        info["disk_free_gb"] = round(disk.free / (1024**3), 1)
+        info["disk_total_gb"] = round(disk.total / (1024**3), 1)
+    except Exception:
+        info["disk_free_gb"] = 0
+        info["disk_total_gb"] = 0
+
+    # OS
+    info["os"] = f"{platform.system()} {platform.release()}"
+
+    return info
+
+
 def _ctx(request: Request, **extra: Any) -> dict[str, Any]:
     """Build a base template context that always includes the CSRF token
     when an authenticated session is in flight."""
@@ -281,12 +373,14 @@ async def dashboard(request: Request, _: Origin = Depends(require_admin_ui)) -> 
     # Build the base URL for cheat sheet examples
     host = request.headers.get("host", f"{cfg.bind}:{cfg.port}")
     base_url = f"http://{host}"
+    sysinfo = _get_system_info(cfg.models_dir)
     return templates.TemplateResponse(request, "dashboard.html", _ctx(
         request,
         status=sm.status(),
         queue=qm.snapshot(),
         recent=[dict(r) for r in recent],
         base_url=base_url,
+        sysinfo=sysinfo,
     ))
 
 
@@ -294,17 +388,20 @@ async def dashboard(request: Request, _: Origin = Depends(require_admin_ui)) -> 
 async def dashboard_partial(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     sm: ServerManager = request.app.state.sm
     qm: QueueManager = request.app.state.queue
+    cfg = request.app.state.cfg
     db = request.app.state.db
     recent = db.query(
         "SELECT id, origin_id, model, status, enqueued_at, started_at,"
         " finished_at, prompt_tokens, completion_tokens FROM requests"
         " ORDER BY enqueued_at DESC LIMIT 10"
     )
+    sysinfo = _get_system_info(cfg.models_dir)
     return templates.TemplateResponse(request, "_dashboard_partial.html", _ctx(
         request,
         status=sm.status(),
         queue=qm.snapshot(),
         recent=[dict(r) for r in recent],
+        sysinfo=sysinfo,
     ))
 
 
@@ -786,6 +883,7 @@ def _launch_ctx(request: Request) -> dict:
         default_model=cfg.default_model,
         default_profile=cfg.default_profile,
         autorestart=supervisor.enabled,
+        autolaunch=cfg.autolaunch,
         max_restarts=cfg.max_restarts_in_window,
         log_tail=_read_log_tail(cfg),
     )
@@ -849,6 +947,17 @@ async def launch_autorestart(request: Request,
                              enabled: str = Form("off"),
                              _: None = Depends(require_csrf)) -> Response:
     request.app.state.supervisor.enabled = (enabled == "on")
+    return RedirectResponse("/ui/launch", status_code=303)
+
+
+@router.post("/launch/autolaunch", response_class=HTMLResponse)
+async def launch_autolaunch(request: Request,
+                            enabled: str = Form("off"),
+                            _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    on = (enabled == "on")
+    cfg.autolaunch = on
+    update_defaults(cfg.config_path, autolaunch=on)
     return RedirectResponse("/ui/launch", status_code=303)
 
 

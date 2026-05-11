@@ -98,6 +98,17 @@ Open the web UI at <http://localhost:7200/ui/login> and paste the bootstrap key.
 
 > **Exposing on a LAN or Tailnet.** llamanager binds to loopback by default because bearer tokens travel in cleartext. To listen elsewhere, set `[server].bind = "0.0.0.0"` (or a specific IP) in `config.toml` and put a TLS-terminating proxy in front of it (Caddy, nginx, or `tailscale serve`). Do not put plain HTTP on a hostile network.
 
+## quick dev uninstall & reinstall commands (macOS)
+
+```bash
+  deactivate
+  rm -rf .venv
+  python3.14 -m venv .venv
+  source .venv/bin/activate
+  pip install -e '.[dev]'
+  llamanager serve
+```
+
 ## pulling a model
 
 Either through the web UI (Models → "Pull a model") or the API:
