@@ -977,24 +977,43 @@ async def about_check_update(request: Request,
                              _: None = Depends(require_csrf)) -> HTMLResponse:
     import urllib.request
     try:
-        req = urllib.request.Request(
-            f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
-            headers={"User-Agent": "llamanager", "Accept": "application/vnd.github+json"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as r:
-            import json as _json
-            data = _json.loads(r.read())
-        latest = data.get("tag_name", "").lstrip("v")
+        latest: str | None = None
+
+        # Try releases first, then fall back to tags
+        for api_path in ("releases/latest", "tags"):
+            req = urllib.request.Request(
+                f"https://api.github.com/repos/{GITHUB_REPO}/{api_path}",
+                headers={"User-Agent": "llamanager",
+                         "Accept": "application/vnd.github+json"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    import json as _json
+                    data = _json.loads(r.read())
+            except urllib.error.HTTPError as he:
+                if he.code == 404 and api_path == "releases/latest":
+                    continue  # no releases yet — try tags
+                raise
+
+            if api_path == "releases/latest":
+                latest = data.get("tag_name", "").lstrip("v") or None
+            else:
+                # tags endpoint returns a list
+                if isinstance(data, list) and data:
+                    latest = data[0].get("name", "").lstrip("v") or None
+            if latest:
+                break
+
         if not latest:
-            raise ValueError("no tag_name in release")
+            raise ValueError("no releases or tags found on GitHub")
         is_newer = latest != LLAMANAGER_VERSION
-        return templates.TemplateResponse(request, "about.html", _about_ctx(
+        return templates.TemplateResponse(request, "_update_area.html", _about_ctx(
             request,
             update_available=is_newer,
             latest_version=latest,
         ))
     except Exception as e:
-        return templates.TemplateResponse(request, "about.html", _about_ctx(
+        return templates.TemplateResponse(request, "_update_area.html", _about_ctx(
             request,
             update_check_error=f"Could not check for updates: {e}",
         ))

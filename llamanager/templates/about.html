@@ -111,37 +111,6 @@
     Check if a newer version is available on GitHub, then apply it directly.
   </p>
 
-  <div id="update-area" style="display: flex; flex-direction: column; gap: 14px; max-width: 520px;">
-    <div style="display: flex; gap: 10px; align-items: center;">
-      <form method="post" action="/ui/about/check-update" style="margin: 0;">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="lm-btn lm-btn--ghost">Check for updates</button>
-      </form>
-      {% if update_available %}
-      <form method="post" action="/ui/about/update"
-            data-confirm="Update llamanager to {{ latest_version }}? This will pull the latest code, reinstall, and restart the server."
-            style="margin: 0;">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="lm-btn lm-btn--primary">Update to {{ latest_version }}</button>
-      </form>
-      {% endif %}
-    </div>
-
-    {% if update_check_error %}
-    <div class="lm-error">{{ update_check_error }}</div>
-    {% elif update_available == true %}
-    <div style="padding: 12px 16px; background: oklch(from var(--accent) l c h / 0.08); border: 1px solid var(--accent); font-size: 0.875rem; color: var(--fg-1);">
-      <strong style="color: var(--accent);">{{ latest_version }}</strong> is available (you have {{ version }}).
-    </div>
-    {% elif update_available == false and latest_version %}
-    <div style="padding: 12px 16px; background: oklch(from var(--ok) l c h / 0.08); border: 1px solid var(--ok); font-size: 0.875rem; color: var(--fg-1);">
-      You are up to date.
-    </div>
-    {% endif %}
-
-    {% if update_log %}
-    <pre class="lm-log" style="max-height: 200px; font-size: 0.75rem;">{{ update_log }}</pre>
-    {% endif %}
-  </div>
+  {% include "_update_area.html" %}
 </section>
 {% endblock %}
