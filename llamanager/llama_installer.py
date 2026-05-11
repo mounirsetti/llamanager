@@ -1,4 +1,5 @@
-"""Detect and install llama-server from official llama.cpp GitHub releases."""
+"""Detect and install llama-server from official llama.cpp GitHub releases
+(and compatible forks)."""
 from __future__ import annotations
 
 import asyncio
@@ -17,6 +18,69 @@ from pathlib import Path
 
 BINARY_NAME = "llama-server.exe" if sys.platform == "win32" else "llama-server"
 GITHUB_API_LATEST = "https://api.github.com/repos/ggerganov/llama.cpp/releases/latest"
+
+# ---------------------------------------------------------------------------
+# Fork registry — each entry describes a llama-server source that can be
+# installed side-by-side.  The default fork ("llama.cpp") installs into
+# ~/.llamanager/bin/; alternate forks install into a subdirectory so they
+# never overwrite the original.
+# ---------------------------------------------------------------------------
+FORKS: dict[str, dict[str, str]] = {
+    "llama.cpp": {
+        "label": "llama.cpp (official)",
+        "github_api": GITHUB_API_LATEST,
+        "subdir": "",
+        "description": "Official llama.cpp CPU build.",
+        "url": "https://github.com/ggerganov/llama.cpp",
+    },
+    "atomic": {
+        "label": "Atomic TurboQuant",
+        "github_api": "https://api.github.com/repos/AtomicBot-ai/atomic-llama-cpp-turboquant/releases/latest",
+        "subdir": "atomic",
+        "description": (
+            "llama.cpp fork with TurboQuant compression and Gemma\u00a04 MTP "
+            "speculative decoding (\u223c30\u201350\u2009% throughput gains)."
+        ),
+        "url": "https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant",
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Model → fork hints.  When a downloaded model matches one of these
+# patterns, the UI shows a banner suggesting the user switch engines.
+# ---------------------------------------------------------------------------
+
+FORK_MODEL_HINTS: dict[str, dict[str, list[str] | str]] = {
+    "atomic": {
+        "repo_prefixes": ["AtomicBot-ai/"],
+        "file_patterns": ["TQ1_", "TQ2_"],
+        "message": (
+            "This model uses TurboQuant quantization. For best results, "
+            "install and switch to the Atomic TurboQuant engine."
+        ),
+    },
+}
+
+
+def get_engine_hint(repo: str = "", filename: str = "") -> dict[str, str] | None:
+    """Return a fork hint if the repo or filename matches a known pattern."""
+    for fork_id, hint in FORK_MODEL_HINTS.items():
+        for prefix in hint.get("repo_prefixes", []):
+            if repo.startswith(prefix):
+                return {
+                    "fork": fork_id,
+                    "label": FORKS[fork_id]["label"],
+                    "message": hint["message"],
+                }
+        for pattern in hint.get("file_patterns", []):
+            if pattern in filename:
+                return {
+                    "fork": fork_id,
+                    "label": FORKS[fork_id]["label"],
+                    "message": hint["message"],
+                }
+    return None
 
 
 def detect_binary(configured: str) -> str | None:
@@ -42,9 +106,22 @@ def detect_binary(configured: str) -> str | None:
     return None
 
 
-def _default_install_path() -> Path:
+def detect_fork_binary(fork: str) -> str | None:
+    """Return the path to a fork's llama-server if it is installed at its
+    default location, or *None* otherwise."""
+    path = _default_install_path(fork)
+    if path.exists():
+        return str(path)
+    return None
+
+
+def _default_install_path(fork: str = "llama.cpp") -> Path:
     suffix = ".exe" if sys.platform == "win32" else ""
-    return Path.home() / ".llamanager" / "bin" / f"llama-server{suffix}"
+    base = Path.home() / ".llamanager" / "bin"
+    subdir = FORKS.get(fork, {}).get("subdir", "")
+    if subdir:
+        base = base / subdir
+    return base / f"llama-server{suffix}"
 
 
 def _asset_suffix() -> str:
@@ -67,7 +144,23 @@ def _asset_extension() -> str:
     return ".zip" if sys.platform == "win32" else ".tar.gz"
 
 
-def install_instructions() -> dict:
+def install_instructions(fork: str = "llama.cpp") -> dict:
+    if fork != "llama.cpp":
+        fork_info = FORKS.get(fork, {})
+        url = fork_info.get("url", "")
+        return {
+            "platform": platform.system() or "Unknown",
+            "steps": [
+                "# Auto-install via the button below, or:",
+                f"# Build from source: {url}",
+            ],
+            "note": (
+                "The auto-installer downloads the latest release build. "
+                "For custom builds with specific GPU backends, clone the "
+                "repo and build from source."
+            ),
+        }
+
     system = platform.system()
     if system == "Darwin":
         return {
@@ -114,19 +207,29 @@ class InstallState:
         }
 
 
-async def install_llama_server(state: InstallState) -> None:
-    """Fetch the latest llama.cpp release and install llama-server.
+async def install_llama_server(state: InstallState,
+                               fork: str = "llama.cpp") -> None:
+    """Fetch the latest release for *fork* and install llama-server.
 
-    Updates `state` throughout so the UI can poll for progress.
+    Updates *state* throughout so the UI can poll for progress.
     """
+    fork_info = FORKS.get(fork)
+    if not fork_info:
+        state.error = f"Unknown fork: {fork}"
+        state.status = "error"
+        return
+
     loop = asyncio.get_running_loop()
 
     def _emit(line: str) -> None:
         state.lines.append(line)
 
     try:
-        _emit("Fetching latest release info from GitHub…")
-        release = await loop.run_in_executor(None, _fetch_latest_release)
+        _emit(f"Fetching latest release info for {fork_info['label']}…")
+        github_api = fork_info["github_api"]
+        release = await loop.run_in_executor(
+            None, lambda: _fetch_latest_release(github_api)
+        )
         tag = release.get("tag_name", "unknown")
         _emit(f"Latest release: {tag}")
 
@@ -161,7 +264,9 @@ async def install_llama_server(state: InstallState) -> None:
         )
         _emit("Download complete. Extracting…")
 
-        install_path = await loop.run_in_executor(None, lambda: _extract_binary(zip_path))
+        install_path = await loop.run_in_executor(
+            None, lambda: _extract_binary(zip_path, fork)
+        )
         _emit(f"Installed to {install_path}")
 
         state.installed_path = str(install_path)
@@ -172,9 +277,9 @@ async def install_llama_server(state: InstallState) -> None:
         state.status = "error"
 
 
-def _fetch_latest_release() -> dict:
+def _fetch_latest_release(github_api_url: str = GITHUB_API_LATEST) -> dict:
     req = urllib.request.Request(
-        GITHUB_API_LATEST,
+        github_api_url,
         headers={"User-Agent": "llamanager/0.1 (https://github.com/llamanager/llamanager)"},
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
@@ -217,10 +322,10 @@ def _download_asset(url: str, emit) -> Path:
         tmp.close()
 
 
-def _extract_binary(archive_path: Path) -> Path:
+def _extract_binary(archive_path: Path, fork: str = "llama.cpp") -> Path:
     """Extract llama-server and all sibling files (shared libraries, etc.)
-    from the archive into ~/.llamanager/bin/."""
-    dest_dir = _default_install_path().parent
+    from the archive into ~/.llamanager/bin/ (or a fork-specific subdirectory)."""
+    dest_dir = _default_install_path(fork).parent
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     if archive_path.suffix == ".gz" or str(archive_path).endswith(".tar.gz"):
@@ -279,7 +384,7 @@ def _extract_binary(archive_path: Path) -> Path:
     except OSError:
         pass
 
-    return _default_install_path()
+    return _default_install_path(fork)
 
 
 def _create_lib_symlinks(dest_dir: Path) -> None:

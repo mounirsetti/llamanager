@@ -1,0 +1,43 @@
+{# File browser partial — rendered by GET /ui/models/browse #}
+{% if browse_error %}
+<p style="color: var(--bad); font-size: 0.8125rem; padding: 8px 0;">
+  Could not list files: {{ browse_error }}
+</p>
+{% else %}
+
+  {# Engine hint banner #}
+  {% if engine_hint %}
+  <div style="padding: 10px 14px; border-left: 3px solid var(--warn); background: oklch(from var(--warn) l c h / 0.08); font-size: 0.8125rem; color: var(--fg-1); margin: 8px 0;">
+    {{ engine_hint.message }}
+    <a href="/ui/setup" style="color: var(--accent); margin-left: 4px;">Go to Setup &rarr;</a>
+  </div>
+  {% endif %}
+
+  {% if gguf_files %}
+  <table class="lm-table" style="margin-top: 8px;">
+    <thead>
+      <tr><th>File</th><th>Size</th><th></th></tr>
+    </thead>
+    <tbody>
+    {% for f in gguf_files %}
+      <tr>
+        <td data-label="File"><code style="font-size: 0.8125rem;">{{ f.name }}</code></td>
+        <td data-label="Size" class="num" style="font-size: 0.8125rem;">{{ f.size_fmt }}</td>
+        <td class="actions" data-label="">
+          <form method="post" action="/ui/models/pull" style="display: inline;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="source" value="hf://{{ repo }}">
+            <input type="hidden" name="files" value="{{ f.name }}">
+            <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Pull</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="font-size: 0.8125rem; color: var(--fg-2); padding: 8px 0;">
+    No GGUF files found in this repository.
+  </p>
+  {% endif %}
+{% endif %}

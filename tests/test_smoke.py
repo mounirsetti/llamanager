@@ -26,8 +26,8 @@ def test_config_defaults_and_paths(tmp_path: Path):
     c = load_config(tmp_path / "missing.toml")
     assert c.port == 7200
     assert c.llama_server_port == 7201
-    assert c.default_profile == "qwen35-4b-default"
-    assert c.profiles  # bundled defaults populate them
+    assert c.default_profile == ""
+    assert c.profiles == {}  # no bundled profiles
     assert c.models_dir.is_dir()
 
 

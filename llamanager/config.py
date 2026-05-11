@@ -25,8 +25,8 @@ llama_server_port = 7201
 data_dir = "~/.llamanager"
 
 [defaults]
-model = "unsloth/Qwen3.5-4B-GGUF/Q4_K_M.gguf"
-profile = "qwen35-4b-default"
+model = ""
+profile = ""
 origin_priority = 50
 
 [restart_policy]
@@ -41,16 +41,6 @@ hf_token_env = "HF_TOKEN"
 [queue]
 max_concurrent = 1
 max_queue_depth = 200
-
-[profiles.qwen35-4b-default]
-model = "unsloth/Qwen3.5-4B-GGUF/Q4_K_M.gguf"
-mmproj = ""
-args = { ctx-size = 16384, host = "127.0.0.1", port = 7201, temp = 0.7, top-p = 0.8, top-k = 20, min-p = 0.0, presence-penalty = 1.5, alias = "qwen3.5-4b" }
-
-[profiles.qwen35-4b-vision]
-model = "unsloth/Qwen3.5-4B-GGUF/Q4_K_M.gguf"
-mmproj = "unsloth/Qwen3.5-4B-GGUF/mmproj-BF16.gguf"
-args = { ctx-size = 8192, host = "127.0.0.1", port = 7201, temp = 0.7, top-p = 0.8, alias = "qwen3.5-4b-vl" }
 """
 
 
@@ -74,8 +64,8 @@ class Config:
     llama_server_port: int = 7201
     data_dir: Path = field(default_factory=lambda: expand("~/.llamanager"))
 
-    default_model: str = "unsloth/Qwen3.5-4B-GGUF/Q4_K_M.gguf"
-    default_profile: str = "qwen35-4b-default"
+    default_model: str = ""
+    default_profile: str = ""
     default_origin_priority: int = 50
     autolaunch: bool = False
 
@@ -144,8 +134,8 @@ def load_config(path: Path | None = None) -> Config:
         llama_server_binary=server.get("llama_server_binary", "llama-server"),
         llama_server_port=int(server.get("llama_server_port", 7201)),
         data_dir=expand(server.get("data_dir", "~/.llamanager")),
-        default_model=defaults.get("model", "unsloth/Qwen3.5-4B-GGUF/Q4_K_M.gguf"),
-        default_profile=defaults.get("profile", "qwen35-4b-default"),
+        default_model=defaults.get("model", ""),
+        default_profile=defaults.get("profile", ""),
         default_origin_priority=int(defaults.get("origin_priority", 50)),
         autolaunch=bool(defaults.get("autolaunch", False)),
         max_restarts_in_window=int(rp.get("max_restarts_in_window", 3)),

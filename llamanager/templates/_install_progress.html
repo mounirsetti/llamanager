@@ -1,6 +1,7 @@
+{% set _fork = fork_name | default('llama.cpp') %}
 {% if install.status == "running" %}
-<div id="install-progress"
-     hx-get="/ui/setup/_install_progress"
+<div id="install-progress-{{ _fork }}"
+     hx-get="/ui/setup/_install_progress?fork={{ _fork }}"
      hx-trigger="every 1s"
      hx-swap="outerHTML"
      style="margin-top: 20px;">
@@ -8,7 +9,7 @@
   <pre class="lm-log" style="max-height: 200px;">{{ install.lines | join('\n') }}</pre>
 </div>
 {% elif install.status == "done" %}
-<div id="install-progress" style="margin-top: 20px;">
+<div id="install-progress-{{ _fork }}" style="margin-top: 20px;">
   <div style="padding: 18px 20px; border: 1px solid var(--ok); background: oklch(from var(--ok) l c h / 0.08); display: flex; flex-direction: column; gap: 10px;">
     <div style="font-size: 0.6875rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ok); font-weight: 500;">Installed</div>
     <div style="font-family: 'Fraunces', serif; font-size: 1.125rem; font-weight: 400; color: var(--fg-0);">llama-server is ready</div>
@@ -21,12 +22,12 @@
   </div>
 </div>
 {% elif install.status == "error" %}
-<div id="install-progress" style="margin-top: 20px;">
+<div id="install-progress-{{ _fork }}" style="margin-top: 20px;">
   <div class="lm-error">Install failed: {{ install.error }}</div>
   {% if install.lines %}
   <pre class="lm-log" style="max-height: 200px; margin-top: 8px;">{{ install.lines | join('\n') }}</pre>
   {% endif %}
 </div>
 {% else %}
-<div id="install-progress"></div>
+<div id="install-progress-{{ _fork }}"></div>
 {% endif %}

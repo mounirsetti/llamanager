@@ -73,6 +73,33 @@ After installing llamanager, open **http://localhost:7200/ui/setup** to verify d
 
 If `llama-server` is already installed but not on `PATH`, you can point llamanager at it by setting `llama_server_binary` in `~/.llamanager/config.toml`, or using the path field on the Setup page.
 
+### Alternative engines
+
+llamanager supports installing compatible llama.cpp forks **alongside** the default engine. Switching engines does not remove the original installation — both binaries live side-by-side under `~/.llamanager/bin/`.
+
+| engine | what it adds | install location |
+|--------|-------------|-----------------|
+| [llama.cpp](https://github.com/ggerganov/llama.cpp) (default) | Official CPU/Metal/CUDA build | `~/.llamanager/bin/llama-server` |
+| [Atomic TurboQuant](https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant) | TurboQuant compression (2–4 bit KV cache, up to 6.4x compression vs FP16) and Gemma 4 MTP speculative decoding (~30–50% throughput gains) | `~/.llamanager/bin/atomic/llama-server` |
+
+To install or switch engines, open **Setup** in the web UI. The **Alternative engines** section lets you auto-install a fork from its GitHub releases and switch the active binary with one click. You can also switch via the CLI by setting `llama_server_binary` in `config.toml` to the fork's binary path.
+
+When using Atomic TurboQuant, add the relevant flags to your profile args to enable its features:
+
+```toml
+[profiles.turbo-example]
+model = "your-model.gguf"
+args = { ctx-size = 16384, ctk = "turbo3", ctv = "turbo3", fa = true }
+```
+
+For MTP speculative decoding with Gemma 4 models:
+
+```toml
+[profiles.gemma4-mtp]
+model = "gemma4-target.gguf"
+args = { ctx-size = 16384, mtp-head = "gemma4-assistant.gguf", spec-type = "mtp" }
+```
+
 ## Install
 
 ```bash

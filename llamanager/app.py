@@ -23,7 +23,7 @@ from .queue_mgr import QueueManager
 from .registry import Registry
 from .server_manager import ServerManager
 from .supervisor import Supervisor
-from .llama_installer import detect_binary, InstallState
+from .llama_installer import detect_binary, InstallState, FORKS
 
 log = logging.getLogger(__name__)
 
@@ -192,7 +192,8 @@ def create_app(config_path: Path | None = None,
     app.state.queue = queue
     app.state.supervisor = supervisor
     app.state.registry = registry
-    app.state.install_state = InstallState()
+    app.state.install_states = {fork: InstallState() for fork in FORKS}
+    app.state.install_state = app.state.install_states["llama.cpp"]
     app.state.session_secret = _load_or_create_session_secret(cfg)
     # Server-side admin UI session store. Lives in-process; restart logs
     # everyone out, which is acceptable for a single-host operator UI.

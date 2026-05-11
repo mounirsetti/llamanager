@@ -80,6 +80,7 @@
     <div style="display: flex; flex-direction: column; gap: 10px;">
       <form method="post" action="/ui/setup/install">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="fork" value="llama.cpp">
         <button type="submit"
                 class="lm-btn lm-btn--primary"
                 {% if install.status == 'running' %}disabled{% endif %}>
@@ -91,8 +92,85 @@
   </div>
 
   {# Install progress area — shared partial #}
+  {% set fork_name = "llama.cpp" %}
   {% include "_install_progress.html" %}
 </section>
+
+{# ---- Section 2b: Alternative engines ---- #}
+{% for fork_id, fork in forks.items() if fork_id != "llama.cpp" %}
+{% if loop.first %}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Alternative engines</span>
+  </header>
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 24px;">
+    Install compatible llama.cpp forks alongside the default engine. Switching does not remove the original installation.
+  </p>
+{% endif %}
+
+  <div style="padding: 20px 24px; border: 1px solid var(--bg-3); background: var(--bg-1); margin-bottom: 16px;">
+    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
+      <span style="font-family: 'Fraunces', serif; font-size: 1.0625rem; font-weight: 500; color: var(--fg-0);">{{ fork.label }}</span>
+      {% if fork.active %}
+      <span class="lm-pill lm-pill--running">active</span>
+      {% elif fork.installed %}
+      <span class="lm-pill" style="color: var(--accent); border-color: var(--accent);">installed</span>
+      {% endif %}
+    </div>
+
+    <p style="font-size: 0.8125rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 16px;">
+      {{ fork.description }}
+      <a href="{{ fork.url }}" style="color: var(--accent); margin-left: 4px;">GitHub &nearr;</a>
+    </p>
+
+    {% if fork.installed %}
+    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px;">
+      <code style="font-size: 0.8125rem; color: var(--fg-1);">{{ fork.binary_path }}</code>
+    </div>
+    <div style="display: flex; gap: 12px; align-items: center;">
+      {% if fork.active %}
+      <span style="font-size: 0.8125rem; color: var(--fg-2);">Currently the active engine.</span>
+      {# Also offer a button to switch back to default #}
+      {% if forks['llama.cpp'].installed %}
+      <form method="post" action="/ui/setup/switch-fork">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="fork" value="llama.cpp">
+        <button type="submit" class="lm-btn lm-btn--ghost">Switch back to llama.cpp</button>
+      </form>
+      {% endif %}
+      {% else %}
+      <form method="post" action="/ui/setup/switch-fork">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="fork" value="{{ fork_id }}">
+        <button type="submit" class="lm-btn lm-btn--primary">Use this engine</button>
+      </form>
+      {% endif %}
+    </div>
+    {% else %}
+    <div style="display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start;">
+      <form method="post" action="/ui/setup/install">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="fork" value="{{ fork_id }}">
+        <button type="submit"
+                class="lm-btn lm-btn--primary"
+                {% if fork.install.status == 'running' %}disabled{% endif %}>
+          {% if fork.install.status == 'running' %}Installing&hellip;{% else %}Auto-install from GitHub{% endif %}
+        </button>
+      </form>
+      <p style="font-size: 0.75rem; color: var(--fg-2); max-width: 36ch; margin: 0;">Downloads the latest release build. Does not replace the default llama.cpp installation.</p>
+    </div>
+    {% endif %}
+
+    {# Per-fork install progress #}
+    {% set fork_name = fork_id %}
+    {% set install = fork.install %}
+    {% include "_install_progress.html" %}
+  </div>
+
+{% if loop.last %}
+</section>
+{% endif %}
+{% endfor %}
 
 {# ---- Section 3: Config file ---- #}
 <section class="lm-section">

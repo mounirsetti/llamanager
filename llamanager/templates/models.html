@@ -23,15 +23,44 @@
   {% include "_models_list_partial.html" %}
 </section>
 
-{# ---- Pull a model ---- #}
+{# ---- Find a model ---- #}
 <section class="lm-section">
   <header class="lm-section-head">
-    <span class="lm-section-marker">Pull a model</span>
-    <span class="lm-section-meta">from Hugging Face or a URL</span>
+    <span class="lm-section-marker">Find a model</span>
+    <span class="lm-section-meta">search Hugging Face</span>
   </header>
 
   <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
-    Enter a Hugging Face repo and the specific GGUF file you want. Downloads run in the background and progress is shown live in the models list above.
+    Search for GGUF models on Hugging Face. Results are sorted by popularity. Click a model to see the available files and pull one with a single click.
+  </p>
+
+  <div style="margin-bottom: 20px;">
+    <input type="search" id="model-search" class="lm-input"
+           name="q" placeholder="Search models, e.g. llama, phi, gemma, mistral..."
+           hx-get="/ui/models/search"
+           hx-trigger="input changed delay:400ms, search"
+           hx-target="#search-results"
+           hx-swap="innerHTML"
+           style="max-width: 520px;">
+  </div>
+
+  <div id="search-results"
+       hx-get="/ui/models/search?q="
+       hx-trigger="load"
+       hx-swap="innerHTML">
+    <p style="color: var(--fg-2); font-size: 0.875rem;">Loading popular models...</p>
+  </div>
+</section>
+
+{# ---- Pull a model (manual) ---- #}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Pull a model</span>
+    <span class="lm-section-meta">manual entry</span>
+  </header>
+
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
+    Already know what you want? Enter a Hugging Face repo or direct URL and the specific GGUF file. Downloads run in the background.
   </p>
 
   <form class="lm-form lm-form--wide" method="post" action="/ui/models/pull">
@@ -41,7 +70,7 @@
         <label class="lm-field-label" for="model-source">Source</label>
         <input id="model-source" class="lm-input lm-input--mono"
                type="text" name="source"
-               placeholder="hf://unsloth/Qwen3.5-4B-GGUF or https://..."
+               placeholder="hf://org/repo-GGUF or https://..."
                required>
       </div>
       <div class="lm-field">

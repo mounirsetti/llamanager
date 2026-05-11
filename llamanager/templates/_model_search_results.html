@@ -1,0 +1,35 @@
+{# Search results partial — rendered by GET /ui/models/search #}
+<div id="search-results">
+  {% if search_error %}
+  <p style="color: var(--bad); font-size: 0.875rem; padding: 12px 0;">
+    Could not reach Hugging Face: {{ search_error }}
+  </p>
+  {% elif search_results %}
+  <div style="display: flex; flex-direction: column; gap: 0;">
+    {% for m in search_results %}
+    <div style="padding: 14px 0; border-bottom: 1px solid var(--bg-2);">
+      <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+        <code style="font-size: 0.875rem; color: var(--fg-0); font-weight: 500;">{{ m.id }}</code>
+        <span style="font-size: 0.75rem; color: var(--fg-2); display: inline-flex; gap: 12px; margin-left: auto;">
+          <span title="Downloads">{{ m.downloads_fmt }} downloads</span>
+          <span title="Likes">{{ m.likes }} likes</span>
+        </span>
+      </div>
+      <div style="margin-top: 10px; display: flex; align-items: center; gap: 10px;">
+        <button class="lm-btn lm-btn--ghost lm-btn--xs"
+                hx-get="/ui/models/browse?repo={{ m.id | urlencode }}"
+                hx-target="#model-files-{{ loop.index }}"
+                hx-swap="innerHTML">
+          Browse GGUF files
+        </button>
+      </div>
+      <div id="model-files-{{ loop.index }}" style="margin-top: 4px;"></div>
+    </div>
+    {% endfor %}
+  </div>
+  {% elif search_query %}
+  <p class="lm-empty">No GGUF models found for &ldquo;{{ search_query }}&rdquo;. Try a different search.</p>
+  {% else %}
+  <p class="lm-empty">No GGUF models found.</p>
+  {% endif %}
+</div>

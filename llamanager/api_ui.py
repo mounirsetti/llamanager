@@ -36,8 +36,11 @@ from .config import (
     load_config, save_profile, delete_profile, update_defaults,
 )
 from .llama_installer import (
+    FORKS,
     InstallState,
     detect_binary,
+    detect_fork_binary,
+    get_engine_hint,
     install_instructions,
     install_llama_server,
     patch_config_binary,
@@ -752,6 +755,121 @@ async def models_locate(request: Request,
     return RedirectResponse("/ui/models", status_code=303)
 
 
+# ---------- model search / browse (Hugging Face) ----------
+
+def _fmt_count(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+def _fmt_size(n: int) -> str:
+    if n >= 1024**3:
+        return f"{n / 1024**3:.1f} GB"
+    if n >= 1024**2:
+        return f"{n / 1024**2:.0f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{n} B"
+
+
+@router.get("/models/search", response_class=HTMLResponse)
+async def models_search(request: Request, q: str = "",
+                        _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """Search Hugging Face for GGUF models.  Returns an HTML partial."""
+    import httpx as _httpx
+
+    async def _do_search(query: str) -> list[dict]:
+        params: dict[str, str] = {
+            "filter": "gguf",
+            "sort": "downloads",
+            "direction": "-1",
+            "limit": "20",
+        }
+        if query.strip():
+            params["search"] = query.strip()
+        async with _httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                "https://huggingface.co/api/models", params=params,
+            )
+            r.raise_for_status()
+            return r.json()
+
+    try:
+        raw = await _do_search(q)
+        results = [
+            {
+                "id": m.get("id", ""),
+                "author": m.get("author", m.get("id", "").split("/")[0]),
+                "downloads": m.get("downloads", 0),
+                "downloads_fmt": _fmt_count(m.get("downloads", 0)),
+                "likes": m.get("likes", 0),
+            }
+            for m in raw
+        ]
+    except Exception as e:
+        log.warning("HF search failed: %s", e)
+        return templates.TemplateResponse(
+            request, "_model_search_results.html",
+            _ctx(request, search_results=[], search_error=str(e), search_query=q),
+        )
+
+    return templates.TemplateResponse(
+        request, "_model_search_results.html",
+        _ctx(request, search_results=results, search_error=None, search_query=q),
+    )
+
+
+@router.get("/models/browse", response_class=HTMLResponse)
+async def models_browse(request: Request, repo: str = "",
+                        _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """List GGUF files in a Hugging Face repo.  Returns an HTML partial."""
+    import httpx as _httpx
+
+    if not repo.strip():
+        return _error_html("repo is required", status_code=400)
+
+    async def _do_browse(repo_id: str) -> list[dict]:
+        # The /tree/main endpoint includes file sizes; /api/models/{id} does not.
+        async with _httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"https://huggingface.co/api/models/{repo_id}/tree/main",
+            )
+            r.raise_for_status()
+            return r.json()
+
+    try:
+        tree = await _do_browse(repo.strip())
+        gguf_files = []
+        for entry in tree:
+            path = entry.get("path", "")
+            if not path.lower().endswith(".gguf"):
+                continue
+            size = entry.get("size") or 0
+            gguf_files.append({
+                "name": path,
+                "size": size,
+                "size_fmt": _fmt_size(size) if size else "unknown",
+                "engine_hint": get_engine_hint(repo=repo, filename=path),
+            })
+        gguf_files.sort(key=lambda f: f["size"])
+    except Exception as e:
+        log.warning("HF browse failed for %s: %s", repo, e)
+        return templates.TemplateResponse(
+            request, "_model_files.html",
+            _ctx(request, repo=repo, gguf_files=[], browse_error=str(e)),
+        )
+
+    engine_hint = get_engine_hint(repo=repo)
+    return templates.TemplateResponse(
+        request, "_model_files.html",
+        _ctx(request, repo=repo, gguf_files=gguf_files,
+             browse_error=None, engine_hint=engine_hint),
+    )
+
+
 # ---------- origins ----------
 
 @router.get("/origins", response_class=HTMLResponse)
@@ -1026,18 +1144,33 @@ async def setup_set_binary(request: Request,
 def _setup_ctx(request: Request) -> dict:
     import sys as _sys
     cfg = request.app.state.cfg
+    states: dict[str, InstallState] = request.app.state.install_states
     if _sys.platform == "darwin":
         open_config_label = "Open in Finder"
     elif _sys.platform == "win32":
         open_config_label = "Open in Explorer"
     else:
         open_config_label = "Open folder"
+
+    active_binary = detect_binary(cfg.llama_server_binary)
+    forks_info: dict[str, dict] = {}
+    for fork_id, fork_meta in FORKS.items():
+        fork_binary = detect_fork_binary(fork_id)
+        forks_info[fork_id] = {
+            **fork_meta,
+            "installed": fork_binary is not None,
+            "binary_path": fork_binary,
+            "install": states[fork_id].to_dict(),
+            "active": fork_binary is not None and fork_binary == active_binary,
+        }
+
     return _ctx(
         request,
-        binary_path=detect_binary(cfg.llama_server_binary),
+        binary_path=active_binary,
         configured_binary=cfg.llama_server_binary,
         instructions=install_instructions(),
         install=request.app.state.install_state.to_dict(),
+        forks=forks_info,
         config_dir=str(cfg.config_path.parent),
         config_file=str(cfg.config_path),
         open_config_label=open_config_label,
@@ -1046,24 +1179,34 @@ def _setup_ctx(request: Request) -> dict:
 
 @router.post("/setup/install", response_class=HTMLResponse)
 async def setup_install(request: Request,
+                        fork: str = Form("llama.cpp"),
                         _: None = Depends(require_csrf)) -> Response:
-    state: InstallState = request.app.state.install_state
+    states: dict[str, InstallState] = request.app.state.install_states
+    if fork not in states:
+        fork = "llama.cpp"
+    state = states[fork]
     if state.status != "running":
         state.status = "running"
         state.lines = []
         state.error = None
         state.installed_path = None
-        asyncio.create_task(install_llama_server(state))
+        asyncio.create_task(install_llama_server(state, fork=fork))
     # Render immediately so the HTMX polling div is present from the start
     return templates.TemplateResponse(request, "setup.html", _setup_ctx(request))
 
 
 @router.get("/setup/_install_progress", response_class=HTMLResponse)
 async def setup_install_progress(request: Request,
+                                 fork: str = "llama.cpp",
                                  _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    state: InstallState = request.app.state.install_state
+    states: dict[str, InstallState] = request.app.state.install_states
+    if fork not in states:
+        fork = "llama.cpp"
+    state = states[fork]
     cfg = request.app.state.cfg
-    if state.status == "done" and state.installed_path:
+    # Auto-update the active binary only for the standard llama.cpp fork.
+    # Alternate forks require an explicit switch so the original is preserved.
+    if fork == "llama.cpp" and state.status == "done" and state.installed_path:
         cfg.llama_server_binary = state.installed_path
         patch_config_binary(cfg.config_path, state.installed_path)
     binary_path = detect_binary(cfg.llama_server_binary)
@@ -1071,7 +1214,21 @@ async def setup_install_progress(request: Request,
         request,
         install=state.to_dict(),
         binary_path=binary_path,
+        fork_name=fork,
     ))
+
+
+@router.post("/setup/switch-fork", response_class=HTMLResponse)
+async def setup_switch_fork(request: Request,
+                            fork: str = Form(...),
+                            _: None = Depends(require_csrf)) -> Response:
+    """Switch the active llama-server binary to a different fork."""
+    cfg = request.app.state.cfg
+    binary = detect_fork_binary(fork)
+    if binary:
+        cfg.llama_server_binary = binary
+        patch_config_binary(cfg.config_path, binary)
+    return RedirectResponse("/ui/setup", status_code=303)
 
 
 @router.post("/setup/open-config", response_class=HTMLResponse)
