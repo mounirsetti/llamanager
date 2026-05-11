@@ -968,7 +968,8 @@ def _version_newer(remote: str, local: str) -> bool:
     return _parse_version(remote) > _parse_version(local)
 
 
-LLAMANAGER_VERSION = "0.1.0"
+from importlib.metadata import version as _pkg_version
+LLAMANAGER_VERSION = _pkg_version("llamanager")
 GITHUB_REPO = "mounirsetti/llamanager"
 
 
