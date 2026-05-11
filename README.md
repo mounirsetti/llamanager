@@ -53,8 +53,21 @@ llamanager requires `llama-server` — the inference engine from [llama.cpp](htt
 | os      | easiest install                                    |
 |---------|----------------------------------------------------|
 | macOS   | `brew install llama.cpp`                           |
-| Linux   | auto-install via the llamanager UI (CPU build), or download a CUDA/ROCm/Vulkan build from [releases](https://github.com/ggerganov/llama.cpp/releases) |
-| Windows | auto-install via the llamanager UI (AVX2 CPU build), or download a CUDA build from [releases](https://github.com/ggerganov/llama.cpp/releases) |
+| Linux   | auto-install via the llamanager UI (CPU build), or download a CUDA/ROCm/Vulkan/SYCL build from [releases](https://github.com/ggerganov/llama.cpp/releases) |
+| Windows | auto-install via the llamanager UI (AVX2 CPU build), or download a CUDA/ROCm/SYCL build from [releases](https://github.com/ggerganov/llama.cpp/releases) |
+
+### GPU compatibility
+
+The dashboard auto-detects your GPU and reports available VRAM (or unified memory on Apple Silicon). The capacity estimate uses whichever memory pool is relevant for inference.
+
+| GPU vendor     | backend         | detection tool | notes                                                  |
+|----------------|-----------------|----------------|--------------------------------------------------------|
+| Apple Silicon  | Metal           | `system_profiler` | Unified memory — RAM and VRAM are the same pool     |
+| NVIDIA         | CUDA            | `nvidia-smi`   | Install NVIDIA drivers; CUDA toolkit optional for llama.cpp CUDA builds |
+| AMD            | ROCm (HIP)     | `rocm-smi`     | Requires ROCm runtime; supported on RDNA2+ and CDNA GPUs |
+| Intel Arc / DC | SYCL (oneAPI)   | `xpu-smi`      | Requires Intel oneAPI runtime and `xpu-smi` from [XPU Manager](https://github.com/intel/xpumanager) |
+
+If no compatible GPU tool is found, llamanager falls back to system RAM for capacity estimates and shows "No compatible GPU detected" on the dashboard. Inference still works (CPU-only) but will be slower.
 
 After installing llamanager, open **http://localhost:7200/ui/setup** to verify detection, set the binary path if needed, or trigger an automatic install directly from the UI.
 

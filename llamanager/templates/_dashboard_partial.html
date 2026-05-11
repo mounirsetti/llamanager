@@ -55,6 +55,11 @@
       <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">
         {{ sysinfo.ram_available_gb }} GB available
       </div>
+      {% if sysinfo.llama_mem_gb > 0 %}
+      <div style="font-size: 0.8125rem; color: var(--accent); margin-top: 2px;">
+        {{ sysinfo.llama_mem_gb }} GB llamanager
+      </div>
+      {% endif %}
       <div style="margin-top: 8px; height: 4px; background: var(--bg-3); border-radius: 2px;">
         <div style="height: 4px; border-radius: 2px; width: {{ sysinfo.ram_used_pct }}%; background: {% if sysinfo.ram_used_pct > 90 %}var(--bad){% elif sysinfo.ram_used_pct > 70 %}var(--warn){% else %}var(--ok){% endif %};"></div>
       </div>
@@ -108,22 +113,40 @@
     </div>
     {% endif %}
 
-    {# Model capacity estimate #}
+    {# Model capacity estimate — use VRAM on CUDA, unified RAM on Mac #}
     <div style="background: var(--bg-0); padding: 16px 18px;">
       <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 8px;">Capacity estimate</div>
-      {% set avail = sysinfo.ram_available_gb %}
-      {% if avail >= 16 %}
+      {% if sysinfo.gpu_vram_free_gb is defined %}
+        {% set avail = sysinfo.gpu_vram_free_gb %}
+        {% set mem_label = "VRAM" %}
+      {% else %}
+        {% set avail = sysinfo.ram_effective_avail_gb %}
+        {% set mem_label = "RAM" %}
+      {% endif %}
+      {% if avail >= 48 %}
+      <div style="font-size: 0.9375rem; color: var(--ok); font-weight: 500;">Very large models OK</div>
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">70B+ Q4 fits in {{ avail }} GB {{ mem_label }}</div>
+      {% elif avail >= 32 %}
       <div style="font-size: 0.9375rem; color: var(--ok); font-weight: 500;">Large models OK</div>
-      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">~{{ (avail * 0.85) | round(0) | int }}B param Q4 fits in {{ avail }} GB free</div>
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">Up to 70B Q4 fits in {{ avail }} GB {{ mem_label }}</div>
+      {% elif avail >= 24 %}
+      <div style="font-size: 0.9375rem; color: var(--ok); font-weight: 500;">Large models OK</div>
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">Up to 32-34B Q4 fits in {{ avail }} GB {{ mem_label }}</div>
+      {% elif avail >= 16 %}
+      <div style="font-size: 0.9375rem; color: var(--ok); font-weight: 500;">Medium-large models OK</div>
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">Up to 13-20B Q4 fits in {{ avail }} GB {{ mem_label }}</div>
       {% elif avail >= 8 %}
       <div style="font-size: 0.9375rem; color: var(--ok); font-weight: 500;">Medium models OK</div>
-      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">7-13B Q4 fits comfortably</div>
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">Up to 7-13B Q4 fits in {{ avail }} GB {{ mem_label }}</div>
       {% elif avail >= 4 %}
       <div style="font-size: 0.9375rem; color: var(--warn); font-weight: 500;">Small models only</div>
-      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">Up to ~7B Q4 with tight headroom</div>
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">Up to 3-7B Q4 with {{ avail }} GB {{ mem_label }}</div>
+      {% elif avail >= 2 %}
+      <div style="font-size: 0.9375rem; color: var(--warn); font-weight: 500;">Tiny models only</div>
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">Up to 1-3B Q4 with {{ avail }} GB {{ mem_label }}</div>
       {% else %}
       <div style="font-size: 0.9375rem; color: var(--bad); font-weight: 500;">Low memory</div>
-      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">Close other apps to free RAM</div>
+      <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">Close other apps to free {{ mem_label }}</div>
       {% endif %}
     </div>
 

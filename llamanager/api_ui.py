@@ -279,22 +279,33 @@ def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
     info["ram_available_gb"] = round(mem.available / (1024**3), 1)
     info["ram_used_pct"] = mem.percent
 
-    # Top 5 memory-consuming processes
+    # Collect per-process memory; separate llamanager processes from the rest
+    LLAMA_NAMES = {"llama-server", "llamanager", "llama_server"}
     try:
         procs = []
+        llama_mem_bytes = 0
         for p in psutil.process_iter(["pid", "name", "memory_info"]):
             try:
                 mi = p.info["memory_info"]
                 if mi is None:
                     continue
-                mem_mb = round(mi.rss / (1024**2), 1)
-                procs.append({"name": p.info["name"], "pid": p.info["pid"], "mem_mb": mem_mb})
+                name = p.info["name"] or ""
+                rss = mi.rss
+                if name in LLAMA_NAMES:
+                    llama_mem_bytes += rss
+                else:
+                    procs.append({"name": name, "pid": p.info["pid"], "mem_mb": round(rss / (1024**2), 1)})
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, AttributeError):
                 continue
         procs.sort(key=lambda x: x["mem_mb"], reverse=True)
         info["top_mem_procs"] = procs[:5]
     except Exception:
+        llama_mem_bytes = 0
         info["top_mem_procs"] = []
+
+    info["llama_mem_gb"] = round(llama_mem_bytes / (1024**3), 1)
+    # Effective available = OS available + what llamanager/llama-server is using
+    info["ram_effective_avail_gb"] = round((mem.available + llama_mem_bytes) / (1024**3), 1)
 
     # Swap
     swap = psutil.swap_memory()
@@ -322,7 +333,7 @@ def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
         except Exception:
             pass
     else:
-        # Try nvidia-smi for CUDA GPUs
+        # Try nvidia-smi for CUDA GPUs, then rocm-smi for AMD GPUs
         info["gpu_type"] = "unknown"
         info["gpu_name"] = ""
         try:
@@ -338,7 +349,67 @@ def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
                 info["gpu_vram_total_gb"] = round(int(parts[1].strip()) / 1024, 1)
                 info["gpu_vram_free_gb"] = round(int(parts[2].strip()) / 1024, 1)
         except Exception:
-            info["gpu_type"] = "CPU-only (no CUDA detected)"
+            # Try AMD ROCm
+            try:
+                rocm = subprocess.check_output(
+                    ["rocm-smi", "--showmeminfo", "vram", "--csv"],
+                    text=True, timeout=5,
+                ).strip()
+                # CSV format: GPU, VRAM Total Used (B), VRAM Total (B)
+                for line in rocm.splitlines()[1:]:
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) >= 3:
+                        total_b = int(parts[2])
+                        used_b = int(parts[1])
+                        info["gpu_type"] = "ROCm"
+                        info["gpu_vram_total_gb"] = round(total_b / (1024**3), 1)
+                        info["gpu_vram_free_gb"] = round((total_b - used_b) / (1024**3), 1)
+                        break
+                # Get GPU name
+                try:
+                    name_out = subprocess.check_output(
+                        ["rocm-smi", "--showproductname", "--csv"],
+                        text=True, timeout=5,
+                    ).strip()
+                    for line in name_out.splitlines()[1:]:
+                        parts = [p.strip() for p in line.split(",")]
+                        if len(parts) >= 2:
+                            info["gpu_name"] = parts[1]
+                            break
+                except Exception:
+                    pass
+            except Exception:
+                # Try Intel Arc / Data Center GPU via xpu-smi
+                try:
+                    # Get device name and total VRAM
+                    disc = subprocess.check_output(
+                        ["xpu-smi", "discovery", "--dump", "1,2,16"],
+                        text=True, timeout=5,
+                    ).strip()
+                    for line in disc.splitlines()[1:]:
+                        parts = [p.strip().strip('"') for p in line.split(",")]
+                        if len(parts) >= 3:
+                            info["gpu_type"] = "Intel Arc (SYCL)"
+                            info["gpu_name"] = parts[1]
+                            # Total VRAM, e.g. "16384.00 MiB"
+                            total_mib = float(parts[2].split()[0])
+                            info["gpu_vram_total_gb"] = round(total_mib / 1024, 1)
+                            break
+                    # Get used VRAM (metric 18 = GPU Memory Used MiB)
+                    used_out = subprocess.check_output(
+                        ["xpu-smi", "dump", "-d", "0", "-m", "18", "-i", "1", "-n", "1"],
+                        text=True, timeout=5,
+                    ).strip()
+                    for line in used_out.splitlines()[1:]:
+                        parts = [p.strip() for p in line.split(",")]
+                        if len(parts) >= 3:
+                            used_mib = float(parts[2])
+                            info["gpu_vram_free_gb"] = round(
+                                (info.get("gpu_vram_total_gb", 0) * 1024 - used_mib) / 1024, 1
+                            )
+                            break
+                except Exception:
+                    info["gpu_type"] = "No compatible GPU detected"
 
     # Disk free in models dir
     try:
