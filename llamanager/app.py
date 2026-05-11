@@ -11,7 +11,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from .api_admin import router as admin_router
 from .api_ui import SessionStore, router as ui_router
@@ -242,6 +242,16 @@ def create_app(config_path: Path | None = None,
     app.include_router(v1_router)
     app.include_router(admin_router)
     app.include_router(ui_router)
+
+    _assets_dir = Path(__file__).resolve().parent.parent / "assets"
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon_ico():
+        return FileResponse(_assets_dir / "favicon.ico", media_type="image/x-icon")
+
+    @app.get("/favicon.svg", include_in_schema=False)
+    async def favicon_svg():
+        return FileResponse(_assets_dir / "favicon.svg", media_type="image/svg+xml")
 
     @app.get("/health")
     async def health() -> JSONResponse:
