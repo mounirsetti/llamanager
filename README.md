@@ -23,7 +23,7 @@
 
 ---
 
-llamanager wraps `llama-server` (from llama.cpp) so a single GPU can serve a phone, a laptop, a CI job, and whatever else you point at it — without those clients trampling each other. Requests land on a per-origin priority queue, the loaded model swaps on demand, and the whole thing is reachable through one OpenAI-compatible endpoint.
+llamanager wraps `llama-server` (from llama.cpp) so a single GPU can serve a phone, a laptop, a CI job, and whatever else you point at it. Requests land on a per-origin priority queue, the loaded model swaps on demand, and the whole thing is reachable through one OpenAI-compatible endpoint.
 
 ## Why this exists
 
