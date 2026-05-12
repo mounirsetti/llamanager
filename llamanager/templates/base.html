@@ -5,18 +5,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
   <title>{% block title %}llamanager{% endblock %}</title>
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" id="lm-favicon" href="/favicon-dark.svg" type="image/svg+xml">
   <link rel="manifest" href="/manifest.json">
-  <meta name="theme-color" content="#201e17">
+  <meta name="theme-color" id="lm-theme-color" content="#201e17">
 
   {# Theme is set before any paint to prevent a light-flash on dark
-     systems. localStorage wins; otherwise the OS preference applies. #}
+     systems. localStorage wins; otherwise the OS preference applies.
+     Favicon is also switched to match the theme. #}
   <script>
     (function () {
       try {
         var stored = localStorage.getItem('lm-theme');
         var theme = stored || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
         document.documentElement.setAttribute('data-theme', theme);
+        var fav = document.getElementById('lm-favicon');
+        var tc = document.getElementById('lm-theme-color');
+        if (fav) fav.href = theme === 'light' ? '/favicon.svg' : '/favicon-dark.svg';
+        if (tc) tc.content = theme === 'light' ? '#f8f6f3' : '#201e17';
       } catch (e) {
         document.documentElement.setAttribute('data-theme', 'dark');
       }
@@ -863,6 +868,10 @@
           var next = b.getAttribute('data-theme-set');
           root.setAttribute('data-theme', next);
           try { localStorage.setItem('lm-theme', next); } catch (e) {}
+          var fav = document.getElementById('lm-favicon');
+          var tc = document.getElementById('lm-theme-color');
+          if (fav) fav.href = next === 'light' ? '/favicon.svg' : '/favicon-dark.svg';
+          if (tc) tc.content = next === 'light' ? '#f8f6f3' : '#201e17';
           sync();
         });
       });

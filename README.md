@@ -155,9 +155,7 @@ Default ports:
 | llamanager   | 7200 | `127.0.0.1` (loopback only by default)          |
 | llama-server | 7201 | `127.0.0.1` (loopback only, never exposed)      |
 
-Open the web UI at <https://localhost:7200/ui/login> and paste the bootstrap key.
-
-llamanager serves HTTPS by default. On first run it generates a locally-trusted TLS certificate via [mkcert](https://github.com/FiloSottile/mkcert). If mkcert is not installed, it falls back to plain HTTP.
+Open the web UI at <http://localhost:7200/ui/login> and paste the bootstrap key.
 
 ### Accessing from other devices (Tailscale, LAN, etc.)
 
@@ -170,23 +168,7 @@ By default llamanager binds to `127.0.0.1` (localhost only). To reach it from a 
 bind = "0.0.0.0"
 ```
 
-**2. Add your IP to the TLS certificate** — the auto-generated cert only covers `localhost` / `127.0.0.1`. Regenerate it with your Tailscale (or LAN) IP:
-
-```bash
-llamanager generate-cert --force --host <your-tailscale-ip>
-```
-
-For example: `llamanager generate-cert --force --host 100.121.245.71`
-
-You can add multiple IPs or hostnames by repeating `--host`:
-
-```bash
-llamanager generate-cert --force --host 100.121.245.71 --host 192.168.1.50
-```
-
-**3. Restart** the server and access it at `https://<your-ip>:7200/ui/`.
-
-> **Note:** If you haven't run `mkcert -install` yet, your browser will show a certificate warning on the first visit. Run it once in a terminal (it needs your password to install the local CA) and the warning goes away on all devices that trust that CA.
+**2. Restart** the server and access it at `http://<your-ip>:7200/ui/`.
 
 ## Quick dev uninstall & reinstall (macOS)
 
@@ -450,10 +432,6 @@ llama_server_binary = "llama-server"   # or "C:\\path\\to\\llama-server.exe"
 llama_server_port = 7201
 data_dir = "~/.llamanager"
 
-# HTTPS (auto-generated via mkcert on first run)
-ssl_certfile = "~/.llamanager/tls/cert.pem"
-ssl_keyfile = "~/.llamanager/tls/key.pem"
-
 [defaults]
 model = ""       # set after pulling your first model
 profile = ""     # auto-created when you pull a model
@@ -512,33 +490,19 @@ The version is defined in one place: the **`VERSION`** file in the project root.
 
 ### 1. Bump the version
 
-Edit the `VERSION` file:
-
-```
-0.2.0
-```
-
-Reinstall so package metadata is updated:
+Edit the `VERSION` file, then reinstall so package metadata is updated:
 
 ```bash
 pip install -e .
-```
-
-Verify:
-
-```bash
 python -c "import llamanager; print(llamanager.__version__)"
-# 0.2.0
 ```
 
-### 2. Commit and tag
+### 2. Tag
 
 ```bash
-git add VERSION
-git commit -m "Bump version to 0.2.0"
-git tag v0.2.0
+git tag "v$(cat VERSION)"
 git push origin main
-git push origin v0.2.0
+git push origin "v$(cat VERSION)"
 ```
 
 ### 3. Create a GitHub release
@@ -548,15 +512,14 @@ Tags are just pointers — a GitHub **Release** adds release notes and makes the
 **Option A — GitHub web UI** (recommended)
 
 1. Go to the repo → **Releases** → **Draft a new release**
-2. Click **Choose a tag** → select `v0.2.0`
-3. Set the title (e.g. `v0.2.0`)
-4. Write release notes (what changed, any breaking changes)
-5. Click **Publish release**
+2. Click **Choose a tag** → select the `v...` tag you just pushed
+3. Set the title and write release notes
+4. Click **Publish release**
 
 **Option B — GitHub CLI** (`gh`)
 
 ```bash
-gh release create v0.2.0 --title "v0.2.0" --notes "Release notes here."
+gh release create "v$(cat VERSION)" --title "v$(cat VERSION)" --notes "Release notes here."
 ```
 
 > **Note:** `gh` requires the [GitHub CLI](https://cli.github.com/) to be installed and authenticated (`gh auth login`). If `gh release create` fails with a permission error, use the web UI instead.

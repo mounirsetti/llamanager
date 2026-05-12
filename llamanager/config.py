@@ -24,10 +24,6 @@ llama_server_binary = "llama-server"
 llama_server_port = 7201
 data_dir = "~/.llamanager"
 
-# HTTPS: a locally-trusted certificate is auto-generated on first run
-# via mkcert (brew install mkcert). No browser warnings.
-ssl_certfile = "~/.llamanager/tls/cert.pem"
-ssl_keyfile = "~/.llamanager/tls/key.pem"
 
 [defaults]
 model = ""
@@ -82,9 +78,6 @@ class Config:
 
     max_disk_gb: int = 80
     hf_token_env: str = "HF_TOKEN"
-
-    ssl_certfile: str = "~/.llamanager/tls/cert.pem"
-    ssl_keyfile: str = "~/.llamanager/tls/key.pem"
 
     max_concurrent: int = 1
     max_queue_depth: int = 200
@@ -146,8 +139,6 @@ def load_config(path: Path | None = None) -> Config:
         llama_server_binary=server.get("llama_server_binary", "llama-server"),
         llama_server_port=int(server.get("llama_server_port", 7201)),
         data_dir=expand(server.get("data_dir", "~/.llamanager")),
-        ssl_certfile=server.get("ssl_certfile", "~/.llamanager/tls/cert.pem"),
-        ssl_keyfile=server.get("ssl_keyfile", "~/.llamanager/tls/key.pem"),
         default_model=defaults.get("model", ""),
         default_profile=defaults.get("profile", ""),
         default_origin_priority=int(defaults.get("origin_priority", 50)),

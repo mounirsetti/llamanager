@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
   <title>llamanager: sign in</title>
+  <link rel="icon" id="lm-favicon" href="/favicon-dark.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" id="lm-theme-color" content="#201e17">
 
   <script>
     (function () {
@@ -12,6 +15,10 @@
         var stored = localStorage.getItem('lm-theme');
         var theme = stored || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
         document.documentElement.setAttribute('data-theme', theme);
+        var fav = document.getElementById('lm-favicon');
+        var tc = document.getElementById('lm-theme-color');
+        if (fav) fav.href = theme === 'light' ? '/favicon.svg' : '/favicon-dark.svg';
+        if (tc) tc.content = theme === 'light' ? '#f8f6f3' : '#201e17';
       } catch (e) {
         document.documentElement.setAttribute('data-theme', 'dark');
       }

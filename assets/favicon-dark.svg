@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 278 72" fill="none">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 160" fill="none">
   <defs>
     <style>
       @font-face {
@@ -9,12 +9,12 @@
       }
     </style>
   </defs>
-  <text x="6" y="54"
+  <text x="4" y="130"
         font-family="'Fraunces', Georgia, serif"
-        font-size="52"
+        font-size="128"
         font-weight="400"
         font-variation-settings="'opsz' 96, 'SOFT' 30"
-        letter-spacing="-0.8"
-        fill="#181510">llamanager</text>
-  <circle cx="267" cy="44" r="5.5" fill="#cf2f13"/>
+        letter-spacing="-1"
+        fill="#f3f1ee">llam</text>
+  <circle cx="238" cy="105" r="13.5" fill="#ef593f"/>
 </svg>

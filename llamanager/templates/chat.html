@@ -54,7 +54,7 @@
   .chat-md pre code { background: transparent; padding: 0; }
   .chat-md ul, .chat-md ol { margin: 0.5em 0; padding-left: 1.5em; }
   .chat-md blockquote { margin: 0.5em 0; padding: 0 0 0 12px; border-left: 2px solid var(--bg-3); color: var(--fg-2); }
-  /* thinking blocks */
+  /* per-message thinking blocks */
   .chat-thinking-wrap { margin-bottom: 6px; }
   .chat-thinking-label {
     font-size: 0.6875rem; color: var(--fg-3); cursor: pointer;
@@ -66,7 +66,20 @@
     padding: 4px 12px; color: var(--fg-3); font-size: 0.8125rem;
     line-height: 1.5; white-space: pre-wrap;
   }
-  .chat-stats { font-size: 0.6875rem; color: var(--fg-3); margin-top: 6px; }
+  /* thinking dots animation */
+  .thinking-dots { display: inline-flex; gap: 3px; align-items: center; }
+  .thinking-dots span {
+    display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+    background: var(--fg-3); animation: thinking-pulse 1.4s infinite ease-in-out;
+  }
+  .thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+  .thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes thinking-pulse {
+    0%, 80%, 100% { opacity: 0.25; transform: scale(0.8); }
+    40% { opacity: 1; transform: scale(1); }
+  }
+  /* top-level speed indicator */
+  .chat-speed { font-size: 0.6875rem; color: var(--fg-3); margin-left: auto; white-space: nowrap; }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/15.0.7/marked.min.js"
         crossorigin="anonymous" referrerpolicy="no-referrer"></script>
@@ -103,9 +116,6 @@
       <label class="chat-md-toggle">
         <input type="checkbox" id="toggle-md"> Markdown
       </label>
-      <label class="chat-md-toggle">
-        <input type="checkbox" id="toggle-thinking"> Thinking
-      </label>
     </div>
   </div>
 
@@ -136,6 +146,7 @@
         <input id="chat-system" type="text" class="lm-input" value="You are a helpful assistant."
                style="font-size: 0.8125rem; padding: 4px 8px; min-width: 200px; max-width: 360px; border-bottom-width: 1px;">
       </div>
+      <span id="chat-speed" class="chat-speed" style="display: none;"></span>
     </div>
 
     {# Messages #}
@@ -166,7 +177,7 @@
   var historyListEl = document.getElementById('history-list');
   var historyNewBtn = document.getElementById('history-new');
   var toggleMd = document.getElementById('toggle-md');
-  var toggleThinking = document.getElementById('toggle-thinking');
+  var speedEl = document.getElementById('chat-speed');
   var apiKey = {{ api_key | tojson }};
   var streaming = false;
   var userScrolledUp = false;
@@ -242,16 +253,6 @@
     renderMessages();
   });
 
-  // ---- Thinking toggle ----
-  var showThinking = false;
-  try { showThinking = localStorage.getItem('lm-admin-chat-thinking') === '1'; } catch (e) {}
-  toggleThinking.checked = showThinking;
-  toggleThinking.addEventListener('change', function () {
-    showThinking = toggleThinking.checked;
-    try { localStorage.setItem('lm-admin-chat-thinking', showThinking ? '1' : '0'); } catch (e) {}
-    renderMessages();
-  });
-
   // ---- Profile/Model mutual exclusion ----
   profileEl.addEventListener('change', function () { if (profileEl.value) modelSelectEl.value = ''; });
   modelSelectEl.addEventListener('change', function () { if (modelSelectEl.value) profileEl.value = ''; });
@@ -264,12 +265,22 @@
   function scrollToBottom() { if (!userScrolledUp) messagesEl.scrollTop = messagesEl.scrollHeight; }
 
   // ---- Thinking parser ----
-  function parseThinking(text) {
+  function parseThinking(text, reasoning) {
+    if (reasoning) return { thinking: reasoning.trim(), content: (text || '').trim(), done: true };
     if (!text) return { thinking: '', content: text || '', done: true };
-    var m = text.match(/^<think>([\s\S]*?)<\/think>\s*([\s\S]*)$/);
+    var t = text.trimStart();
+    var m = t.match(/^<think>([\s\S]*?)<\/think>\s*([\s\S]*)$/);
     if (m) return { thinking: m[1].trim(), content: m[2].trim(), done: true };
-    if (text.startsWith('<think>')) return { thinking: text.slice(7), content: '', done: false };
+    if (t.startsWith('<think>')) return { thinking: t.slice(7), content: '', done: false };
     return { thinking: '', content: text, done: true };
+  }
+
+  // ---- Thinking dots HTML ----
+  function makeThinkingDots() {
+    var el = document.createElement('span');
+    el.className = 'thinking-dots';
+    for (var i = 0; i < 3; i++) { el.appendChild(document.createElement('span')); }
+    return el;
   }
 
   // ---- Rendering ----
@@ -316,11 +327,11 @@
     var wrap = document.createElement('div');
     wrap.style.cssText = 'flex:1;min-width:0;';
 
-    // Thinking block (AI only)
+    // Thinking block (AI only) — always shown per-message if thinking exists
     var thinkingWrap = null;
     var thinkingContentEl = null;
-    var parsed = !isUser ? parseThinking(content || '') : null;
-    if (!isUser && parsed && parsed.thinking && showThinking) {
+    var parsed = !isUser ? parseThinking(content || '', msgStats && msgStats.reasoning) : null;
+    if (!isUser && parsed && parsed.thinking) {
       thinkingWrap = document.createElement('div');
       thinkingWrap.className = 'chat-thinking-wrap';
       var tLabel = document.createElement('button');
@@ -346,19 +357,9 @@
     setContent(bubble, displayContent, !isUser);
     wrap.appendChild(bubble);
 
-    // Stats line (AI only)
-    var statsEl = document.createElement('div');
-    statsEl.className = 'chat-stats';
-    if (!isUser && msgStats && msgStats.tok_s > 0) {
-      statsEl.textContent = msgStats.tok_s.toFixed(1) + ' tok/s';
-    } else {
-      statsEl.style.display = 'none';
-    }
-    wrap.appendChild(statsEl);
-
     div.appendChild(badge);
     div.appendChild(wrap);
-    return { el: div, bubble: bubble, statsEl: statsEl, wrap: wrap,
+    return { el: div, bubble: bubble, wrap: wrap,
              thinkingWrap: thinkingWrap, thinkingContentEl: thinkingContentEl };
   }
 
@@ -395,9 +396,9 @@
     sendBtn.textContent = '...';
 
     var assistantEl = buildMsgEl('assistant', '');
-    assistantEl.bubble.style.color = 'var(--fg-3)';
-    assistantEl.bubble.textContent = '...';
-    assistantEl.bubble.style.whiteSpace = 'pre-wrap';
+    // Show animated thinking dots as initial placeholder
+    assistantEl.bubble.innerHTML = '';
+    assistantEl.bubble.appendChild(makeThinkingDots());
     messagesEl.appendChild(assistantEl.el);
     scrollToBottom();
 
@@ -415,8 +416,10 @@
     else if (model) headers['X-Llamanager-Model'] = model;
 
     var fullContent = '';
+    var reasoningContent = '';
     var tokenCount = 0;
     var streamStart = 0;
+    var isThinking = false;
 
     fetch('/v1/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body) })
       .then(function (resp) {
@@ -438,45 +441,43 @@
               try {
                 var parsed = JSON.parse(data);
                 var delta = parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
-                if (delta && delta.content) {
-                  if (!streamStart) streamStart = Date.now();
+                if (!delta) continue;
+                if (!streamStart && (delta.content || delta.reasoning_content)) streamStart = Date.now();
+                if (delta.reasoning_content) {
+                  tokenCount++;
+                  reasoningContent += delta.reasoning_content;
+                  isThinking = true;
+                }
+                if (delta.content) {
                   tokenCount++;
                   fullContent += delta.content;
-                  // Parse thinking during stream
-                  var p = parseThinking(fullContent);
-                  if (p.thinking) {
-                    if (showThinking) {
-                      // Create thinking display on first detection
-                      if (!assistantEl.thinkingWrap) {
-                        assistantEl.thinkingWrap = document.createElement('div');
-                        assistantEl.thinkingWrap.className = 'chat-thinking-wrap';
-                        var tl = document.createElement('span');
-                        tl.className = 'chat-thinking-label';
-                        tl.style.cursor = 'default';
-                        assistantEl.thinkingWrap.appendChild(tl);
-                        assistantEl.thinkingContentEl = document.createElement('div');
-                        assistantEl.thinkingContentEl.className = 'chat-thinking-content';
-                        assistantEl.thinkingWrap.appendChild(assistantEl.thinkingContentEl);
-                        assistantEl.wrap.insertBefore(assistantEl.thinkingWrap, assistantEl.bubble);
-                        assistantEl._thinkLabel = tl;
-                      }
-                      assistantEl.thinkingContentEl.textContent = p.thinking;
-                      assistantEl._thinkLabel.textContent = p.done ? '\u25BC Thinking' : '\u25BC Thinking\u2026';
-                      assistantEl.bubble.textContent = p.content;
-                    } else {
-                      // Thinking hidden: show placeholder or main content
-                      assistantEl.bubble.textContent = p.done ? p.content : 'Thinking\u2026';
+                }
+                if (delta.content || delta.reasoning_content) {
+                  var p = parseThinking(fullContent, reasoningContent);
+                  // Check if we're still in thinking phase
+                  var stillThinking = reasoningContent ? !fullContent : !p.done;
+                  if (stillThinking) {
+                    // Show animated dots in the bubble
+                    if (!assistantEl.bubble.querySelector('.thinking-dots')) {
+                      assistantEl.bubble.innerHTML = '';
+                      assistantEl.bubble.appendChild(makeThinkingDots());
                     }
+                    isThinking = true;
                   } else {
-                    assistantEl.bubble.textContent = fullContent;
+                    // Transition out of thinking
+                    if (isThinking) {
+                      assistantEl.bubble.innerHTML = '';
+                      isThinking = false;
+                    }
+                    assistantEl.bubble.textContent = p.content;
+                    assistantEl.bubble.style.color = 'var(--fg-1)';
                   }
-                  assistantEl.bubble.style.color = 'var(--fg-1)';
-                  // Live tok/s
+                  // Live tok/s in top bar
                   if (streamStart) {
                     var elapsed = (Date.now() - streamStart) / 1000;
                     if (elapsed > 0.3) {
-                      assistantEl.statsEl.textContent = (tokenCount / elapsed).toFixed(1) + ' tok/s';
-                      assistantEl.statsEl.style.display = '';
+                      speedEl.textContent = (tokenCount / elapsed).toFixed(1) + ' tok/s';
+                      speedEl.style.display = '';
                     }
                   }
                   scrollToBottom();
@@ -500,17 +501,22 @@
         var elapsed = (Date.now() - streamStart) / 1000;
         msgStats = { tok_s: elapsed > 0 ? tokenCount / elapsed : 0 };
       }
-      if (fullContent) {
-        activeChat.messages.push({ role: 'assistant', content: fullContent, stats: msgStats });
-        // Re-render with proper formatting
+      if (msgStats && reasoningContent) msgStats.reasoning = reasoningContent;
+      if (fullContent || reasoningContent) {
+        var storedContent = fullContent;
+        if (reasoningContent && !fullContent.trimStart().startsWith('<think>')) {
+          storedContent = '<think>\n' + reasoningContent + '\n</think>\n\n' + fullContent;
+        }
+        activeChat.messages.push({ role: 'assistant', content: storedContent, stats: msgStats });
         var parent = assistantEl.el.parentNode;
-        var newEl = buildMsgEl('assistant', fullContent, msgStats);
+        var newEl = buildMsgEl('assistant', storedContent, msgStats);
         parent.replaceChild(newEl.el, assistantEl.el);
         saveHistory();
       }
       streaming = false;
       sendBtn.disabled = false;
       sendBtn.textContent = 'Send';
+      speedEl.style.display = 'none';
       scrollToBottom();
     }
   }

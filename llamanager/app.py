@@ -251,6 +251,10 @@ def create_app(config_path: Path | None = None,
     async def favicon_svg():
         return FileResponse(_assets_dir / "favicon.svg", media_type="image/svg+xml")
 
+    @app.get("/favicon-dark.svg", include_in_schema=False)
+    async def favicon_dark_svg():
+        return FileResponse(_assets_dir / "favicon-dark.svg", media_type="image/svg+xml")
+
     @app.get("/logo.svg", include_in_schema=False)
     async def logo_svg():
         return FileResponse(_assets_dir / "logo.svg", media_type="image/svg+xml")
@@ -258,6 +262,14 @@ def create_app(config_path: Path | None = None,
     @app.get("/logo-dark.svg", include_in_schema=False)
     async def logo_dark_svg():
         return FileResponse(_assets_dir / "logo-dark.svg", media_type="image/svg+xml")
+
+    @app.get("/logo.png", include_in_schema=False)
+    async def logo_png():
+        return FileResponse(_assets_dir / "logo.png", media_type="image/png")
+
+    @app.get("/logo-dark.png", include_in_schema=False)
+    async def logo_dark_png():
+        return FileResponse(_assets_dir / "logo-dark.png", media_type="image/png")
 
     # ---- PWA support ----
 
@@ -274,9 +286,10 @@ def create_app(config_path: Path | None = None,
             "background_color": "#201e17",
             "theme_color": "#201e17",
             "icons": [
-                {"src": "/favicon.svg", "type": "image/svg+xml", "sizes": "any"},
-                {"src": "/icon-192.png", "type": "image/png", "sizes": "192x192"},
-                {"src": "/icon-512.png", "type": "image/png", "sizes": "512x512"},
+                {"src": "/icon-light-192.png", "type": "image/png", "sizes": "192x192"},
+                {"src": "/icon-light-512.png", "type": "image/png", "sizes": "512x512"},
+                {"src": "/icon-dark-192.png", "type": "image/png", "sizes": "192x192"},
+                {"src": "/icon-dark-512.png", "type": "image/png", "sizes": "512x512"},
             ],
         }
         return Response(
@@ -295,41 +308,13 @@ def create_app(config_path: Path | None = None,
         return Response(content=sw_js, media_type="application/javascript",
                         headers={"Service-Worker-Allowed": "/"})
 
-    def _make_png_icon(size: int) -> bytes:
-        """Generate a solid-color PNG icon with the brand red (#cf2f13)."""
-        import struct
-        import zlib
-        r, g, b = 207, 47, 19  # brand accent
-        # PNG signature
-        sig = b'\x89PNG\r\n\x1a\n'
-        # IHDR
-        ihdr_data = struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0)
-        ihdr = _png_chunk(b'IHDR', ihdr_data)
-        # IDAT — solid colour rows
-        row = bytes([0] + [r, g, b] * size)
-        compressed = zlib.compress(row * size)
-        idat = _png_chunk(b'IDAT', compressed)
-        iend = _png_chunk(b'IEND', b'')
-        return sig + ihdr + idat + iend
-
-    def _png_chunk(ctype: bytes, data: bytes) -> bytes:
-        import struct, zlib as _zlib
-        raw = ctype + data
-        return struct.pack('>I', len(data)) + raw + struct.pack('>I', _zlib.crc32(raw) & 0xffffffff)
-
-    _icon_cache: dict[int, bytes] = {}
-
-    @app.get("/icon-192.png", include_in_schema=False)
-    async def icon_192():
-        if 192 not in _icon_cache:
-            _icon_cache[192] = _make_png_icon(192)
-        return Response(content=_icon_cache[192], media_type="image/png")
-
-    @app.get("/icon-512.png", include_in_schema=False)
-    async def icon_512():
-        if 512 not in _icon_cache:
-            _icon_cache[512] = _make_png_icon(512)
-        return Response(content=_icon_cache[512], media_type="image/png")
+    for _icon_name in ("icon-light-192.png", "icon-light-512.png",
+                       "icon-dark-192.png", "icon-dark-512.png"):
+        def _make_icon_route(name: str):
+            @app.get(f"/{name}", include_in_schema=False)
+            async def _serve_icon(n=name):
+                return FileResponse(_assets_dir / n, media_type="image/png")
+        _make_icon_route(_icon_name)
 
     @app.get("/health")
     async def health() -> JSONResponse:
