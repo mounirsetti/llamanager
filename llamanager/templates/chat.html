@@ -4,13 +4,35 @@
 {% block content %}
 <style>
   @media (max-width: 640px) {
-    #chat-app { height: calc(100vh - 140px) !important; min-height: 300px !important; }
+    #chat-app {
+      height: calc(100vh - 140px) !important; min-height: 300px !important;
+      flex-direction: column !important;
+    }
     #chat-system { min-width: 0 !important; max-width: 100% !important; width: 100% !important; }
     #chat-profile { min-width: 0 !important; width: 100% !important; }
     .chat-settings-bar { flex-direction: column !important; align-items: stretch !important; gap: 10px !important; }
     .chat-settings-bar > div { width: 100%; }
     .chat-settings-bar select, .chat-settings-bar input { width: 100%; }
-    .chat-history-rail { display: none !important; }
+    .chat-history-rail {
+      width: 100% !important; flex-shrink: 0 !important;
+      border-right: 0 !important; border-bottom: 1px solid var(--bg-2) !important;
+      max-height: 130px !important;
+    }
+    .chat-history-list {
+      display: flex !important; flex-direction: row !important;
+      overflow-x: auto !important; overflow-y: hidden !important;
+      padding: 6px 8px !important; gap: 6px !important;
+    }
+    .chat-history-item {
+      flex: 0 0 auto !important; max-width: 160px !important;
+      border: 1px solid var(--bg-3) !important; border-radius: 2px !important;
+      padding: 5px 9px !important;
+    }
+    .chat-history-del { display: inline !important; }
+    .chat-history-foot {
+      flex-direction: row !important; align-items: center !important;
+      padding: 6px 12px !important;
+    }
   }
   .chat-history-rail {
     width: 200px; flex-shrink: 0; border-right: 1px solid var(--bg-2);
@@ -184,15 +206,17 @@
 
   // ---- Chat history (localStorage, per-origin) ----
   var STORAGE_KEY = 'lm-admin-chat-' + apiKey.slice(-8);
+  var ACTIVE_KEY = STORAGE_KEY + '-active';
   var chats = [];
   var activeChat = null;
 
   function loadHistory() { try { chats = JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch (e) { chats = []; } }
   function saveHistory() { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(chats)); } catch (e) {} }
+  function saveActive() { try { if (activeChat) localStorage.setItem(ACTIVE_KEY, activeChat.id); } catch (e) {} }
   function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 
   function newChat() {
-    var chat = { id: genId(), title: 'New chat', messages: [], system: systemEl.value };
+    var chat = { id: genId(), title: 'New chat', messages: [], system: systemEl.value, draft: '' };
     chats.unshift(chat);
     saveHistory();
     switchTo(chat.id);
@@ -202,8 +226,11 @@
     activeChat = chats.find(function (c) { return c.id === id; }) || null;
     if (!activeChat) { if (chats.length) switchTo(chats[0].id); return; }
     systemEl.value = activeChat.system || 'You are a helpful assistant.';
+    inputEl.value = activeChat.draft || '';
+    autoResize();
     renderMessages();
     renderHistoryList();
+    saveActive();
   }
 
   function deleteChat(id) {
@@ -266,7 +293,12 @@
 
   // ---- Thinking parser ----
   function parseThinking(text, reasoning) {
-    if (reasoning) return { thinking: reasoning.trim(), content: (text || '').trim(), done: true };
+    if (reasoning) {
+      var raw = (text || '').trimStart();
+      var stripMatch = raw.match(/^<think>[\s\S]*?<\/think>\s*([\s\S]*)$/);
+      var body = (stripMatch ? stripMatch[1] : raw).trim();
+      return { thinking: reasoning.trim(), content: body, done: true };
+    }
     if (!text) return { thinking: '', content: text || '', done: true };
     var t = text.trimStart();
     var m = t.match(/^<think>([\s\S]*?)<\/think>\s*([\s\S]*)$/);
@@ -368,7 +400,10 @@
     inputEl.style.height = 'auto';
     inputEl.style.height = Math.min(inputEl.scrollHeight, 150) + 'px';
   }
-  inputEl.addEventListener('input', autoResize);
+  inputEl.addEventListener('input', function () {
+    autoResize();
+    if (activeChat) { activeChat.draft = inputEl.value; saveHistory(); }
+  });
 
   // ---- Send ----
   function send() {
@@ -381,6 +416,8 @@
       renderHistoryList();
     }
     activeChat.messages.push({ role: 'user', content: text });
+    activeChat.draft = '';
+    saveHistory();
     // Remove empty placeholder
     var emptyPlaceholder = messagesEl.querySelector('[style*="font-style:italic"]');
     if (emptyPlaceholder) emptyPlaceholder.remove();
@@ -527,7 +564,15 @@
 
   // Init
   loadHistory();
-  if (!chats.length) newChat(); else switchTo(chats[0].id);
+  var savedActive = null;
+  try { savedActive = localStorage.getItem(ACTIVE_KEY); } catch (e) {}
+  if (!chats.length) {
+    newChat();
+  } else if (savedActive && chats.some(function (c) { return c.id === savedActive; })) {
+    switchTo(savedActive);
+  } else {
+    switchTo(chats[0].id);
+  }
 })();
 </script>
 {% endblock %}

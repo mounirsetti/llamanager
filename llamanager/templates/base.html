@@ -813,9 +813,15 @@
             <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
             <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
           </div>
-          <button type="button" onclick="location.reload()"
-                  style="background: transparent; border: 1px solid var(--bg-3); border-radius: 2px; padding: 4px 7px; font-size: 0.875rem; color: var(--fg-2); cursor: pointer; line-height: 1; transition: color 180ms ease;"
-                  title="Reload page and refresh status">&#x21bb;</button>
+          {# Refresh goes to the canonical GET URL of the current page, never
+             location.reload() — some pages are reached via POST (e.g. after
+             /origins/create or /launch/server/start) and reloading would
+             resubmit the form or 405 on POST-only routes. #}
+          {% set _refresh_target = '/ui/' if not active or active == 'dashboard' else '/ui/' ~ active %}
+          <a href="{{ _refresh_target }}"
+             role="button"
+             style="display: inline-flex; align-items: center; justify-content: center; background: transparent; border: 1px solid var(--bg-3); border-radius: 2px; padding: 4px 7px; font-size: 0.875rem; color: var(--fg-2); text-decoration: none; line-height: 1; transition: color 180ms ease;"
+             title="Reload page and refresh status">&#x21bb;</a>
         </div>
         <form class="lm-logout" method="post" action="/ui/logout">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
