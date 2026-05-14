@@ -23,6 +23,41 @@
 
 ---
 
+## Table of contents
+
+- [Why this exists](#why-this-exists)
+- [What you get](#what-you-get)
+- [Platforms](#platforms)
+- [Prerequisites](#prerequisites)
+  - [GPU compatibility](#gpu-compatibility)
+  - [Alternative engines](#alternative-engines)
+- [Download](#download)
+  - [Getting `git` on your system](#getting-git-on-your-system)
+- [Install](#install)
+- [First run](#first-run)
+  - [Accessing from other devices (Tailscale, LAN, etc.)](#accessing-from-other-devices-tailscale-lan-etc)
+- [Quick dev uninstall & reinstall (macOS)](#quick-dev-uninstall--reinstall-macos)
+- [Pulling a model](#pulling-a-model)
+- [Listing available models](#listing-available-models)
+- [Sending an inference request](#sending-an-inference-request)
+  - [Requesting a specific model](#requesting-a-specific-model)
+- [Chat in the browser](#chat-in-the-browser)
+- [Auto-start at boot or login](#auto-start-at-boot-or-login)
+  - [macOS — launchd](#macos--launchd)
+  - [Linux — user systemd unit](#linux--user-systemd-unit)
+  - [Windows](#windows)
+- [CLI](#cli)
+  - [Admin verbs (drive a running daemon)](#admin-verbs-drive-a-running-daemon)
+- [Configuration](#configuration)
+- [API](#api)
+- [Filesystem layout](#filesystem-layout)
+- [Troubleshooting](#troubleshooting)
+- [Releasing a new version](#releasing-a-new-version)
+- [Credits](#credits)
+- [License](#license)
+
+---
+
 llamanager wraps `llama-server` (from llama.cpp) so a single GPU can serve a phone, a laptop, a CI job, and whatever else you point at it. Requests land on a per-origin priority queue, the loaded model swaps on demand, and the whole thing is reachable through one OpenAI-compatible endpoint.
 
 ## Why this exists
@@ -104,6 +139,40 @@ For MTP speculative decoding with Gemma 4 models:
 model = "gemma4-target.gguf"
 args = { ctx-size = 16384, mtp-head = "gemma4-assistant.gguf", spec-type = "mtp" }
 ```
+
+## Download
+
+Clone the repo with git, or grab a zip from the [releases page](https://github.com/mounirsetti/Llamanager/releases) if you'd rather not install git.
+
+```bash
+git clone https://github.com/mounirsetti/Llamanager.git
+cd Llamanager
+```
+
+To pin to a tagged release instead of `main`:
+
+```bash
+git clone --branch "v0.1.6" --depth 1 https://github.com/mounirsetti/Llamanager.git
+cd Llamanager
+```
+
+Updating an existing checkout later:
+
+```bash
+git pull origin main
+```
+
+### Getting `git` on your system
+
+| os      | install command                                                                                                 |
+|---------|-----------------------------------------------------------------------------------------------------------------|
+| macOS   | `xcode-select --install` (ships git), or `brew install git`                                                     |
+| Linux   | Debian/Ubuntu: `sudo apt install git` · Fedora: `sudo dnf install git` · Arch: `sudo pacman -S git`             |
+| Windows | `winget install --id Git.Git -e`, or download the installer from [git-scm.com](https://git-scm.com/download/win) |
+
+Verify with `git --version`. On Windows, run the cloned commands above from **Git Bash**, **PowerShell**, or **Windows Terminal** — all three work once Git for Windows is on `PATH` (the installer adds it by default).
+
+If you're behind a proxy, set it once with `git config --global http.proxy http://user:pass@host:port` before cloning. For private/internal forks, GitHub now requires either an SSH key (`ssh-keygen -t ed25519` → add the `.pub` to GitHub → clone with `git@github.com:...`) or a personal access token in place of the password.
 
 ## Install
 
