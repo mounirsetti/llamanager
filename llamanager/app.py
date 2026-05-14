@@ -1,6 +1,7 @@
 """FastAPI app factory."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import secrets
@@ -139,7 +140,6 @@ def create_app(config_path: Path | None = None,
             try:
                 from .server_manager import resolve_spec
                 spec = resolve_spec(cfg, profile=cfg.default_profile or None)
-                import asyncio
                 asyncio.create_task(sm.start(spec))
                 log.info("autolaunch: starting default profile %r", cfg.default_profile)
             except Exception as e:
@@ -147,9 +147,8 @@ def create_app(config_path: Path | None = None,
 
         # Periodic database maintenance (daily prune of old records)
         async def _periodic_prune() -> None:
-            import asyncio as _aio
             while True:
-                await _aio.sleep(86400)  # 24 hours
+                await asyncio.sleep(86400)  # 24 hours
                 try:
                     counts = db.prune(max_age_days=90)
                     if any(v > 0 for v in counts.values()):
@@ -162,7 +161,6 @@ def create_app(config_path: Path | None = None,
         # SIGHUP -> reload config (POSIX only)
         loop = None
         try:
-            import asyncio
             loop = asyncio.get_running_loop()
             if hasattr(signal, "SIGHUP"):
                 def _on_sighup() -> None:
