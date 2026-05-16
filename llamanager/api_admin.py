@@ -85,6 +85,18 @@ async def server_restart(request: Request, body: StartBody | None = None,
     cfg = request.app.state.cfg
     spec = None
     if body and (body.profile or body.model):
+        # Profile-only restart is rejected — three-scenario rule applies here
+        # too. Callers must always specify the model when restarting with a
+        # different profile.
+        if body.profile and not body.model:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "profile requires a model on restart: pass both "
+                    "'model' and 'profile' (or omit profile to reuse the "
+                    "model's default)."
+                ),
+            )
         try:
             spec = resolve_spec(cfg, profile=body.profile, model=body.model,
                                 mmproj=body.mmproj, args=body.args)
@@ -102,13 +114,18 @@ async def server_swap(request: Request, body: StartBody,
                       _: Origin = Depends(admin_origin)) -> JSONResponse:
     sm: ServerManager = request.app.state.sm
     cfg = request.app.state.cfg
-    if not (body.profile or body.model):
-        raise HTTPException(status_code=400, detail="profile or model required")
+    if not body.model:
+        raise HTTPException(
+            status_code=400,
+            detail="model required (profile alone is no longer accepted)",
+        )
     try:
         spec = resolve_spec(cfg, profile=body.profile, model=body.model,
                             mmproj=body.mmproj, args=body.args)
         pid = await sm.swap(spec)
-    except (ServerError, ValueError) as e:
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ServerError as e:
         raise HTTPException(status_code=500, detail=str(e))
     return JSONResponse({"pid": pid})
 

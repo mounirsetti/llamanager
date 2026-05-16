@@ -1,5 +1,7 @@
 {% set active_downloads = downloads | selectattr('status', 'equalto', 'running') | list %}
 {% set active_downloads = active_downloads + (downloads | selectattr('status', 'equalto', 'pending') | list) %}
+{% set finished_downloads = downloads | selectattr('status', 'in', ['failed', 'cancelled']) | list %}
+
 <div id="models-list"
      {% if active_downloads %}
      hx-get="/ui/models/_list"
@@ -7,107 +9,223 @@
      hx-swap="outerHTML"
      {% endif %}>
 
-  {% if models or active_downloads or (downloads | selectattr('status', 'equalto', 'done') | list) or (downloads | selectattr('status', 'equalto', 'failed') | list) %}
-  <table class="lm-table">
-    <thead>
-      <tr><th>Model</th><th>Size</th><th>Source</th><th></th></tr>
-    </thead>
-    <tbody>
-    {# ---- Active / pending downloads ---- #}
-    {% for d in downloads if d.status in ('running', 'pending') %}
-    <tr>
-      <td data-label="Model">
-        <code style="color: var(--fg-2);">{{ d.source }}</code>
-        <span class="lm-pill lm-pill--swapping" style="margin-left: 8px;">downloading</span>
-      </td>
-      <td data-label="Size" class="num">
-        {% if d.bytes_total %}
-        <div style="display: flex; flex-direction: column; gap: 4px; min-width: 140px;">
-          <div style="height: 4px; background: var(--bg-3); border-radius: 2px;">
-            <div style="height: 4px; background: var(--ok); border-radius: 2px; width: {{ '%.0f' % (100 * d.bytes_done / d.bytes_total) }}%; transition: width 0.3s ease;"></div>
-          </div>
-          <span style="font-size: 0.75rem; color: var(--fg-2);">
-            {{ '%.1f' % (d.bytes_done / (1024**3)) }} / {{ '%.1f' % (d.bytes_total / (1024**3)) }} GB
-            ({{ '%.0f' % (100 * d.bytes_done / d.bytes_total) }}%)
-          </span>
+{# ---- Active downloads (compact table for the transient items) ---- #}
+{% if active_downloads %}
+<table class="lm-table" style="margin-bottom: 18px;">
+  <tbody>
+  {% for d in active_downloads %}
+  <tr>
+    <td data-label="Model">
+      <code style="color: var(--fg-2);">{{ d.source }}</code>
+      <span class="lm-pill lm-pill--swapping" style="margin-left: 8px;">downloading</span>
+    </td>
+    <td data-label="Progress" class="num">
+      {% if d.bytes_total %}
+      <div style="display: flex; flex-direction: column; gap: 4px; min-width: 140px;">
+        <div style="height: 4px; background: var(--bg-3); border-radius: 2px;">
+          <div style="height: 4px; background: var(--ok); border-radius: 2px; width: {{ '%.0f' % (100 * d.bytes_done / d.bytes_total) }}%; transition: width 0.3s ease;"></div>
         </div>
-        {% elif d.bytes_done %}
-        <span style="font-size: 0.8125rem; color: var(--fg-2);">{{ '%.2f GB' % (d.bytes_done / (1024**3)) }}&hellip;</span>
+        <span style="font-size: 0.75rem; color: var(--fg-2);">
+          {{ '%.1f' % (d.bytes_done / (1024**3)) }} / {{ '%.1f' % (d.bytes_total / (1024**3)) }} GB
+          ({{ '%.0f' % (100 * d.bytes_done / d.bytes_total) }}%)
+        </span>
+      </div>
+      {% elif d.bytes_done %}
+      <span style="font-size: 0.8125rem; color: var(--fg-2);">{{ '%.2f GB' % (d.bytes_done / (1024**3)) }}&hellip;</span>
+      {% else %}
+      <span style="font-size: 0.8125rem; color: var(--fg-2);">starting&hellip;</span>
+      {% endif %}
+    </td>
+    <td class="actions" data-label="">
+      <form method="post" action="/ui/downloads/{{ d.id }}/cancel"
+            data-confirm="Cancel this download and remove partial files?">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Cancel</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{# ---- On-disk models — one card per model with inline profile management ---- #}
+{% if models %}
+<div class="lm-model-cards">
+  {% for m in models %}
+  {% set is_loaded = m.model_id == current_model %}
+  {% set is_default_model = m.model_id == default_model %}
+  <article class="lm-model {% if is_loaded %}lm-model--loaded{% endif %}"
+           data-model-id="{{ m.model_id }}">
+    <header class="lm-model__head">
+      <div class="lm-model__title-row">
+        <code class="lm-model__id">{{ m.model_id }}</code>
+        {% if is_loaded %}<span class="lm-pill lm-pill--running">loaded</span>{% endif %}
+        {% if is_default_model %}<span class="lm-pill" style="color: var(--accent); border-color: var(--accent);">default</span>{% endif %}
+      </div>
+      <div class="lm-model__meta">
+        <span>{{ '%.2f GB' % (m.size / (1024**3)) }}</span>
+        <span class="lm-model__sep">·</span>
+        <span>{{ m.source or 'local' }}</span>
+        <span class="lm-model__sep">·</span>
+        <span>{{ m.profiles | length }} profile{% if m.profiles|length != 1 %}s{% endif %}</span>
+      </div>
+    </header>
+
+    <div class="lm-model__actions">
+      <form method="post" action="/ui/models/load" style="display: inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="model_id" value="{{ m.model_id }}">
+        <button type="submit" class="lm-btn lm-btn--xs">{% if is_loaded %}Reload{% else %}Load{% endif %}</button>
+      </form>
+      {% if not is_default_model %}
+      <form method="post" action="/ui/models/set-default" style="display: inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="model_id" value="{{ m.model_id }}">
+        <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Set as default</button>
+      </form>
+      {% endif %}
+      <form method="post" action="/ui/models/locate" style="display: inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="model_id" value="{{ m.model_id }}">
+        <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Locate</button>
+      </form>
+      <form method="post" action="/ui/models/delete"
+            data-confirm="Delete this model? Its profiles will be removed too."
+            style="display: inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="model_id" value="{{ m.model_id }}">
+        {% if is_loaded %}<input type="hidden" name="force" value="true">{% endif %}
+        <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">
+          Delete{% if is_loaded %} (force){% endif %}
+        </button>
+      </form>
+    </div>
+
+    {# ---- Profiles for this model ---- #}
+    <details class="lm-model__profiles" {% if m.profiles or m.default_profile %}open{% endif %}>
+      <summary class="lm-model__profiles-summary">
+        <span class="lm-eyebrow">Profiles</span>
+        {% if m.default_profile %}
+        <span style="font-size: 0.75rem; color: var(--fg-2);">
+          default: <code style="color: var(--accent);">{{ m.default_profile }}</code>
+        </span>
+        {% endif %}
+      </summary>
+
+      <div class="lm-model__profiles-body">
+        {% if m.profiles %}
+        <ul class="lm-profile-list">
+          {% for prof in m.profiles %}
+          {% set is_model_default = prof.name == m.default_profile %}
+          <li class="lm-profile {% if is_model_default %}is-default{% endif %}">
+            <div class="lm-profile__head">
+              <span class="lm-profile__name">{{ prof.name }}</span>
+              {% if is_model_default %}<span class="lm-pill" style="color: var(--accent); border-color: var(--accent); font-size: 0.625rem;">default</span>{% endif %}
+            </div>
+            <details class="lm-profile__details">
+              <summary class="lm-profile__summary">edit args</summary>
+              <form method="post" action="/ui/models/profiles/{{ prof.name }}/update" class="lm-form lm-form--inline">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="model_id" value="{{ m.model_id }}">
+                <label class="lm-field-label">mmproj (optional)</label>
+                <input class="lm-input lm-input--mono" type="text" name="mmproj" value="{{ prof.mmproj or '' }}"
+                       placeholder="repo/mmproj.gguf">
+                <label class="lm-field-label">args (JSON)</label>
+                <textarea class="lm-input lm-input--mono" name="args_json" rows="3" spellcheck="false"
+                          style="resize: vertical;">{{ prof.args_json or '{}' }}</textarea>
+                <div class="lm-profile__actions">
+                  <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Save</button>
+                </div>
+              </form>
+            </details>
+            <div class="lm-profile__row-actions">
+              {% if not is_model_default %}
+              <form method="post" action="/ui/models/profiles/set-model-default" style="display: inline;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="model_id" value="{{ m.model_id }}">
+                <input type="hidden" name="profile_name" value="{{ prof.name }}">
+                <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Make default</button>
+              </form>
+              {% else %}
+              <form method="post" action="/ui/models/profiles/set-model-default" style="display: inline;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="model_id" value="{{ m.model_id }}">
+                <input type="hidden" name="profile_name" value="">
+                <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Unset default</button>
+              </form>
+              {% endif %}
+              <form method="post" action="/ui/models/profiles/{{ prof.name }}/delete"
+                    data-confirm="Delete profile '{{ prof.name }}'?"
+                    style="display: inline;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Delete</button>
+              </form>
+            </div>
+          </li>
+          {% endfor %}
+        </ul>
         {% else %}
-        <span style="font-size: 0.8125rem; color: var(--fg-2);">starting&hellip;</span>
+        <p class="lm-profile-empty">No profiles yet for this model.</p>
         {% endif %}
-      </td>
-      <td data-label="Source"><code>{{ d.source }}</code></td>
-      <td class="actions" data-label="">
-        <form method="post" action="/ui/downloads/{{ d.id }}/cancel"
-              data-confirm="Cancel this download and remove partial files?">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Cancel</button>
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
 
-    {# ---- On-disk models ---- #}
-    {% for m in models %}
-    <tr>
-      <td data-label="Model">
-        <code>{{ m.model_id }}</code>
-        {% if m.model_id == current_model %}
-          <span class="lm-pill lm-pill--running" style="margin-left: 8px;">loaded</span>
-        {% endif %}
-      </td>
-      <td data-label="Size" class="num">{{ '%.2f GB' % (m.size / (1024**3)) }}</td>
-      <td data-label="Source"><code>{{ m.source or '-' }}</code></td>
-      <td class="actions" data-label="">
-        <form method="post" action="/ui/models/load" style="display:inline;">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="model_id" value="{{ m.model_id }}">
-          <button type="submit" class="lm-btn lm-btn--xs">Load</button>
-        </form>
-        <form method="post" action="/ui/models/locate" style="display:inline;">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="model_id" value="{{ m.model_id }}">
-          <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Locate</button>
-        </form>
-        <form method="post" action="/ui/models/delete"
-              data-confirm="Delete this model? This removes the file from disk."
-              style="display:inline;">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="model_id" value="{{ m.model_id }}">
-          {% if m.model_id == current_model %}<input type="hidden" name="force" value="true">{% endif %}
-          <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">
-            Delete{% if m.model_id == current_model %} (force){% endif %}
-          </button>
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
+        <details class="lm-profile-add">
+          <summary class="lm-profile-add__summary">+ Add profile</summary>
+          <form method="post" action="/ui/models/profiles/create" class="lm-form lm-form--inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="model_id" value="{{ m.model_id }}">
+            <label class="lm-field-label">Profile name</label>
+            <input class="lm-input" type="text" name="name" required
+                   pattern="[a-z0-9][a-z0-9\-]*"
+                   placeholder="e.g. fast, balanced, creative">
+            <label class="lm-field-label">mmproj (optional)</label>
+            <input class="lm-input lm-input--mono" type="text" name="mmproj"
+                   placeholder="repo/mmproj.gguf">
+            <label class="lm-field-label">args (JSON)</label>
+            <textarea class="lm-input lm-input--mono" name="args_json" rows="3" spellcheck="false"
+                      style="resize: vertical;">{"ctx-size": 4096, "temp": 0.7}</textarea>
+            <label style="font-size: 0.75rem; color: var(--fg-2); display: inline-flex; align-items: center; gap: 6px; margin-top: 6px;">
+              <input type="checkbox" name="make_default" value="on"> Make this the default profile for the model
+            </label>
+            <div class="lm-profile__actions">
+              <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Create profile</button>
+            </div>
+          </form>
+        </details>
+      </div>
+    </details>
+  </article>
+  {% endfor %}
+</div>
+{% else %}
+<p class="lm-empty">No models on disk yet. Pull one below to get started.</p>
+{% endif %}
 
-    {# ---- Failed / cancelled downloads ---- #}
-    {% for d in downloads if d.status in ('failed', 'cancelled') %}
-    <tr>
-      <td data-label="Model">
-        <code style="color: var(--fg-2);">{{ d.source }}</code>
-        <span class="lm-pill lm-pill--crashed" style="margin-left: 8px;">{{ d.status }}</span>
-      </td>
-      <td data-label="Size" class="num"><span style="color: var(--fg-3);">-</span></td>
-      <td data-label="Source">
-        {% if d.error %}<span style="font-size: 0.8125rem; color: var(--bad);">{{ d.error[:80] }}{% if d.error|length > 80 %}&hellip;{% endif %}</span>{% endif %}
-      </td>
-      <td class="actions" data-label="">
-        <form method="post" action="/ui/downloads/{{ d.id }}/delete"
-              data-confirm="Remove this entry and clean up any partial files?"
-              style="display:inline;">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Remove</button>
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="lm-empty">No models on disk yet. Search for one below to get started, or add an existing .gguf file from your computer.</p>
-  {% endif %}
+{# ---- Failed / cancelled downloads ---- #}
+{% if finished_downloads %}
+<table class="lm-table" style="margin-top: 18px;">
+  <tbody>
+  {% for d in finished_downloads %}
+  <tr>
+    <td data-label="Model">
+      <code style="color: var(--fg-2);">{{ d.source }}</code>
+      <span class="lm-pill lm-pill--crashed" style="margin-left: 8px;">{{ d.status }}</span>
+    </td>
+    <td data-label="">
+      {% if d.error %}<span style="font-size: 0.8125rem; color: var(--bad);">{{ d.error[:80] }}{% if d.error|length > 80 %}&hellip;{% endif %}</span>{% endif %}
+    </td>
+    <td class="actions" data-label="">
+      <form method="post" action="/ui/downloads/{{ d.id }}/delete"
+            data-confirm="Remove this entry and clean up any partial files?"
+            style="display: inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Remove</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 </div>

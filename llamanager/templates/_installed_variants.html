@@ -1,0 +1,77 @@
+{% set has_installed = namespace(any=false) %}
+{% for src in sources %}{% for v in src.backends %}{% if v.installed %}{% set has_installed.any = true %}{% endif %}{% endfor %}{% endfor %}
+
+<div id="installed-variants" class="lm-variants">
+  {% if has_installed.any %}
+    {% for src in sources %}
+      {% for v in src.backends %}
+        {% if v.installed %}
+        {% set upd = updates.get(v.id) if updates else none %}
+        <article class="lm-variant {% if v.active %}is-active{% endif %}">
+          <header class="lm-variant__head">
+            <div class="lm-variant__title-row">
+              <span class="lm-variant__source">{{ v.source_label }}</span>
+              <span class="lm-variant__sep">·</span>
+              <span class="lm-variant__backend">{{ v.backend_label }}</span>
+              {% if v.backend_vendor %}<span class="lm-variant__vendor">{{ v.backend_vendor }}</span>{% endif %}
+              {% if v.active %}<span class="lm-pill lm-pill--running" style="margin-left: 4px;">active</span>{% endif %}
+            </div>
+            <div class="lm-variant__version">
+              {% if v.installed_version %}
+              <span class="lm-eyebrow" style="margin: 0;">Version</span>
+              <span class="mono">{{ v.installed_version }}</span>
+              {% if upd and upd.latest and upd.has_update %}
+              <span class="lm-update-flag">&rarr; {{ upd.latest }} available</span>
+              {% elif upd and upd.latest and not upd.has_update %}
+              <span class="lm-update-ok">up to date</span>
+              {% elif upd and upd.error %}
+              <span class="lm-update-err">check failed</span>
+              {% endif %}
+              {% else %}
+              <span class="mono" style="color: var(--fg-3);">unknown version</span>
+              {% endif %}
+            </div>
+          </header>
+
+          <div class="lm-variant__path">
+            <code>{{ v.binary_path }}</code>
+          </div>
+
+          <footer class="lm-variant__actions">
+            <button type="button"
+                    class="lm-btn lm-btn--ghost lm-update-btn"
+                    hx-get="/ui/setup/check-updates?variant={{ v.id }}"
+                    hx-target="#installed-variants"
+                    hx-swap="outerHTML"
+                    hx-indicator="this">
+              <span class="lm-update-btn__idle">Check for updates</span>
+              <span class="lm-update-btn__busy">Checking&hellip;</span>
+            </button>
+
+            {% if upd and upd.has_update %}
+            <form method="post" action="/ui/setup/install" style="display: inline-flex;">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="source" value="{{ v.source }}">
+              <input type="hidden" name="backend" value="{{ v.backend }}">
+              <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Update to {{ upd.latest }}</button>
+            </form>
+            {% endif %}
+
+            {% if not v.active %}
+            <form method="post" action="/ui/setup/switch-variant" style="display: inline-flex;">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="variant" value="{{ v.id }}">
+              <button type="submit" class="lm-btn lm-btn--ghost lm-btn--sm">Make active</button>
+            </form>
+            {% endif %}
+          </footer>
+        </article>
+        {% endif %}
+      {% endfor %}
+    {% endfor %}
+  {% else %}
+    <p class="lm-variants__empty">
+      No engines installed yet. Pick a source and backend above to install one.
+    </p>
+  {% endif %}
+</div>

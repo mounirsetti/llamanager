@@ -136,20 +136,160 @@ def test_admin_status_with_bootstrap(app):
     assert body["queue_depth"] == 0
 
 
-def test_resolve_spec_profile_and_overrides(app, tmp_path: Path):
-    """Profile expansion + bare-model resolution."""
-    from llamanager.server_manager import resolve_spec
-    cfg = app.state.cfg
-    # Create a fake model file so resolve_spec doesn't reject paths.
+def _seed_fake_model(cfg) -> None:
+    """Create a zero-byte test/model.gguf under cfg.models_dir so resolve_spec
+    doesn't reject the path."""
     target = cfg.models_dir / "test" / "model.gguf"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(b"")
-    spec = resolve_spec(cfg, profile="test")
-    assert spec.profile_name == "test"
+
+
+def test_resolve_spec_scenario_1_nothing_specified(app):
+    """No model, no profile -> default_model + its default profile."""
+    from llamanager.server_manager import resolve_spec
+    cfg = app.state.cfg
+    _seed_fake_model(cfg)
+    spec = resolve_spec(cfg)
     assert spec.model_id == "test/model.gguf"
-    spec2 = resolve_spec(cfg, model="test/model.gguf",
-                         args={"temp": 0.1})
-    assert spec2.extra_args["temp"] == 0.1
+    assert spec.profile_name == "test"  # from [model_defaults]
+    assert spec.extra_args.get("ctx-size") == 1024
+
+
+def test_resolve_spec_scenario_2_model_only(app):
+    """Model only -> that model + its default profile (if any)."""
+    from llamanager.server_manager import resolve_spec
+    cfg = app.state.cfg
+    _seed_fake_model(cfg)
+    spec = resolve_spec(cfg, model="test/model.gguf")
+    assert spec.model_id == "test/model.gguf"
+    assert spec.profile_name == "test"
+    assert spec.extra_args.get("ctx-size") == 1024
+
+
+def test_resolve_spec_scenario_2_model_only_no_default(app):
+    """Model only, with no per-model default and no global default
+    -> the model loads with the request's args only."""
+    from llamanager.server_manager import resolve_spec
+    cfg = app.state.cfg
+    _seed_fake_model(cfg)
+    cfg.model_default_profiles.pop("test/model.gguf", None)
+    spec = resolve_spec(cfg, model="test/model.gguf", args={"temp": 0.1})
+    assert spec.profile_name is None
+    assert spec.extra_args == {"temp": 0.1}
+
+
+def test_resolve_spec_scenario_3_model_and_matching_profile(app):
+    """Model + bound profile -> use the pair."""
+    from llamanager.server_manager import resolve_spec
+    cfg = app.state.cfg
+    _seed_fake_model(cfg)
+    spec = resolve_spec(cfg, model="test/model.gguf", profile="test",
+                        args={"temp": 0.4})
+    assert spec.profile_name == "test"
+    assert spec.extra_args.get("temp") == 0.4
+    assert spec.extra_args.get("ctx-size") == 1024  # from profile
+
+
+def test_resolve_spec_rejects_profile_without_model(app):
+    """Profile alone is no longer accepted."""
+    from llamanager.server_manager import resolve_spec
+    cfg = app.state.cfg
+    _seed_fake_model(cfg)
+    with pytest.raises(ValueError, match="profile requires a model"):
+        resolve_spec(cfg, profile="test")
+
+
+def test_resolve_spec_rejects_mismatched_profile(app):
+    """Profile bound to model A cannot be used with model B."""
+    from llamanager.config import Profile
+    from llamanager.server_manager import resolve_spec
+    cfg = app.state.cfg
+    _seed_fake_model(cfg)
+    # Add a second fake model + a profile bound to it.
+    other = cfg.models_dir / "other" / "model.gguf"
+    other.parent.mkdir(parents=True, exist_ok=True)
+    other.write_bytes(b"")
+    cfg.profiles["other-only"] = Profile(name="other-only",
+                                          model="other/model.gguf",
+                                          mmproj="", args={"temp": 0.2})
+    with pytest.raises(ValueError, match="bound to"):
+        resolve_spec(cfg, model="test/model.gguf", profile="other-only")
+
+
+def test_resolve_spec_global_profile_applies_to_any_model(app):
+    """A profile with model='' is a valid args-only fallback for any model."""
+    from llamanager.config import Profile
+    from llamanager.server_manager import resolve_spec
+    cfg = app.state.cfg
+    _seed_fake_model(cfg)
+    cfg.profiles["balanced"] = Profile(name="balanced", model="",
+                                        mmproj="", args={"top-p": 0.95})
+    spec = resolve_spec(cfg, model="test/model.gguf", profile="balanced")
+    assert spec.profile_name == "balanced"
+    assert spec.extra_args.get("top-p") == 0.95
+
+
+def test_load_config_migrates_legacy_default_profile(tmp_path: Path):
+    """A legacy [defaults] profile that names a model-bound profile becomes
+    a [model_defaults] entry. default_profile is cleared in memory."""
+    from llamanager.config import load_config
+    p = tmp_path / "config.toml"
+    p.write_text(f'''
+[server]
+data_dir = "{tmp_path.as_posix()}"
+
+[defaults]
+model = "x/m.gguf"
+profile = "fast"
+
+[profiles.fast]
+model = "x/m.gguf"
+[profiles.fast.args]
+temp = 0.3
+''', encoding="utf-8")
+    cfg = load_config(p)
+    assert cfg.default_profile == ""
+    assert cfg.model_default_profiles == {"x/m.gguf": "fast"}
+    # Re-loading should be a no-op (migration is idempotent).
+    cfg2 = load_config(p)
+    assert cfg2.default_profile == ""
+    assert cfg2.model_default_profiles == {"x/m.gguf": "fast"}
+
+
+def test_v1_rejects_legacy_profile_shorthand(app):
+    """X-Llamanager-Model: profile:foo returns 400 with a migration hint."""
+    from fastapi.testclient import TestClient
+    am = app.state.auth
+    new_key = am.rotate_key(am.get_origin_by_name("bootstrap").id)
+    client = TestClient(app)
+    r = client.post(
+        "/v1/chat/completions",
+        json={"messages": []},
+        headers={
+            "Authorization": f"Bearer {new_key}",
+            "X-Llamanager-Model": "profile:fast",
+        },
+    )
+    assert r.status_code == 400
+    assert "no longer supported" in r.json()["detail"]
+
+
+def test_v1_rejects_profile_header_without_model(app):
+    """X-Llamanager-Profile without X-Llamanager-Model returns 400."""
+    from fastapi.testclient import TestClient
+    am = app.state.auth
+    new_key = am.rotate_key(am.get_origin_by_name("bootstrap").id)
+    client = TestClient(app)
+    r = client.post(
+        "/v1/chat/completions",
+        json={"messages": []},
+        headers={
+            "Authorization": f"Bearer {new_key}",
+            "X-Llamanager-Profile": "fast",
+        },
+    )
+    assert r.status_code == 400
+    assert "requires X-Llamanager-Model" in r.json()["detail"]
 
 
 def test_priority_queue_ordering(app):

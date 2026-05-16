@@ -2,217 +2,573 @@
 {% set active = 'setup' %}
 {% block title %}Setup - llamanager{% endblock %}
 {% block content %}
+
+<style>
+  /* ===== Setup-page specific composition. Builds on lm-* tokens in base. ===== */
+
+  .lm-setup-eyebrow {
+    font-size: 0.6875rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--fg-2);
+    font-weight: 500;
+  }
+
+  /* ---- Engine hero (active engine summary) ---- */
+  .lm-engine-hero {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 28px;
+    align-items: end;
+    padding: 26px 28px 24px;
+    margin-top: 32px;
+    border: 1px solid var(--bg-3);
+    background:
+      linear-gradient(180deg, var(--accent-soft), transparent 80%),
+      var(--bg-1);
+    position: relative;
+    overflow: hidden;
+  }
+  .lm-engine-hero::before {
+    /* a quiet decorative ruler in the corner */
+    content: "";
+    position: absolute;
+    top: 14px; right: 18px;
+    width: 56px; height: 1px;
+    background: var(--fg-3);
+    opacity: 0.6;
+  }
+  .lm-engine-hero__name {
+    font-family: 'Fraunces', serif;
+    font-variation-settings: 'opsz' 96, 'SOFT' 30;
+    font-size: 2rem;
+    font-weight: 400;
+    line-height: 1.05;
+    letter-spacing: -0.015em;
+    color: var(--fg-0);
+    margin: 8px 0 4px;
+  }
+  .lm-engine-hero__name em {
+    font-style: italic;
+    color: var(--accent);
+  }
+  .lm-engine-hero__meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px 22px;
+    margin-top: 12px;
+    font-size: 0.8125rem;
+    color: var(--fg-1);
+  }
+  .lm-engine-hero__meta dt {
+    font-size: 0.6875rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--fg-2);
+    margin-bottom: 2px;
+  }
+  .lm-engine-hero__meta dd {
+    margin: 0;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.8125rem;
+    color: var(--fg-1);
+    word-break: break-all;
+  }
+  .lm-engine-hero__missing {
+    font-family: 'Fraunces', serif;
+    font-style: italic;
+    font-size: 1.375rem;
+    color: var(--fg-2);
+    line-height: 1.2;
+  }
+
+  /* ---- Hardware dossier ---- */
+  .lm-dossier {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 8px 14px 8px 12px;
+    border-left: 2px solid var(--accent);
+    background: var(--bg-1);
+    font-size: 0.8125rem;
+    color: var(--fg-1);
+    margin: 20px 0 0;
+  }
+  .lm-dossier__label {
+    font-size: 0.6875rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--fg-2);
+  }
+  .lm-dossier__pick {
+    font-family: 'Fraunces', serif;
+    font-style: italic;
+    font-size: 1rem;
+    color: var(--fg-0);
+  }
+
+  /* ---- Card picker (radio-as-card) ---- */
+  .lm-pick {
+    display: grid;
+    gap: 10px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+  .lm-pick--sources { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+  .lm-pick--backends { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+  .lm-pick legend {
+    font-size: 0.6875rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--fg-2);
+    margin-bottom: 10px;
+    padding: 0;
+  }
+  .lm-pick__opt { position: relative; }
+  .lm-pick__opt input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .lm-pick__card {
+    display: block;
+    padding: 14px 16px;
+    border: 1px solid var(--bg-3);
+    background: var(--bg-1);
+    cursor: pointer;
+    transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+    position: relative;
+  }
+  .lm-pick__card:hover {
+    border-color: var(--bg-4);
+    background: var(--bg-2);
+  }
+  .lm-pick__opt input:checked + .lm-pick__card {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .lm-pick__opt input:checked + .lm-pick__card::before {
+    /* selection nib on the left edge */
+    content: "";
+    position: absolute;
+    left: -1px; top: -1px; bottom: -1px;
+    width: 3px;
+    background: var(--accent);
+  }
+  .lm-pick__opt input:focus-visible + .lm-pick__card {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .lm-pick__opt input:disabled + .lm-pick__card {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .lm-pick__title-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .lm-pick__title {
+    font-family: 'Fraunces', serif;
+    font-variation-settings: 'opsz' 36, 'SOFT' 20;
+    font-size: 1.0625rem;
+    font-weight: 500;
+    color: var(--fg-0);
+    letter-spacing: -0.005em;
+  }
+  .lm-pick__chip {
+    font-size: 0.6875rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--fg-2);
+  }
+  .lm-pick__chip--suggested {
+    color: var(--accent);
+    font-weight: 500;
+  }
+  .lm-pick__desc {
+    font-size: 0.8125rem;
+    color: var(--fg-2);
+    line-height: 1.45;
+  }
+  .lm-pick__link {
+    display: inline-block;
+    margin-top: 6px;
+    font-size: 0.75rem;
+    color: var(--accent);
+  }
+
+  /* ---- Install action row ---- */
+  .lm-install-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-top: 22px;
+    padding-top: 22px;
+    border-top: 1px solid var(--bg-3);
+    flex-wrap: wrap;
+  }
+  .lm-install-row__note {
+    font-size: 0.8125rem;
+    color: var(--fg-2);
+    font-style: italic;
+    font-family: 'Fraunces', serif;
+    line-height: 1.4;
+    flex: 1 1 280px;
+  }
+
+  /* ---- Installed variants ---- */
+  .lm-variants { display: grid; gap: 10px; }
+  .lm-variants__empty {
+    font-family: 'Fraunces', serif;
+    font-style: italic;
+    color: var(--fg-2);
+    padding: 18px 0;
+  }
+  .lm-variant {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "head head"
+      "path path"
+      "actions actions";
+    gap: 10px 16px;
+    padding: 16px 18px;
+    border: 1px solid var(--bg-3);
+    background: var(--bg-1);
+    position: relative;
+  }
+  .lm-variant.is-active {
+    border-color: var(--accent);
+    background:
+      linear-gradient(180deg, var(--accent-soft), transparent 60%),
+      var(--bg-1);
+  }
+  .lm-variant.is-active::before {
+    content: "";
+    position: absolute;
+    left: -1px; top: -1px; bottom: -1px;
+    width: 3px;
+    background: var(--accent);
+  }
+  .lm-variant__head {
+    grid-area: head;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+  }
+  .lm-variant__title-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .lm-variant__source {
+    font-family: 'Fraunces', serif;
+    font-size: 1.0625rem;
+    font-weight: 500;
+    color: var(--fg-0);
+  }
+  .lm-variant__sep { color: var(--fg-3); }
+  .lm-variant__backend { font-size: 0.875rem; color: var(--fg-1); }
+  .lm-variant__vendor {
+    font-size: 0.6875rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--fg-2);
+    border: 1px solid var(--bg-3);
+    padding: 1px 6px;
+  }
+  .lm-variant__version {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 0.8125rem;
+    color: var(--fg-1);
+  }
+  .lm-variant__path { grid-area: path; }
+  .lm-variant__path code {
+    font-size: 0.75rem;
+    color: var(--fg-2);
+    word-break: break-all;
+  }
+  .lm-variant__actions {
+    grid-area: actions;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .lm-update-flag { color: var(--accent); font-weight: 500; }
+  .lm-update-ok   { color: var(--ok); }
+  .lm-update-err  { color: var(--bad); }
+
+  .lm-update-btn { position: relative; }
+  .lm-update-btn .lm-update-btn__busy { display: none; }
+  .lm-update-btn.htmx-request .lm-update-btn__idle { display: none; }
+  .lm-update-btn.htmx-request .lm-update-btn__busy { display: inline; color: var(--warn); }
+
+  .lm-btn--sm { padding: 6px 12px; font-size: 0.8125rem; }
+
+  /* ---- Page-load reveal ---- */
+  .lm-reveal { animation: lm-reveal 480ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+  .lm-reveal-1 { animation-delay: 30ms; }
+  .lm-reveal-2 { animation-delay: 100ms; }
+  .lm-reveal-3 { animation-delay: 180ms; }
+  .lm-reveal-4 { animation-delay: 260ms; }
+  @keyframes lm-reveal {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .lm-reveal { animation: none; }
+  }
+</style>
+
 <div class="lm-eyebrow">Configure</div>
 <h1 class="lm-page-title">Setup</h1>
-<p class="lm-page-lede">Verify that llama-server is installed and reachable, or install it from here.</p>
+<p class="lm-page-lede">Pick the inference engine llamanager runs. Install side-by-side and switch any time.</p>
 
-{# ---- Section 1: Binary status ---- #}
-<section class="lm-section" style="margin-top: 32px;">
-  <header class="lm-section-head">
-    <span class="lm-section-marker">Binary</span>
-  </header>
-
-  <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 24px;">
+{# ---------- Active engine hero ---------- #}
+<section class="lm-engine-hero lm-reveal lm-reveal-1" aria-label="Active engine">
+  <div>
+    <div class="lm-setup-eyebrow">Active engine</div>
     {% if binary_path %}
-    <span class="lm-pill lm-pill--running">found</span>
-    <code style="font-size: 0.875rem; color: var(--fg-1);">{{ binary_path }}</code>
-    {% else %}
-    <span class="lm-pill" style="color: var(--bad); border-color: var(--bad);">not found</span>
-    <span style="font-size: 0.875rem; color: var(--fg-1);">Configured as <code>{{ configured_binary }}</code>. Not found on PATH or at the default install location.</span>
-    {% endif %}
-  </div>
-
-  <details style="margin-bottom: 0;">
-    <summary style="cursor: pointer; font-size: 0.875rem; color: var(--fg-1); user-select: none; padding: 6px 0; list-style: none; display: flex; align-items: center; gap: 6px;">
-      <span style="font-size: 0.75rem; color: var(--fg-2);">&#9656;</span>
-      Set binary path manually
-    </summary>
-    <div style="padding: 16px 0 8px;">
-      <form class="lm-form" method="post" action="/ui/setup/binary-path">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <div class="lm-field">
-          <label class="lm-field-label" for="binary-path-input">Binary path</label>
-          <input id="binary-path-input"
-                 class="lm-input lm-input--mono"
-                 type="text"
-                 name="binary_path"
-                 value="{{ configured_binary }}"
-                 placeholder="llama-server or /usr/local/bin/llama-server"
-                 style="max-width: 480px;">
+      {% set active_v = None %}
+      {% for s in sources %}{% for v in s.backends %}{% if v.active %}{% set active_v = v %}{% endif %}{% endfor %}{% endfor %}
+      {% if active_v %}
+      <h2 class="lm-engine-hero__name">{{ active_v.source_label }} <em>·</em> {{ active_v.backend_label }}</h2>
+      <dl class="lm-engine-hero__meta">
+        <div>
+          <dt>Engine</dt>
+          <dd>{{ engine }}</dd>
+        </div>
+        {% if active_v.installed_version %}
+        <div>
+          <dt>Version</dt>
+          <dd>{{ active_v.installed_version }}</dd>
+        </div>
+        {% endif %}
+        <div>
+          <dt>Binary</dt>
+          <dd>{{ binary_path }}</dd>
+        </div>
+      </dl>
+      {% else %}
+      <h2 class="lm-engine-hero__name">External binary</h2>
+      <dl class="lm-engine-hero__meta">
+        <div>
+          <dt>Engine</dt>
+          <dd>{{ engine }}</dd>
         </div>
         <div>
-          <button type="submit" class="lm-btn lm-btn--primary">Save</button>
+          <dt>Binary</dt>
+          <dd>{{ binary_path }}</dd>
         </div>
-      </form>
-    </div>
-  </details>
+      </dl>
+      {% endif %}
+    {% else %}
+    <h2 class="lm-engine-hero__missing">No engine installed&hellip; yet.</h2>
+    <p style="font-size: 0.875rem; color: var(--fg-2); margin-top: 8px;">
+      Configured as <code>{{ configured_binary }}</code>, but nothing was found on PATH or in <code>~/.llamanager/bin/</code>.
+    </p>
+    {% endif %}
+  </div>
+  <div>
+    {% if binary_path %}
+    <span class="lm-pill lm-pill--running">found</span>
+    {% else %}
+    <span class="lm-pill" style="color: var(--bad); border-color: var(--bad);">not found</span>
+    {% endif %}
+  </div>
 </section>
 
-{# ---- Section 2: Install llama-server ---- #}
-<section class="lm-section">
+{# Optional: set binary path manually #}
+<details style="margin-top: 12px;">
+  <summary style="cursor: pointer; font-size: 0.8125rem; color: var(--fg-2); user-select: none; padding: 4px 0;">Set binary path manually</summary>
+  <form class="lm-form" method="post" action="/ui/setup/binary-path" style="margin-top: 10px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-field">
+      <label class="lm-field-label" for="binary-path-input">Binary path</label>
+      <input id="binary-path-input"
+             class="lm-input lm-input--mono"
+             type="text"
+             name="binary_path"
+             value="{{ configured_binary }}"
+             placeholder="llama-server or /usr/local/bin/llama-server"
+             style="max-width: 480px;">
+    </div>
+    <button type="submit" class="lm-btn lm-btn--primary">Save</button>
+  </form>
+</details>
+
+{# ---------- Install picker ---------- #}
+<section class="lm-section lm-reveal lm-reveal-2">
   <header class="lm-section-head">
-    <span class="lm-section-marker">Install llama-server</span>
+    <span class="lm-section-marker">Install</span>
   </header>
 
-  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 24px;">
-    llama-server is the inference engine from <a href="https://github.com/ggerganov/llama.cpp" style="color: var(--accent);">llama.cpp</a>. llamanager manages and proxies it. It does not bundle the binary. Install it separately using one of the methods below.
-  </p>
-
-  <div style="display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start;">
-    {# Platform instructions (collapsible) #}
-    <details style="flex: 1; min-width: 260px; max-width: 480px;">
-      <summary class="lm-btn lm-btn--ghost" style="list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;">
-        View instructions
-        <span style="font-size: 0.75rem; color: var(--fg-2);">&#9662;</span>
-      </summary>
-      <div style="margin-top: 16px; padding: 18px; background: var(--bg-1); border: 1px solid var(--bg-3);">
-        <div class="lm-eyebrow" style="margin-bottom: 10px;">{{ instructions.platform }}</div>
-        <div style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px;">
-          {% for step in instructions.steps %}
-          <code style="display: block; font-size: 0.8125rem; background: var(--bg-2); padding: 8px 12px; color: var(--fg-0); white-space: pre-wrap; word-break: break-all;">{{ step }}</code>
-          {% endfor %}
-        </div>
-        <p style="font-size: 0.8125rem; color: var(--fg-2); margin: 0;">{{ instructions.note }}</p>
-      </div>
-    </details>
-
-    {# Auto-install button #}
-    <div style="display: flex; flex-direction: column; gap: 10px;">
-      <form method="post" action="/ui/setup/install">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="fork" value="llama.cpp">
-        <button type="submit"
-                class="lm-btn lm-btn--primary"
-                {% if install.status == 'running' %}disabled{% endif %}>
-          {% if install.status == 'running' %}Installing&hellip;{% else %}Auto-install from GitHub{% endif %}
-        </button>
-      </form>
-      <p style="font-size: 0.75rem; color: var(--fg-2); max-width: 28ch; margin: 0;">Downloads the latest CPU build for <strong>{{ instructions.platform }}</strong> from the official llama.cpp releases.</p>
-    </div>
+  {% if suggested_backend or suggested_source %}
+  <div class="lm-dossier">
+    <span class="lm-dossier__label">Detected hardware</span>
+    <span class="lm-dossier__pick">
+      {% if platform_tag == 'macos' and machine|lower in ['arm64', 'aarch64'] %}
+        Apple Silicon — MLX or Metal recommended
+      {% elif suggested_backend == 'cuda' %}
+        NVIDIA — CUDA recommended
+      {% elif suggested_backend == 'hip' %}
+        AMD — HIP recommended
+      {% elif suggested_backend == 'vulkan' %}
+        Vulkan available — works across NVIDIA, AMD, Intel
+      {% else %}
+        No GPU detected — CPU build is the safe choice
+      {% endif %}
+    </span>
   </div>
+  {% endif %}
 
-  {# Install progress area — shared partial #}
-  {% set fork_name = "llama.cpp" %}
+  <form method="post" action="/ui/setup/install" style="margin-top: 22px;" id="install-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <fieldset class="lm-pick lm-pick--sources" id="source-picker">
+      <legend>Source</legend>
+      {% for src in sources %}
+      <label class="lm-pick__opt">
+        <input type="radio" name="source" value="{{ src.id }}"
+               data-source="{{ src.id }}"
+               {% if src.id == selected_source %}checked{% endif %}>
+        <span class="lm-pick__card">
+          <span class="lm-pick__title-row">
+            <span class="lm-pick__title">{{ src.label }}</span>
+            {% if src.id == suggested_source %}<span class="lm-pick__chip lm-pick__chip--suggested">suggested</span>{% endif %}
+          </span>
+          <span class="lm-pick__desc">{{ src.description }}</span>
+          <a class="lm-pick__link" href="{{ src.url }}" onclick="event.stopPropagation()">GitHub &nearr;</a>
+        </span>
+      </label>
+      {% endfor %}
+    </fieldset>
+
+    <fieldset class="lm-pick lm-pick--backends" id="backend-picker" style="margin-top: 22px;">
+      <legend>Backend</legend>
+      {% for be_id, be in backends.items() %}
+        {% if platform_tag in be.platforms %}
+        {% set allowed = be.get('sources') %}
+        <label class="lm-pick__opt"
+               data-be-sources="{{ (allowed | join(',')) if allowed else 'all' }}">
+          <input type="radio" name="backend" value="{{ be_id }}"
+                 {% if be_id == selected_backend %}checked{% endif %}>
+          <span class="lm-pick__card">
+            <span class="lm-pick__title-row">
+              <span class="lm-pick__title">{{ be.label }}{% if be.vendor %} <span style="color: var(--fg-3); font-weight: 400;">/ {{ be.vendor }}</span>{% endif %}</span>
+              {% if be_id == suggested_backend %}<span class="lm-pick__chip lm-pick__chip--suggested">suggested</span>{% endif %}
+            </span>
+            <span class="lm-pick__desc">{{ be.description }}</span>
+          </span>
+        </label>
+        {% endif %}
+      {% endfor %}
+    </fieldset>
+
+    <div class="lm-install-row">
+      <button type="submit" class="lm-btn lm-btn--primary"
+              {% if install.status == 'running' %}disabled{% endif %}>
+        {% if install.status == 'running' %}Installing&hellip;{% else %}Install &rarr;{% endif %}
+      </button>
+      <p class="lm-install-row__note">
+        Each variant installs into its own directory. Switching never overwrites another.
+      </p>
+    </div>
+  </form>
+
   {% include "_install_progress.html" %}
 </section>
 
-{# ---- Section 2b: Alternative engines ---- #}
-{% for fork_id, fork in forks.items() if fork_id != "llama.cpp" %}
-{% if loop.first %}
-<section class="lm-section">
-  <header class="lm-section-head">
-    <span class="lm-section-marker">Alternative engines</span>
+<script>
+  /* Hide backend cards that don't apply to the currently-chosen source. */
+  (function () {
+    const sourceInputs = document.querySelectorAll('#source-picker input[type="radio"]');
+    const backendOpts = document.querySelectorAll('#backend-picker .lm-pick__opt');
+
+    function sync() {
+      const selected = document.querySelector('#source-picker input[type="radio"]:checked');
+      if (!selected) return;
+      const src = selected.dataset.source;
+      let firstVisible = null;
+      backendOpts.forEach(opt => {
+        const allowed = opt.dataset.beSources;
+        const ok = allowed === 'all' || allowed.split(',').includes(src);
+        opt.style.display = ok ? '' : 'none';
+        if (ok && !firstVisible) firstVisible = opt;
+      });
+      // If the previously-checked backend is now hidden, fall back to first visible.
+      const checked = document.querySelector('#backend-picker input:checked');
+      if (checked && checked.closest('.lm-pick__opt').style.display === 'none') {
+        if (firstVisible) {
+          const input = firstVisible.querySelector('input');
+          if (input) input.checked = true;
+        }
+      }
+    }
+
+    sourceInputs.forEach(i => i.addEventListener('change', sync));
+    sync();
+  })();
+</script>
+
+{# ---------- Installed variants ---------- #}
+<section class="lm-section lm-reveal lm-reveal-3">
+  <header class="lm-section-head" style="display: flex; align-items: center; gap: 14px; justify-content: space-between;">
+    <span class="lm-section-marker">Installed</span>
+    <button type="button"
+            class="lm-btn lm-btn--ghost lm-btn--sm lm-update-btn"
+            hx-get="/ui/setup/check-updates"
+            hx-target="#installed-variants"
+            hx-swap="outerHTML"
+            hx-indicator="this">
+      <span class="lm-update-btn__idle">Check all for updates</span>
+      <span class="lm-update-btn__busy">Checking&hellip;</span>
+    </button>
   </header>
-  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 24px;">
-    Install compatible llama.cpp forks alongside the default engine. Switching does not remove the original installation.
-  </p>
-{% endif %}
 
-  <div style="padding: 20px 24px; border: 1px solid var(--bg-3); background: var(--bg-1); margin-bottom: 16px;">
-    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
-      <span style="font-family: 'Fraunces', serif; font-size: 1.0625rem; font-weight: 500; color: var(--fg-0);">{{ fork.label }}</span>
-      {% if fork.active %}
-      <span class="lm-pill lm-pill--running">active</span>
-      {% elif fork.installed %}
-      <span class="lm-pill" style="color: var(--accent); border-color: var(--accent);">installed</span>
-      {% endif %}
-    </div>
-
-    <p style="font-size: 0.8125rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 16px;">
-      {{ fork.description }}
-      <a href="{{ fork.url }}" style="color: var(--accent); margin-left: 4px;">GitHub &nearr;</a>
-    </p>
-
-    {% if fork.installed %}
-    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px;">
-      <code style="font-size: 0.8125rem; color: var(--fg-1);">{{ fork.binary_path }}</code>
-    </div>
-    <div style="display: flex; gap: 12px; align-items: center;">
-      {% if fork.active %}
-      <span style="font-size: 0.8125rem; color: var(--fg-2);">Currently the active engine.</span>
-      {# Also offer a button to switch back to default #}
-      {% if forks['llama.cpp'].installed %}
-      <form method="post" action="/ui/setup/switch-fork">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="fork" value="llama.cpp">
-        <button type="submit" class="lm-btn lm-btn--ghost">Switch back to llama.cpp</button>
-      </form>
-      {% endif %}
-      {% else %}
-      <form method="post" action="/ui/setup/switch-fork">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="fork" value="{{ fork_id }}">
-        <button type="submit" class="lm-btn lm-btn--primary">Use this engine</button>
-      </form>
-      {% endif %}
-    </div>
-    {% else %}
-    <div style="display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start;">
-      <form method="post" action="/ui/setup/install">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="fork" value="{{ fork_id }}">
-        <button type="submit"
-                class="lm-btn lm-btn--primary"
-                {% if fork.install.status == 'running' %}disabled{% endif %}>
-          {% if fork.install.status == 'running' %}Installing&hellip;{% else %}Auto-install from GitHub{% endif %}
-        </button>
-      </form>
-      <p style="font-size: 0.75rem; color: var(--fg-2); max-width: 36ch; margin: 0;">Downloads the latest release build. Does not replace the default llama.cpp installation.</p>
-    </div>
-    {% endif %}
-
-    {# Per-fork install progress #}
-    {% set fork_name = fork_id %}
-    {% set install = fork.install %}
-    {% include "_install_progress.html" %}
-  </div>
-
-{% if loop.last %}
+  {% include "_installed_variants.html" %}
 </section>
-{% endif %}
-{% endfor %}
 
-{# ---- Section 3: Config file ---- #}
-<section class="lm-section">
+{# ---------- Config + restart ---------- #}
+<section class="lm-section lm-reveal lm-reveal-4">
   <header class="lm-section-head">
     <span class="lm-section-marker">Configuration</span>
   </header>
 
   <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
-    Server settings like bind address, port, and admin keys live in <code>config.toml</code>. Edit it directly and restart llamanager for changes to take effect.
+    Server settings — bind address, port, admin keys — live in <code>config.toml</code>. Edit it and restart llamanager for changes to take effect.
   </p>
 
   <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px;">
     <code style="font-size: 0.8125rem; color: var(--fg-1); background: var(--bg-1); border: 1px solid var(--bg-3); padding: 8px 12px; word-break: break-all;">{{ config_file }}</code>
   </div>
 
-  <form method="post" action="/ui/setup/open-config">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button type="submit" class="lm-btn lm-btn--ghost" style="display: inline-flex; align-items: center; gap: 8px;">
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;">
-        <path d="M2 13.5V4a1.5 1.5 0 0 1 1.5-1.5h3.172a1.5 1.5 0 0 1 1.06.44L9.329 4.5H12.5A1.5 1.5 0 0 1 14 6v7.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 13.5Z"/>
-      </svg>
-      {{ open_config_label }}
-    </button>
-  </form>
+  <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+    <form method="post" action="/ui/setup/open-config">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="lm-btn lm-btn--ghost" style="display: inline-flex; align-items: center; gap: 8px;">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;">
+          <path d="M2 13.5V4a1.5 1.5 0 0 1 1.5-1.5h3.172a1.5 1.5 0 0 1 1.06.44L9.329 4.5H12.5A1.5 1.5 0 0 1 14 6v7.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 13.5Z"/>
+        </svg>
+        {{ open_config_label }}
+      </button>
+    </form>
+
+    <form method="post" action="/ui/setup/restart">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="lm-btn lm-btn--danger"
+              data-confirm="Restart llamanager? This will briefly disconnect all clients and stop the engine.">
+        Restart llamanager
+      </button>
+    </form>
+  </div>
 </section>
 
-{# ---- Section 4: Restart llamanager ---- #}
-<section class="lm-section">
-  <header class="lm-section-head">
-    <span class="lm-section-marker">Restart llamanager</span>
-  </header>
-
-  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
-    Restart the llamanager daemon. This stops llama-server, reloads config.toml, and starts fresh. If autolaunch is enabled, the default profile will start automatically.
-  </p>
-
-  <form method="post" action="/ui/setup/restart">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button type="submit" class="lm-btn lm-btn--danger"
-            data-confirm="Restart llamanager? This will briefly disconnect all clients and stop llama-server.">
-      Restart llamanager
-    </button>
-  </form>
-</section>
 {% endblock %}

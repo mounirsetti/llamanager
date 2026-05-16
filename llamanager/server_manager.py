@@ -30,24 +30,62 @@ STOP_GRACE_S = 10.0
 HEALTH_POLL_INTERVAL_S = 0.5
 
 
+# Args that don't translate cleanly to mlx_lm.server. mlx-lm has a much
+# narrower flag surface than llama-server; we pass through what it accepts
+# and silently drop the rest (they're llama.cpp-specific).
+_MLX_SUPPORTED_ARGS = {
+    "model", "host", "port", "trust-remote-code", "log-level",
+    "chat-template", "use-default-chat-template",
+    "temp", "top-p", "top-k", "min-p",
+    "max-tokens",  # default; per-request override comes from the API
+}
+
+
 @dataclass
 class StartSpec:
-    """Resolved set of args to launch llama-server with."""
+    """Resolved set of args to launch the inference engine with.
+
+    ``cmdline`` adapts to either llama-server (the llama.cpp CLI) or
+    ``mlx_lm.server`` based on the *engine* argument.
+    """
     model_path: Path
     mmproj_path: Path | None
     extra_args: dict[str, Any]
     profile_name: str | None
-    model_id: str  # the requested logical id (relative to models_dir, or "profile:foo")
+    model_id: str  # the requested logical id (bare model path relative to models_dir)
 
-    def cmdline(self, binary: str, port: int) -> list[str]:
+    def cmdline(self, binary: str, port: int, engine: str = "llama") -> list[str]:
+        if engine == "mlx":
+            return self._mlx_cmdline(binary, port)
+        return self._llama_cmdline(binary, port)
+
+    def _llama_cmdline(self, binary: str, port: int) -> list[str]:
         cmd = [binary, "-m", str(self.model_path)]
         if self.mmproj_path:
             cmd += ["--mmproj", str(self.mmproj_path)]
-        # always force loopback bind and our chosen port
         cmd += ["--host", "127.0.0.1", "--port", str(port)]
         for k, v in self.extra_args.items():
             if k in ("host", "port"):
-                continue  # handled above
+                continue
+            flag = f"--{k}"
+            if isinstance(v, bool):
+                if v:
+                    cmd.append(flag)
+            else:
+                cmd += [flag, str(v)]
+        return cmd
+
+    def _mlx_cmdline(self, python: str, port: int) -> list[str]:
+        # binary is the venv Python; mlx-lm is invoked as a module.
+        cmd = [python, "-m", "mlx_lm", "server",
+               "--model", str(self.model_path),
+               "--host", "127.0.0.1", "--port", str(port)]
+        for k, v in self.extra_args.items():
+            if k in ("host", "port", "mmproj"):
+                continue
+            if k not in _MLX_SUPPORTED_ARGS:
+                log.debug("dropping arg %r — not supported by mlx-lm", k)
+                continue
             flag = f"--{k}"
             if isinstance(v, bool):
                 if v:
@@ -101,38 +139,75 @@ def _port_free(port: int, host: str = "127.0.0.1") -> bool:
         return False
 
 
+def resolve_default(cfg: Config) -> tuple[str, str | None]:
+    """Return the (model_id, profile_name) pair used when a request specifies
+    neither. Profile is None when no model-default and no global-default exist.
+
+    Returns ("", None) when no default_model is configured — callers should
+    treat that as "nothing to start" rather than crashing.
+    """
+    model = cfg.default_model
+    if not model:
+        return "", None
+    profile = cfg.model_default_profiles.get(model) or cfg.default_profile or None
+    return model, profile
+
+
 def resolve_spec(cfg: Config, *, profile: str | None = None,
                  model: str | None = None,
                  mmproj: str | None = None,
                  args: dict[str, Any] | None = None) -> StartSpec:
-    """Turn a (profile_name | model_id + args) request into a concrete StartSpec.
+    """Turn a request into a concrete StartSpec under the three-scenario rule:
 
-    Rules:
-    - profile name -> look up in cfg.profiles, optional overrides on top.
-    - model id like "profile:foo" -> same as profile name.
-    - bare model id -> relative to models_dir.
+    1. Nothing specified           → cfg.default_model + its default profile
+    2. Only model specified        → that model + its default profile
+    3. Both specified              → that exact pair (profile must be bound to
+                                     that model, or be the global default)
+
+    Profile-without-model is rejected.
+
+    The ``profile:foo`` shorthand on ``model`` is no longer accepted; callers
+    that used it must migrate to passing ``model`` and ``profile`` separately.
     """
     args = dict(args or {})
+    model = (model or "").strip() or None
+    profile = (profile or "").strip() or None
 
-    if model and model.startswith("profile:") and not profile:
-        profile = model.split(":", 1)[1]
-        model = None
+    if profile and not model:
+        raise ValueError(
+            "profile requires a model: pass model + profile, not profile alone"
+        )
+
+    if not model:
+        # Scenarios 1/2: fall through to the default. Note: scenario 2 (model
+        # only) is handled below — we only reach this branch when *neither*
+        # was given, so use cfg.default_model.
+        model, default_prof = resolve_default(cfg)
+        if not model:
+            raise ValueError("no model specified and no default configured")
+        if profile is None:
+            profile = default_prof
+    elif profile is None:
+        # Scenario 2: pick the model's default profile, then the global one.
+        profile = cfg.model_default_profiles.get(model) or cfg.default_profile or None
 
     prof: Profile | None = None
     if profile:
         prof = cfg.profiles.get(profile)
         if not prof:
             raise ValueError(f"unknown profile: {profile}")
+        if prof.model and prof.model != model:
+            raise ValueError(
+                f"profile {profile!r} is bound to model {prof.model!r}, "
+                f"not {model!r}"
+            )
 
-    chosen_model = model or (prof.model if prof else cfg.default_model)
     chosen_mmproj = mmproj if mmproj is not None else (prof.mmproj if prof else "")
     merged_args = dict(prof.args) if prof else {}
     merged_args.update(args)
 
-    if not chosen_model:
-        raise ValueError("no model specified and no default configured")
-    _validate_model_id(chosen_model)
-    model_path = _safe_under(cfg.models_dir, cfg.models_dir / chosen_model)
+    _validate_model_id(model)
+    model_path = _safe_under(cfg.models_dir, cfg.models_dir / model)
     mmproj_path: Path | None
     if chosen_mmproj:
         _validate_model_id(chosen_mmproj)
@@ -145,7 +220,7 @@ def resolve_spec(cfg: Config, *, profile: str | None = None,
         mmproj_path=mmproj_path,
         extra_args=merged_args,
         profile_name=profile,
-        model_id=chosen_model,
+        model_id=model,
     )
 
 
@@ -183,20 +258,21 @@ class ServerManager:
     async def start(self, spec: StartSpec) -> int:
         async with self._lock:
             if self.is_running:
-                raise ServerError("llama-server already running")
+                raise ServerError("inference engine already running")
+            engine = getattr(self.cfg, "llama_server_engine", "llama") or "llama"
             if not spec.model_path.exists():
-                raise ServerError(f"model file not found: {spec.model_path}")
+                raise ServerError(f"model not found: {spec.model_path}")
             if spec.mmproj_path and not spec.mmproj_path.exists():
                 raise ServerError(f"mmproj file not found: {spec.mmproj_path}")
             port = self.cfg.llama_server_port
             if not _port_free(port):
                 raise ServerError(f"port {port} is busy on 127.0.0.1")
 
-            cmd = spec.cmdline(self.cfg.llama_server_binary, port)
+            cmd = spec.cmdline(self.cfg.llama_server_binary, port, engine=engine)
             log_path = self.cfg.logs_dir / "llama-server.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
             self._log_fp = open(log_path, "ab", buffering=0)
-            log.info("launching llama-server: %s", shlex.join(cmd))
+            log.info("launching %s engine: %s", engine, shlex.join(cmd))
             try:
                 self.proc = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -207,7 +283,7 @@ class ServerManager:
             except FileNotFoundError as e:
                 self._close_log()
                 raise ServerError(
-                    f"llama-server binary not found: {self.cfg.llama_server_binary}"
+                    f"engine binary not found: {self.cfg.llama_server_binary}"
                 ) from e
 
             self.spec = spec

@@ -3,9 +3,12 @@
 Behavior:
 - Resolve origin from Authorization: Bearer <key>.
 - Resolve requested model:
-    1. X-Llamanager-Model header (subject to origin.allowed_models)
-    2. otherwise leave model_required=None — dispatcher will use whatever's loaded
-       and cold-start the default if nothing is.
+    1. X-Llamanager-Model header (bare model id, subject to origin.allowed_models)
+    2. X-Llamanager-Profile header (optional) — selects a profile bound to the
+       model above (or the global default profile). Profile without a model
+       is rejected (400).
+    3. otherwise leave model_required=None — dispatcher will use whatever's
+       loaded and cold-start the default if nothing is.
 - Enqueue, then either:
     - non-streaming: wait for slot, forward request, return JSON.
     - streaming: open SSE response immediately and emit ":queued" / ":swapping"
@@ -62,12 +65,31 @@ def _check_model_allowed(origin: Origin, model_id: str) -> None:
     )
 
 
-def _model_required(req: Request, origin: Origin) -> str | None:
-    hdr = req.headers.get("x-llamanager-model")
-    if not hdr:
-        return None
-    _check_model_allowed(origin, hdr)
-    return hdr
+def _model_required(req: Request, origin: Origin) -> tuple[str | None, str | None]:
+    """Return (model_id, profile_name) from the request headers.
+
+    The legacy ``X-Llamanager-Model: profile:foo`` shorthand is rejected with
+    a 400 pointing callers at the new two-header contract.
+    """
+    model = req.headers.get("x-llamanager-model")
+    profile = req.headers.get("x-llamanager-profile")
+    if model and model.startswith("profile:"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "the 'profile:<name>' shorthand on X-Llamanager-Model is no "
+                "longer supported. Send X-Llamanager-Model: <model-id> and "
+                "X-Llamanager-Profile: <name> as separate headers."
+            ),
+        )
+    if profile and not model:
+        raise HTTPException(
+            status_code=400,
+            detail="X-Llamanager-Profile requires X-Llamanager-Model",
+        )
+    if model:
+        _check_model_allowed(origin, model)
+    return (model or None), (profile or None)
 
 
 def _is_streaming(body: dict[str, Any]) -> bool:
@@ -176,9 +198,13 @@ async def _handle_inference(
     qm: QueueManager = request.app.state.queue
     sm: ServerManager = request.app.state.sm
 
-    model_required = _model_required(request, origin)
+    model_required, profile_required = _model_required(request, origin)
     try:
-        qr = await qm.enqueue(origin=origin, model_required=model_required)
+        qr = await qm.enqueue(
+            origin=origin,
+            model_required=model_required,
+            profile_required=profile_required,
+        )
     except QueueFull:
         raise HTTPException(status_code=503, detail="queue full")
 

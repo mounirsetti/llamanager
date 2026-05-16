@@ -168,6 +168,8 @@ class Registry:
         out: list[ModelEntry] = []
         if not self.models_dir.exists():
             return out
+
+        # GGUF single-file models (llama.cpp engines).
         for p in self.models_dir.rglob("*.gguf"):
             if not p.is_file():
                 continue
@@ -185,6 +187,33 @@ class Registry:
                 source=meta.get("source"),
                 pulled_at=meta.get("pulled_at"),
             ))
+
+        # MLX / Hugging Face directory-style models. A directory counts as
+        # a model when it contains config.json (HF convention) and at least
+        # one weight file (safetensors or mlx). Sub-models nested inside a
+        # GGUF model dir aren't possible because GGUF entries are files, so
+        # there's no ambiguity.
+        seen: set[Path] = set()
+        for cfg_path in self.models_dir.rglob("config.json"):
+            d = cfg_path.parent
+            if d in seen or d == self.models_dir:
+                continue
+            has_weights = any(d.glob("*.safetensors")) or any(d.glob("*.npz"))
+            if not has_weights:
+                continue
+            seen.add(d)
+            rel = d.relative_to(self.models_dir).as_posix()
+            meta = _read_meta(d)
+            size = _dir_size(d)
+            out.append(ModelEntry(
+                model_id=rel,
+                path=d,
+                size=size,
+                sha256=meta.get("sha256"),
+                source=meta.get("source"),
+                pulled_at=meta.get("pulled_at"),
+            ))
+
         out.sort(key=lambda m: m.model_id)
         return out
 
@@ -203,21 +232,38 @@ class Registry:
         if currently_loaded == model_id and not force:
             return False, "loaded"
         try:
-            m.path.unlink()
+            if m.path.is_dir():
+                shutil.rmtree(m.path)
+            else:
+                m.path.unlink()
         except FileNotFoundError:
             pass
-        mp = _meta_path(m.path)
-        with contextlib.suppress(FileNotFoundError):
-            mp.unlink()
+        if m.path.is_file():
+            mp = _meta_path(m.path)
+            with contextlib.suppress(FileNotFoundError):
+                mp.unlink()
         # Clean empty parent dirs back up to models_dir.
-        parent = m.path.parent
+        parent = m.path.parent if m.path.is_file() or not m.path.exists() else m.path.parent
         while parent != self.models_dir and parent.exists():
             try:
                 parent.rmdir()
                 parent = parent.parent
             except OSError:
                 break
-        self.db.log_event("model_deleted", {"model_id": model_id, "force": force})
+        # Cascade: drop any profiles bound to this model and the per-model
+        # default-profile pointer. In-memory cfg is also updated so the rest
+        # of the request observes a consistent picture.
+        from . import config as _cfg
+        removed_profiles = _cfg.delete_model_profiles(self.cfg.config_path, model_id)
+        for name in removed_profiles:
+            self.cfg.profiles.pop(name, None)
+        self.cfg.model_default_profiles.pop(model_id, None)
+        if self.cfg.default_profile in removed_profiles:
+            self.cfg.default_profile = ""
+        self.db.log_event("model_deleted", {
+            "model_id": model_id, "force": force,
+            "removed_profiles": removed_profiles,
+        })
         return True, None
 
     # ---- pull ----
@@ -447,14 +493,20 @@ class Registry:
             self.cfg.profiles[profile_name] = Profile(
                 name=profile_name, model=model_id, mmproj=mmproj, args=args,
             )
-            # If no default profile is set yet, make this the default
-            if not self.cfg.default_profile:
-                self.cfg.default_profile = profile_name
+            # Register this as the model's default profile if the model
+            # doesn't already have one. Also seed cfg.default_model if no
+            # default model is set, but never overwrite an existing one.
+            from . import config as _cfg
+            if model_id not in self.cfg.model_default_profiles:
+                self.cfg.model_default_profiles[model_id] = profile_name
+                _cfg.set_model_default_profile(
+                    self.cfg.config_path, model_id, profile_name,
+                )
+            if not self.cfg.default_model:
                 self.cfg.default_model = model_id
                 update_defaults(
                     self.cfg.config_path,
                     default_model=model_id,
-                    default_profile=profile_name,
                 )
             log.info("auto-created profile %r for %s", profile_name, model_id)
             self.db.log_event("profile_auto_created", {

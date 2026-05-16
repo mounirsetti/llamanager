@@ -43,8 +43,11 @@ data_dir = "{data_dir.as_posix()}"
 
 [defaults]
 model = "test/model.gguf"
-profile = "test"
+profile = ""
 origin_priority = 50
+
+[model_defaults]
+"test/model.gguf" = "test"
 
 [restart_policy]
 max_restarts_in_window = 3

@@ -2,11 +2,284 @@
 {% set active = 'models' %}
 {% block title %}Models - llamanager{% endblock %}
 {% block content %}
+
+<style>
+  /* ====== Models-page composition (model cards + inline profiles) ====== */
+
+  .lm-model-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .lm-model {
+    border: 1px solid var(--bg-3);
+    background: var(--bg-1);
+    padding: 16px 18px;
+    position: relative;
+  }
+  .lm-model--loaded {
+    border-color: var(--accent);
+    background:
+      linear-gradient(180deg, var(--accent-soft), transparent 70%),
+      var(--bg-1);
+  }
+  .lm-model--loaded::before {
+    content: "";
+    position: absolute;
+    left: -1px; top: -1px; bottom: -1px;
+    width: 3px;
+    background: var(--accent);
+  }
+  .lm-model__head {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 12px;
+  }
+  .lm-model__title-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .lm-model__id {
+    font-size: 0.875rem;
+    color: var(--fg-0);
+    word-break: break-all;
+  }
+  .lm-model__meta {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 0.75rem;
+    color: var(--fg-2);
+  }
+  .lm-model__sep { color: var(--fg-3); }
+
+  .lm-model__actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+
+  .lm-model__profiles {
+    border-top: 1px solid var(--bg-3);
+    padding-top: 10px;
+  }
+  .lm-model__profiles-summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 4px 0;
+    user-select: none;
+  }
+  .lm-model__profiles-summary::before {
+    content: "▸";
+    color: var(--fg-3);
+    font-size: 0.75rem;
+    transition: transform 160ms ease;
+    margin-right: 8px;
+    display: inline-block;
+  }
+  .lm-model__profiles[open] > .lm-model__profiles-summary::before {
+    transform: rotate(90deg);
+  }
+  .lm-model__profiles-body {
+    margin-top: 8px;
+  }
+
+  .lm-profile-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .lm-profile {
+    padding: 10px 14px;
+    background: var(--bg-2);
+    border-left: 2px solid var(--bg-3);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .lm-profile.is-default {
+    border-left-color: var(--accent);
+  }
+  .lm-profile__head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .lm-profile__name {
+    font-family: 'Fraunces', serif;
+    font-variation-settings: 'opsz' 24, 'SOFT' 16;
+    font-size: 0.9375rem;
+    color: var(--fg-0);
+  }
+  .lm-profile__details summary,
+  .lm-profile-add__summary {
+    cursor: pointer;
+    list-style: none;
+    font-size: 0.75rem;
+    color: var(--accent);
+    user-select: none;
+  }
+  .lm-profile__details summary::before,
+  .lm-profile-add__summary::before {
+    content: "▸ ";
+    color: var(--fg-3);
+  }
+  .lm-profile__details[open] summary::before,
+  .lm-profile-add[open] .lm-profile-add__summary::before {
+    content: "▾ ";
+  }
+  .lm-profile__actions,
+  .lm-profile__row-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+  .lm-profile-empty {
+    font-family: 'Fraunces', serif;
+    font-style: italic;
+    color: var(--fg-2);
+    font-size: 0.8125rem;
+    margin: 4px 0 8px;
+  }
+  .lm-profile-add {
+    margin-top: 10px;
+    padding: 8px 12px;
+    border: 1px dashed var(--bg-3);
+  }
+
+  .lm-form--inline {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .lm-form--inline .lm-input { max-width: none; }
+  .lm-form--inline .lm-field-label {
+    font-size: 0.6875rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--fg-2);
+    margin: 4px 0 0;
+  }
+  .lm-btn--xs { padding: 4px 10px; font-size: 0.75rem; }
+
+  /* ---- Global default profile card ---- */
+  .lm-global-default {
+    padding: 18px 22px;
+    margin: 0 0 24px;
+    border: 1px solid var(--bg-3);
+    background: var(--bg-1);
+    position: relative;
+  }
+  .lm-global-default__title {
+    font-family: 'Fraunces', serif;
+    font-variation-settings: 'opsz' 48, 'SOFT' 20;
+    font-size: 1.125rem;
+    color: var(--fg-0);
+    margin-bottom: 2px;
+  }
+  .lm-global-default__lede {
+    font-size: 0.8125rem;
+    color: var(--fg-2);
+    margin-bottom: 12px;
+    max-width: 64ch;
+    font-style: italic;
+    font-family: 'Fraunces', serif;
+  }
+  .lm-global-default__current {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 12px;
+    font-size: 0.875rem;
+    color: var(--fg-1);
+  }
+  .lm-global-default__current code {
+    font-size: 0.8125rem;
+    color: var(--accent);
+  }
+  .lm-global-default__form {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+</style>
+
 <div class="lm-eyebrow">Operate</div>
 <h1 class="lm-page-title">Models</h1>
+<p class="lm-page-lede">Manage on-disk models and their profiles. Profiles attach to their model and configure how the engine launches it.</p>
 
-{# ---- Models (unified: on-disk + downloads) ---- #}
+{# ---- Global default profile ---- #}
 <section class="lm-section" style="margin-top: 32px;">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Defaults</span>
+  </header>
+
+  <div class="lm-global-default">
+    <div class="lm-global-default__title">Global default profile</div>
+    <p class="lm-global-default__lede">
+      An args-only fallback applied to any model when neither the request nor the model's own default profile sets one. Useful for shared decoding settings (context size, sampling) that aren't tied to a specific weight file.
+    </p>
+
+    <div class="lm-global-default__current">
+      <span class="lm-eyebrow" style="margin: 0;">Current</span>
+      {% if global_default_profile %}
+      <code>{{ global_default_profile }}</code>
+      {% else %}
+      <em style="color: var(--fg-3); font-family: 'Fraunces', serif;">none set</em>
+      {% endif %}
+    </div>
+
+    <form method="post" action="/ui/models/profiles/set-global-default" class="lm-global-default__form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <select name="profile_name" class="lm-input" style="min-width: 220px; max-width: 320px;">
+        <option value="">— none —</option>
+        {% for gp in global_profiles %}
+        <option value="{{ gp.name }}" {% if gp.name == global_default_profile %}selected{% endif %}>{{ gp.name }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Save</button>
+    </form>
+
+    <details style="margin-top: 14px;">
+      <summary style="cursor: pointer; font-size: 0.8125rem; color: var(--accent); user-select: none;">+ Create a new global profile</summary>
+      <form method="post" action="/ui/models/profiles/create" class="lm-form lm-form--inline" style="margin-top: 10px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="model_id" value="">
+        <label class="lm-field-label">Profile name</label>
+        <input class="lm-input" type="text" name="name" required
+               pattern="[a-z0-9][a-z0-9\-]*"
+               placeholder="e.g. balanced, fast"
+               style="max-width: 320px;">
+        <label class="lm-field-label">args (JSON)</label>
+        <textarea class="lm-input lm-input--mono" name="args_json" rows="3" spellcheck="false"
+                  style="max-width: 520px; resize: vertical;">{"ctx-size": 4096, "temp": 0.7}</textarea>
+        <label style="font-size: 0.75rem; color: var(--fg-2); display: inline-flex; align-items: center; gap: 6px; margin-top: 6px;">
+          <input type="checkbox" name="make_default" value="on" checked> Make this the global default profile
+        </label>
+        <div>
+          <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Create profile</button>
+        </div>
+      </form>
+    </details>
+  </div>
+</section>
+
+{# ---- Models (unified: on-disk + downloads + per-model profiles) ---- #}
+<section class="lm-section">
   <header class="lm-section-head">
     <span class="lm-section-marker">Models</span>
     <span class="lm-section-meta">{{ models|length }} on disk</span>

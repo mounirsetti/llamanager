@@ -24,7 +24,7 @@ from .queue_mgr import QueueManager
 from .registry import Registry
 from .server_manager import ServerManager
 from .supervisor import Supervisor
-from .llama_installer import detect_binary, InstallState, FORKS
+from .llama_installer import detect_binary, InstallState, list_variants
 from . import __version__
 
 log = logging.getLogger(__name__)
@@ -135,13 +135,18 @@ def create_app(config_path: Path | None = None,
         queue.start()
         supervisor.start()
 
-        # Autolaunch default profile if configured and binary is available
+        # Autolaunch the configured default model (+ its default profile if
+        # any) when autolaunch is on and a binary is available.
         if cfg.autolaunch and detect_binary(cfg.llama_server_binary):
             try:
-                from .server_manager import resolve_spec
-                spec = resolve_spec(cfg, profile=cfg.default_profile or None)
-                asyncio.create_task(sm.start(spec))
-                log.info("autolaunch: starting default profile %r", cfg.default_profile)
+                from .server_manager import resolve_spec, resolve_default
+                model, profile = resolve_default(cfg)
+                if not model:
+                    log.info("autolaunch: no default_model configured, skipping")
+                else:
+                    spec = resolve_spec(cfg, model=model, profile=profile)
+                    asyncio.create_task(sm.start(spec))
+                    log.info("autolaunch: starting %s (profile=%s)", model, profile)
             except Exception as e:
                 log.warning("autolaunch failed: %s", e)
 
@@ -191,8 +196,9 @@ def create_app(config_path: Path | None = None,
     app.state.queue = queue
     app.state.supervisor = supervisor
     app.state.registry = registry
-    app.state.install_states = {fork: InstallState() for fork in FORKS}
-    app.state.install_state = app.state.install_states["llama.cpp"]
+    # One InstallState per installable variant (source + backend), so the UI
+    # can poll progress per variant independently.
+    app.state.install_states = {v["id"]: InstallState() for v in list_variants()}
     app.state.session_secret = _load_or_create_session_secret(cfg)
     # Server-side admin UI session store. Lives in-process; restart logs
     # everyone out, which is acceptable for a single-host operator UI.
@@ -332,11 +338,13 @@ def create_app(config_path: Path | None = None,
         from pathlib import Path as _Path
         import json as _json
         _templates = Jinja2Templates(directory=str(_Path(__file__).parent / "templates"))
-        profile_names = list(cfg.profiles.keys())
+        # Profiles are emitted as [name, bound_model] pairs so the page can
+        # filter the dropdown to the user's chosen model.
+        profile_pairs = [(p.name, p.model) for p in cfg.profiles.values()]
         model_ids = [m.model_id for m in registry.list()]
         return _templates.TemplateResponse(request, "chat_public.html", {
             "request": request,
-            "profiles_json": _json.dumps(profile_names),
+            "profiles_json": _json.dumps(profile_pairs),
             "models_json": _json.dumps(model_ids),
         })
 

@@ -43,9 +43,10 @@ class QueuedRequest:
     request_id: str
     origin: Origin
     priority: int
-    model_required: str | None  # logical id (e.g. "repo/file.gguf" or "profile:foo") or None
+    model_required: str | None  # bare model id (e.g. "repo/file.gguf") or None
     enqueued_at: float
     seq: int
+    profile_required: str | None = None  # optional per-request profile selection
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     # signalled by dispatcher when it's this request's turn:
     ready: asyncio.Event = field(default_factory=asyncio.Event)
@@ -92,6 +93,7 @@ class QueueManager:
 
     # ---- enqueue / cancel ----
     async def enqueue(self, *, origin: Origin, model_required: str | None,
+                      profile_required: str | None = None,
                       ) -> QueuedRequest:
         active_pending = len(self._heap) - self._cancelled_in_heap
         if active_pending + len(self._in_flight) >= self.cfg.max_queue_depth:
@@ -101,6 +103,7 @@ class QueueManager:
             origin=origin,
             priority=origin.priority,
             model_required=model_required,
+            profile_required=profile_required,
             enqueued_at=time.time(),
             seq=next(self._seq),
         )
@@ -281,10 +284,14 @@ class QueueManager:
                 await asyncio.sleep(1.0)
 
     async def _prepare_and_release(self, req: QueuedRequest) -> None:
-        """Ensure the right model is loaded, then signal the handler."""
-        # Resolve target spec. None means "use whatever is loaded; if nothing,
-        # load default".
+        """Ensure the right model is loaded, then signal the handler.
+
+        ``req.model_required`` is a bare model id or None. The legacy
+        ``profile:foo`` shorthand is no longer accepted; per-request profile
+        selection arrives via the X-Llamanager-Profile header path instead.
+        """
         wanted = req.model_required
+        wanted_profile = getattr(req, "profile_required", None)
         loaded = self.sm.runtime.current_model
 
         need_swap = False
@@ -292,18 +299,14 @@ class QueueManager:
 
         if wanted is None:
             if loaded is None:
-                # cold start with default
-                target_spec = resolve_spec(self.cfg, profile=self.cfg.default_profile)
-                need_swap = True  # actually a cold start, same code path
+                # cold start with configured defaults.
+                target_spec = resolve_spec(self.cfg)
+                need_swap = True
         else:
-            if wanted.startswith("profile:"):
-                target_spec = resolve_spec(self.cfg, profile=wanted.split(":", 1)[1])
-                if loaded != target_spec.model_id or self.sm.runtime.current_profile != target_spec.profile_name:
-                    need_swap = True
-            else:
-                target_spec = resolve_spec(self.cfg, model=wanted)
-                if loaded != wanted:
-                    need_swap = True
+            target_spec = resolve_spec(self.cfg, model=wanted, profile=wanted_profile)
+            if (loaded != target_spec.model_id
+                    or self.sm.runtime.current_profile != target_spec.profile_name):
+                need_swap = True
 
         if need_swap and target_spec is not None:
             req.status = "swapping_model"

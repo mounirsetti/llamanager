@@ -64,6 +64,9 @@ class Config:
     bind: str = "127.0.0.1"
     port: int = 7200
     llama_server_binary: str = "llama-server"
+    # Engine that the binary speaks. "llama" → llama-server CLI flags.
+    # "mlx" → binary is a Python interpreter, launched as `python -m mlx_lm server`.
+    llama_server_engine: str = "llama"
     llama_server_port: int = 7201
     data_dir: Path = field(default_factory=lambda: expand("~/.llamanager"))
 
@@ -85,6 +88,10 @@ class Config:
     queue_timeout_s: int = 300
 
     profiles: dict[str, Profile] = field(default_factory=dict)
+    # Per-model default profile pointers: model_id -> profile_name. A model
+    # may have at most one default; when set, scenarios 1 and 2 of resolve_spec
+    # pick this profile before falling back to default_profile (the global one).
+    model_default_profiles: dict[str, str] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
     path: Path | None = None
 
@@ -137,6 +144,7 @@ def load_config(path: Path | None = None) -> Config:
         bind=server.get("bind", "127.0.0.1"),
         port=int(server.get("port", 7200)),
         llama_server_binary=server.get("llama_server_binary", "llama-server"),
+        llama_server_engine=str(server.get("llama_server_engine", "llama")),
         llama_server_port=int(server.get("llama_server_port", 7201)),
         data_dir=expand(server.get("data_dir", "~/.llamanager")),
         default_model=defaults.get("model", ""),
@@ -157,12 +165,32 @@ def load_config(path: Path | None = None) -> Config:
     )
 
     for name, body in (raw.get("profiles") or {}).items():
+        # model defaults to "" (global / any-model). NOT cfg.default_model, which
+        # would silently bind a global profile and break TOML round-trip.
         cfg.profiles[name] = Profile(
             name=name,
-            model=body.get("model", cfg.default_model),
+            model=body.get("model", "") or "",
             mmproj=body.get("mmproj", "") or "",
             args=dict(body.get("args") or {}),
         )
+
+    # Per-model default profile pointers. TOML keys are quoted strings (model
+    # ids contain slashes), so the section is a plain table.
+    for model_id, prof_name in (raw.get("model_defaults") or {}).items():
+        if isinstance(prof_name, str) and prof_name:
+            cfg.model_default_profiles[model_id] = prof_name
+
+    # ---- one-shot migration: legacy [defaults] profile pointing at a
+    # model-bound profile becomes the model's default profile, not a global
+    # default. We only mutate the in-memory cfg here; persistence happens on
+    # the next config write that touches the affected sections. The fix-up
+    # below makes load_config idempotent: re-running over a migrated config
+    # is a no-op.
+    if cfg.default_profile:
+        p = cfg.profiles.get(cfg.default_profile)
+        if p and p.model:
+            cfg.model_default_profiles.setdefault(p.model, p.name)
+            cfg.default_profile = ""
 
     # Ensure required dirs exist.
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
@@ -215,7 +243,12 @@ def _validate_profile_name(name: str) -> str:
 
 def save_profile(cfg_path: Path, name: str, model: str,
                  mmproj: str, args: dict[str, Any]) -> None:
-    """Create or overwrite a profile in config.toml."""
+    """Create or overwrite a profile in config.toml.
+
+    An empty ``model`` marks the profile as global (applies to any model as
+    an args-only fallback). A non-empty ``model`` binds the profile to
+    exactly that model id.
+    """
     import tomlkit
     name = _validate_profile_name(name)
     doc = _load_tomlkit(cfg_path)
@@ -232,12 +265,75 @@ def save_profile(cfg_path: Path, name: str, model: str,
 
 
 def delete_profile(cfg_path: Path, name: str) -> None:
-    """Remove a profile from config.toml."""
+    """Remove a profile from config.toml. Also clear any model_defaults entry
+    that points at it so we never leave a dangling pointer behind."""
     doc = _load_tomlkit(cfg_path)
+    changed = False
     profiles = doc.get("profiles")
     if profiles and name in profiles:
         del profiles[name]
+        changed = True
+    model_defaults = doc.get("model_defaults")
+    if model_defaults:
+        for mid in [k for k, v in model_defaults.items() if v == name]:
+            del model_defaults[mid]
+            changed = True
+    defaults = doc.get("defaults")
+    if defaults and defaults.get("profile") == name:
+        defaults["profile"] = ""
+        changed = True
+    if changed:
         _save_tomlkit(cfg_path, doc)
+
+
+def set_model_default_profile(cfg_path: Path, model_id: str, profile_name: str) -> None:
+    """Write/replace `[model_defaults]` entry mapping model_id -> profile_name."""
+    import tomlkit
+    doc = _load_tomlkit(cfg_path)
+    if "model_defaults" not in doc:
+        doc.add("model_defaults", tomlkit.table())
+    doc["model_defaults"][model_id] = profile_name
+    _save_tomlkit(cfg_path, doc)
+
+
+def clear_model_default_profile(cfg_path: Path, model_id: str) -> None:
+    """Remove `[model_defaults]` entry for model_id, if present."""
+    doc = _load_tomlkit(cfg_path)
+    model_defaults = doc.get("model_defaults")
+    if model_defaults and model_id in model_defaults:
+        del model_defaults[model_id]
+        _save_tomlkit(cfg_path, doc)
+
+
+def delete_model_profiles(cfg_path: Path, model_id: str) -> list[str]:
+    """Cascade-delete every profile bound to model_id and clear its default
+    pointer. Returns the list of profile names that were removed."""
+    doc = _load_tomlkit(cfg_path)
+    removed: list[str] = []
+    changed = False
+    profiles = doc.get("profiles")
+    if profiles:
+        for name in list(profiles.keys()):
+            entry = profiles[name]
+            try:
+                bound = entry.get("model", "")
+            except AttributeError:
+                bound = ""
+            if bound == model_id:
+                del profiles[name]
+                removed.append(name)
+                changed = True
+    model_defaults = doc.get("model_defaults")
+    if model_defaults and model_id in model_defaults:
+        del model_defaults[model_id]
+        changed = True
+    defaults = doc.get("defaults")
+    if defaults and defaults.get("profile") in removed:
+        defaults["profile"] = ""
+        changed = True
+    if changed:
+        _save_tomlkit(cfg_path, doc)
+    return removed
 
 
 def update_defaults(cfg_path: Path, *,

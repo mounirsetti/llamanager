@@ -148,9 +148,9 @@
       <div style="display: flex; align-items: center; gap: 6px;">
         <label style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2);">Profile</label>
         <select id="chat-profile" class="lm-select" style="font-size: 0.8125rem; padding: 4px 8px; min-width: 140px;">
-          <option value="">current (no swap)</option>
+          <option value="">— model default —</option>
           {% for p in profiles %}
-          <option value="profile:{{ p.name }}">{{ p.name }}</option>
+          <option value="{{ p.name }}" data-model="{{ p.model or '' }}">{{ p.name }}{% if not p.model %} (global){% endif %}</option>
           {% endfor %}
         </select>
       </div>
@@ -449,8 +449,17 @@
     var headers = { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' };
     var profile = profileEl.value;
     var model = modelSelectEl.value;
-    if (profile) headers['X-Llamanager-Model'] = profile;
-    else if (model) headers['X-Llamanager-Model'] = model;
+    if (model) headers['X-Llamanager-Model'] = model;
+    if (profile) {
+      if (!headers['X-Llamanager-Model']) {
+        // Profile requires a model. The selected profile may be bound to one;
+        // try to use that. Otherwise drop the profile silently.
+        var opt = profileEl.options[profileEl.selectedIndex];
+        var boundModel = opt && opt.dataset ? opt.dataset.model : '';
+        if (boundModel) headers['X-Llamanager-Model'] = boundModel;
+      }
+      if (headers['X-Llamanager-Model']) headers['X-Llamanager-Profile'] = profile;
+    }
 
     var fullContent = '';
     var reasoningContent = '';

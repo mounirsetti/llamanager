@@ -34,11 +34,19 @@ def load(path: Path) -> RuntimeState:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return RuntimeState()
+    current_model = data.get("current_model")
+    current_profile = data.get("current_profile")
+    # Defensive: a profile without a model is meaningless under the new
+    # parent/child invariant. Drop the dangling profile rather than crashing
+    # later when something tries to validate the pair. The next start/swap
+    # will repopulate from a fresh resolve_spec call.
+    if current_profile and not current_model:
+        current_profile = None
     return RuntimeState(
         state=data.get("state", "stopped"),
         pid=data.get("pid"),
-        current_model=data.get("current_model"),
-        current_profile=data.get("current_profile"),
+        current_model=current_model,
+        current_profile=current_profile,
         current_args=data.get("current_args", {}) or {},
         started_at=data.get("started_at"),
         last_event_at=data.get("last_event_at"),

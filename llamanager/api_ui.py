@@ -36,14 +36,25 @@ from .config import (
     load_config, save_profile, delete_profile, update_defaults,
 )
 from .llama_installer import (
-    FORKS,
+    BACKENDS,
+    SOURCES,
     InstallState,
+    check_for_update,
+    current_platform,
     detect_binary,
-    detect_fork_binary,
+    detect_default_backend,
+    detect_default_source,
+    detect_variant_binary,
+    detect_variant_for_binary,
+    engine_type_for,
     get_engine_hint,
-    install_instructions,
-    install_llama_server,
+    install_variant,
+    list_variants,
+    parse_variant_id,
     patch_config_binary,
+    read_install_meta,
+    variant_id,
+    variant_install_path,
 )
 from .queue_mgr import QueueManager
 from .registry import Registry
@@ -586,13 +597,46 @@ def _models_ctx(request: Request) -> dict:
         open_label = "Open in Explorer"
     else:
         open_label = "Open folder"
+
+    # Group profiles by parent model so the template can render them inline
+    # under each model row. The "global" bucket holds profiles whose `model`
+    # field is empty — these are the args-only fallbacks.
+    profiles_by_model: dict[str, list[dict]] = {}
+    global_profiles: list[dict] = []
+    for p in cfg.profiles.values():
+        entry = {
+            "name": p.name,
+            "model": p.model,
+            "mmproj": p.mmproj,
+            "args": p.args,
+            "args_json": json.dumps(p.args) if p.args else "",
+        }
+        if p.model:
+            profiles_by_model.setdefault(p.model, []).append(entry)
+        else:
+            global_profiles.append(entry)
+    for v in profiles_by_model.values():
+        v.sort(key=lambda e: e["name"])
+    global_profiles.sort(key=lambda e: e["name"])
+
+    models = []
+    for m in reg.list():
+        d = m.to_dict()
+        d["profiles"] = profiles_by_model.get(m.model_id, [])
+        d["default_profile"] = cfg.model_default_profiles.get(m.model_id, "")
+        models.append(d)
+
     return _ctx(
         request,
-        models=[m.to_dict() for m in reg.list()],
+        models=models,
         downloads=reg.list_downloads(),
         current_model=request.app.state.sm.runtime.current_model,
+        current_profile=request.app.state.sm.runtime.current_profile,
         models_dir=str(cfg.models_dir),
         open_label=open_label,
+        global_profiles=global_profiles,
+        global_default_profile=cfg.default_profile,
+        default_model=cfg.default_model,
     )
 
 
@@ -938,12 +982,12 @@ async def origins_rotate_ui(request: Request, origin_id: int,
     ))
 
 
-# ---------- profiles (redirect to launch) ----------
+# ---------- profiles (redirect to models — profile CRUD lives there now) ----------
 
 @router.get("/profiles")
 async def profiles_redirect(request: Request,
                             _: Origin = Depends(require_admin_ui)) -> Response:
-    return RedirectResponse("/ui/launch", status_code=301)
+    return RedirectResponse("/ui/models", status_code=301)
 
 
 # ---------- about ----------
@@ -1115,7 +1159,9 @@ async def chat_view(request: Request, _: Origin = Depends(require_admin_ui)) -> 
     sm: ServerManager = request.app.state.sm
     reg: Registry = request.app.state.registry
     sess = _read_session(request)
-    profiles = [{"name": name} for name in cfg.profiles]
+    # Each profile carries its bound model id so the template can show
+    # `(global)` and the JS can route the right model+profile header pair.
+    profiles = [{"name": p.name, "model": p.model} for p in cfg.profiles.values()]
     model_ids = [m.model_id for m in reg.list()]
     return templates.TemplateResponse(request, "chat.html", _ctx(
         request,
@@ -1181,7 +1227,32 @@ async def setup_set_binary(request: Request,
     return RedirectResponse("/ui/setup", status_code=303)
 
 
-def _setup_ctx(request: Request) -> dict:
+def _resolve_variant(source: str, backend: str) -> tuple[str, str]:
+    """Validate (source, backend) — fall back to sensible defaults."""
+    if source not in SOURCES:
+        source = detect_default_source()
+    plat = current_platform()
+    allowed = BACKENDS.get(backend, {}).get("sources")
+    if (backend not in BACKENDS
+            or plat not in BACKENDS[backend]["platforms"]
+            or (allowed is not None and source not in allowed)):
+        # Pick the first backend valid for this (source, platform).
+        for be_id, be_meta in BACKENDS.items():
+            if plat not in be_meta["platforms"]:
+                continue
+            be_allowed = be_meta.get("sources")
+            if be_allowed is not None and source not in be_allowed:
+                continue
+            backend = be_id
+            break
+        else:
+            backend = "cpu"
+    return source, backend
+
+
+def _setup_ctx(request: Request,
+               selected_source: str | None = None,
+               selected_backend: str | None = None) -> dict:
     import sys as _sys
     cfg = request.app.state.cfg
     states: dict[str, InstallState] = request.app.state.install_states
@@ -1193,24 +1264,92 @@ def _setup_ctx(request: Request) -> dict:
         open_config_label = "Open folder"
 
     active_binary = detect_binary(cfg.llama_server_binary)
-    forks_info: dict[str, dict] = {}
-    for fork_id, fork_meta in FORKS.items():
-        fork_binary = detect_fork_binary(fork_id)
-        forks_info[fork_id] = {
-            **fork_meta,
-            "installed": fork_binary is not None,
-            "binary_path": fork_binary,
-            "install": states[fork_id].to_dict(),
-            "active": fork_binary is not None and fork_binary == active_binary,
+    active_variant = detect_variant_for_binary(active_binary) if active_binary else None
+
+    # Build the variant catalogue for the dropdowns + installed list. The
+    # per-variant view is purely presentational; the source of truth for
+    # install state lives in app.state.install_states.
+    variants = list_variants()
+    variants_by_id: dict[str, dict] = {}
+    for v in variants:
+        bin_path = detect_variant_binary(v["source"], v["backend"])
+        installed_meta = read_install_meta(v["source"], v["backend"]) or {}
+        variants_by_id[v["id"]] = {
+            **v,
+            "installed": bin_path is not None,
+            "binary_path": bin_path,
+            "installed_version": installed_meta.get("version"),
+            "install": states[v["id"]].to_dict() if v["id"] in states else InstallState().to_dict(),
+            "active": (active_variant is not None
+                       and active_variant == (v["source"], v["backend"])),
         }
+
+    # Group by source for the UI: each source row lists its backends.
+    sources_view: list[dict] = []
+    for src_id, src_meta in SOURCES.items():
+        backends_for_src = [variants_by_id[v["id"]] for v in variants
+                            if v["source"] == src_id]
+        if not backends_for_src:
+            continue
+        sources_view.append({
+            "id": src_id,
+            **src_meta,
+            "backends": backends_for_src,
+        })
+
+    suggested_source = detect_default_source()
+    suggested_backend = detect_default_backend()
+    sel_source, sel_backend = _resolve_variant(
+        selected_source or suggested_source,
+        selected_backend or suggested_backend,
+    )
+
+    # Available backends for the currently selected source.
+    plat = current_platform()
+    backends_for_selected: list[dict] = []
+    for be_id, be_meta in BACKENDS.items():
+        if plat not in be_meta["platforms"]:
+            continue
+        allowed = be_meta.get("sources")
+        if allowed is not None and sel_source not in allowed:
+            continue
+        backends_for_selected.append({"id": be_id, **be_meta})
+
+    # The currently-running progress block (if any) — pick the most recently
+    # touched state so the UI shows the install the user just started.
+    progress_state = None
+    progress_variant = None
+    for vid, st in states.items():
+        if st.status == "running":
+            progress_state = st
+            progress_variant = vid
+            break
+    if progress_state is None:
+        vid = variant_id(sel_source, sel_backend)
+        if vid in states:
+            progress_state = states[vid]
+            progress_variant = vid
+
+    updates = getattr(request.app.state, "install_updates", {}) or {}
 
     return _ctx(
         request,
         binary_path=active_binary,
+        active_variant_id=variant_id(*active_variant) if active_variant else None,
         configured_binary=cfg.llama_server_binary,
-        instructions=install_instructions(),
-        install=request.app.state.install_state.to_dict(),
-        forks=forks_info,
+        engine=getattr(cfg, "llama_server_engine", "llama"),
+        sources=sources_view,
+        backends=BACKENDS,
+        backends_for_selected=backends_for_selected,
+        selected_source=sel_source,
+        selected_backend=sel_backend,
+        suggested_source=suggested_source,
+        suggested_backend=suggested_backend,
+        platform_tag=plat,
+        machine=platform.machine(),
+        install=progress_state.to_dict() if progress_state else InstallState().to_dict(),
+        install_variant=progress_variant,
+        updates=updates,
         config_dir=str(cfg.config_path.parent),
         config_file=str(cfg.config_path),
         open_config_label=open_config_label,
@@ -1219,56 +1358,105 @@ def _setup_ctx(request: Request) -> dict:
 
 @router.post("/setup/install", response_class=HTMLResponse)
 async def setup_install(request: Request,
-                        fork: str = Form("llama.cpp"),
+                        source: str = Form("llama.cpp"),
+                        backend: str = Form(""),
                         _: None = Depends(require_csrf)) -> Response:
+    source, backend = _resolve_variant(source, backend)
+    vid = variant_id(source, backend)
     states: dict[str, InstallState] = request.app.state.install_states
-    if fork not in states:
-        fork = "llama.cpp"
-    state = states[fork]
+    state = states.setdefault(vid, InstallState())
     if state.status != "running":
         state.status = "running"
         state.lines = []
         state.error = None
         state.installed_path = None
-        asyncio.create_task(install_llama_server(state, fork=fork))
-    # Render immediately so the HTMX polling div is present from the start
-    return templates.TemplateResponse(request, "setup.html", _setup_ctx(request))
+        asyncio.create_task(install_variant(state, source, backend))
+    return templates.TemplateResponse(
+        request, "setup.html",
+        _setup_ctx(request, selected_source=source, selected_backend=backend),
+    )
 
 
 @router.get("/setup/_install_progress", response_class=HTMLResponse)
 async def setup_install_progress(request: Request,
-                                 fork: str = "llama.cpp",
+                                 variant: str = "",
                                  _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     states: dict[str, InstallState] = request.app.state.install_states
-    if fork not in states:
-        fork = "llama.cpp"
-    state = states[fork]
+    state = states.get(variant)
+    if state is None:
+        return templates.TemplateResponse(request, "_install_progress.html", _ctx(
+            request,
+            install=InstallState().to_dict(),
+            binary_path=detect_binary(request.app.state.cfg.llama_server_binary),
+            install_variant=variant,
+        ))
+
     cfg = request.app.state.cfg
-    # Auto-update the active binary only for the standard llama.cpp fork.
-    # Alternate forks require an explicit switch so the original is preserved.
-    if fork == "llama.cpp" and state.status == "done" and state.installed_path:
-        cfg.llama_server_binary = state.installed_path
-        patch_config_binary(cfg.config_path, state.installed_path)
+    # When an install finishes, point the configured binary at it so the new
+    # variant becomes active immediately. Engine type is set in lockstep so
+    # server_manager builds the right cmdline.
+    if state.status == "done" and state.installed_path:
+        if cfg.llama_server_binary != state.installed_path:
+            cfg.llama_server_binary = state.installed_path
+            parsed = parse_variant_id(variant)
+            engine = engine_type_for(parsed[0]) if parsed else "llama"
+            cfg.llama_server_engine = engine
+            patch_config_binary(cfg.config_path, state.installed_path, engine=engine)
     binary_path = detect_binary(cfg.llama_server_binary)
     return templates.TemplateResponse(request, "_install_progress.html", _ctx(
         request,
         install=state.to_dict(),
         binary_path=binary_path,
-        fork_name=fork,
+        install_variant=variant,
     ))
 
 
-@router.post("/setup/switch-fork", response_class=HTMLResponse)
-async def setup_switch_fork(request: Request,
-                            fork: str = Form(...),
-                            _: None = Depends(require_csrf)) -> Response:
-    """Switch the active llama-server binary to a different fork."""
+@router.post("/setup/switch-variant", response_class=HTMLResponse)
+async def setup_switch_variant(request: Request,
+                               variant: str = Form(...),
+                               _: None = Depends(require_csrf)) -> Response:
+    """Switch the active engine to a previously-installed variant."""
     cfg = request.app.state.cfg
-    binary = detect_fork_binary(fork)
-    if binary:
-        cfg.llama_server_binary = binary
-        patch_config_binary(cfg.config_path, binary)
+    parsed = parse_variant_id(variant)
+    if parsed is not None:
+        source, backend = parsed
+        path = variant_install_path(source, backend)
+        if path.exists():
+            engine = engine_type_for(source)
+            cfg.llama_server_binary = str(path)
+            cfg.llama_server_engine = engine
+            patch_config_binary(cfg.config_path, str(path), engine=engine)
     return RedirectResponse("/ui/setup", status_code=303)
+
+
+@router.get("/setup/check-updates", response_class=HTMLResponse)
+async def setup_check_updates(request: Request,
+                              variant: str = "",
+                              _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """Check upstream for a newer release of a specific variant (or all
+    installed variants if ``variant`` is empty). Renders the updated
+    variants list partial.
+    """
+    parsed = parse_variant_id(variant) if variant else None
+    updates: dict[str, dict] = {}
+    loop = asyncio.get_running_loop()
+    if parsed is not None:
+        source, backend = parsed
+        info = await loop.run_in_executor(None, check_for_update, source, backend)
+        updates[variant] = info.to_dict()
+    else:
+        for v in list_variants():
+            if detect_variant_binary(v["source"], v["backend"]) is None:
+                continue
+            info = await loop.run_in_executor(
+                None, check_for_update, v["source"], v["backend"]
+            )
+            updates[v["id"]] = info.to_dict()
+    request.app.state.install_updates = updates
+    return templates.TemplateResponse(
+        request, "_installed_variants.html",
+        _setup_ctx(request) | {"updates": updates},
+    )
 
 
 @router.post("/setup/open-config", response_class=HTMLResponse)
@@ -1339,28 +1527,36 @@ def _read_log_tail(cfg, lines: int = 15) -> str:
 
 
 def _launch_ctx(request: Request) -> dict:
+    """Context for the launcher page. Profile management lives on the Models
+    page now, so this context exposes only what the launcher needs: the
+    inventory of models + their bound profiles for the start-form dropdowns.
+    """
     cfg = request.app.state.cfg
     sm: ServerManager = request.app.state.sm
     supervisor: Supervisor = request.app.state.supervisor
     reg: Registry = request.app.state.registry
     model_ids = [m.model_id for m in reg.list()]
-    profiles = []
+
+    # Group profiles by their bound model for the JS-side filtering of the
+    # profile dropdown.
+    profiles_by_model: dict[str, list[str]] = {}
+    global_profile_names: list[str] = []
     for name, p in cfg.profiles.items():
-        available = p.model in model_ids
-        profiles.append({
-            "name": name,
-            "model": p.model,
-            "mmproj": p.mmproj,
-            "args": p.args,
-            "args_json": json.dumps(p.args, indent=2, sort_keys=True),
-            "available": available,
-        })
+        if p.model:
+            profiles_by_model.setdefault(p.model, []).append(name)
+        else:
+            global_profile_names.append(name)
+    for v in profiles_by_model.values():
+        v.sort()
+    global_profile_names.sort()
+
     return _ctx(
         request,
         status=sm.status(),
-        profiles=profiles,
-        profile_names=list(cfg.profiles.keys()),
         model_ids=model_ids,
+        profiles_by_model=profiles_by_model,
+        global_profile_names=global_profile_names,
+        model_default_profiles=cfg.model_default_profiles,
         default_model=cfg.default_model,
         default_profile=cfg.default_profile,
         autorestart=supervisor.enabled,
@@ -1378,20 +1574,22 @@ async def launch_view(request: Request,
 
 @router.post("/launch/server/start", response_class=HTMLResponse)
 async def launch_server_start(request: Request,
+                              model: str = Form(""),
                               profile: str = Form(""),
                               _: None = Depends(require_csrf)) -> Response:
     sm: ServerManager = request.app.state.sm
     cfg = request.app.state.cfg
     try:
-        spec = resolve_spec(cfg, profile=profile or None)
+        spec = resolve_spec(
+            cfg,
+            model=model or None,
+            profile=profile or None,
+        )
     except (ServerError, ValueError) as e:
         return _error_html(str(e), status_code=400)
-    # Fire and forget — the page will poll for status
     asyncio.create_task(_start_server_bg(sm, spec))
-    # Wait briefly so the state transitions from stopped to starting
     await asyncio.sleep(0.3)
     ctx = _launch_ctx(request)
-    # Force-show the status partial even if state hasn't transitioned yet
     ctx["launching"] = True
     return templates.TemplateResponse(request, "launch.html", ctx)
 
@@ -1442,74 +1640,145 @@ async def launch_autolaunch(request: Request,
     return RedirectResponse("/ui/launch", status_code=303)
 
 
-@router.post("/launch/profiles/create", response_class=HTMLResponse)
-async def launch_profile_create(request: Request,
+# ---------- profile CRUD (model-scoped) ----------
+#
+# Profiles always live as a child of a model (or as a global "args-only"
+# fallback when model_id is empty). All profile-mutating endpoints redirect
+# back to /ui/models — the launcher no longer owns profile management.
+
+from .config import (
+    clear_model_default_profile as _clear_mdp,
+    set_model_default_profile as _set_mdp,
+)
+
+
+@router.post("/models/profiles/create", response_class=HTMLResponse)
+async def models_profile_create(request: Request,
                                 name: str = Form(...),
-                                model: str = Form(...),
+                                model_id: str = Form(""),
                                 mmproj: str = Form(""),
                                 args_json: str = Form("{}"),
+                                make_default: str = Form(""),
                                 _: None = Depends(require_csrf)) -> Response:
     cfg = request.app.state.cfg
     try:
         args = json.loads(args_json.strip() or "{}")
     except json.JSONDecodeError as e:
         return _error_html(f"invalid JSON in args: {e}", status_code=400)
-    if name.strip().lower() in cfg.profiles:
-        return _error_html(f"profile '{name}' already exists", status_code=409)
+    profile_name = name.strip().lower()
+    if profile_name in cfg.profiles:
+        return _error_html(f"profile '{profile_name}' already exists", status_code=409)
     try:
-        save_profile(cfg.config_path, name, model.strip(), mmproj.strip(), args)
+        save_profile(cfg.config_path, profile_name,
+                     model_id.strip(), mmproj.strip(), args)
     except ValueError as e:
         return _error_html(str(e), status_code=400)
+    if make_default == "on":
+        if model_id.strip():
+            _set_mdp(cfg.config_path, model_id.strip(), profile_name)
+        else:
+            update_defaults(cfg.config_path, default_profile=profile_name)
     _reload_config(request)
-    return RedirectResponse("/ui/launch", status_code=303)
+    return RedirectResponse("/ui/models", status_code=303)
 
 
-@router.post("/launch/profiles/{profile_name}/update", response_class=HTMLResponse)
-async def launch_profile_update(request: Request, profile_name: str,
+@router.post("/models/profiles/{profile_name}/update", response_class=HTMLResponse)
+async def models_profile_update(request: Request, profile_name: str,
                                 new_name: str = Form(""),
-                                model: str = Form(...),
+                                model_id: str = Form(""),
                                 mmproj: str = Form(""),
                                 args_json: str = Form("{}"),
                                 _: None = Depends(require_csrf)) -> Response:
     cfg = request.app.state.cfg
+    if profile_name not in cfg.profiles:
+        return _error_html(f"profile '{profile_name}' not found", status_code=404)
     try:
         args = json.loads(args_json.strip() or "{}")
     except json.JSONDecodeError as e:
         return _error_html(f"invalid JSON in args: {e}", status_code=400)
     target_name = new_name.strip().lower() or profile_name
-    # If renamed, check for conflicts and delete the old profile
     if target_name != profile_name:
         if target_name in cfg.profiles:
-            return _error_html(f"profile '{target_name}' already exists", status_code=409)
+            return _error_html(f"profile '{target_name}' already exists",
+                               status_code=409)
         delete_profile(cfg.config_path, profile_name)
     try:
-        save_profile(cfg.config_path, target_name, model.strip(), mmproj.strip(), args)
+        save_profile(cfg.config_path, target_name,
+                     model_id.strip(), mmproj.strip(), args)
     except ValueError as e:
         return _error_html(str(e), status_code=400)
     _reload_config(request)
-    return RedirectResponse("/ui/launch", status_code=303)
+    return RedirectResponse("/ui/models", status_code=303)
 
 
-@router.post("/launch/profiles/{profile_name}/delete", response_class=HTMLResponse)
-async def launch_profile_delete(request: Request, profile_name: str,
+@router.post("/models/profiles/{profile_name}/delete", response_class=HTMLResponse)
+async def models_profile_delete(request: Request, profile_name: str,
                                 _: None = Depends(require_csrf)) -> Response:
     cfg = request.app.state.cfg
     delete_profile(cfg.config_path, profile_name)
     _reload_config(request)
-    return RedirectResponse("/ui/launch", status_code=303)
+    return RedirectResponse("/ui/models", status_code=303)
 
 
-@router.post("/launch/defaults", response_class=HTMLResponse)
-async def launch_defaults(request: Request,
-                          default_model: str = Form(""),
-                          default_profile: str = Form(""),
-                          _: None = Depends(require_csrf)) -> Response:
+@router.post("/models/profiles/set-model-default", response_class=HTMLResponse)
+async def models_set_model_default(request: Request,
+                                   model_id: str = Form(...),
+                                   profile_name: str = Form(""),
+                                   _: None = Depends(require_csrf)) -> Response:
+    """Set the default profile for a specific model. Empty profile_name
+    clears the per-model default (falling back to the global default)."""
     cfg = request.app.state.cfg
-    update_defaults(
-        cfg.config_path,
-        default_model=default_model.strip() or None,
-        default_profile=default_profile.strip() or None,
-    )
+    mid = model_id.strip()
+    pname = profile_name.strip()
+    if not mid:
+        return _error_html("model_id required", status_code=400)
+    if pname:
+        prof = cfg.profiles.get(pname)
+        if not prof:
+            return _error_html(f"unknown profile: {pname}", status_code=400)
+        if prof.model and prof.model != mid:
+            return _error_html(
+                f"profile '{pname}' is bound to '{prof.model}', not '{mid}'",
+                status_code=400,
+            )
+        _set_mdp(cfg.config_path, mid, pname)
+    else:
+        _clear_mdp(cfg.config_path, mid)
     _reload_config(request)
-    return RedirectResponse("/ui/launch", status_code=303)
+    return RedirectResponse("/ui/models", status_code=303)
+
+
+@router.post("/models/profiles/set-global-default", response_class=HTMLResponse)
+async def models_set_global_default(request: Request,
+                                    profile_name: str = Form(""),
+                                    _: None = Depends(require_csrf)) -> Response:
+    """Set or clear the global default profile (the args-only fallback
+    applied when neither the request nor the model has a profile)."""
+    cfg = request.app.state.cfg
+    pname = profile_name.strip()
+    if pname:
+        prof = cfg.profiles.get(pname)
+        if not prof:
+            return _error_html(f"unknown profile: {pname}", status_code=400)
+        if prof.model:
+            return _error_html(
+                f"profile '{pname}' is bound to '{prof.model}' and cannot be "
+                "used as the global default. Create a model-less profile to "
+                "use as the global default.",
+                status_code=400,
+            )
+    update_defaults(cfg.config_path, default_profile=pname)
+    _reload_config(request)
+    return RedirectResponse("/ui/models", status_code=303)
+
+
+@router.post("/models/set-default", response_class=HTMLResponse)
+async def models_set_default(request: Request,
+                             model_id: str = Form(""),
+                             _: None = Depends(require_csrf)) -> Response:
+    """Set the configured default model. Empty model_id clears it."""
+    cfg = request.app.state.cfg
+    update_defaults(cfg.config_path, default_model=model_id.strip())
+    _reload_config(request)
+    return RedirectResponse("/ui/models", status_code=303)
 

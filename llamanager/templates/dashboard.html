@@ -229,7 +229,8 @@
         tab-size: 2;
       ">curl {{ base_url }}/v1/chat/completions \
   -H "Authorization: Bearer $KEY" \
-  -H "X-Llamanager-Model: profile:my-profile" \
+  -H "X-Llamanager-Model: org/repo-GGUF/Q4_K_M.gguf" \
+  -H "X-Llamanager-Profile: fast" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "any",

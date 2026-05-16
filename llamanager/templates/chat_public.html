@@ -400,23 +400,33 @@
   var toggleMd = document.getElementById('toggle-md');
   var speedEl = document.getElementById('chat-speed');
 
-  // Populate profile and model dropdowns from server-rendered JSON
-  var profileNames = {{ profiles_json | safe }};
+  // Populate profile and model dropdowns from server-rendered JSON.
+  // Profile entries arrive as [name, bound_model_id]; an empty bound_model
+  // means a global (args-only) profile.
+  var profilePairs = {{ profiles_json | safe }};
   var modelIds = {{ models_json | safe }};
-  profileNames.forEach(function (n) {
-    var o = document.createElement('option');
-    o.value = 'profile:' + n;
-    o.textContent = n;
-    profileEl.appendChild(o);
-  });
   modelIds.forEach(function (mid) {
     var o = document.createElement('option');
     o.value = mid;
     o.textContent = mid;
     modelSelectEl.appendChild(o);
   });
-  // Mutual exclusion: selecting a profile clears model and vice versa
-  profileEl.addEventListener('change', function () { if (profileEl.value) modelSelectEl.value = ''; });
+  function rebuildProfiles() {
+    while (profileEl.options.length > 1) profileEl.remove(1);
+    var chosenModel = modelSelectEl.value;
+    profilePairs.forEach(function (pair) {
+      var name = pair[0], bound = pair[1];
+      // Show profile if it has no binding (global) or matches the model.
+      if (bound && chosenModel && bound !== chosenModel) return;
+      var o = document.createElement('option');
+      o.value = name;
+      o.dataset.model = bound || '';
+      o.textContent = bound ? name : name + ' (global)';
+      profileEl.appendChild(o);
+    });
+  }
+  modelSelectEl.addEventListener('change', rebuildProfiles);
+  rebuildProfiles();
   modelSelectEl.addEventListener('change', function () { if (modelSelectEl.value) profileEl.value = ''; });
 
   var apiKey = '';
@@ -775,8 +785,15 @@
     var headers = { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' };
     var profile = profileEl.value;
     var model = modelSelectEl.value;
-    if (profile) headers['X-Llamanager-Model'] = profile;
-    else if (model) headers['X-Llamanager-Model'] = model;
+    if (model) headers['X-Llamanager-Model'] = model;
+    if (profile) {
+      if (!headers['X-Llamanager-Model']) {
+        var opt = profileEl.options[profileEl.selectedIndex];
+        var boundModel = opt && opt.dataset ? opt.dataset.model : '';
+        if (boundModel) headers['X-Llamanager-Model'] = boundModel;
+      }
+      if (headers['X-Llamanager-Model']) headers['X-Llamanager-Profile'] = profile;
+    }
 
     var fullContent = '';
     var reasoningContent = '';

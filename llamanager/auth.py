@@ -129,10 +129,42 @@ class AuthManager:
         # induce by replaying the same garbage token.
         self._neg_cache: dict[str, float] = {}
         self._warn_legacy_rows()
+        self._strip_legacy_profile_allowlist_entries()
 
     def _key_lookup(self, key: str) -> str:
         return hmac.new(self._lookup_secret, key.encode("utf-8"),
                         hashlib.sha256).hexdigest()
+
+    def _strip_legacy_profile_allowlist_entries(self) -> None:
+        """One-shot migration: remove ``profile:*`` entries from every
+        origin's allowed_models. The model/profile contract no longer
+        accepts profile shorthand, so these entries can never match.
+        Operators must reconfigure if they relied on per-profile allow-
+        lists; we log one warning per affected origin.
+        """
+        rows = self.db.query(
+            "SELECT id, name, allowed_models_json FROM origins"
+        )
+        for row in rows:
+            try:
+                entries = json.loads(row["allowed_models_json"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(entries, list):
+                continue
+            cleaned = [e for e in entries if not (isinstance(e, str)
+                                                  and e.startswith("profile:"))]
+            if len(cleaned) == len(entries):
+                continue
+            log.warning(
+                "auth: dropping %d 'profile:*' entries from origin %r's "
+                "allowed_models; profile shorthand is no longer supported.",
+                len(entries) - len(cleaned), row["name"],
+            )
+            self.db.execute(
+                "UPDATE origins SET allowed_models_json=? WHERE id=?",
+                (json.dumps(cleaned), row["id"]),
+            )
 
     def _warn_legacy_rows(self) -> None:
         row = self.db.query_one(
