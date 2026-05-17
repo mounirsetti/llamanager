@@ -1,0 +1,774 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Images - llamanager</title>
+  <link rel="icon" id="lm-favicon" href="/favicon-dark.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" id="lm-theme-color" content="#201e17">
+
+  <script>
+    (function () {
+      try {
+        var stored = localStorage.getItem('lm-theme');
+        var theme = stored || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        document.documentElement.setAttribute('data-theme', theme);
+        var fav = document.getElementById('lm-favicon');
+        var tc = document.getElementById('lm-theme-color');
+        if (fav) fav.href = theme === 'light' ? '/favicon.svg' : '/favicon-dark.svg';
+        if (tc) tc.content = theme === 'light' ? '#f8f6f3' : '#201e17';
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    })();
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..700,0..100&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+
+  <style>
+    :root, [data-theme="dark"] {
+      --bg-0: oklch(0.14 0.008 80); --bg-1: oklch(0.18 0.008 80);
+      --bg-2: oklch(0.22 0.010 80); --bg-3: oklch(0.28 0.012 80);
+      --fg-0: oklch(0.96 0.005 80); --fg-1: oklch(0.82 0.005 80);
+      --fg-2: oklch(0.62 0.008 80); --fg-3: oklch(0.46 0.010 80);
+      --accent: oklch(0.66 0.19 32); --accent-soft: oklch(0.66 0.19 32 / 0.14);
+      --on-accent: oklch(0.14 0.008 80); --ok: oklch(0.70 0.13 155); --bad: oklch(0.62 0.18 28);
+    }
+    [data-theme="light"] {
+      --bg-0: oklch(0.97 0.006 80); --bg-1: oklch(0.94 0.008 80);
+      --bg-2: oklch(0.91 0.010 80); --bg-3: oklch(0.84 0.012 80);
+      --fg-0: oklch(0.20 0.010 80); --fg-1: oklch(0.36 0.010 80);
+      --fg-2: oklch(0.50 0.010 80); --fg-3: oklch(0.64 0.010 80);
+      --accent: oklch(0.56 0.20 32); --accent-soft: oklch(0.56 0.20 32 / 0.10);
+      --on-accent: oklch(0.97 0.006 80); --ok: oklch(0.50 0.14 155); --bad: oklch(0.52 0.20 28);
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg-0); color: var(--fg-0);
+      font-family: 'Inter', system-ui, sans-serif; font-size: 0.9375rem;
+      line-height: 1.5; -webkit-font-smoothing: antialiased;
+    }
+    code, pre { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    ::selection { background: var(--accent-soft); color: var(--fg-0); }
+
+    /* Layout */
+    .app-shell { display: flex; height: 100vh; }
+
+    /* History sidebar */
+    .history-rail {
+      width: 240px; flex-shrink: 0; background: var(--bg-1);
+      border-right: 1px solid var(--bg-2);
+      display: flex; flex-direction: column; height: 100vh;
+    }
+    .history-header {
+      padding: 16px 16px 12px; border-bottom: 1px solid var(--bg-2);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .history-header-brand {
+      font-family: 'Fraunces', Georgia, serif; font-size: 1.125rem;
+      font-weight: 400; font-variation-settings: 'opsz' 96, 'SOFT' 30;
+    }
+    .history-new {
+      margin-left: auto; background: transparent; border: 1px solid var(--bg-3);
+      border-radius: 2px; padding: 4px 10px; font-size: 0.6875rem;
+      letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-2);
+      cursor: pointer;
+    }
+    .history-new:hover { color: var(--fg-0); border-color: var(--fg-2); }
+    .history-list { flex: 1; overflow-y: auto; padding: 8px 0; }
+    .history-item {
+      display: block; width: 100%; text-align: left; background: transparent;
+      border: 0; padding: 8px 16px; font-size: 0.8125rem; color: var(--fg-2);
+      cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      transition: color 120ms ease;
+    }
+    .history-item:hover { color: var(--fg-0); background: var(--bg-2); }
+    .history-item--active { color: var(--fg-0); background: var(--bg-2); font-weight: 500; }
+    .history-item-row { display: flex; align-items: center; gap: 4px; }
+    .history-item-label { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+    .history-delete {
+      flex-shrink: 0; background: transparent; border: 0; color: var(--fg-3);
+      font-size: 0.75rem; cursor: pointer; padding: 0 4px; display: none;
+    }
+    .history-item:hover .history-delete { display: inline; }
+    .history-delete:hover { color: var(--bad); }
+    .history-foot {
+      padding: 10px 16px; border-top: 1px solid var(--bg-2);
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .theme-btns {
+      display: flex; gap: 0; border: 1px solid var(--bg-3); border-radius: 2px;
+      padding: 2px; width: fit-content;
+    }
+    .theme-btns button {
+      background: transparent; border: 0; padding: 3px 8px; font-size: 0.625rem;
+      letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-2); cursor: pointer;
+    }
+    .theme-btns button[aria-pressed="true"] { background: var(--bg-2); color: var(--fg-0); }
+
+    /* Main area */
+    .img-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .img-topbar {
+      padding: 10px 22px; border-bottom: 1px solid var(--bg-2);
+      display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+      font-size: 0.75rem; color: var(--fg-2);
+    }
+    .img-status { font-size: 0.6875rem; letter-spacing: 0.1em; text-transform: uppercase; }
+    .img-status--ok { color: var(--ok); }
+    .img-status--bad { color: var(--bad); }
+    .img-status--busy { color: var(--accent); }
+    .img-controls {
+      padding: 10px 22px; border-bottom: 1px solid var(--bg-2);
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+      font-size: 0.8125rem; color: var(--fg-2);
+    }
+    .img-controls label {
+      font-size: 0.6875rem; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--fg-2);
+    }
+    .img-controls select, .img-controls input {
+      background: transparent; border: 0; border-bottom: 1px solid var(--bg-3);
+      color: var(--fg-0); padding: 4px 6px; font: inherit; font-size: 0.8125rem;
+      font-family: inherit;
+    }
+    .img-controls select:focus, .img-controls input:focus {
+      outline: 0; border-bottom-color: var(--accent);
+    }
+
+    /* Gallery */
+    .img-gallery {
+      flex: 1; overflow-y: auto; padding: 22px 24px;
+      display: grid; grid-template-columns: 1fr; gap: 20px;
+      align-content: start;
+    }
+    @media (min-width: 800px) {
+      .img-gallery { grid-template-columns: 2fr 1fr 1fr; }
+      .img-gallery .img-tile:first-child {
+        grid-column: 1 / 2; grid-row: span 2;
+      }
+    }
+    .img-empty {
+      grid-column: 1 / -1; color: var(--fg-3); font-size: 0.875rem;
+      text-align: center; padding: 80px 0;
+    }
+    .img-tile {
+      border: 1px solid var(--bg-3); background: var(--bg-1);
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    .img-tile img {
+      width: 100%; height: auto; display: block; background: var(--bg-2);
+    }
+    .img-tile-meta {
+      padding: 10px 12px; font-size: 0.75rem; color: var(--fg-2);
+      border-top: 1px solid var(--bg-2);
+      display: flex; gap: 10px; flex-wrap: wrap;
+    }
+    .img-tile-meta small { color: var(--fg-3); }
+    .img-tile-meta code { color: var(--fg-1); }
+
+    /* Composer */
+    .img-composer {
+      padding: 14px 22px 18px; border-top: 1px solid var(--bg-2);
+      background: var(--bg-0);
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .img-composer textarea {
+      width: 100%; min-height: 64px; resize: vertical;
+      background: var(--bg-1); border: 1px solid var(--bg-3);
+      color: var(--fg-0); padding: 10px 12px; font-size: 0.9375rem;
+      font-family: inherit; line-height: 1.5;
+    }
+    .img-composer textarea:focus { outline: 0; border-color: var(--accent); }
+    .img-composer-row {
+      display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+      font-size: 0.75rem; color: var(--fg-2);
+    }
+    .img-message {
+      flex: 1; color: var(--fg-2); font-size: 0.75rem;
+    }
+    .img-message--err { color: var(--bad); }
+    .img-btn {
+      display: inline-flex; align-items: center; padding: 9px 18px;
+      font-size: 0.8125rem; font-weight: 500; color: var(--on-accent);
+      background: var(--accent); border: 1px solid var(--accent);
+      border-radius: 2px; cursor: pointer; flex-shrink: 0;
+    }
+    .img-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .img-btn--ghost { background: transparent; color: var(--fg-1); border-color: var(--bg-3); }
+
+    /* Login */
+    .img-login {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; height: 100vh; gap: 24px;
+    }
+    .img-login-box {
+      width: 100%; max-width: 360px; display: flex; flex-direction: column; gap: 16px;
+    }
+    .img-login-box input {
+      background: transparent; border: 0; border-bottom: 1px solid var(--bg-3);
+      padding: 10px 2px; font: inherit; font-size: 0.9375rem; color: var(--fg-0); width: 100%;
+    }
+    .img-login-box input:focus { outline: 0; border-bottom-color: var(--accent); }
+    .img-login-box input::placeholder { color: var(--fg-3); }
+    .img-login-error { font-size: 0.8125rem; color: var(--bad); display: none; }
+
+    .login-logo--light { display: none; }
+    .login-logo--dark { display: inline; }
+    [data-theme="light"] .login-logo--light { display: inline; }
+    [data-theme="light"] .login-logo--dark { display: none; }
+    .login-theme { margin-top: 8px; }
+
+    @media (max-width: 700px) {
+      .app-shell { flex-direction: column; height: 100vh; }
+      .history-rail {
+        width: 100%; height: auto; max-height: 140px;
+        border-right: 0; border-bottom: 1px solid var(--bg-2);
+      }
+      .history-header { padding: 10px 14px; }
+      .history-list {
+        display: flex; flex-direction: row;
+        overflow-x: auto; overflow-y: hidden;
+        padding: 6px 10px; gap: 6px;
+      }
+      .history-item {
+        flex: 0 0 auto; max-width: 160px;
+        border: 1px solid var(--bg-3); border-radius: 2px;
+        padding: 5px 10px;
+      }
+      .history-delete { display: inline; }
+      .history-foot {
+        flex-direction: row; flex-wrap: wrap; align-items: center; gap: 10px;
+        padding: 8px 14px;
+      }
+      .img-topbar, .img-controls, .img-gallery, .img-composer { padding-left: 16px; padding-right: 16px; }
+      .img-gallery { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Login screen -->
+  <div id="login-screen" class="img-login">
+    <div style="text-align: center;">
+      <img src="/logo-dark.svg" alt="llamanager" class="login-logo login-logo--dark" style="height: 36px; margin-bottom: 6px;">
+      <img src="/logo.svg" alt="llamanager" class="login-logo login-logo--light" style="height: 36px; margin-bottom: 6px;">
+      <div style="font-size: 0.6875rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-2);">images</div>
+    </div>
+    <div class="img-login-box">
+      <input id="login-key" type="password" placeholder="Paste your API key" autofocus>
+      <button id="login-btn" class="img-btn" style="width: 100%; justify-content: center;">Connect</button>
+      <div id="login-error" class="img-login-error"></div>
+    </div>
+    <div class="theme-btns login-theme" role="group">
+      <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
+      <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
+    </div>
+  </div>
+
+  <!-- App screen -->
+  <div id="app-screen" class="app-shell" style="display: none;">
+    <aside class="history-rail">
+      <div class="history-header">
+        <span class="history-header-brand">Generations</span>
+        <button id="history-new" class="history-new" title="Clear active selection">New</button>
+      </div>
+      <div id="history-list" class="history-list"></div>
+      <div class="history-foot">
+        <div class="theme-btns" role="group">
+          <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
+          <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
+        </div>
+        <button id="logout-btn" class="img-btn img-btn--ghost" style="width: 100%; justify-content: center; padding: 5px 10px; font-size: 0.6875rem;">Sign out</button>
+      </div>
+    </aside>
+
+    <main class="img-main">
+      <div class="img-topbar">
+        <span id="img-status" class="img-status">connecting</span>
+        <span id="img-engine" style="font-size: 0.6875rem; color: var(--fg-3);"></span>
+      </div>
+
+      <div class="img-controls">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <label>Model</label>
+          <select id="model-select" style="min-width: 160px;">
+            <option value="">(no image models)</option>
+          </select>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <label>Profile</label>
+          <select id="profile-select" style="min-width: 140px;">
+            <option value="">model default</option>
+          </select>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <label>Size</label>
+          <select id="size-select" style="min-width: 120px;">
+            <option value="">profile default</option>
+          </select>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <label>n</label>
+          <input id="n-input" type="number" value="1" min="1" max="4" style="width: 56px;">
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <label>Seed</label>
+          <input id="seed-input" type="number" placeholder="random" style="width: 110px;">
+        </div>
+      </div>
+
+      <div id="gallery" class="img-gallery">
+        <div class="img-empty">Type a prompt and hit Generate.</div>
+      </div>
+
+      <div class="img-composer">
+        <textarea id="prompt-input" rows="2"
+                  placeholder="A still life of three pears on a blue table, soft window light, oil paint texture."></textarea>
+        <div class="img-composer-row">
+          <span id="message" class="img-message"></span>
+          <button id="cancel-btn" class="img-btn img-btn--ghost" style="display: none;">Cancel</button>
+          <button id="generate-btn" class="img-btn">Generate</button>
+        </div>
+      </div>
+    </main>
+  </div>
+
+<script>
+(function () {
+  // ---- DOM refs ----
+  var loginScreen = document.getElementById('login-screen');
+  var appScreen = document.getElementById('app-screen');
+  var loginKey = document.getElementById('login-key');
+  var loginBtn = document.getElementById('login-btn');
+  var loginError = document.getElementById('login-error');
+  var statusEl = document.getElementById('img-status');
+  var engineEl = document.getElementById('img-engine');
+  var logoutBtn = document.getElementById('logout-btn');
+  var modelSel = document.getElementById('model-select');
+  var profileSel = document.getElementById('profile-select');
+  var sizeSel = document.getElementById('size-select');
+  var nInput = document.getElementById('n-input');
+  var seedInput = document.getElementById('seed-input');
+  var promptInput = document.getElementById('prompt-input');
+  var generateBtn = document.getElementById('generate-btn');
+  var cancelBtn = document.getElementById('cancel-btn');
+  var messageEl = document.getElementById('message');
+  var galleryEl = document.getElementById('gallery');
+  var historyListEl = document.getElementById('history-list');
+  var historyNewBtn = document.getElementById('history-new');
+
+  // ---- Server-rendered data ----
+  // Image-family models only (no text models surface here).
+  // Each entry: { model_id, engine }.
+  var IMAGE_MODELS = {{ image_models_json | safe }};
+  // Profile entries: [name, bound_model_id, sizes_csv].
+  // sizes_csv is a pipe-separated list of "WxH" buckets from the adapter
+  // schema; empty for free-form sizes.
+  var PROFILES = {{ profiles_json | safe }};
+  // Fallback sizes per engine when the profile doesn't constrain them.
+  var ENGINE_DEFAULT_SIZES = {{ engine_sizes_json | safe }};
+
+  var apiKey = '';
+  var STORAGE_KEY = '';
+  var ACTIVE_KEY = '';
+  var history = [];
+  var activeId = null;
+  var inflight = null;
+  var statusPoll = null;
+
+  // ---- Theme toggle ----
+  var root = document.documentElement;
+  var themeBtns = document.querySelectorAll('[data-theme-set]');
+  function syncTheme() {
+    var current = root.getAttribute('data-theme');
+    themeBtns.forEach(function (b) {
+      b.setAttribute('aria-pressed', b.getAttribute('data-theme-set') === current ? 'true' : 'false');
+    });
+    var fav = document.getElementById('lm-favicon');
+    var tc = document.getElementById('lm-theme-color');
+    if (fav) fav.href = current === 'light' ? '/favicon.svg' : '/favicon-dark.svg';
+    if (tc) tc.content = current === 'light' ? '#f8f6f3' : '#201e17';
+  }
+  themeBtns.forEach(function (b) {
+    b.addEventListener('click', function () {
+      var next = b.getAttribute('data-theme-set');
+      root.setAttribute('data-theme', next);
+      try { localStorage.setItem('lm-theme', next); } catch (e) {}
+      syncTheme();
+    });
+  });
+  syncTheme();
+
+  // ---- Selector population ----
+  function populateModels() {
+    modelSel.innerHTML = '';
+    if (!IMAGE_MODELS.length) {
+      var o = document.createElement('option');
+      o.value = '';
+      o.textContent = '(no image models)';
+      modelSel.appendChild(o);
+      modelSel.disabled = true;
+      return;
+    }
+    modelSel.disabled = false;
+    IMAGE_MODELS.forEach(function (m) {
+      var o = document.createElement('option');
+      o.value = m.model_id;
+      o.textContent = m.model_id + ' · ' + m.engine;
+      o.dataset.engine = m.engine;
+      modelSel.appendChild(o);
+    });
+  }
+  function currentEngine() {
+    var opt = modelSel.options[modelSel.selectedIndex];
+    return opt ? opt.dataset.engine : '';
+  }
+  function rebuildProfiles() {
+    profileSel.innerHTML = '';
+    var defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = 'model default';
+    profileSel.appendChild(defaultOpt);
+    var modelId = modelSel.value;
+    PROFILES.forEach(function (p) {
+      if (p[1] !== modelId) return;
+      var o = document.createElement('option');
+      o.value = p[0];
+      o.textContent = p[0];
+      o.dataset.sizes = p[2] || '';
+      profileSel.appendChild(o);
+    });
+  }
+  function rebuildSizes() {
+    sizeSel.innerHTML = '';
+    var defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = 'profile default';
+    sizeSel.appendChild(defaultOpt);
+    // Sizes come from the active profile if it lists them; otherwise from
+    // the engine's default size bucket list. Free-form input is not
+    // exposed here — the page sticks to known buckets to avoid silent snaps.
+    var sizes = [];
+    var profileOpt = profileSel.options[profileSel.selectedIndex];
+    if (profileOpt && profileOpt.dataset.sizes) {
+      sizes = profileOpt.dataset.sizes.split('|').filter(Boolean);
+    }
+    if (!sizes.length) {
+      var engine = currentEngine();
+      sizes = ENGINE_DEFAULT_SIZES[engine] || [];
+    }
+    sizes.forEach(function (s) {
+      var o = document.createElement('option');
+      o.value = s;
+      o.textContent = s;
+      sizeSel.appendChild(o);
+    });
+  }
+  modelSel.addEventListener('change', function () {
+    rebuildProfiles();
+    rebuildSizes();
+    engineEl.textContent = currentEngine() ? 'engine: ' + currentEngine() : '';
+  });
+  profileSel.addEventListener('change', rebuildSizes);
+  populateModels();
+  rebuildProfiles();
+  rebuildSizes();
+  engineEl.textContent = currentEngine() ? 'engine: ' + currentEngine() : '';
+
+  // ---- History (localStorage, per-API-key) ----
+  function loadHistory() {
+    try { history = JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch (e) { history = []; }
+  }
+  function saveHistory() {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(history)); } catch (e) {}
+  }
+  function saveActive() {
+    try { if (activeId && ACTIVE_KEY) localStorage.setItem(ACTIVE_KEY, activeId); } catch (e) {}
+  }
+  function genId() { return 'r-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+
+  function renderHistoryList() {
+    historyListEl.innerHTML = '';
+    if (!history.length) {
+      var empty = document.createElement('div');
+      empty.style.cssText = 'padding: 10px 16px; font-size: 0.75rem; color: var(--fg-3);';
+      empty.textContent = 'No generations yet.';
+      historyListEl.appendChild(empty);
+      return;
+    }
+    history.forEach(function (h) {
+      var btn = document.createElement('button');
+      btn.className = 'history-item' + (h.id === activeId ? ' history-item--active' : '');
+      var row = document.createElement('div');
+      row.className = 'history-item-row';
+      var label = document.createElement('span');
+      label.className = 'history-item-label';
+      label.textContent = h.prompt.slice(0, 60) || '(no prompt)';
+      var del = document.createElement('span');
+      del.className = 'history-delete';
+      del.textContent = '×';
+      del.setAttribute('data-id', h.id);
+      row.appendChild(label);
+      row.appendChild(del);
+      btn.appendChild(row);
+      btn.setAttribute('data-id', h.id);
+      historyListEl.appendChild(btn);
+    });
+  }
+  historyListEl.addEventListener('click', function (e) {
+    var del = e.target.closest('.history-delete');
+    if (del) {
+      e.stopPropagation();
+      var id = del.getAttribute('data-id');
+      history = history.filter(function (h) { return h.id !== id; });
+      saveHistory();
+      if (activeId === id) { activeId = null; renderGallery(null); }
+      renderHistoryList();
+      return;
+    }
+    var item = e.target.closest('.history-item');
+    if (item) {
+      activeId = item.getAttribute('data-id');
+      saveActive();
+      renderHistoryList();
+      var entry = history.find(function (h) { return h.id === activeId; });
+      renderGallery(entry || null);
+    }
+  });
+  historyNewBtn.addEventListener('click', function () {
+    activeId = null;
+    saveActive();
+    renderHistoryList();
+    renderGallery(null);
+    promptInput.focus();
+  });
+
+  // ---- Gallery rendering ----
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function chip(key, value) {
+    var span = document.createElement('span');
+    span.innerHTML = '<small>' + escapeHtml(key) + '</small> <code>' + escapeHtml(value) + '</code>';
+    return span;
+  }
+  function renderGallery(entry) {
+    galleryEl.innerHTML = '';
+    if (!entry || !entry.images || !entry.images.length) {
+      var empty = document.createElement('div');
+      empty.className = 'img-empty';
+      empty.textContent = 'Type a prompt and hit Generate.';
+      galleryEl.appendChild(empty);
+      return;
+    }
+    entry.images.forEach(function (src) {
+      var tile = document.createElement('div');
+      tile.className = 'img-tile';
+      var img = document.createElement('img');
+      img.src = src;
+      img.alt = entry.prompt;
+      img.loading = 'lazy';
+      tile.appendChild(img);
+      var meta = document.createElement('div');
+      meta.className = 'img-tile-meta';
+      if (entry.engine) meta.appendChild(chip('engine', entry.engine));
+      if (entry.model) meta.appendChild(chip('model', entry.model));
+      if (entry.profile) meta.appendChild(chip('profile', entry.profile));
+      if (entry.seed != null) meta.appendChild(chip('seed', String(entry.seed)));
+      if (entry.duration_s) meta.appendChild(chip('time', entry.duration_s.toFixed(1) + 's'));
+      tile.appendChild(meta);
+      galleryEl.appendChild(tile);
+    });
+  }
+
+  // ---- Auth ----
+  function tryConnect(key) {
+    loginBtn.disabled = true;
+    loginBtn.textContent = 'Connecting...';
+    loginError.style.display = 'none';
+    fetch('/v1/models', { headers: { 'Authorization': 'Bearer ' + key } })
+      .then(function (r) {
+        if (r.status === 401) throw new Error('Invalid API key.');
+        if (!r.ok) throw new Error('Server error (' + r.status + ').');
+        return r.json();
+      })
+      .then(function () {
+        apiKey = key;
+        STORAGE_KEY = 'lm-img-' + key.slice(-8);
+        ACTIVE_KEY = STORAGE_KEY + '-active';
+        try { localStorage.setItem('lm-img-key', key); } catch (e) {}
+        loginScreen.style.display = 'none';
+        appScreen.style.display = 'flex';
+        loadHistory();
+        var savedActive = null;
+        try { savedActive = localStorage.getItem(ACTIVE_KEY); } catch (e) {}
+        if (savedActive && history.some(function (h) { return h.id === savedActive; })) {
+          activeId = savedActive;
+        }
+        renderHistoryList();
+        var current = history.find(function (h) { return h.id === activeId; });
+        renderGallery(current || null);
+        pollStatus();
+        statusPoll = setInterval(pollStatus, 5000);
+        promptInput.focus();
+      })
+      .catch(function (err) {
+        loginError.textContent = err.message;
+        loginError.style.display = 'block';
+        loginBtn.disabled = false;
+        loginBtn.textContent = 'Connect';
+      });
+  }
+  loginBtn.addEventListener('click', function () {
+    var k = loginKey.value.trim();
+    if (k) tryConnect(k);
+  });
+  loginKey.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { var k = loginKey.value.trim(); if (k) tryConnect(k); }
+  });
+  try { var saved = localStorage.getItem('lm-img-key'); if (saved) tryConnect(saved); } catch (e) {}
+
+  logoutBtn.addEventListener('click', function () {
+    if (inflight) { inflight.abort(); inflight = null; }
+    if (statusPoll) { clearInterval(statusPoll); statusPoll = null; }
+    apiKey = '';
+    STORAGE_KEY = '';
+    ACTIVE_KEY = '';
+    try { localStorage.removeItem('lm-img-key'); } catch (e) {}
+    appScreen.style.display = 'none';
+    loginScreen.style.display = 'flex';
+    loginKey.value = '';
+    loginError.style.display = 'none';
+    loginBtn.disabled = false;
+    loginBtn.textContent = 'Connect';
+  });
+
+  // ---- Status polling ----
+  // Image engines are one-shot — the daemon's `state` is the text engine's
+  // state. We surface "running" / "stopped" + the active image task if any.
+  function pollStatus() {
+    fetch('/health').then(function (r) { return r.json(); }).then(function (d) {
+      var state = d.state || 'stopped';
+      if (state === 'running') {
+        statusEl.textContent = 'ready';
+        statusEl.className = 'img-status img-status--ok';
+      } else if (state === 'stopped') {
+        statusEl.textContent = 'ready';
+        statusEl.className = 'img-status img-status--ok';
+      } else {
+        statusEl.textContent = state;
+        statusEl.className = 'img-status img-status--busy';
+      }
+    }).catch(function () {
+      statusEl.textContent = 'offline';
+      statusEl.className = 'img-status img-status--bad';
+    });
+  }
+
+  // ---- Generate ----
+  function setBusy(busy) {
+    generateBtn.disabled = busy;
+    cancelBtn.style.display = busy ? 'inline-flex' : 'none';
+    if (busy) { statusEl.textContent = 'generating'; statusEl.className = 'img-status img-status--busy'; }
+  }
+  function setMessage(text, isErr) {
+    messageEl.textContent = text || '';
+    messageEl.className = 'img-message' + (isErr ? ' img-message--err' : '');
+  }
+  function generate() {
+    var prompt = promptInput.value.trim();
+    if (!prompt) { setMessage('Type a prompt first.', true); return; }
+    var model = modelSel.value;
+    if (!model) { setMessage('No image model available.', true); return; }
+    var body = {
+      prompt: prompt,
+      model: model,
+      n: parseInt(nInput.value, 10) || 1,
+      response_format: 'b64_json',
+    };
+    if (profileSel.value) body.profile = profileSel.value;
+    if (sizeSel.value) body.size = sizeSel.value;
+    var seedRaw = seedInput.value.trim();
+    if (seedRaw) {
+      var seed = parseInt(seedRaw, 10);
+      if (!isNaN(seed)) body.seed = seed;
+    }
+
+    setBusy(true);
+    setMessage('Queued...');
+    var ctrl = new AbortController();
+    inflight = ctrl;
+    var t0 = Date.now();
+
+    fetch('/v1/images/generations', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + apiKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    }).then(function (r) {
+      if (!r.ok) {
+        return r.text().then(function (text) {
+          throw new Error('HTTP ' + r.status + ': ' + text.slice(0, 200));
+        });
+      }
+      return r.json();
+    }).then(function (data) {
+      if (!data.data || !data.data.length) throw new Error('No images returned.');
+      var images = data.data.map(function (d) {
+        return d.b64_json ? 'data:image/png;base64,' + d.b64_json : d.url;
+      });
+      var entry = {
+        id: genId(),
+        prompt: prompt,
+        model: model,
+        profile: body.profile || null,
+        engine: (data.llamanager || {}).engine || null,
+        seed: (data.llamanager || {}).seed,
+        duration_s: (data.llamanager || {}).duration_s || (Date.now() - t0) / 1000,
+        images: images,
+        ts: Date.now(),
+      };
+      history = [entry].concat(history).slice(0, 50);
+      activeId = entry.id;
+      saveHistory();
+      saveActive();
+      renderHistoryList();
+      renderGallery(entry);
+      setMessage('Done in ' + entry.duration_s.toFixed(1) + 's.');
+    }).catch(function (err) {
+      if (err.name === 'AbortError') {
+        setMessage('Cancelled.');
+      } else {
+        setMessage(err.message, true);
+      }
+    }).finally(function () {
+      inflight = null;
+      setBusy(false);
+      pollStatus();
+    });
+  }
+  generateBtn.addEventListener('click', generate);
+  cancelBtn.addEventListener('click', function () {
+    if (inflight) inflight.abort();
+  });
+  // Ctrl+Enter to submit
+  promptInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      generate();
+    }
+  });
+})();
+</script>
+</body>
+</html>

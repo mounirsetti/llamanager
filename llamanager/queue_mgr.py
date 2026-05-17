@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .auth import Origin
-from .config import Config
+from .config import Config, ENGINE_FAMILY, detect_engine_for_id
 from .db import DB
 from .server_manager import ServerManager, StartSpec, resolve_spec
 
@@ -47,6 +47,10 @@ class QueuedRequest:
     enqueued_at: float
     seq: int
     profile_required: str | None = None  # optional per-request profile selection
+    # "text" or "image" — set at enqueue time based on the model's engine
+    # family. Text requests proxy through llama-server; image requests
+    # are dispatched to ImageTaskRunner.
+    task_type: str = "text"
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     # signalled by dispatcher when it's this request's turn:
     ready: asyncio.Event = field(default_factory=asyncio.Event)
@@ -94,16 +98,20 @@ class QueueManager:
     # ---- enqueue / cancel ----
     async def enqueue(self, *, origin: Origin, model_required: str | None,
                       profile_required: str | None = None,
+                      task_type: str | None = None,
                       ) -> QueuedRequest:
         active_pending = len(self._heap) - self._cancelled_in_heap
         if active_pending + len(self._in_flight) >= self.cfg.max_queue_depth:
             raise QueueFull("queue is full")
+        if task_type is None:
+            task_type = _infer_task_type(self.cfg, model_required)
         req = QueuedRequest(
             request_id=str(uuid.uuid4()),
             origin=origin,
             priority=origin.priority,
             model_required=model_required,
             profile_required=profile_required,
+            task_type=task_type,
             enqueued_at=time.time(),
             seq=next(self._seq),
         )
@@ -289,10 +297,25 @@ class QueueManager:
         ``req.model_required`` is a bare model id or None. The legacy
         ``profile:foo`` shorthand is no longer accepted; per-request profile
         selection arrives via the X-Llamanager-Profile header path instead.
+
+        For image-family tasks (``req.task_type == "image"``), no swap is
+        done here — the image runner owns the cross-family coordination
+        via ServerManager.yield_to_image() at dispatch time. We just mark
+        the slot in-flight and let the handler invoke the runner.
         """
         wanted = req.model_required
         wanted_profile = getattr(req, "profile_required", None)
         loaded = self.sm.runtime.current_model
+
+        # Image-family tasks bypass the text server swap entirely.
+        if req.task_type == "image":
+            self._in_flight[req.request_id] = req
+            req.status = "running"
+            req.started_at = time.time()
+            self.db.update_request_status(req.request_id, "running",
+                                          started_at=req.started_at)
+            req.ready.set()
+            return
 
         need_swap = False
         target_spec: StartSpec | None = None
@@ -350,8 +373,24 @@ def _request_public(req: QueuedRequest | None) -> dict[str, Any] | None:
         "origin": req.origin.name,
         "priority": req.priority,
         "model_required": req.model_required,
+        "task_type": req.task_type,
         "status": req.status,
         "enqueued_at": req.enqueued_at,
         "started_at": req.started_at,
         "finished_at": req.finished_at,
     }
+
+
+def _infer_task_type(cfg: Config, model_id: str | None) -> str:
+    """Map a request's model id to a task family. Falls back to ``text``
+    when the model is unknown (preserves legacy behaviour for callers
+    that don't specify a model)."""
+    if not model_id:
+        # Inherit from the configured default model, if any. Otherwise
+        # we'd treat "no model header" as text, which matches the
+        # historical assumption.
+        model_id = cfg.default_model or None
+    if not model_id:
+        return "text"
+    engine = detect_engine_for_id(model_id, cfg.models_dir)
+    return "image" if ENGINE_FAMILY.get(engine, "text") == "image" else "text"

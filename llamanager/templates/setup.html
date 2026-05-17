@@ -545,6 +545,123 @@
   {% include "_installed_variants.html" %}
 </section>
 
+{# ---------- Image engines ---------- #}
+<section class="lm-section lm-reveal lm-reveal-4">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Image engines</span>
+    <span class="lm-section-meta">point at an existing install</span>
+  </header>
+
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 18px;">
+    Both image stacks have hardware-pinned dependency chains (ROCm wheels
+    for HiDream, Vulkan binaries for FLUX 2 via sd.cpp) and are
+    <strong>not</strong> auto-installed. Set up the venv / binary yourself
+    per the docs, then point llamanager at it below.
+  </p>
+
+  {# ---- HiDream-O1-Image ---- #}
+  <div style="border: 1px solid var(--bg-3); background: var(--bg-1); padding: 18px 20px; margin-bottom: 16px;">
+    <div style="display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 12px;">
+      <h3 style="font-family: 'Fraunces', serif; font-size: 1.25rem; margin: 0; letter-spacing: -0.01em;">
+        HiDream-O1-Image
+      </h3>
+      <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2);">
+        Linux · ROCm 7.2+ · gfx1201 verified
+      </span>
+    </div>
+    <form class="lm-form" method="post" action="/ui/setup/image/hidream">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="lm-field">
+        <label class="lm-field-label" for="hidream-python">Venv Python</label>
+        <input id="hidream-python" class="lm-input lm-input--mono" type="text"
+               name="hidream_python" value="{{ image_cfg.hidream_python }}"
+               placeholder="/path/to/.venv-hidream/bin/python">
+      </div>
+      <div class="lm-field">
+        <label class="lm-field-label" for="hidream-repo">HiDream-O1-Image checkout</label>
+        <input id="hidream-repo" class="lm-input lm-input--mono" type="text"
+               name="hidream_repo" value="{{ image_cfg.hidream_repo }}"
+               placeholder="/path/to/HiDream-O1-Image">
+      </div>
+      <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Save HiDream paths</button>
+    </form>
+  </div>
+
+  {# ---- FLUX 2 / sd.cpp ---- #}
+  <div style="border: 1px solid var(--bg-3); background: var(--bg-1); padding: 18px 20px; margin-bottom: 16px;">
+    <div style="display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 12px;">
+      <h3 style="font-family: 'Fraunces', serif; font-size: 1.25rem; margin: 0; letter-spacing: -0.01em;">
+        FLUX 2 Dev <em style="font-style: italic; color: var(--fg-2); font-weight: normal;">via sd.cpp</em>
+      </h3>
+      <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2);">
+        Linux + Windows · Vulkan
+      </span>
+    </div>
+    <form class="lm-form" method="post" action="/ui/setup/image/flux2">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="lm-field">
+        <label class="lm-field-label" for="flux2-sd-cli">sd-cli binary</label>
+        <input id="flux2-sd-cli" class="lm-input lm-input--mono" type="text"
+               name="flux2_sd_cli" value="{{ image_cfg.flux2_sd_cli }}"
+               placeholder="/path/to/sd-cli or C:\\path\\to\\sd-cli.exe">
+      </div>
+      <div class="lm-field">
+        <label class="lm-field-label" for="flux2-device">Vulkan device index</label>
+        <input id="flux2-device" class="lm-input lm-input--mono" type="number"
+               name="flux2_device_index" value="{{ image_cfg.flux2_device_index if image_cfg.flux2_device_index is not none else '' }}"
+               placeholder="1" min="0" max="8" style="max-width: 120px;">
+        <p style="font-size: 0.75rem; color: var(--fg-2); margin-top: 6px;">
+          Sets <code>GGML_VK_VISIBLE_DEVICES</code>. Run <code>sd-cli --verbose</code> once to see the index for your AMD card.
+        </p>
+      </div>
+      <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Save FLUX 2 paths</button>
+    </form>
+  </div>
+
+  {# ---- Coexistence policy ---- #}
+  <div style="border: 1px solid var(--bg-3); background: var(--bg-1); padding: 18px 20px;">
+    <div style="margin-bottom: 12px;">
+      <h3 style="font-family: 'Fraunces', serif; font-size: 1.125rem; margin: 0; letter-spacing: -0.01em;">
+        Coexistence policy
+      </h3>
+      <p style="font-size: 0.8125rem; color: var(--fg-2); margin: 6px 0 0;">
+        How the GPU slot is shared between text and image engines.
+      </p>
+    </div>
+    <form class="lm-form" method="post" action="/ui/setup/coexistence">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; font-size: 0.875rem;">
+        <input type="checkbox" name="unload_text_on_arrival" {% if coex.unload_text_on_arrival %}checked{% endif %}>
+        <span>
+          <strong>Unload text engine when image task arrives</strong>
+          <span style="display: block; color: var(--fg-2); font-size: 0.8125rem;">
+            Default. Single-slot dashboard invariant. Image task gets the GPU; the text engine pauses.
+          </span>
+        </span>
+      </label>
+      <label style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; font-size: 0.875rem;">
+        <input type="checkbox" name="restart_text_after_image" {% if coex.restart_text_after_image %}checked{% endif %}>
+        <span>
+          <strong>Restart text engine after image completes</strong>
+          <span style="display: block; color: var(--fg-2); font-size: 0.8125rem;">
+            Re-launches the text engine from its prior spec. Disable to stay in image-only mode after a generation.
+          </span>
+        </span>
+      </label>
+      <label style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 14px; font-size: 0.875rem;">
+        <input type="checkbox" name="allow_concurrent" {% if coex.allow_concurrent %}checked{% endif %}>
+        <span>
+          <strong>Allow concurrent text + image</strong>
+          <span style="display: block; color: var(--accent); font-size: 0.8125rem;">
+            ⚠ Risks VRAM OOM. Only enable on cards with ≥ 48 GB VRAM or when you know both fit.
+          </span>
+        </span>
+      </label>
+      <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Save policy</button>
+    </form>
+  </div>
+</section>
+
 {# ---------- Config + restart ---------- #}
 <section class="lm-section lm-reveal lm-reveal-4">
   <header class="lm-section-head">

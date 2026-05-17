@@ -23,6 +23,22 @@
     {% if status.uptime_s %}<span><span class="key">uptime</span><code>{% set u = status.uptime_s | int %}{% if u >= 86400 %}{{ '%dd %dh' % (u // 86400, (u % 86400) // 3600) }}{% elif u >= 3600 %}{{ '%dh %dm' % (u // 3600, (u % 3600) // 60) }}{% elif u >= 60 %}{{ '%dm %ds' % (u // 60, u % 60) }}{% else %}{{ '%ds' % u }}{% endif %}</code></span>{% endif %}
     {% if status.mem_rss_mb %}<span><span class="key">rss</span><code>{{ '%.0f MB' % status.mem_rss_mb }}</code></span>{% endif %}
   </div>
+
+  {% if image_status and image_status.status == 'generating' %}
+  <div style="margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--bg-3);">
+    <div class="lm-eyebrow" style="margin-bottom: 4px;">
+      Generating · <span class="lm-live" aria-label="live"></span>
+    </div>
+    <div style="font-size: 0.9375rem; color: var(--fg-0);">
+      <code>{{ image_status.engine }}</code>
+      {% if image_status.model_id %}· <code>{{ image_status.model_id }}</code>{% endif %}
+      {% if image_status.profile %}· profile <code>{{ image_status.profile }}</code>{% endif %}
+      {% if image_status.step and image_status.total_steps %}
+        · step <code>{{ image_status.step }}/{{ image_status.total_steps }}</code>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
 </section>
 
 {% if sysinfo %}
@@ -180,6 +196,7 @@
       <div class="lm-eyebrow">In flight</div>
       {% for r in queue.in_flight %}
       <div style="display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; font-size: 0.9375rem; color: var(--fg-1);{% if not loop.last %} margin-bottom: 8px;{% endif %}">
+        <code title="{{ r.task_type or 'text' }}">{{ 'I' if r.task_type == 'image' else 'T' }}</code>
         <code>{{ r.id[:8] }}</code>
         <span style="color: var(--fg-2);">from</span>
         <strong style="color: var(--fg-0); font-weight: 500;">{{ r.origin }}</strong>
@@ -195,11 +212,12 @@
   {% if queue.pending %}
   <table class="lm-table">
     <thead>
-      <tr><th>Id</th><th>Origin</th><th>Prio</th><th>Model</th><th>Status</th></tr>
+      <tr><th>Type</th><th>Id</th><th>Origin</th><th>Prio</th><th>Model</th><th>Status</th></tr>
     </thead>
     <tbody>
     {% for r in queue.pending %}
       <tr>
+        <td data-label="Type"><code title="{{ r.task_type or 'text' }}">{{ 'I' if r.task_type == 'image' else 'T' }}</code></td>
         <td data-label="Id"><code>{{ r.id[:8] }}</code></td>
         <td data-label="Origin">{{ r.origin }}</td>
         <td data-label="Prio" class="num">{{ r.priority }}</td>

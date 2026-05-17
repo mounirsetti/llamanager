@@ -22,8 +22,9 @@ from typing import Any
 import httpx
 
 from .config import (
-    Config, Profile, delete_model_entry, save_profile,
-    set_model_default_profile, update_defaults,
+    Config, ENGINE_FAMILY, Profile, delete_model_entry,
+    detect_engine_for_path, save_profile, set_model_default_profile,
+    update_defaults,
 )
 from .db import DB
 
@@ -172,9 +173,38 @@ class Registry:
         if not self.models_dir.exists():
             return out
 
-        # GGUF single-file models (llama.cpp engines).
+        # Pass 1: discover image-engine directories. Each candidate dir
+        # is identified by a marker file (tokenizer_config / config.json)
+        # or by containing a flux*.gguf alongside a VAE. We collect their
+        # paths so the GGUF and MLX passes can skip files inside them.
+        image_dirs: set[Path] = set()
+        for marker in ("tokenizer_config.json", "config.json"):
+            for p in self.models_dir.rglob(marker):
+                d = p.parent
+                if d == self.models_dir:
+                    continue
+                engine = detect_engine_for_path(d)
+                if ENGINE_FAMILY.get(engine, "text") == "image":
+                    image_dirs.add(d)
+        # Flux2 dirs may not have any marker config — detect via file shape.
+        for p in self.models_dir.rglob("*.gguf"):
+            d = p.parent
+            if d == self.models_dir or d in image_dirs:
+                continue
+            engine = detect_engine_for_path(d)
+            if ENGINE_FAMILY.get(engine, "text") == "image":
+                image_dirs.add(d)
+
+        def _is_inside_image_dir(p: Path) -> bool:
+            return any(p == d or d in p.parents for d in image_dirs)
+
+        # Pass 2: GGUF single-file models (llama.cpp engines). Skip files
+        # that live inside an image-engine dir (those are referenced from
+        # the parent image model, not as standalone models).
         for p in self.models_dir.rglob("*.gguf"):
             if not p.is_file():
+                continue
+            if _is_inside_image_dir(p):
                 continue
             rel = p.relative_to(self.models_dir).as_posix()
             meta = _read_meta(p)
@@ -191,15 +221,34 @@ class Registry:
                 pulled_at=meta.get("pulled_at"),
             ))
 
-        # MLX / Hugging Face directory-style models. A directory counts as
-        # a model when it contains config.json (HF convention) and at least
-        # one weight file (safetensors or mlx). Sub-models nested inside a
-        # GGUF model dir aren't possible because GGUF entries are files, so
-        # there's no ambiguity.
-        seen: set[Path] = set()
+        # Pass 3: directory-style models (mlx, hidream, flux2). MLX dirs
+        # use config.json; HiDream uses tokenizer_config + preprocessor;
+        # flux2 uses file shape.
+        seen: set[Path] = set(image_dirs)
+        # Emit image-engine dirs first.
+        for d in image_dirs:
+            rel = d.relative_to(self.models_dir).as_posix()
+            meta = _read_meta(d)
+            size = _dir_size(d)
+            out.append(ModelEntry(
+                model_id=rel,
+                path=d,
+                size=size,
+                sha256=meta.get("sha256"),
+                source=meta.get("source"),
+                pulled_at=meta.get("pulled_at"),
+            ))
+        # Then non-image directory models.
         for cfg_path in self.models_dir.rglob("config.json"):
             d = cfg_path.parent
             if d in seen or d == self.models_dir:
+                continue
+            engine = detect_engine_for_path(d)
+            if engine == "llama":
+                # Loose dir without a clear shape — skip.
+                continue
+            if ENGINE_FAMILY.get(engine, "text") == "image":
+                # Already handled above.
                 continue
             has_weights = any(d.glob("*.safetensors")) or any(d.glob("*.npz"))
             if not has_weights:
@@ -425,6 +474,9 @@ class Registry:
         Scans the repo directory for a main GGUF file and an optional mmproj
         file. Skips if no main model is found (e.g. user only pulled an
         mmproj) or if a profile already references this model.
+
+        For image-engine model directories, seeds the adapter's
+        ``default_profiles()`` instead of the LLM-shaped default.
         """
         # Only handle HF pulls where files land in a repo subdirectory
         if not (source.startswith("hf://") or source.startswith("hf:")):
@@ -432,6 +484,13 @@ class Registry:
         repo = source.removeprefix("hf://").removeprefix("hf:")
         repo_dir = self.models_dir / repo
         if not repo_dir.is_dir():
+            return
+
+        # First: is this an image-engine model? If so, register the dir
+        # itself as the model_id and seed adapter-specific profiles.
+        engine = detect_engine_for_path(repo_dir)
+        if ENGINE_FAMILY.get(engine, "text") == "image":
+            self._seed_image_profiles(repo, repo_dir, engine)
             return
 
         # Collect GGUF files, separate main models from mmproj files
@@ -515,6 +574,37 @@ class Registry:
             })
         except Exception:
             log.exception("failed to auto-create profile for %s", model_id)
+
+    def _seed_image_profiles(self, repo: str, repo_dir: Path, engine: str) -> None:
+        """Auto-create the adapter's default profiles on an image-model pull."""
+        from . import engines as _engines_pkg
+        try:
+            adapter = _engines_pkg.get(engine)
+        except KeyError:
+            log.warning("no adapter for engine %r; skipping default profiles", engine)
+            return
+        model_id = repo  # directory-style id
+        existing_model = self.cfg.get_model(model_id)
+        defaults = adapter.default_profiles() if hasattr(adapter, "default_profiles") else {}
+        for pname, body in defaults.items():
+            if existing_model and pname in existing_model.profiles:
+                continue
+            prof = Profile(name=pname, **body)
+            try:
+                save_profile(self.cfg.config_path, model_id, pname, prof)
+                m = self.cfg.ensure_model(model_id)
+                m.profiles[pname] = prof
+                if not m.default_profile:
+                    m.default_profile = pname
+                    set_model_default_profile(self.cfg.config_path, model_id, pname)
+                log.info("auto-created %s profile %r for %s",
+                         engine, pname, model_id)
+                self.db.log_event("profile_auto_created", {
+                    "engine": engine, "profile": pname, "model": model_id,
+                })
+            except Exception:
+                log.exception("failed to auto-create image profile %r for %s",
+                              pname, model_id)
 
     async def _run_pull(self, did: str, source: str, files: list[str],
                         cancel: asyncio.Event) -> None:

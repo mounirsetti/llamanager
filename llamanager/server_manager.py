@@ -7,6 +7,7 @@ exits via the shared `wait_event`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import shlex
@@ -521,3 +522,53 @@ class ServerManager:
         self.runtime.last_event_at = time.time()
         rt.save(self.cfg.runtime_path, self.runtime)
         self.db.log_event("server_supervisor_giveup", {"reason": reason})
+
+    # ---- image-family coordination ----
+    @contextlib.asynccontextmanager
+    async def yield_to_image(self, *, reason: str = "image"):
+        """Temporarily release the GPU slot to an image task.
+
+        Coexistence policy (see config.toml ``[coexistence]``):
+
+        * ``allow_concurrent = true``  → no-op; text stays running.
+        * ``unload_text_on_arrival = false`` → no-op (operator opted to
+          keep text running; image task accepts the risk).
+        * Otherwise: snapshot the active StartSpec, stop the server,
+          yield, then optionally restart per ``restart_text_after_image``.
+        """
+        # Resolve the current policy each time — config hot-reloads.
+        if self.cfg.allow_concurrent:
+            yield
+            return
+        if not self.cfg.unload_text_on_arrival:
+            yield
+            return
+
+        saved_spec: StartSpec | None = self.spec if self.is_running else None
+        if saved_spec is None:
+            # Nothing to unload, nothing to restore.
+            yield
+            return
+
+        self.db.log_event("text_yield_to_image_begin", {
+            "model": saved_spec.model_id, "reason": reason,
+        })
+        await self.stop()
+        try:
+            yield
+        finally:
+            if self.cfg.restart_text_after_image:
+                try:
+                    await self.start(saved_spec)
+                    self.db.log_event("text_yield_to_image_restored", {
+                        "model": saved_spec.model_id,
+                    })
+                except Exception as e:
+                    log.error("yield_to_image: restore failed: %s", e)
+                    self.db.log_event("text_yield_to_image_restore_failed", {
+                        "model": saved_spec.model_id, "error": str(e),
+                    })
+            else:
+                self.db.log_event("text_yield_to_image_kept_unloaded", {
+                    "prior_model": saved_spec.model_id,
+                })

@@ -18,6 +18,7 @@ Behavior:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -28,6 +29,9 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .auth import AuthManager, Origin
+from .config import ENGINE_FAMILY, detect_engine_for_id
+from .engines._base import ImageRequest
+from .image_runner import ImageError, ImageTaskRunner, resolve_image_engine
 from .queue_mgr import Cancelled, QueueManager, QueueFull, QueuedRequest
 from .registry import Registry
 from .server_manager import ServerManager
@@ -321,6 +325,328 @@ async def chat_completions(request: Request) -> Response:
 @router.post("/completions")
 async def completions(request: Request) -> Response:
     return await _handle_inference(request, "/v1/completions")
+
+
+def _parse_size(size: str | None) -> tuple[int, int]:
+    """Parse an OpenAI-style ``WxH`` size; default 0,0 lets the adapter
+    pick from its profile/defaults."""
+    if not size:
+        return 0, 0
+    s = str(size).lower().strip().replace("×", "x")
+    if "x" not in s:
+        return 0, 0
+    w, h = s.split("x", 1)
+    try:
+        return int(w), int(h)
+    except ValueError:
+        return 0, 0
+
+
+@router.post("/images/generations")
+async def images_generations(request: Request) -> Response:
+    """Generate one or more images.
+
+    OpenAI-compatible request body:
+        prompt:           str (required)
+        model:            str — bare model id (image-family); if omitted, falls
+                          back to the X-Llamanager-Model header.
+        n:                int (default 1)
+        size:             "WxH" (default per adapter)
+        response_format:  "b64_json" (default) | "url"
+        stream:           bool — when true, returns SSE progress with a final
+                          data event carrying the result.
+        seed:             int (optional)
+        profile:          llamanager-specific — selects an image profile by name.
+    """
+    origin = await _origin_from_request(request)
+    body_bytes = await request.body()
+    try:
+        body = json.loads(body_bytes) if body_bytes else {}
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+
+    prompt = body.get("prompt") or ""
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt is required")
+
+    qm: QueueManager = request.app.state.queue
+    cfg = request.app.state.cfg
+    runner: ImageTaskRunner = request.app.state.image_runner
+
+    # Resolve model id: body `model`, or X-Llamanager-Model header.
+    model_required = body.get("model") or request.headers.get("x-llamanager-model")
+    if not model_required:
+        raise HTTPException(
+            status_code=400,
+            detail="image requests require 'model' (an image-family model id)",
+        )
+    _check_model_allowed(origin, model_required)
+    # Verify it's an image-family model before queueing.
+    try:
+        engine = resolve_image_engine(cfg, model_required)
+    except ImageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    profile_required = body.get("profile") or request.headers.get("x-llamanager-profile")
+
+    n = int(body.get("n", 1) or 1)
+    if n < 1 or n > 8:
+        raise HTTPException(status_code=400, detail="n must be between 1 and 8")
+    width, height = _parse_size(body.get("size"))
+    response_format = str(body.get("response_format") or "b64_json").lower()
+    if response_format not in ("b64_json", "url"):
+        raise HTTPException(
+            status_code=400,
+            detail="response_format must be 'b64_json' or 'url'",
+        )
+    streaming = bool(body.get("stream", False))
+    seed = body.get("seed")
+    seed_int: int | None
+    if seed is None:
+        seed_int = None
+    else:
+        try:
+            seed_int = int(seed)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="seed must be an integer")
+
+    try:
+        qr = await qm.enqueue(
+            origin=origin,
+            model_required=model_required,
+            profile_required=profile_required,
+            task_type="image",
+        )
+    except QueueFull:
+        raise HTTPException(status_code=503, detail="queue full")
+
+    # Build the typed request now so adapter errors fail fast.
+    image_req = ImageRequest(
+        prompt=prompt,
+        width=width,
+        height=height,
+        steps=None,    # adapter pulls from profile/defaults
+        seed=seed_int,
+        n=n,
+    )
+
+    # Resolve the profile object (may be None — runner accepts that).
+    profile_obj = None
+    if profile_required:
+        profile_obj = cfg.get_profile(model_required, profile_required)
+        if profile_obj is None:
+            qm.mark_in_flight_done(qr, error="profile not found",
+                                   cancelled=False, prompt_tokens=None,
+                                   completion_tokens=None)
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown profile {profile_required!r} for model {model_required!r}",
+            )
+
+    if streaming:
+        return await _images_stream(qm, qr, runner, request, image_req,
+                                     model_required, engine, profile_obj,
+                                     response_format)
+    return await _images_blocking(qm, qr, runner, request, image_req,
+                                    model_required, engine, profile_obj,
+                                    response_format)
+
+
+async def _images_blocking(
+    qm: QueueManager,
+    qr: QueuedRequest,
+    runner: ImageTaskRunner,
+    request: Request,
+    image_req: ImageRequest,
+    model_required: str,
+    engine: str,
+    profile_obj,
+    response_format: str,
+) -> Response:
+    error: str | None = None
+    try:
+        await qm.wait_for_slot(qr)
+        try:
+            result = await runner.run(
+                model_id=model_required,
+                engine=engine,
+                profile=profile_obj,
+                req=image_req,
+                request_id=qr.request_id,
+                origin_name=qr.origin.name,
+            )
+        except ImageError as e:
+            error = str(e)
+            raise HTTPException(status_code=502, detail=error)
+        payload = _build_image_response(result, response_format, request)
+        headers = {"x-llamanager-request-id": qr.request_id}
+        return JSONResponse(content=payload, headers=headers)
+    except Cancelled:
+        error = "cancelled"
+        return JSONResponse(
+            status_code=499,
+            content={"error": {"message": "request cancelled",
+                               "type": "llamanager_error"}},
+        )
+    except asyncio.TimeoutError:
+        error = "queue timeout"
+        qm.cancel(qr.request_id)
+        raise HTTPException(status_code=504,
+                            detail="request timed out waiting in queue")
+    except HTTPException:
+        raise
+    except Exception as e:
+        error = str(e)
+        log.exception("image generation failed for %s", qr.request_id)
+        raise HTTPException(status_code=502, detail=str(e))
+    finally:
+        qm.mark_in_flight_done(
+            qr, error=error,
+            cancelled=(error == "cancelled"),
+            prompt_tokens=None, completion_tokens=None,
+        )
+
+
+async def _images_stream(
+    qm: QueueManager,
+    qr: QueuedRequest,
+    runner: ImageTaskRunner,
+    request: Request,
+    image_req: ImageRequest,
+    model_required: str,
+    engine: str,
+    profile_obj,
+    response_format: str,
+) -> StreamingResponse:
+    """SSE response. Emits ``: status=...`` while queued/swapping,
+    ``: step=N/M`` while generating, then a final ``data:`` event with
+    the OpenAI-shaped payload."""
+    progress_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+    def _on_progress(ev) -> None:
+        try:
+            progress_queue.put_nowait(("step", (ev.step, ev.total)))
+        except asyncio.QueueFull:
+            pass
+
+    async def gen() -> AsyncIterator[bytes]:
+        error: str | None = None
+        try:
+            # Phase 1: wait for slot. ImageTaskRunner is invoked AFTER the
+            # slot is acquired; until then emit keepalives.
+            ready_task = asyncio.create_task(qr.ready.wait())
+            last_status = ""
+            while not ready_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(ready_task),
+                                            timeout=KEEPALIVE_INTERVAL_S)
+                except asyncio.TimeoutError:
+                    if qr.cancel.is_set():
+                        return
+                    if qr.status != last_status:
+                        last_status = qr.status
+                        yield f": status={qr.status}\n\n".encode("utf-8")
+                    else:
+                        yield b": keepalive\n\n"
+            if qr.error:
+                payload = {"error": {"message": qr.error,
+                                      "type": "llamanager_error"}}
+                yield f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+                yield b"data: [DONE]\n\n"
+                return
+
+            # Phase 2: run the engine. We launch the actual task as a
+            # background task so we can interleave progress events.
+            run_task = asyncio.create_task(
+                runner.run(
+                    model_id=model_required,
+                    engine=engine,
+                    profile=profile_obj,
+                    req=image_req,
+                    request_id=qr.request_id,
+                    origin_name=qr.origin.name,
+                    progress_cb=_on_progress,
+                )
+            )
+            while not run_task.done():
+                done, _ = await asyncio.wait(
+                    {run_task},
+                    timeout=KEEPALIVE_INTERVAL_S,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                # Drain progress events.
+                while not progress_queue.empty():
+                    kind, payload = progress_queue.get_nowait()
+                    if kind == "step":
+                        step, total = payload
+                        yield f": step={step}/{total}\n\n".encode("utf-8")
+                if not done:
+                    yield b": keepalive\n\n"
+
+            try:
+                result = run_task.result()
+            except ImageError as e:
+                error = str(e)
+                payload = {"error": {"message": error,
+                                      "type": "llamanager_error"}}
+                yield f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+                yield b"data: [DONE]\n\n"
+                return
+
+            final_payload = _build_image_response(result, response_format, request)
+            yield f"data: {json.dumps(final_payload)}\n\n".encode("utf-8")
+            yield b"data: [DONE]\n\n"
+        except Exception as e:
+            error = str(e)
+            log.exception("image stream failed for %s", qr.request_id)
+            yield f"data: {json.dumps({'error': {'message': error}})}\n\n".encode("utf-8")
+        finally:
+            qm.mark_in_flight_done(
+                qr, error=error,
+                cancelled=(error == "cancelled"),
+                prompt_tokens=None, completion_tokens=None,
+            )
+
+    headers = {
+        "x-llamanager-request-id": qr.request_id,
+        "cache-control": "no-cache",
+        "x-accel-buffering": "no",
+    }
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                              headers=headers)
+
+
+def _build_image_response(result, response_format: str, request: Request) -> dict[str, Any]:
+    """Translate an ImageResult into an OpenAI-shaped JSON payload."""
+    out_path = result.output_path
+    items: list[dict[str, Any]] = []
+    paths: list = [out_path] + [
+        type(out_path)(p) for p in result.sidecar.get("batch", [])
+        if p and p != str(out_path)
+    ]
+    for p in paths:
+        item: dict[str, Any] = {}
+        if response_format == "b64_json":
+            try:
+                item["b64_json"] = base64.b64encode(p.read_bytes()).decode("ascii")
+            except OSError:
+                continue
+        else:
+            # Authenticated UI route, gated by the same session as the rest.
+            item["url"] = f"/ui/images/file/{p.parent.parent.name}/{p.parent.name}/{p.name}"
+        item["revised_prompt"] = result.sidecar.get("prompt")
+        items.append(item)
+    return {
+        "created": int(time.time()),
+        "data": items,
+        "llamanager": {
+            "engine": result.engine,
+            "model": result.model_id,
+            "profile": result.profile_name,
+            "seed": result.seed,
+            "duration_s": round(result.duration_s, 3),
+        },
+    }
 
 
 @router.get("/models")

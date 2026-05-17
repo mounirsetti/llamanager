@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <strong>Queue AI work against a local model and reach it from anywhere on your network.</strong>
+  <strong>Queue AI text and image work against a local model and reach it from anywhere on your network.</strong>
 </p>
 
 <p align="center">
@@ -42,6 +42,7 @@
 - [Sending an inference request](#sending-an-inference-request)
   - [Requesting a specific model](#requesting-a-specific-model)
 - [Chat in the browser](#chat-in-the-browser)
+- [Image generation](#image-generation)
 - [Auto-start at boot or login](#auto-start-at-boot-or-login)
   - [macOS — launchd](#macos--launchd)
   - [Linux — user systemd unit](#linux--user-systemd-unit)
@@ -66,10 +67,11 @@ llamanager wraps `llama-server` (from llama.cpp) so a single GPU can serve a pho
 
 ## What you get
 
-- **OpenAI-compatible `/v1/*` proxy** — any existing client library works out of the box
+- **OpenAI-compatible `/v1/*` proxy** — chat, completions, **and image generations** — any existing client library works out of the box
+- **Two engine families on one GPU** — text (llama.cpp, mlx) **and image (HiDream-O1-Image, FLUX 2 via sd.cpp)**, with automatic swap-and-restore between families so the dashboard stays single-slot
 - **Per-origin priority queue** with cancellation, so a long batch job cannot block your editor
 - **Model lifecycle** — start, stop, restart, hot-swap by model alias on a per-request header
-- **Crash supervisor** with a 3-in-5-minutes restart cap, so a broken GGUF cannot melt the box
+- **Crash supervisor** with a 3-in-5-minutes restart cap, applied to text servers and image engines alike
 - **Hugging Face GGUF puller** with disk-space checks
 - **HTMX web UI** that is usable from a phone over Tailscale
 - **Bearer-token auth** — one key per origin, hashed with argon2id at rest
@@ -337,6 +339,74 @@ Features:
 
 The admin panel also has a chat page at `/ui/chat` that uses the admin session key automatically.
 
+## Image generation
+
+llamanager manages two image-generation engines side-by-side with text models:
+
+| engine | platform | model size | typical speed | notes |
+|---|---|---|---|---|
+| [HiDream-O1-Image](https://huggingface.co/HiDream-ai/HiDream-O1-Image) | Linux + ROCm | 33 GB on disk · 16.4 GB VRAM | ~34 s end-to-end at 2048², dev variant | One-shot Python `inference.py`; needs ROCm 7.2 wheels |
+| [FLUX 2 Dev via sd.cpp](https://github.com/leejet/stable-diffusion.cpp) | Linux + Windows · Vulkan | ~27 GB VRAM | ~74 s at 768², 8 steps | One-shot `sd-cli` binary; cross-platform Vulkan |
+
+Both engines are **one-shot CLI invocations** — the subprocess loads the model, generates one PNG, and exits. This matches the upstream tools' design exactly and means llamanager doesn't need a long-running wrapper around them.
+
+### Install (manual — not auto-installed)
+
+Both stacks have hardware-pinned dependency chains. llamanager points at an existing install rather than building it for you:
+
+- **HiDream-O1-Image (Linux + ROCm)** — follow the upstream install (clone the repo, create the ROCm-pinned venv). Then on the `/ui/setup` page, fill in:
+  - **Venv Python** — path to the venv's `python` binary
+  - **HiDream-O1-Image checkout** — path to the repo (contains `inference.py`)
+- **FLUX 2 / sd.cpp (Vulkan)** — download the `sd-master-*-bin-*-vulkan-x64.zip` from [sd.cpp releases](https://github.com/leejet/stable-diffusion.cpp/releases), then on the same page:
+  - **sd-cli binary** — full path to the `sd-cli` (or `sd-cli.exe`)
+  - **Vulkan device index** — the integer for the AMD card; run `sd-cli --verbose` once to see the indices
+
+Drop the model files under `~/.llamanager/models/` like any other model (a directory per checkpoint). llamanager auto-detects HiDream and FLUX 2 layouts and seeds default profiles (`hidream-dev`, `hidream-full`, `flux2-fast`, `flux2-quality`) on first detection.
+
+### Generate from the UI
+
+Open <http://localhost:7200/ui/images>. Pick a model, pick a profile, type a prompt, hit Generate. Results land in an asymmetric gallery; per-session history is stored in browser localStorage. Generated PNGs and a sidecar JSON live under `~/.llamanager/images/YYYY-MM-DD/<origin>/`. The gallery is size-capped (`[image].max_disk_gb = 10` by default, oldest-first GC).
+
+### Generate from the API
+
+OpenAI-compatible:
+
+```bash
+curl -X POST http://localhost:7200/v1/images/generations \
+  -H "Authorization: Bearer $ORIGIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "HiDream-O1-Image",
+    "prompt": "A still life of three pears on a blue table",
+    "size": "2048x2048",
+    "n": 1,
+    "response_format": "b64_json"
+  }'
+```
+
+Streaming (`"stream": true`) emits `: step=N/M` SSE comments while generating, then a final `data:` event with the result.
+
+### Coexistence with text engines
+
+By default, when an image request lands and a text engine is running, llamanager:
+
+1. Snapshots the current text spec (model + profile + args)
+2. Stops the text server to free VRAM
+3. Runs the image task to completion
+4. Restarts the text server from the snapshot
+
+This is the **single-slot invariant** — the dashboard "Now serving" hero shows one engine at a time, the same way LLM swaps work today. Two flags on `/ui/setup` change the behaviour:
+
+- **Restart text engine after image completes** (default on) — turn off to stay in image-only mode after a generation
+- **Allow concurrent text + image** (default off) — keep both loaded at once. Risks OOM on cards with less than ~48 GB VRAM; only enable when you know both fit
+
+```toml
+[coexistence]
+unload_text_on_arrival = true
+restart_text_after_image = true
+allow_concurrent = false
+```
+
 ## Auto-start at boot or login
 
 ### macOS — launchd
@@ -530,10 +600,13 @@ Full endpoint list is in spec §5.
 ├── state.db                sqlite: origins, requests, downloads, events
 ├── runtime.json            current run state (atomic writes)
 ├── .session-secret         signed-cookie secret (mode 0600)
-├── models/                 downloaded GGUFs
+├── models/                 downloaded GGUFs + image-model dirs (HiDream, FLUX 2)
+├── images/                 generated PNGs, organised YYYY-MM-DD/<origin>/
 ├── logs/
 │   ├── llamanager.log      llamanager's own log (rotated 5 × 50 MB)
-│   └── llama-server.log    captured stdout/stderr of the child
+│   ├── llama-server.log    captured stdout/stderr of the text engine
+│   ├── hidream.log         captured output of the HiDream subprocess
+│   └── flux2.log           captured output of the FLUX 2 / sd.cpp subprocess
 └── llamanager.task.xml     windows: generated by `install-windows` (if used)
 ```
 

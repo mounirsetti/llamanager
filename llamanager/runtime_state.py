@@ -2,6 +2,10 @@
 
 Spec §4.7: runtime.json holds (PID, current_model, current_profile,
 started_at). Used to recover state if llamanager itself restarts.
+
+The ``image`` sub-state tracks transient image-engine generations. Image
+engines are one-shot CLIs, so there's no persistent ``running`` state —
+``status`` is ``idle`` between requests and ``generating`` during one.
 """
 from __future__ import annotations
 
@@ -14,6 +18,24 @@ from typing import Any
 
 
 @dataclass
+class ImageRuntimeState:
+    """Transient state for the active image task.
+
+    Single-task (mutual exclusion within the image family). Fields are
+    reset to defaults when no task is running.
+    """
+    status: str = "idle"              # idle|generating|failed
+    engine: str | None = None         # "hidream" | "flux2"
+    model_id: str | None = None
+    profile: str | None = None
+    request_id: str | None = None
+    step: int | None = None
+    total_steps: int | None = None
+    started_at: float | None = None
+    last_event_at: float | None = None
+
+
+@dataclass
 class RuntimeState:
     state: str = "stopped"            # stopped|starting|running|swapping|crashed|degraded
     pid: int | None = None
@@ -22,6 +44,7 @@ class RuntimeState:
     current_args: dict[str, Any] = field(default_factory=dict)
     started_at: float | None = None
     last_event_at: float | None = None
+    image: ImageRuntimeState = field(default_factory=ImageRuntimeState)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -42,6 +65,18 @@ def load(path: Path) -> RuntimeState:
     # will repopulate from a fresh resolve_spec call.
     if current_profile and not current_model:
         current_profile = None
+    image_raw = data.get("image") or {}
+    image = ImageRuntimeState(
+        status=image_raw.get("status", "idle"),
+        engine=image_raw.get("engine"),
+        model_id=image_raw.get("model_id"),
+        profile=image_raw.get("profile"),
+        request_id=image_raw.get("request_id"),
+        step=image_raw.get("step"),
+        total_steps=image_raw.get("total_steps"),
+        started_at=image_raw.get("started_at"),
+        last_event_at=image_raw.get("last_event_at"),
+    )
     return RuntimeState(
         state=data.get("state", "stopped"),
         pid=data.get("pid"),
@@ -50,6 +85,7 @@ def load(path: Path) -> RuntimeState:
         current_args=data.get("current_args", {}) or {},
         started_at=data.get("started_at"),
         last_event_at=data.get("last_event_at"),
+        image=image,
     )
 
 

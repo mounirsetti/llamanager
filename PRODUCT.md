@@ -10,7 +10,7 @@ A solo home-lab operator running llamanager on their own workstation. They check
 
 ## Product Purpose
 
-llamanager turns one local GPU into a private inference service that survives multiple clients trampling each other. The UI exists so the operator can see queue depth, model state, origin activity, and crash history at a glance, and so they can pull, swap, or kill a model without dropping into the CLI. Success looks like: glance at the page, know within two seconds whether something needs attention, never get blocked from doing the obvious next action.
+llamanager turns one local GPU into a private inference service for both text and image generation, sharing the same queue, auth, and dashboard. Multiple clients can trample each other safely: requests land on a per-origin priority queue, the loaded text model swaps on demand, and image-generation tasks transparently yield the GPU slot and return it. The UI exists so the operator can see queue depth, model state, origin activity, and crash history at a glance, and so they can pull, swap, or kill a model without dropping into the CLI. Success looks like: glance at the page, know within two seconds whether something needs attention, never get blocked from doing the obvious next action.
 
 ## Brand Personality
 

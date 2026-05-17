@@ -33,9 +33,10 @@ from fastapi.templating import Jinja2Templates
 
 from .auth import AuthManager, Origin
 from .config import (
-    Profile, VALID_RAM_SPILL_POLICIES, delete_profile, detect_engine_for_id,
-    load_config, rename_profile, save_profile, set_default_args,
-    set_model_default_profile, update_defaults,
+    ENGINE_FAMILY, Profile, VALID_RAM_SPILL_POLICIES, delete_profile,
+    detect_engine_for_id, load_config, rename_profile, save_profile,
+    set_default_args, set_model_default_profile, update_coexistence_policy,
+    update_defaults, update_image_config,
 )
 from .llama_installer import (
     BACKENDS,
@@ -528,6 +529,8 @@ async def dashboard(request: Request, _: Origin = Depends(require_admin_ui)) -> 
     host = request.headers.get("host", f"{cfg.bind}:{cfg.port}")
     base_url = f"http://{host}"
     sysinfo = _get_system_info(cfg.models_dir)
+    image_runner = getattr(request.app.state, "image_runner", None)
+    image_status = image_runner.status() if image_runner else None
     return templates.TemplateResponse(request, "dashboard.html", _ctx(
         request,
         status=sm.status(),
@@ -535,6 +538,7 @@ async def dashboard(request: Request, _: Origin = Depends(require_admin_ui)) -> 
         recent=[dict(r) for r in recent],
         base_url=base_url,
         sysinfo=sysinfo,
+        image_status=image_status,
     ))
 
 
@@ -550,12 +554,15 @@ async def dashboard_partial(request: Request, _: Origin = Depends(require_admin_
         " ORDER BY enqueued_at DESC LIMIT 10"
     )
     sysinfo = _get_system_info(cfg.models_dir)
+    image_runner = getattr(request.app.state, "image_runner", None)
+    image_status = image_runner.status() if image_runner else None
     return templates.TemplateResponse(request, "_dashboard_partial.html", _ctx(
         request,
         status=sm.status(),
         queue=qm.snapshot(),
         recent=[dict(r) for r in recent],
         sysinfo=sysinfo,
+        image_status=image_status,
     ))
 
 
@@ -1337,6 +1344,57 @@ async def chat_view(request: Request, _: Origin = Depends(require_admin_ui)) -> 
     ))
 
 
+# ---------- images ----------
+
+@router.get("/images", response_class=HTMLResponse)
+async def images_view(request: Request,
+                      _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    cfg = request.app.state.cfg
+    reg: Registry = request.app.state.registry
+    sess = _read_session(request)
+    image_models: list[dict[str, str]] = []
+    for m in reg.list():
+        engine = detect_engine_for_id(m.model_id, cfg.models_dir)
+        if ENGINE_FAMILY.get(engine, "text") == "image":
+            image_models.append({"model_id": m.model_id, "engine": engine})
+    # Profiles bound to image-family models; UI filters by selected model.
+    profiles: list[dict[str, str]] = []
+    image_model_ids = {m["model_id"] for m in image_models}
+    for mid, p in cfg.iter_profiles():
+        if mid in image_model_ids:
+            profiles.append({"name": p.name, "model": mid})
+    return templates.TemplateResponse(request, "images.html", _ctx(
+        request,
+        image_models=image_models,
+        image_models_json=json.dumps(image_models),
+        profiles_json=json.dumps(profiles),
+        api_key=sess["key"] if sess else "",
+    ))
+
+
+@router.get("/images/file/{day}/{origin}/{name}")
+async def images_file_serve(request: Request, day: str, origin: str, name: str,
+                            _: Origin = Depends(require_admin_ui)) -> Response:
+    """Serve a previously generated PNG. Authenticated by the same admin
+    session that owns the rest of /ui. Path components are sanitised
+    against traversal."""
+    from fastapi.responses import FileResponse as _FileResponse
+    cfg = request.app.state.cfg
+    for seg in (day, origin, name):
+        if "/" in seg or "\\" in seg or ".." in seg or "\x00" in seg:
+            raise HTTPException(status_code=400, detail="invalid path component")
+    if not name.lower().endswith(".png"):
+        raise HTTPException(status_code=400, detail="only .png files are served here")
+    p = (cfg.images_dir / day / origin / name).resolve()
+    try:
+        p.relative_to(cfg.images_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="path escapes images_dir")
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return _FileResponse(p, media_type="image/png")
+
+
 # ---------- logs ----------
 
 @router.get("/logs", response_class=HTMLResponse)
@@ -1389,6 +1447,65 @@ async def setup_set_binary(request: Request,
     binary_path = binary_path.strip()
     cfg.llama_server_binary = binary_path
     patch_config_binary(cfg.config_path, binary_path)
+    return RedirectResponse("/ui/setup", status_code=303)
+
+
+@router.post("/setup/image/hidream", response_class=HTMLResponse)
+async def setup_hidream(request: Request,
+                        hidream_python: str = Form(""),
+                        hidream_repo: str = Form(""),
+                        _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    cfg.hidream_python = hidream_python.strip()
+    cfg.hidream_repo = hidream_repo.strip()
+    update_image_config(
+        cfg.config_path,
+        hidream_python=cfg.hidream_python,
+        hidream_repo=cfg.hidream_repo,
+    )
+    return RedirectResponse("/ui/setup", status_code=303)
+
+
+@router.post("/setup/image/flux2", response_class=HTMLResponse)
+async def setup_flux2(request: Request,
+                      flux2_sd_cli: str = Form(""),
+                      flux2_device_index: str = Form(""),
+                      _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    cfg.flux2_sd_cli = flux2_sd_cli.strip()
+    idx_raw = flux2_device_index.strip()
+    idx = None
+    if idx_raw:
+        try:
+            idx = int(idx_raw)
+        except ValueError:
+            idx = None
+    cfg.flux2_device_index = idx
+    update_image_config(
+        cfg.config_path,
+        flux2_sd_cli=cfg.flux2_sd_cli,
+        flux2_device_index=idx,
+        clear_flux2_device_index=(idx is None),
+    )
+    return RedirectResponse("/ui/setup", status_code=303)
+
+
+@router.post("/setup/coexistence", response_class=HTMLResponse)
+async def setup_coexistence(request: Request,
+                            unload_text_on_arrival: str = Form(""),
+                            restart_text_after_image: str = Form(""),
+                            allow_concurrent: str = Form(""),
+                            _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    cfg.unload_text_on_arrival = bool(unload_text_on_arrival)
+    cfg.restart_text_after_image = bool(restart_text_after_image)
+    cfg.allow_concurrent = bool(allow_concurrent)
+    update_coexistence_policy(
+        cfg.config_path,
+        unload_text_on_arrival=cfg.unload_text_on_arrival,
+        restart_text_after_image=cfg.restart_text_after_image,
+        allow_concurrent=cfg.allow_concurrent,
+    )
     return RedirectResponse("/ui/setup", status_code=303)
 
 
@@ -1518,6 +1635,17 @@ def _setup_ctx(request: Request,
         config_dir=str(cfg.config_path.parent),
         config_file=str(cfg.config_path),
         open_config_label=open_config_label,
+        image_cfg={
+            "hidream_python": cfg.hidream_python,
+            "hidream_repo": cfg.hidream_repo,
+            "flux2_sd_cli": cfg.flux2_sd_cli,
+            "flux2_device_index": cfg.flux2_device_index,
+        },
+        coex={
+            "unload_text_on_arrival": cfg.unload_text_on_arrival,
+            "restart_text_after_image": cfg.restart_text_after_image,
+            "allow_concurrent": cfg.allow_concurrent,
+        },
     )
 
 
