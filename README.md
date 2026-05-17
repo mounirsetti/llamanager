@@ -1,3 +1,11 @@
+<!-- markdownlint-disable MD033 MD041 MD060 -->
+<!-- MD033: the banner below uses <picture>/<img> for theme-aware logos
+     and badge images, which Markdown can't express natively.
+     MD041: the file's first visible line is that banner, not an h1.
+     MD060: some tables mix narrow rows (short commands) with very wide
+     ones (long install URLs); aligning every pipe to the longest row
+     would force excessive padding for no readability gain. -->
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
@@ -90,9 +98,9 @@ Python 3.11 or newer is required. The daemon uses `tomllib` and recent asyncio f
 
 llamanager requires `llama-server` — the inference engine from [llama.cpp](https://github.com/ggerganov/llama.cpp) — to be installed separately. llamanager manages and proxies it; it does not bundle the binary.
 
-| os      | easiest install                                    |
-|---------|----------------------------------------------------|
-| macOS   | `brew install llama.cpp`                           |
+| os      | easiest install |
+|---------|-----------------|
+| macOS   | `brew install llama.cpp` |
 | Linux   | auto-install via the llamanager UI (CPU build), or download a CUDA/ROCm/Vulkan/SYCL build from [releases](https://github.com/ggerganov/llama.cpp/releases) |
 | Windows | auto-install via the llamanager UI (AVX2 CPU build), or download a CUDA/ROCm/SYCL build from [releases](https://github.com/ggerganov/llama.cpp/releases) |
 
@@ -109,7 +117,7 @@ The dashboard auto-detects your GPU and reports available VRAM (or unified memor
 
 If no compatible GPU tool is found, llamanager falls back to system RAM for capacity estimates and shows "No compatible GPU detected" on the dashboard. Inference still works (CPU-only) but will be slower.
 
-After installing llamanager, open **http://localhost:7200/ui/setup** to verify detection, set the binary path if needed, or trigger an automatic install directly from the UI.
+After installing llamanager, open the [Setup page](http://localhost:7200/ui/setup) to verify detection, set the binary path if needed, or trigger an automatic install directly from the UI.
 
 If `llama-server` is already installed but not on `PATH`, you can point llamanager at it by setting `llama_server_binary` in `~/.llamanager/config.toml`, or using the path field on the Setup page.
 
@@ -124,20 +132,28 @@ llamanager supports installing compatible llama.cpp forks **alongside** the defa
 
 To install or switch engines, open **Setup** in the web UI. The **Alternative engines** section lets you auto-install a fork from its GitHub releases and switch the active binary with one click. You can also switch via the CLI by setting `llama_server_binary` in `config.toml` to the fork's binary path.
 
-When using Atomic TurboQuant, add the relevant flags to your profile args to enable its features:
+When using Atomic TurboQuant, add the relevant flags to your profile args to enable its features. Profiles are nested under their parent model:
 
 ```toml
-[profiles.turbo-example]
-model = "your-model.gguf"
-args = { ctx-size = 16384, ctk = "turbo3", ctv = "turbo3", fa = true }
+[models."your-model.gguf"]
+default_profile = "turbo-example"
+
+[models."your-model.gguf".profiles.turbo-example]
+ctx_size = 16384
+[models."your-model.gguf".profiles.turbo-example.args]
+ctk = "turbo3"
+ctv = "turbo3"
+fa = true
 ```
 
 For MTP speculative decoding with Gemma 4 models:
 
 ```toml
-[profiles.gemma4-mtp]
-model = "gemma4-target.gguf"
-args = { ctx-size = 16384, mtp-head = "gemma4-assistant.gguf", spec-type = "mtp" }
+[models."gemma4-target.gguf".profiles.gemma4-mtp]
+ctx_size = 16384
+[models."gemma4-target.gguf".profiles.gemma4-mtp.args]
+mtp-head = "gemma4-assistant.gguf"
+spec-type = "mtp"
 ```
 
 ## Download
@@ -207,7 +223,7 @@ llamanager serve                           # foreground, ctrl-c to stop
 
 The first launch prints a bootstrap admin key to stdout:
 
-```
+```text
 ==============================================================================
   llamanager BOOTSTRAP ADMIN KEY (shown ONCE — won't be displayed again)
   lm_2n8RkFf...
@@ -296,7 +312,7 @@ curl -N http://localhost:7200/v1/chat/completions \
 
 ### Requesting a specific model
 
-By default, requests use whatever model is currently loaded (or the default profile if nothing is running yet). To request a different model, add the `X-Llamanager-Model` header. llamanager will hot-swap automatically if needed.
+By default, requests use whatever model is currently loaded (or the default model and its default profile if nothing is running yet). To request a different model or profile, add the relevant headers. llamanager hot-swaps automatically if needed.
 
 **By model ID** (the path relative to the models directory):
 
@@ -308,15 +324,18 @@ curl -N http://localhost:7200/v1/chat/completions \
   -d '{"model": "any", "messages": [{"role": "user", "content": "Hi!"}]}'
 ```
 
-**By profile name** (uses the profile's model, mmproj, and args):
+**By profile name** — profiles always belong to a model, so send both headers (or send `X-Llamanager-Profile` alone to apply it against the default/currently-loaded model):
 
 ```bash
 curl -N http://localhost:7200/v1/chat/completions \
   -H "Authorization: Bearer $ORIGIN_KEY" \
-  -H "X-Llamanager-Model: profile:my-vision-profile" \
+  -H "X-Llamanager-Model: bartowski/Llama-3.2-1B-Instruct-GGUF/Llama-3.2-1B-Instruct-Q4_K_M.gguf" \
+  -H "X-Llamanager-Profile: my-vision-profile" \
   -H "Content-Type: application/json" \
   -d '{"model": "any", "messages": [{"role": "user", "content": "Hi!"}]}'
 ```
+
+> Note: the legacy `X-Llamanager-Model: profile:<name>` shorthand has been removed. Use the separate `X-Llamanager-Model` and `X-Llamanager-Profile` headers instead.
 
 Each origin's `allowed_models` setting restricts which models it can request. Set to `*` to allow any model, `default` to allow only the default, or a comma-separated list of specific model IDs.
 
@@ -414,7 +433,7 @@ schtasks /Delete /TN llamanager /F
 
 Daemon and installer commands:
 
-```
+```text
 llamanager serve [--host ...] [--port ...] [--log-level info]
 llamanager init-config [--path PATH]
 llamanager status                    # prints last persisted runtime.json
@@ -446,7 +465,7 @@ Base URL resolution order:
 3. derived from config (`http://<bind>:<port>`, with `0.0.0.0` rewritten to
    `127.0.0.1` since the CLI usually runs on the same host)
 
-```
+```text
 llamanager server status                    # full daemon snapshot
 llamanager server start --profile P         # start llama-server
 llamanager server stop
@@ -503,13 +522,40 @@ data_dir = "~/.llamanager"
 
 [defaults]
 model = ""       # set after pulling your first model
-profile = ""     # auto-created when you pull a model
 
-# Profiles are auto-created when you pull a model, or you can add them manually:
-# [profiles.my-model]
-# model = "org/repo-GGUF/Q4_K_M.gguf"
-# args = { ctx-size = 4096, temp = 0.7 }
+# Engine-keyed minimum defaults — applied to every model of that engine
+# unless its profile (or the request itself) overrides the key.
+[default_args.llama]
+temp = 0.7
+
+[default_args.mlx]
+temp = 0.6
+
+# Profiles are auto-created when you pull a model. They nest under the
+# model they configure. Example of a manual entry:
+#
+# [models."org/repo-GGUF/Q4_K_M.gguf"]
+# default_profile = "fast"
+#
+# [models."org/repo-GGUF/Q4_K_M.gguf".profiles.fast]
+# mmproj = ""                      # optional, for GGUF multimodal models
+# ctx_size = 4096                  # llama.cpp only; MLX reads ctx from the model
+# vram_limit_gb = 8.0              # optional; omit (or set ram_spill_policy
+#                                  # = "default") to let the engine decide
+# ram_spill_policy = "limited"     # "default" | "unlimited" | "limited" | "none"
+# ram_spill_limit_gb = 4.0         # only used when policy = "limited"
+#
+# [models."org/repo-GGUF/Q4_K_M.gguf".profiles.fast.args]
+# # Raw engine flags — pass through to llama-server / mlx_lm.server.
+# # These win over the basic fields above.
+# temp = 0.7
 ```
+
+The VRAM / RAM-spill knobs are basic fields that translate into a
+computed `--n-gpu-layers` value at launch time, based on the model's
+GGUF header (layer count + file size) plus a KV-cache budget derived
+from `ctx_size`. They're llama.cpp-only — MLX uses unified memory and
+ignores them.
 
 ## API
 
@@ -524,7 +570,7 @@ Full endpoint list is in spec §5.
 
 ## Filesystem layout
 
-```
+```text
 ~/.llamanager/
 ├── config.toml             static config (you edit this)
 ├── state.db                sqlite: origins, requests, downloads, events
