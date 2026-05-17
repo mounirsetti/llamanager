@@ -660,6 +660,105 @@
     .htmx-swapping { opacity: 0; transition: opacity 120ms cubic-bezier(0.22, 1, 0.36, 1); }
     .htmx-settling { opacity: 1; transition: opacity 120ms cubic-bezier(0.22, 1, 0.36, 1); }
 
+    /* ---------- inline file/folder browser ---------- */
+    .lm-fs-host { margin-top: 8px; }
+    .lm-fs-host:empty { display: none; }
+    .lm-fs {
+      border: 1px solid var(--bg-3);
+      background: var(--bg-1);
+      padding: 10px 12px;
+      max-width: 480px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .lm-fs__bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--bg-3);
+    }
+    .lm-fs__cwd {
+      flex: 1;
+      min-width: 0;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.75rem;
+      color: var(--fg-1);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .lm-fs__shortcuts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--bg-3);
+    }
+    .lm-fs__shortcut {
+      background: transparent;
+      border: 1px solid var(--bg-3);
+      border-radius: 2px;
+      padding: 3px 8px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.6875rem;
+      letter-spacing: 0.04em;
+      color: var(--fg-1);
+      transition: border-color 120ms ease, color 120ms ease;
+    }
+    .lm-fs__shortcut:hover {
+      border-color: var(--fg-2);
+      color: var(--fg-0);
+    }
+    .lm-fs__select-dir { padding-bottom: 4px; }
+    .lm-fs__list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      max-height: 280px;
+      overflow-y: auto;
+    }
+    .lm-fs__list li { margin: 0; padding: 0; }
+    .lm-fs__entry {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      padding: 5px 6px;
+      background: transparent;
+      border: 0;
+      text-align: left;
+      font-size: 0.8125rem;
+      color: var(--fg-1);
+      transition: background 120ms ease, color 120ms ease;
+    }
+    .lm-fs__entry:hover { background: var(--bg-2); color: var(--fg-0); }
+    .lm-fs__entry:focus-visible {
+      outline: 1px solid var(--accent);
+      outline-offset: -1px;
+    }
+    .lm-fs__icon { width: 16px; flex-shrink: 0; opacity: 0.75; }
+    .lm-fs__name {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.75rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .lm-fs__entry--dir .lm-fs__name { color: var(--fg-0); }
+    .lm-fs__empty {
+      color: var(--fg-2);
+      font-size: 0.75rem;
+      padding: 8px 6px;
+      font-style: italic;
+    }
+    .lm-fs__error {
+      color: var(--bad);
+      font-size: 0.75rem;
+      margin: 0;
+    }
+
     /* ---------- touch-friendly sizing ---------- */
     @media (pointer: coarse) {
       .lm-btn { min-height: 44px; padding: 10px 16px; }
@@ -930,6 +1029,49 @@
       if (!form) return;
       var input = form.querySelector('input[name="vram_limit_gb"]');
       if (input) input.disabled = cb.checked;
+    });
+
+    /* Inline file/folder browser: inject the source input's current
+       value as the `path` query param before htmx fires. CSP blocks
+       hx-vals="js:..." because we don't ship 'unsafe-eval', so the
+       button declares data-fs-prefill="<input-id>" instead. */
+    document.addEventListener('htmx:configRequest', function (e) {
+      var elt = e.detail.elt;
+      if (!elt || !elt.getAttribute) return;
+      var inputId = elt.getAttribute('data-fs-prefill');
+      if (!inputId) return;
+      var input = document.getElementById(inputId);
+      if (input && input.value) {
+        e.detail.parameters['path'] = input.value;
+      }
+    });
+
+    /* Inline file/folder browser: handle "select" + "close" clicks.
+       Delegated so it keeps working after htmx swaps replace the panel. */
+    document.addEventListener('click', function (e) {
+      var btn = e.target.closest && e.target.closest('[data-fs-select]');
+      if (btn) {
+        var inputId = btn.getAttribute('data-fs-target');
+        var value = btn.getAttribute('data-fs-path');
+        if (inputId) {
+          var input = document.getElementById(inputId);
+          if (input) {
+            input.value = value;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.focus();
+          }
+          var host = document.querySelector('[data-fs-host="' + inputId + '"]');
+          if (host) host.innerHTML = '';
+        }
+        return;
+      }
+      var close = e.target.closest && e.target.closest('[data-fs-close]');
+      if (close) {
+        var hostId = close.getAttribute('data-fs-close');
+        var host2 = document.querySelector('[data-fs-host="' + hostId + '"]');
+        if (host2) host2.innerHTML = '';
+      }
     });
 
     /* Register service worker for PWA install support */

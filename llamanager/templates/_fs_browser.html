@@ -1,0 +1,96 @@
+{# Local filesystem browser — rendered by GET /ui/fs/browse.
+   Used inline beneath the path inputs that have a "Browse" button.
+
+   Selection works via two mechanisms:
+   - Directories: hx-get back into this same endpoint to navigate.
+   - Files / "use this directory": plain buttons carrying data-fs-path +
+     data-fs-target. A delegated listener in base.html copies the path
+     into the named input and hides the browser panel. #}
+
+{% set _q_base = '/ui/fs/browse?kind=' ~ fs_kind ~ '&target=' ~ (fs_target|urlencode) ~ ('&ext=' ~ fs_ext|urlencode if fs_ext else '') %}
+
+<div class="lm-fs" role="region" aria-label="File browser">
+  <div class="lm-fs__bar">
+    <code class="lm-fs__cwd" title="{{ fs_current }}">{{ fs_current }}</code>
+    <button type="button"
+            class="lm-btn lm-btn--ghost lm-btn--xs"
+            data-fs-close="{{ fs_target }}">Close</button>
+  </div>
+
+  {% if fs_shortcuts %}
+  <div class="lm-fs__shortcuts" aria-label="Quick locations">
+    {% for s in fs_shortcuts %}
+    <button type="button"
+            class="lm-fs__shortcut"
+            hx-get="{{ _q_base }}&path={{ s.path|urlencode }}"
+            hx-target="closest .lm-fs-host"
+            hx-swap="innerHTML"
+            title="{{ s.path }}">{{ s.label }}</button>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if fs_error %}
+  <p class="lm-fs__error">Could not read directory: {{ fs_error }}</p>
+  {% endif %}
+
+  {% if fs_kind == 'dir' %}
+  <div class="lm-fs__select-dir">
+    <button type="button"
+            class="lm-btn lm-btn--primary lm-btn--xs"
+            data-fs-select=""
+            data-fs-path="{{ fs_current }}"
+            data-fs-target="{{ fs_target }}">Use this directory</button>
+  </div>
+  {% endif %}
+
+  <ul class="lm-fs__list">
+    {% if fs_parent %}
+    <li>
+      <button type="button"
+              class="lm-fs__entry lm-fs__entry--dir"
+              hx-get="{{ _q_base }}&path={{ fs_parent|urlencode }}"
+              hx-target="closest .lm-fs-host"
+              hx-swap="innerHTML">
+        <span class="lm-fs__icon">&#x2191;</span>
+        <span class="lm-fs__name">..</span>
+      </button>
+    </li>
+    {% endif %}
+
+    {% for d in fs_dirs %}
+    <li>
+      <button type="button"
+              class="lm-fs__entry lm-fs__entry--dir"
+              hx-get="{{ _q_base }}&path={{ d.path|urlencode }}"
+              hx-target="closest .lm-fs-host"
+              hx-swap="innerHTML">
+        <span class="lm-fs__icon">&#x1f4c1;</span>
+        <span class="lm-fs__name">{{ d.name }}/</span>
+      </button>
+    </li>
+    {% endfor %}
+
+    {% if fs_kind == 'file' %}
+      {% for f in fs_files %}
+      <li>
+        <button type="button"
+                class="lm-fs__entry lm-fs__entry--file"
+                data-fs-select=""
+                data-fs-path="{{ f.path }}"
+                data-fs-target="{{ fs_target }}">
+          <span class="lm-fs__icon">&#x1f4c4;</span>
+          <span class="lm-fs__name">{{ f.name }}</span>
+        </button>
+      </li>
+      {% endfor %}
+      {% if not fs_files and not fs_dirs and not fs_error %}
+      <li class="lm-fs__empty">No matching files in this directory{% if fs_ext %} (filter: <code>*{{ fs_ext }}</code>){% endif %}.</li>
+      {% endif %}
+    {% else %}
+      {% if not fs_dirs and not fs_error %}
+      <li class="lm-fs__empty">No subdirectories.</li>
+      {% endif %}
+    {% endif %}
+  </ul>
+</div>

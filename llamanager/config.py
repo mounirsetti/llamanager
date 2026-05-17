@@ -171,12 +171,18 @@ class Config:
     # Engine-keyed minimum defaults ("llama" / "mlx" → args dict).
     default_args: dict[str, dict[str, Any]] = field(default_factory=dict)
 
+    # Set by the operator via /ui/models/set-dir or [server].models_dir in
+    # config.toml. When None, models_dir falls back to data_dir/models.
+    models_dir_override: Path | None = None
+
     raw: dict[str, Any] = field(default_factory=dict)
     path: Path | None = None
 
     # ---- derived paths ----
     @property
     def models_dir(self) -> Path:
+        if self.models_dir_override is not None:
+            return self.models_dir_override
         return self.data_dir / "models"
 
     @property
@@ -305,6 +311,9 @@ def load_config(path: Path | None = None) -> Config:
         raw=raw,
         path=cfg_path,
     )
+
+    if "models_dir" in server:
+        cfg.models_dir_override = expand(str(server["models_dir"]))
 
     # ---- new-format models section ----
     for model_id, body in (raw.get("models") or {}).items():

@@ -128,10 +128,12 @@ BACKENDS: dict[str, dict] = {
 GPU_TOKENS = ("cuda", "vulkan", "hip", "rocm", "sycl", "kompute",
               "openvino", "kleidiai", "musa")
 
+# Per backend, the asset filename must contain ANY one of these tokens.
+# HIP lists both because upstream uses 'hip' on Windows and 'rocm' on Linux.
 _BACKEND_TOKENS: dict[str, tuple[str, ...]] = {
     "cuda": ("cuda",),
     "vulkan": ("vulkan",),
-    "hip": ("hip",),
+    "hip": ("hip", "rocm"),
     "sycl": ("sycl",),
 }
 
@@ -398,20 +400,24 @@ def write_install_meta(source: str, backend: str, **fields) -> None:
 # ---------------------------------------------------------------------------
 # GitHub release fetching + asset matching
 # ---------------------------------------------------------------------------
-def _platform_tags() -> list[str]:
+def _platform_tags() -> list[tuple[str, ...]]:
+    """Acceptable (os, arch) token tuples — every token must appear in the
+    asset name. Split because upstream filenames interleave backend tokens
+    between OS and arch (``…-ubuntu-vulkan-x64.tar.gz``), so a joined
+    ``"ubuntu-x64"`` substring check misses them."""
     system = platform.system()
     machine = platform.machine().lower()
     if system == "Darwin":
         if machine in ("arm64", "aarch64"):
-            return ["macos-arm64"]
-        return ["macos-x64"]
+            return [("macos", "arm64")]
+        return [("macos", "x64")]
     if system == "Linux":
         if machine in ("aarch64", "arm64"):
-            return ["ubuntu-arm64", "linux-arm64"]
-        return ["ubuntu-x64", "linux-x64"]
+            return [("ubuntu", "arm64"), ("linux", "arm64")]
+        return [("ubuntu", "x64"), ("linux", "x64")]
     if machine in ("arm64", "aarch64"):
-        return ["win-arm64"]
-    return ["win-x64", "win-amd64"]
+        return [("win", "arm64")]
+    return [("win", "x64"), ("win", "amd64")]
 
 
 def _asset_extensions() -> tuple[str, ...]:
@@ -429,10 +435,10 @@ def _select_asset(assets: list[dict], backend: str) -> dict | None:
         low = name.lower()
         if not any(low.endswith(ext) for ext in exts):
             return False
-        if not any(tag in low for tag in tags):
+        if not any(all(part in low for part in tag) for tag in tags):
             return False
         if backend_tokens:
-            if not all(tok in low for tok in backend_tokens):
+            if not any(tok in low for tok in backend_tokens):
                 return False
         else:
             if any(tok in low for tok in GPU_TOKENS):
@@ -444,6 +450,24 @@ def _select_asset(assets: list[dict], backend: str) -> dict | None:
         return None
     candidates.sort(key=lambda a: (len(a["name"]), a["name"]))
     return candidates[0]
+
+
+def _missing_asset_hint(source: str, backend: str) -> str:
+    """User-facing guidance when upstream didn't publish a binary for the
+    requested (platform, backend) combination."""
+    if backend == "cuda" and current_platform() == "linux":
+        return (
+            "The official llama.cpp project does not always ship a "
+            "prebuilt Linux CUDA binary in every release. You have two "
+            "options:\n"
+            "  1. Build llama.cpp from source with CUDA support — see "
+            "https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md#cuda\n"
+            "  2. Use the official CUDA container image "
+            "(ghcr.io/ggml-org/llama.cpp:server-cuda)\n"
+            "Alternatively, install the Vulkan backend instead — it "
+            "accelerates on NVIDIA, AMD, and Intel GPUs."
+        )
+    return ""
 
 
 def _fetch_latest_release(github_api_url: str) -> dict:
@@ -578,10 +602,15 @@ async def _install_llama(state: InstallState, source: str, backend: str,
         asset = _select_asset(release.get("assets", []), backend)
         if asset is None:
             names = [a.get("name", "") for a in release.get("assets", [])]
-            raise RuntimeError(
+            hint = _missing_asset_hint(source, backend)
+            msg = (
                 f"No release asset found for {be_meta['label']} on this "
-                f"platform in release {tag}. Available: {names}"
+                f"platform in release {tag}."
             )
+            if hint:
+                msg += f"\n\n{hint}"
+            msg += f"\n\nAvailable assets in this release: {names}"
+            raise RuntimeError(msg)
 
         size_mb = (asset.get("size", 0) or 0) // 1024 // 1024
         _emit(f"Downloading {asset['name']} ({size_mb} MB)…")

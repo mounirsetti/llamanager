@@ -802,6 +802,128 @@ async def models_locate(request: Request,
     return RedirectResponse("/ui/models", status_code=303)
 
 
+# ---------- local filesystem browser (for path inputs) ----------
+
+def _fs_default_start(kind: str) -> Path:
+    """Where to start browsing if the caller didn't specify a path."""
+    return Path.home()
+
+
+def _fs_shortcuts() -> list[dict[str, str]]:
+    """Quick-jump locations shown above the directory listing. Lets users
+    cross drive/root boundaries that ``..`` cannot reach (Windows drive
+    letters, mounted volumes on macOS/Linux). Only entries that exist on
+    disk are returned."""
+    import sys as _sys
+    out: list[dict[str, str]] = []
+    home = Path.home()
+    if home.exists():
+        out.append({"label": "Home", "path": str(home)})
+
+    if _sys.platform == "win32":
+        import string
+        for letter in string.ascii_uppercase:
+            drive = Path(f"{letter}:\\")
+            try:
+                if drive.exists():
+                    out.append({"label": f"{letter}:\\", "path": str(drive)})
+            except OSError:
+                continue
+        return out
+
+    out.append({"label": "/", "path": "/"})
+    # Surface mounted volumes (one level under common mount roots).
+    mount_roots = ["/Volumes"] if _sys.platform == "darwin" else ["/mnt", "/media"]
+    for root in mount_roots:
+        root_path = Path(root)
+        if not root_path.is_dir():
+            continue
+        try:
+            for entry in sorted(root_path.iterdir(), key=lambda p: p.name.lower()):
+                if entry.name.startswith("."):
+                    continue
+                if entry.is_dir():
+                    out.append({"label": entry.name, "path": str(entry)})
+        except (PermissionError, OSError):
+            continue
+    return out
+
+
+def _fs_safe_listdir(path: Path) -> tuple[list[Path], list[Path], str | None]:
+    """Return (dirs, files, error_message). Hidden entries are skipped.
+    Errors (permission, missing) are returned, not raised."""
+    try:
+        entries = sorted(path.iterdir(), key=lambda p: p.name.lower())
+    except (PermissionError, FileNotFoundError, NotADirectoryError, OSError) as exc:
+        return [], [], str(exc)
+    dirs, files = [], []
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        try:
+            if entry.is_dir():
+                dirs.append(entry)
+            elif entry.is_file():
+                files.append(entry)
+        except OSError:
+            # broken symlink, race — skip silently
+            continue
+    return dirs, files, None
+
+
+@router.get("/fs/browse", response_class=HTMLResponse)
+async def fs_browse(request: Request,
+                    path: str = "",
+                    kind: str = "file",
+                    ext: str = "",
+                    target: str = "",
+                    _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """Render an inline directory browser for one of the path inputs.
+
+    Query params:
+      path:   directory to list (defaults to $HOME)
+      kind:   "file" or "dir" — controls which selection action is shown
+      ext:    optional extension filter for files (e.g. ".gguf"); empty = all
+      target: id of the form input whose value should be set on selection
+    """
+    if kind not in ("file", "dir"):
+        kind = "file"
+    raw = (path or "").strip()
+    current = Path(raw).expanduser() if raw else _fs_default_start(kind)
+    try:
+        current = current.resolve()
+    except OSError:
+        current = _fs_default_start(kind)
+
+    if not current.is_dir():
+        # Fall back to the parent if a file path was passed in.
+        current = current.parent if current.parent.exists() else _fs_default_start(kind)
+
+    dirs, files, err = _fs_safe_listdir(current)
+    ext_norm = ext.strip().lower()
+    if ext_norm and not ext_norm.startswith("."):
+        ext_norm = "." + ext_norm
+    if ext_norm:
+        files = [f for f in files if f.suffix.lower() == ext_norm]
+
+    parent = current.parent if current.parent != current else None
+    return templates.TemplateResponse(
+        request, "_fs_browser.html",
+        _ctx(
+            request,
+            fs_current=str(current),
+            fs_parent=str(parent) if parent else "",
+            fs_dirs=[{"name": d.name, "path": str(d)} for d in dirs],
+            fs_files=[{"name": f.name, "path": str(f)} for f in files],
+            fs_error=err,
+            fs_kind=kind,
+            fs_ext=ext_norm,
+            fs_target=target,
+            fs_shortcuts=_fs_shortcuts(),
+        ),
+    )
+
+
 # ---------- model search / browse (Hugging Face) ----------
 
 def _fmt_count(n: int) -> str:

@@ -258,6 +258,45 @@
 <h1 class="lm-page-title">Models</h1>
 <p class="lm-page-lede">Manage on-disk models and their profiles. Profiles attach to their model and configure how the engine launches it.</p>
 
+{# ---- Storage location ---- #}
+<section class="lm-section" style="margin-top: 32px;">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Storage location</span>
+  </header>
+
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
+    By default models are stored in <code>~/.llamanager/models</code>. If you have a separate drive or prefer a different path, change it here. The directory will be created if it does not exist.
+  </p>
+
+  <form class="lm-form" method="post" action="/ui/models/set-dir">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-field">
+      <label class="lm-field-label" for="models-dir-input">Models directory</label>
+      <div style="display: flex; gap: 8px; align-items: flex-end; max-width: 480px;">
+        <input id="models-dir-input"
+               class="lm-input lm-input--mono"
+               type="text"
+               name="models_dir"
+               value="{{ models_dir }}"
+               style="flex: 1; min-width: 0;">
+        <button type="button"
+                class="lm-btn lm-btn--ghost lm-btn--xs"
+                hx-get="/ui/fs/browse?kind=dir&target=models-dir-input"
+                data-fs-prefill="models-dir-input"
+                hx-target="[data-fs-host='models-dir-input']"
+                hx-swap="innerHTML">Browse…</button>
+      </div>
+      <div class="lm-fs-host" data-fs-host="models-dir-input"></div>
+    </div>
+    <div>
+      <button type="submit" class="lm-btn lm-btn--primary"
+              data-confirm="Change the models directory? Existing models in the old location will not be moved.">
+        Save location
+      </button>
+    </div>
+  </form>
+</section>
+
 {# ---- Engine-keyed default args ---- #}
 <section class="lm-section" style="margin-top: 32px;">
   <header class="lm-section-head">
@@ -383,13 +422,22 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="lm-field">
       <label class="lm-field-label" for="existing-path">Path to .gguf file</label>
-      <input id="existing-path"
-             class="lm-input lm-input--mono"
-             type="text"
-             name="file_path"
-             placeholder="/path/to/model.gguf"
-             required
-             style="max-width: 480px;">
+      <div style="display: flex; gap: 8px; align-items: flex-end; max-width: 480px;">
+        <input id="existing-path"
+               class="lm-input lm-input--mono"
+               type="text"
+               name="file_path"
+               placeholder="/path/to/model.gguf"
+               required
+               style="flex: 1; min-width: 0;">
+        <button type="button"
+                class="lm-btn lm-btn--ghost lm-btn--xs"
+                hx-get="/ui/fs/browse?kind=file&ext=.gguf&target=existing-path"
+                data-fs-prefill="existing-path"
+                hx-target="[data-fs-host='existing-path']"
+                hx-swap="innerHTML">Browse…</button>
+      </div>
+      <div class="lm-fs-host" data-fs-host="existing-path"></div>
     </div>
     <div>
       <button type="submit" class="lm-btn lm-btn--primary">Add model</button>
@@ -397,33 +445,4 @@
   </form>
 </section>
 
-{# ---- Storage location ---- #}
-<section class="lm-section">
-  <header class="lm-section-head">
-    <span class="lm-section-marker">Storage location</span>
-  </header>
-
-  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
-    By default models are stored in <code>~/.llamanager/models</code>. If you have a separate drive or prefer a different path, change it here. The directory will be created if it does not exist.
-  </p>
-
-  <form class="lm-form" method="post" action="/ui/models/set-dir">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <div class="lm-field">
-      <label class="lm-field-label" for="models-dir-input">Models directory</label>
-      <input id="models-dir-input"
-             class="lm-input lm-input--mono"
-             type="text"
-             name="models_dir"
-             value="{{ models_dir }}"
-             style="max-width: 480px;">
-    </div>
-    <div>
-      <button type="submit" class="lm-btn lm-btn--primary"
-              data-confirm="Change the models directory? Existing models in the old location will not be moved.">
-        Save location
-      </button>
-    </div>
-  </form>
-</section>
 {% endblock %}
