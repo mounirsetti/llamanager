@@ -589,8 +589,34 @@ async def queue_cancel_ui(request: Request, request_id: str,
 
 # ---------- models ----------
 
+_CTX_MAX_CACHE: dict[tuple[str, float], int] = {}
+
+
+def _ctx_max_for(path: Path, engine: str) -> int:
+    """Best-effort trained context length for a model. Cached by (path,
+    mtime). Returns a generous fallback when unknown."""
+    if engine != "llama" or not path.is_file():
+        return 131072
+    try:
+        key = (str(path), path.stat().st_mtime)
+    except OSError:
+        return 131072
+    cached = _CTX_MAX_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        from .gguf_meta import read_gguf_meta
+        meta = read_gguf_meta(path)
+        value = int(meta.context_length) if meta.context_length else 131072
+    except Exception:
+        value = 131072
+    _CTX_MAX_CACHE[key] = value
+    return value
+
+
 def _models_ctx(request: Request) -> dict:
     import sys as _sys
+    import psutil as _psutil
     reg: Registry = request.app.state.registry
     cfg = request.app.state.cfg
     if _sys.platform == "darwin":
@@ -600,6 +626,17 @@ def _models_ctx(request: Request) -> dict:
     else:
         open_label = "Open folder"
 
+    sysinfo = _get_system_info(cfg.models_dir)
+    ram_total_gb = float(sysinfo.get("ram_total_gb") or 0) or round(
+        _psutil.virtual_memory().total / (1024**3), 1
+    )
+    vram_total_gb = sysinfo.get("gpu_vram_total_gb")
+    # On Apple Silicon (unified memory) and CPU-only systems we have no
+    # distinct VRAM total; fall back to system RAM as the cap for the
+    # vram_limit slider so the control is still useful.
+    if not vram_total_gb:
+        vram_total_gb = ram_total_gb
+
     # Profiles live nested under their parent model in cfg.models. We hand
     # the template a flattened per-model list of dicts so Jinja can render
     # without poking dataclasses.
@@ -608,6 +645,7 @@ def _models_ctx(request: Request) -> dict:
         d = entry.to_dict()
         engine = detect_engine_for_id(entry.model_id, cfg.models_dir)
         d["engine"] = engine
+        d["ctx_max"] = _ctx_max_for(entry.path, engine)
         m = cfg.get_model(entry.model_id)
         prof_entries: list[dict] = []
         default_profile = ""
@@ -640,6 +678,8 @@ def _models_ctx(request: Request) -> dict:
         default_args=cfg.default_args,
         default_model=cfg.default_model,
         ram_spill_policies=VALID_RAM_SPILL_POLICIES,
+        ram_total_gb=round(ram_total_gb, 1),
+        vram_total_gb=round(float(vram_total_gb), 1),
     )
 
 

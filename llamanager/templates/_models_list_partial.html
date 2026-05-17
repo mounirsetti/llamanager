@@ -139,10 +139,18 @@
 
                 <div class="lm-tab-panel" data-panel="basic">
                   {% if m.engine == 'llama' %}
-                  <label class="lm-field-label">Context size (tokens)</label>
-                  <input class="lm-input" type="number" name="ctx_size" min="128" step="128"
-                         value="{{ prof.ctx_size if prof.ctx_size is not none else '' }}"
-                         placeholder="e.g. 4096">
+                  <label class="lm-field-label">Context size (tokens)
+                    <span class="lm-field-hint">model max: {{ "{:,}".format(m.ctx_max) }}</span>
+                  </label>
+                  <div class="lm-slider-pair">
+                    <input type="range" class="lm-slider"
+                           min="128" max="{{ m.ctx_max }}" step="128"
+                           value="{{ prof.ctx_size if prof.ctx_size is not none else 4096 }}">
+                    <input class="lm-input lm-slider-pair__num" type="number"
+                           name="ctx_size" min="128" max="{{ m.ctx_max }}" step="128"
+                           value="{{ prof.ctx_size if prof.ctx_size is not none else '' }}"
+                           placeholder="e.g. 4096">
+                  </div>
                   {% else %}
                   <label class="lm-field-label">Context size (read-only — fixed by the MLX model)</label>
                   <input class="lm-input" type="text" disabled
@@ -151,13 +159,20 @@
                   <input type="hidden" name="ctx_size" value="">
                   {% endif %}
 
-                  <label class="lm-field-label">VRAM limit (GB)</label>
-                  <div style="display: flex; gap: 8px; align-items: center;">
-                    <input class="lm-input" type="number" name="vram_limit_gb" min="0" step="0.5"
+                  <label class="lm-field-label">VRAM limit (GB)
+                    <span class="lm-field-hint">system: {{ vram_total_gb }} GB</span>
+                  </label>
+                  <div class="lm-slider-pair">
+                    <input type="range" class="lm-slider"
+                           min="0" max="{{ vram_total_gb }}" step="0.5"
+                           value="{{ prof.vram_limit_gb if prof.vram_limit_gb is not none else 0 }}"
+                           {% if m.engine != 'llama' %}disabled{% endif %}>
+                    <input class="lm-input lm-slider-pair__num" type="number"
+                           name="vram_limit_gb" min="0" max="{{ vram_total_gb }}" step="0.5"
                            value="{{ prof.vram_limit_gb if prof.vram_limit_gb is not none else '' }}"
                            placeholder="e.g. 8.0"
                            {% if m.engine != 'llama' %}disabled{% endif %}>
-                    <label style="white-space: nowrap; font-size: 0.75rem;">
+                    <label class="lm-slider-pair__cap">
                       <input type="checkbox" name="vram_unlimited" value="on"
                              {% if prof.vram_limit_gb is none and prof.ram_spill_policy in ('default','unlimited','limited') %}checked{% endif %}
                              {% if m.engine != 'llama' %}disabled{% endif %}>
@@ -173,10 +188,17 @@
                     <option value="limited" {% if prof.ram_spill_policy == 'limited' %}selected{% endif %}>limit spill to RAM (GB)</option>
                     <option value="none" {% if prof.ram_spill_policy == 'none' %}selected{% endif %}>no spill — all layers on GPU</option>
                   </select>
-                  <input class="lm-input" type="number" name="ram_spill_limit_gb" min="0" step="0.5"
-                         value="{{ prof.ram_spill_limit_gb if prof.ram_spill_limit_gb is not none else '' }}"
-                         placeholder="GB allowed on CPU/RAM (only used when 'limit spill')"
-                         {% if prof.ram_spill_policy != 'limited' %}style="display:none;"{% endif %}>
+                  <div class="lm-slider-pair"
+                       {% if prof.ram_spill_policy != 'limited' %}style="display:none;"{% endif %}>
+                    <input type="range" class="lm-slider"
+                           min="0" max="{{ ram_total_gb }}" step="0.5"
+                           value="{{ prof.ram_spill_limit_gb if prof.ram_spill_limit_gb is not none else 0 }}">
+                    <input class="lm-input lm-slider-pair__num" type="number"
+                           name="ram_spill_limit_gb" min="0" max="{{ ram_total_gb }}" step="0.5"
+                           value="{{ prof.ram_spill_limit_gb if prof.ram_spill_limit_gb is not none else '' }}"
+                           placeholder="GB on CPU/RAM">
+                    <span class="lm-field-hint" style="white-space:nowrap;">/ {{ ram_total_gb }} GB</span>
+                  </div>
 
                   <label class="lm-field-label">mmproj (optional, GGUF multimodal)</label>
                   <input class="lm-input lm-input--mono" type="text" name="mmproj" value="{{ prof.mmproj or '' }}"
@@ -250,20 +272,34 @@
 
             <div class="lm-tab-panel" data-panel="basic">
               {% if m.engine == 'llama' %}
-              <label class="lm-field-label">Context size (tokens)</label>
-              <input class="lm-input" type="number" name="ctx_size" min="128" step="128" value="4096">
+              <label class="lm-field-label">Context size (tokens)
+                <span class="lm-field-hint">model max: {{ "{:,}".format(m.ctx_max) }}</span>
+              </label>
+              <div class="lm-slider-pair">
+                <input type="range" class="lm-slider"
+                       min="128" max="{{ m.ctx_max }}" step="128" value="4096">
+                <input class="lm-input lm-slider-pair__num" type="number"
+                       name="ctx_size" min="128" max="{{ m.ctx_max }}" step="128"
+                       value="4096">
+              </div>
               {% else %}
               <label class="lm-field-label">Context size (read-only — fixed by the MLX model)</label>
               <input class="lm-input" type="text" disabled value="defined by model config.json">
               <input type="hidden" name="ctx_size" value="">
               {% endif %}
 
-              <label class="lm-field-label">VRAM limit (GB)</label>
-              <div style="display: flex; gap: 8px; align-items: center;">
-                <input class="lm-input" type="number" name="vram_limit_gb" min="0" step="0.5"
+              <label class="lm-field-label">VRAM limit (GB)
+                <span class="lm-field-hint">system: {{ vram_total_gb }} GB</span>
+              </label>
+              <div class="lm-slider-pair">
+                <input type="range" class="lm-slider"
+                       min="0" max="{{ vram_total_gb }}" step="0.5" value="0"
+                       {% if m.engine != 'llama' %}disabled{% endif %}>
+                <input class="lm-input lm-slider-pair__num" type="number"
+                       name="vram_limit_gb" min="0" max="{{ vram_total_gb }}" step="0.5"
                        placeholder="e.g. 8.0"
                        {% if m.engine != 'llama' %}disabled{% endif %}>
-                <label style="white-space: nowrap; font-size: 0.75rem;">
+                <label class="lm-slider-pair__cap">
                   <input type="checkbox" name="vram_unlimited" value="on" checked
                          {% if m.engine != 'llama' %}disabled{% endif %}>
                   no cap
@@ -278,9 +314,14 @@
                 <option value="limited">limit spill to RAM (GB)</option>
                 <option value="none">no spill — all layers on GPU</option>
               </select>
-              <input class="lm-input" type="number" name="ram_spill_limit_gb" min="0" step="0.5"
-                     placeholder="GB allowed on CPU/RAM (only used when 'limit spill')"
-                     style="display: none;">
+              <div class="lm-slider-pair" style="display: none;">
+                <input type="range" class="lm-slider"
+                       min="0" max="{{ ram_total_gb }}" step="0.5" value="0">
+                <input class="lm-input lm-slider-pair__num" type="number"
+                       name="ram_spill_limit_gb" min="0" max="{{ ram_total_gb }}" step="0.5"
+                       placeholder="GB on CPU/RAM">
+                <span class="lm-field-hint" style="white-space:nowrap;">/ {{ ram_total_gb }} GB</span>
+              </div>
 
               <label class="lm-field-label">mmproj (optional)</label>
               <input class="lm-input lm-input--mono" type="text" name="mmproj"

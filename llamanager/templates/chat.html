@@ -102,6 +102,17 @@
   }
   /* top-level speed indicator */
   .chat-speed { font-size: 0.6875rem; color: var(--fg-3); margin-left: auto; white-space: nowrap; }
+  /* per-message stats (tok/s) */
+  .chat-stats-wrap { margin-top: 6px; display: flex; align-items: center; gap: 8px; }
+  .chat-stats-label {
+    font-size: 0.6875rem; color: var(--fg-3); cursor: pointer;
+    background: transparent; border: 0; padding: 0;
+  }
+  .chat-stats-label:hover { color: var(--fg-2); }
+  .chat-stats-value {
+    font-size: 0.6875rem; color: var(--fg-2);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/15.0.7/marked.min.js"
         crossorigin="anonymous" referrerpolicy="no-referrer"></script>
@@ -388,6 +399,28 @@
     var displayContent = (!isUser && parsed) ? parsed.content : (content || '');
     setContent(bubble, displayContent, !isUser);
     wrap.appendChild(bubble);
+
+    // On-demand stats (assistant only, if recorded)
+    if (!isUser && msgStats && typeof msgStats.tok_s === 'number' && msgStats.tok_s > 0) {
+      var statsWrap = document.createElement('div');
+      statsWrap.className = 'chat-stats-wrap';
+      var statsBtn = document.createElement('button');
+      statsBtn.type = 'button';
+      statsBtn.className = 'chat-stats-label';
+      statsBtn.textContent = '▶ stats';
+      var statsValue = document.createElement('span');
+      statsValue.className = 'chat-stats-value';
+      statsValue.style.display = 'none';
+      statsValue.textContent = msgStats.tok_s.toFixed(1) + ' tok/s';
+      statsBtn.addEventListener('click', function () {
+        var hidden = statsValue.style.display === 'none';
+        statsValue.style.display = hidden ? '' : 'none';
+        statsBtn.textContent = (hidden ? '▼ ' : '▶ ') + 'stats';
+      });
+      statsWrap.appendChild(statsBtn);
+      statsWrap.appendChild(statsValue);
+      wrap.appendChild(statsWrap);
+    }
 
     div.appendChild(badge);
     div.appendChild(wrap);

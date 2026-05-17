@@ -550,6 +550,49 @@
     }
     .lm-checkbox-row input { accent-color: var(--accent); }
 
+    /* ---------- slider + number pair ---------- */
+    .lm-field-hint {
+      display: inline;
+      margin-left: 8px;
+      font-size: 0.625rem;
+      letter-spacing: 0.08em;
+      color: var(--fg-3);
+      text-transform: none;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+    }
+    .lm-slider-pair {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      max-width: 520px;
+    }
+    .lm-slider {
+      flex: 1;
+      min-width: 0;
+      accent-color: var(--accent);
+      height: 24px;
+      cursor: pointer;
+      background: transparent;
+    }
+    .lm-slider:disabled { opacity: 0.45; cursor: not-allowed; }
+    .lm-slider-pair__num {
+      flex: 0 0 110px;
+      font-variant-numeric: tabular-nums;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.8125rem;
+    }
+    .lm-slider-pair__num:disabled { opacity: 0.45; }
+    .lm-slider-pair__cap {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+      font-size: 0.75rem;
+      color: var(--fg-1);
+      cursor: pointer;
+    }
+    .lm-slider-pair__cap input { accent-color: var(--accent); }
+
     /* ---------- key callout ---------- */
     .lm-callout {
       padding: 18px 20px;
@@ -1018,17 +1061,51 @@
       var form = sel.closest('form');
       if (!form) return;
       var limit = form.querySelector('input[name="ram_spill_limit_gb"]');
-      if (limit) limit.style.display = (sel.value === 'limited') ? '' : 'none';
+      var wrap = limit && (limit.closest('.lm-slider-pair') || limit);
+      if (wrap) wrap.style.display = (sel.value === 'limited') ? '' : 'none';
     });
 
-    /* "no cap" toggle disables the VRAM number input. */
+    /* "no cap" toggle disables both the VRAM number input AND its
+       paired slider. */
     document.addEventListener('change', function (e) {
       var cb = e.target;
       if (!cb || cb.name !== 'vram_unlimited') return;
       var form = cb.closest('form');
       if (!form) return;
       var input = form.querySelector('input[name="vram_limit_gb"]');
-      if (input) input.disabled = cb.checked;
+      if (!input) return;
+      input.disabled = cb.checked;
+      var pair = input.closest('.lm-slider-pair');
+      if (pair) {
+        var slider = pair.querySelector('input[type="range"]');
+        if (slider) slider.disabled = cb.checked;
+      }
+    });
+
+    /* Two-way bind: dragging a slider updates its paired number input
+       and vice versa. Pairing is by sibling lookup inside
+       .lm-slider-pair, so no IDs are needed and the script keeps
+       working after htmx re-renders. */
+    document.addEventListener('input', function (e) {
+      var el = e.target;
+      if (!el || !el.closest) return;
+      var pair = el.closest('.lm-slider-pair');
+      if (!pair) return;
+      var slider = pair.querySelector('input[type="range"]');
+      var num = pair.querySelector('input[type="number"]');
+      if (!slider || !num) return;
+      if (el === slider) {
+        num.value = slider.value;
+      } else if (el === num) {
+        var v = parseFloat(num.value);
+        if (!isNaN(v)) {
+          var min = parseFloat(slider.min);
+          var max = parseFloat(slider.max);
+          if (!isNaN(min) && v < min) v = min;
+          if (!isNaN(max) && v > max) v = max;
+          slider.value = v;
+        }
+      }
     });
 
     /* Inline file/folder browser: inject the source input's current
