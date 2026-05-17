@@ -175,6 +175,42 @@
   }
   .lm-btn--xs { padding: 4px 10px; font-size: 0.75rem; }
 
+  /* ---- Profile basic/advanced tabs ---- */
+  .lm-tabs {
+    display: flex;
+    gap: 4px;
+    margin: 8px 0 6px;
+    border-bottom: 1px solid var(--bg-3);
+  }
+  .lm-tab {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    padding: 6px 12px;
+    font: inherit;
+    font-size: 0.75rem;
+    color: var(--fg-2);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .lm-tab.is-active {
+    color: var(--fg-0);
+    border-bottom-color: var(--accent);
+  }
+  .lm-tab-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .lm-tab-panel[hidden] { display: none; }
+  .lm-help {
+    font-size: 0.75rem;
+    color: var(--fg-2);
+    margin: 0;
+    line-height: 1.4;
+  }
+
   /* ---- Global default profile card ---- */
   .lm-global-default {
     padding: 18px 22px;
@@ -222,59 +258,35 @@
 <h1 class="lm-page-title">Models</h1>
 <p class="lm-page-lede">Manage on-disk models and their profiles. Profiles attach to their model and configure how the engine launches it.</p>
 
-{# ---- Global default profile ---- #}
+{# ---- Engine-keyed default args ---- #}
 <section class="lm-section" style="margin-top: 32px;">
   <header class="lm-section-head">
-    <span class="lm-section-marker">Defaults</span>
+    <span class="lm-section-marker">Engine defaults</span>
   </header>
 
   <div class="lm-global-default">
-    <div class="lm-global-default__title">Global default profile</div>
     <p class="lm-global-default__lede">
-      An args-only fallback applied to any model when neither the request nor the model's own default profile sets one. Useful for shared decoding settings (context size, sampling) that aren't tied to a specific weight file.
+      Minimum default args applied to every model of a given engine. A model's profile (and the request itself) overrides any key set here.
     </p>
 
-    <div class="lm-global-default__current">
-      <span class="lm-eyebrow" style="margin: 0;">Current</span>
-      {% if global_default_profile %}
-      <code>{{ global_default_profile }}</code>
-      {% else %}
-      <em style="color: var(--fg-3); font-family: 'Fraunces', serif;">none set</em>
-      {% endif %}
-    </div>
-
-    <form method="post" action="/ui/models/profiles/set-global-default" class="lm-global-default__form">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <select name="profile_name" class="lm-input" style="min-width: 220px; max-width: 320px;">
-        <option value="">— none —</option>
-        {% for gp in global_profiles %}
-        <option value="{{ gp.name }}" {% if gp.name == global_default_profile %}selected{% endif %}>{{ gp.name }}</option>
-        {% endfor %}
-      </select>
-      <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Save</button>
-    </form>
-
-    <details style="margin-top: 14px;">
-      <summary style="cursor: pointer; font-size: 0.8125rem; color: var(--accent); user-select: none;">+ Create a new global profile</summary>
-      <form method="post" action="/ui/models/profiles/create" class="lm-form lm-form--inline" style="margin-top: 10px;">
+    {% for engine in ['llama', 'mlx'] %}
+    <details class="lm-profile-add" style="margin-top: 10px;" {% if default_args.get(engine) %}open{% endif %}>
+      <summary class="lm-profile-add__summary">
+        <code>{{ engine }}</code> — {{ default_args.get(engine, {}) | length }} keys
+      </summary>
+      <form method="post" action="/ui/models/default-args/save"
+            class="lm-form lm-form--inline" style="margin-top: 10px;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="model_id" value="">
-        <label class="lm-field-label">Profile name</label>
-        <input class="lm-input" type="text" name="name" required
-               pattern="[a-z0-9][a-z0-9\-]*"
-               placeholder="e.g. balanced, fast"
-               style="max-width: 320px;">
-        <label class="lm-field-label">args (JSON)</label>
-        <textarea class="lm-input lm-input--mono" name="args_json" rows="3" spellcheck="false"
-                  style="max-width: 520px; resize: vertical;">{"ctx-size": 4096, "temp": 0.7}</textarea>
-        <label style="font-size: 0.75rem; color: var(--fg-2); display: inline-flex; align-items: center; gap: 6px; margin-top: 6px;">
-          <input type="checkbox" name="make_default" value="on" checked> Make this the global default profile
-        </label>
+        <input type="hidden" name="engine" value="{{ engine }}">
+        <label class="lm-field-label">args (JSON object)</label>
+        <textarea class="lm-input lm-input--mono" name="args_json" rows="4" spellcheck="false"
+                  style="max-width: 520px; resize: vertical;">{{ default_args.get(engine, {}) | tojson(indent=2) }}</textarea>
         <div>
-          <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Create profile</button>
+          <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Save {{ engine }} defaults</button>
         </div>
       </form>
     </details>
+    {% endfor %}
   </div>
 </section>
 

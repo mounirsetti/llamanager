@@ -85,20 +85,13 @@ async def server_restart(request: Request, body: StartBody | None = None,
     cfg = request.app.state.cfg
     spec = None
     if body and (body.profile or body.model):
-        # Profile-only restart is rejected — three-scenario rule applies here
-        # too. Callers must always specify the model when restarting with a
-        # different profile.
-        if body.profile and not body.model:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "profile requires a model on restart: pass both "
-                    "'model' and 'profile' (or omit profile to reuse the "
-                    "model's default)."
-                ),
-            )
+        # Profile-only restart falls back to the default model (or the
+        # currently-loaded one if no default is configured).
+        model_hint = body.model
+        if body.profile and not model_hint:
+            model_hint = sm.runtime.current_model or cfg.default_model or None
         try:
-            spec = resolve_spec(cfg, profile=body.profile, model=body.model,
+            spec = resolve_spec(cfg, profile=body.profile, model=model_hint,
                                 mmproj=body.mmproj, args=body.args)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))

@@ -103,9 +103,10 @@
     </div>
 
     {# ---- Profiles for this model ---- #}
-    <details class="lm-model__profiles" {% if m.profiles or m.default_profile %}open{% endif %}>
+    <details class="lm-model__profiles" open>
       <summary class="lm-model__profiles-summary">
         <span class="lm-eyebrow">Profiles</span>
+        <span style="font-size: 0.7rem; color: var(--fg-2);">engine: <code>{{ m.engine }}</code></span>
         {% if m.default_profile %}
         <span style="font-size: 0.75rem; color: var(--fg-2);">
           default: <code style="color: var(--accent);">{{ m.default_profile }}</code>
@@ -124,16 +125,75 @@
               {% if is_model_default %}<span class="lm-pill" style="color: var(--accent); border-color: var(--accent); font-size: 0.625rem;">default</span>{% endif %}
             </div>
             <details class="lm-profile__details">
-              <summary class="lm-profile__summary">edit args</summary>
-              <form method="post" action="/ui/models/profiles/{{ prof.name }}/update" class="lm-form lm-form--inline">
+              <summary class="lm-profile__summary">edit</summary>
+              <form method="post" action="/ui/models/profiles/{{ prof.name }}/update"
+                    class="lm-form lm-form--inline lm-profile-form"
+                    data-engine="{{ m.engine }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="model_id" value="{{ m.model_id }}">
-                <label class="lm-field-label">mmproj (optional)</label>
-                <input class="lm-input lm-input--mono" type="text" name="mmproj" value="{{ prof.mmproj or '' }}"
-                       placeholder="repo/mmproj.gguf">
-                <label class="lm-field-label">args (JSON)</label>
-                <textarea class="lm-input lm-input--mono" name="args_json" rows="3" spellcheck="false"
-                          style="resize: vertical;">{{ prof.args_json or '{}' }}</textarea>
+
+                <div class="lm-tabs" role="tablist">
+                  <button type="button" class="lm-tab is-active" data-tab="basic">Basic</button>
+                  <button type="button" class="lm-tab" data-tab="advanced">Advanced</button>
+                </div>
+
+                <div class="lm-tab-panel" data-panel="basic">
+                  {% if m.engine == 'llama' %}
+                  <label class="lm-field-label">Context size (tokens)</label>
+                  <input class="lm-input" type="number" name="ctx_size" min="128" step="128"
+                         value="{{ prof.ctx_size if prof.ctx_size is not none else '' }}"
+                         placeholder="e.g. 4096">
+                  {% else %}
+                  <label class="lm-field-label">Context size (read-only — fixed by the MLX model)</label>
+                  <input class="lm-input" type="text" disabled
+                         value="defined by model config.json"
+                         title="MLX models read context length from their config.json; it cannot be overridden at launch.">
+                  <input type="hidden" name="ctx_size" value="">
+                  {% endif %}
+
+                  <label class="lm-field-label">VRAM limit (GB)</label>
+                  <div style="display: flex; gap: 8px; align-items: center;">
+                    <input class="lm-input" type="number" name="vram_limit_gb" min="0" step="0.5"
+                           value="{{ prof.vram_limit_gb if prof.vram_limit_gb is not none else '' }}"
+                           placeholder="e.g. 8.0"
+                           {% if m.engine != 'llama' %}disabled{% endif %}>
+                    <label style="white-space: nowrap; font-size: 0.75rem;">
+                      <input type="checkbox" name="vram_unlimited" value="on"
+                             {% if prof.vram_limit_gb is none and prof.ram_spill_policy in ('default','unlimited','limited') %}checked{% endif %}
+                             {% if m.engine != 'llama' %}disabled{% endif %}>
+                      no cap
+                    </label>
+                  </div>
+
+                  <label class="lm-field-label">RAM spill</label>
+                  <select class="lm-input" name="ram_spill_policy"
+                          {% if m.engine != 'llama' %}disabled{% endif %}>
+                    <option value="default" {% if prof.ram_spill_policy == 'default' %}selected{% endif %}>engine default</option>
+                    <option value="unlimited" {% if prof.ram_spill_policy == 'unlimited' %}selected{% endif %}>allow unlimited spill to RAM</option>
+                    <option value="limited" {% if prof.ram_spill_policy == 'limited' %}selected{% endif %}>limit spill to RAM (GB)</option>
+                    <option value="none" {% if prof.ram_spill_policy == 'none' %}selected{% endif %}>no spill — all layers on GPU</option>
+                  </select>
+                  <input class="lm-input" type="number" name="ram_spill_limit_gb" min="0" step="0.5"
+                         value="{{ prof.ram_spill_limit_gb if prof.ram_spill_limit_gb is not none else '' }}"
+                         placeholder="GB allowed on CPU/RAM (only used when 'limit spill')"
+                         {% if prof.ram_spill_policy != 'limited' %}style="display:none;"{% endif %}>
+
+                  <label class="lm-field-label">mmproj (optional, GGUF multimodal)</label>
+                  <input class="lm-input lm-input--mono" type="text" name="mmproj" value="{{ prof.mmproj or '' }}"
+                         placeholder="repo/mmproj.gguf"
+                         {% if m.engine != 'llama' %}disabled{% endif %}>
+                </div>
+
+                <div class="lm-tab-panel" data-panel="advanced" hidden>
+                  <p class="lm-help">
+                    Raw engine flags — pass through directly to {% if m.engine == 'llama' %}llama-server{% else %}mlx_lm.server{% endif %}.
+                    These win over the basic settings above.
+                  </p>
+                  <label class="lm-field-label">args (JSON object)</label>
+                  <textarea class="lm-input lm-input--mono" name="args_json" rows="6" spellcheck="false"
+                            style="resize: vertical;">{{ prof.args_json or '{}' }}</textarea>
+                </div>
+
                 <div class="lm-profile__actions">
                   <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Save</button>
                 </div>
@@ -159,6 +219,7 @@
                     data-confirm="Delete profile '{{ prof.name }}'?"
                     style="display: inline;">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="model_id" value="{{ m.model_id }}">
                 <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Delete</button>
               </form>
             </div>
@@ -171,19 +232,72 @@
 
         <details class="lm-profile-add">
           <summary class="lm-profile-add__summary">+ Add profile</summary>
-          <form method="post" action="/ui/models/profiles/create" class="lm-form lm-form--inline">
+          <form method="post" action="/ui/models/profiles/create"
+                class="lm-form lm-form--inline lm-profile-form"
+                data-engine="{{ m.engine }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="model_id" value="{{ m.model_id }}">
+
             <label class="lm-field-label">Profile name</label>
             <input class="lm-input" type="text" name="name" required
                    pattern="[a-z0-9][a-z0-9\-]*"
                    placeholder="e.g. fast, balanced, creative">
-            <label class="lm-field-label">mmproj (optional)</label>
-            <input class="lm-input lm-input--mono" type="text" name="mmproj"
-                   placeholder="repo/mmproj.gguf">
-            <label class="lm-field-label">args (JSON)</label>
-            <textarea class="lm-input lm-input--mono" name="args_json" rows="3" spellcheck="false"
-                      style="resize: vertical;">{"ctx-size": 4096, "temp": 0.7}</textarea>
+
+            <div class="lm-tabs" role="tablist">
+              <button type="button" class="lm-tab is-active" data-tab="basic">Basic</button>
+              <button type="button" class="lm-tab" data-tab="advanced">Advanced</button>
+            </div>
+
+            <div class="lm-tab-panel" data-panel="basic">
+              {% if m.engine == 'llama' %}
+              <label class="lm-field-label">Context size (tokens)</label>
+              <input class="lm-input" type="number" name="ctx_size" min="128" step="128" value="4096">
+              {% else %}
+              <label class="lm-field-label">Context size (read-only — fixed by the MLX model)</label>
+              <input class="lm-input" type="text" disabled value="defined by model config.json">
+              <input type="hidden" name="ctx_size" value="">
+              {% endif %}
+
+              <label class="lm-field-label">VRAM limit (GB)</label>
+              <div style="display: flex; gap: 8px; align-items: center;">
+                <input class="lm-input" type="number" name="vram_limit_gb" min="0" step="0.5"
+                       placeholder="e.g. 8.0"
+                       {% if m.engine != 'llama' %}disabled{% endif %}>
+                <label style="white-space: nowrap; font-size: 0.75rem;">
+                  <input type="checkbox" name="vram_unlimited" value="on" checked
+                         {% if m.engine != 'llama' %}disabled{% endif %}>
+                  no cap
+                </label>
+              </div>
+
+              <label class="lm-field-label">RAM spill</label>
+              <select class="lm-input" name="ram_spill_policy"
+                      {% if m.engine != 'llama' %}disabled{% endif %}>
+                <option value="default" selected>engine default</option>
+                <option value="unlimited">allow unlimited spill to RAM</option>
+                <option value="limited">limit spill to RAM (GB)</option>
+                <option value="none">no spill — all layers on GPU</option>
+              </select>
+              <input class="lm-input" type="number" name="ram_spill_limit_gb" min="0" step="0.5"
+                     placeholder="GB allowed on CPU/RAM (only used when 'limit spill')"
+                     style="display: none;">
+
+              <label class="lm-field-label">mmproj (optional)</label>
+              <input class="lm-input lm-input--mono" type="text" name="mmproj"
+                     placeholder="repo/mmproj.gguf"
+                     {% if m.engine != 'llama' %}disabled{% endif %}>
+            </div>
+
+            <div class="lm-tab-panel" data-panel="advanced" hidden>
+              <p class="lm-help">
+                Raw engine flags — pass through to {% if m.engine == 'llama' %}llama-server{% else %}mlx_lm.server{% endif %}.
+                Wins over basic settings.
+              </p>
+              <label class="lm-field-label">args (JSON object)</label>
+              <textarea class="lm-input lm-input--mono" name="args_json" rows="5" spellcheck="false"
+                        style="resize: vertical;">{}</textarea>
+            </div>
+
             <label style="font-size: 0.75rem; color: var(--fg-2); display: inline-flex; align-items: center; gap: 6px; margin-top: 6px;">
               <input type="checkbox" name="make_default" value="on"> Make this the default profile for the model
             </label>

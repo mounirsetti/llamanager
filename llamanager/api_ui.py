@@ -33,7 +33,9 @@ from fastapi.templating import Jinja2Templates
 
 from .auth import AuthManager, Origin
 from .config import (
-    load_config, save_profile, delete_profile, update_defaults,
+    Profile, VALID_RAM_SPILL_POLICIES, delete_profile, detect_engine_for_id,
+    load_config, rename_profile, save_profile, set_default_args,
+    set_model_default_profile, update_defaults,
 )
 from .llama_installer import (
     BACKENDS,
@@ -598,32 +600,33 @@ def _models_ctx(request: Request) -> dict:
     else:
         open_label = "Open folder"
 
-    # Group profiles by parent model so the template can render them inline
-    # under each model row. The "global" bucket holds profiles whose `model`
-    # field is empty — these are the args-only fallbacks.
-    profiles_by_model: dict[str, list[dict]] = {}
-    global_profiles: list[dict] = []
-    for p in cfg.profiles.values():
-        entry = {
-            "name": p.name,
-            "model": p.model,
-            "mmproj": p.mmproj,
-            "args": p.args,
-            "args_json": json.dumps(p.args) if p.args else "",
-        }
-        if p.model:
-            profiles_by_model.setdefault(p.model, []).append(entry)
-        else:
-            global_profiles.append(entry)
-    for v in profiles_by_model.values():
-        v.sort(key=lambda e: e["name"])
-    global_profiles.sort(key=lambda e: e["name"])
-
+    # Profiles live nested under their parent model in cfg.models. We hand
+    # the template a flattened per-model list of dicts so Jinja can render
+    # without poking dataclasses.
     models = []
-    for m in reg.list():
-        d = m.to_dict()
-        d["profiles"] = profiles_by_model.get(m.model_id, [])
-        d["default_profile"] = cfg.model_default_profiles.get(m.model_id, "")
+    for entry in reg.list():
+        d = entry.to_dict()
+        engine = detect_engine_for_id(entry.model_id, cfg.models_dir)
+        d["engine"] = engine
+        m = cfg.get_model(entry.model_id)
+        prof_entries: list[dict] = []
+        default_profile = ""
+        if m:
+            default_profile = m.default_profile
+            for p in m.profiles.values():
+                prof_entries.append({
+                    "name": p.name,
+                    "mmproj": p.mmproj,
+                    "ctx_size": p.ctx_size,
+                    "vram_limit_gb": p.vram_limit_gb,
+                    "ram_spill_policy": p.ram_spill_policy or "default",
+                    "ram_spill_limit_gb": p.ram_spill_limit_gb,
+                    "args": p.args,
+                    "args_json": json.dumps(p.args, indent=2) if p.args else "{}",
+                })
+            prof_entries.sort(key=lambda e: e["name"])
+        d["profiles"] = prof_entries
+        d["default_profile"] = default_profile
         models.append(d)
 
     return _ctx(
@@ -634,9 +637,9 @@ def _models_ctx(request: Request) -> dict:
         current_profile=request.app.state.sm.runtime.current_profile,
         models_dir=str(cfg.models_dir),
         open_label=open_label,
-        global_profiles=global_profiles,
-        global_default_profile=cfg.default_profile,
+        default_args=cfg.default_args,
         default_model=cfg.default_model,
+        ram_spill_policies=VALID_RAM_SPILL_POLICIES,
     )
 
 
@@ -1159,9 +1162,9 @@ async def chat_view(request: Request, _: Origin = Depends(require_admin_ui)) -> 
     sm: ServerManager = request.app.state.sm
     reg: Registry = request.app.state.registry
     sess = _read_session(request)
-    # Each profile carries its bound model id so the template can show
-    # `(global)` and the JS can route the right model+profile header pair.
-    profiles = [{"name": p.name, "model": p.model} for p in cfg.profiles.values()]
+    # Each profile carries its bound model id so the JS can route the
+    # right model+profile header pair.
+    profiles = [{"name": p.name, "model": mid} for mid, p in cfg.iter_profiles()]
     model_ids = [m.model_id for m in reg.list()]
     return templates.TemplateResponse(request, "chat.html", _ctx(
         request,
@@ -1537,28 +1540,25 @@ def _launch_ctx(request: Request) -> dict:
     reg: Registry = request.app.state.registry
     model_ids = [m.model_id for m in reg.list()]
 
-    # Group profiles by their bound model for the JS-side filtering of the
-    # profile dropdown.
+    # Group profiles by their parent model for the JS-side filtering of
+    # the profile dropdown. (Profiles are nested under models now.)
     profiles_by_model: dict[str, list[str]] = {}
-    global_profile_names: list[str] = []
-    for name, p in cfg.profiles.items():
-        if p.model:
-            profiles_by_model.setdefault(p.model, []).append(name)
-        else:
-            global_profile_names.append(name)
-    for v in profiles_by_model.values():
-        v.sort()
-    global_profile_names.sort()
+    model_default_profiles: dict[str, str] = {}
+    for mid, m in cfg.models.items():
+        if m.profiles:
+            profiles_by_model[mid] = sorted(m.profiles.keys())
+        if m.default_profile:
+            model_default_profiles[mid] = m.default_profile
 
     return _ctx(
         request,
         status=sm.status(),
         model_ids=model_ids,
         profiles_by_model=profiles_by_model,
-        global_profile_names=global_profile_names,
-        model_default_profiles=cfg.model_default_profiles,
+        global_profile_names=[],  # no more globals — kept for template compat
+        model_default_profiles=model_default_profiles,
         default_model=cfg.default_model,
-        default_profile=cfg.default_profile,
+        default_profile="",
         autorestart=supervisor.enabled,
         autolaunch=cfg.autolaunch,
         max_restarts=cfg.max_restarts_in_window,
@@ -1642,69 +1642,159 @@ async def launch_autolaunch(request: Request,
 
 # ---------- profile CRUD (model-scoped) ----------
 #
-# Profiles always live as a child of a model (or as a global "args-only"
-# fallback when model_id is empty). All profile-mutating endpoints redirect
-# back to /ui/models — the launcher no longer owns profile management.
+# Profiles always live as a child of a model. All mutating endpoints take
+# (model_id, profile_name) and redirect back to /ui/models.
 
-from .config import (
-    clear_model_default_profile as _clear_mdp,
-    set_model_default_profile as _set_mdp,
-)
+
+def _parse_optional_float(s: str) -> float | None:
+    s = s.strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        raise ValueError(f"expected a number, got {s!r}")
+
+
+def _parse_optional_int(s: str) -> int | None:
+    s = s.strip()
+    if not s:
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        raise ValueError(f"expected an integer, got {s!r}")
+
+
+def _build_profile_from_form(
+    name: str,
+    *,
+    mmproj: str,
+    ctx_size: str,
+    vram_limit_gb: str,
+    vram_unlimited: str,
+    ram_spill_policy: str,
+    ram_spill_limit_gb: str,
+    args_json: str,
+) -> Profile:
+    try:
+        ctx_size_val = _parse_optional_int(ctx_size)
+        vram_val = (None if vram_unlimited == "on"
+                    else _parse_optional_float(vram_limit_gb))
+        ram_limit_val = _parse_optional_float(ram_spill_limit_gb)
+    except ValueError as e:
+        raise ValueError(str(e))
+    policy = (ram_spill_policy or "default").strip()
+    if policy not in VALID_RAM_SPILL_POLICIES:
+        raise ValueError(
+            f"invalid ram_spill_policy {policy!r}; "
+            f"must be one of {VALID_RAM_SPILL_POLICIES}"
+        )
+    if policy != "limited":
+        ram_limit_val = None
+    try:
+        args = json.loads(args_json.strip() or "{}")
+    except json.JSONDecodeError as e:
+        raise ValueError(f"invalid JSON in args: {e}")
+    if not isinstance(args, dict):
+        raise ValueError("args must be a JSON object")
+    return Profile(
+        name=name,
+        mmproj=mmproj.strip(),
+        ctx_size=ctx_size_val,
+        vram_limit_gb=vram_val,
+        ram_spill_policy=policy,
+        ram_spill_limit_gb=ram_limit_val,
+        args=args,
+    )
 
 
 @router.post("/models/profiles/create", response_class=HTMLResponse)
 async def models_profile_create(request: Request,
+                                model_id: str = Form(...),
                                 name: str = Form(...),
-                                model_id: str = Form(""),
                                 mmproj: str = Form(""),
+                                ctx_size: str = Form(""),
+                                vram_limit_gb: str = Form(""),
+                                vram_unlimited: str = Form(""),
+                                ram_spill_policy: str = Form("default"),
+                                ram_spill_limit_gb: str = Form(""),
                                 args_json: str = Form("{}"),
                                 make_default: str = Form(""),
                                 _: None = Depends(require_csrf)) -> Response:
     cfg = request.app.state.cfg
-    try:
-        args = json.loads(args_json.strip() or "{}")
-    except json.JSONDecodeError as e:
-        return _error_html(f"invalid JSON in args: {e}", status_code=400)
+    mid = model_id.strip()
+    if not mid:
+        return _error_html("model_id required", status_code=400)
     profile_name = name.strip().lower()
-    if profile_name in cfg.profiles:
-        return _error_html(f"profile '{profile_name}' already exists", status_code=409)
+    existing = cfg.get_model(mid)
+    if existing and profile_name in existing.profiles:
+        return _error_html(
+            f"profile '{profile_name}' already exists for model '{mid}'",
+            status_code=409,
+        )
     try:
-        save_profile(cfg.config_path, profile_name,
-                     model_id.strip(), mmproj.strip(), args)
+        prof = _build_profile_from_form(
+            profile_name,
+            mmproj=mmproj, ctx_size=ctx_size,
+            vram_limit_gb=vram_limit_gb, vram_unlimited=vram_unlimited,
+            ram_spill_policy=ram_spill_policy,
+            ram_spill_limit_gb=ram_spill_limit_gb,
+            args_json=args_json,
+        )
+        save_profile(cfg.config_path, mid, profile_name, prof)
     except ValueError as e:
         return _error_html(str(e), status_code=400)
     if make_default == "on":
-        if model_id.strip():
-            _set_mdp(cfg.config_path, model_id.strip(), profile_name)
-        else:
-            update_defaults(cfg.config_path, default_profile=profile_name)
+        set_model_default_profile(cfg.config_path, mid, profile_name)
     _reload_config(request)
     return RedirectResponse("/ui/models", status_code=303)
 
 
 @router.post("/models/profiles/{profile_name}/update", response_class=HTMLResponse)
 async def models_profile_update(request: Request, profile_name: str,
+                                model_id: str = Form(...),
                                 new_name: str = Form(""),
-                                model_id: str = Form(""),
                                 mmproj: str = Form(""),
+                                ctx_size: str = Form(""),
+                                vram_limit_gb: str = Form(""),
+                                vram_unlimited: str = Form(""),
+                                ram_spill_policy: str = Form("default"),
+                                ram_spill_limit_gb: str = Form(""),
                                 args_json: str = Form("{}"),
                                 _: None = Depends(require_csrf)) -> Response:
     cfg = request.app.state.cfg
-    if profile_name not in cfg.profiles:
-        return _error_html(f"profile '{profile_name}' not found", status_code=404)
+    mid = model_id.strip()
+    m = cfg.get_model(mid)
+    if not m or profile_name not in m.profiles:
+        return _error_html(
+            f"profile '{profile_name}' not found for model '{mid}'",
+            status_code=404,
+        )
+    target_name = (new_name.strip().lower() or profile_name)
     try:
-        args = json.loads(args_json.strip() or "{}")
-    except json.JSONDecodeError as e:
-        return _error_html(f"invalid JSON in args: {e}", status_code=400)
-    target_name = new_name.strip().lower() or profile_name
+        prof = _build_profile_from_form(
+            target_name,
+            mmproj=mmproj, ctx_size=ctx_size,
+            vram_limit_gb=vram_limit_gb, vram_unlimited=vram_unlimited,
+            ram_spill_policy=ram_spill_policy,
+            ram_spill_limit_gb=ram_spill_limit_gb,
+            args_json=args_json,
+        )
+    except ValueError as e:
+        return _error_html(str(e), status_code=400)
     if target_name != profile_name:
-        if target_name in cfg.profiles:
-            return _error_html(f"profile '{target_name}' already exists",
-                               status_code=409)
-        delete_profile(cfg.config_path, profile_name)
+        if target_name in m.profiles:
+            return _error_html(
+                f"profile '{target_name}' already exists for model '{mid}'",
+                status_code=409,
+            )
+        try:
+            rename_profile(cfg.config_path, mid, profile_name, target_name)
+        except ValueError as e:
+            return _error_html(str(e), status_code=400)
     try:
-        save_profile(cfg.config_path, target_name,
-                     model_id.strip(), mmproj.strip(), args)
+        save_profile(cfg.config_path, mid, target_name, prof)
     except ValueError as e:
         return _error_html(str(e), status_code=400)
     _reload_config(request)
@@ -1713,9 +1803,11 @@ async def models_profile_update(request: Request, profile_name: str,
 
 @router.post("/models/profiles/{profile_name}/delete", response_class=HTMLResponse)
 async def models_profile_delete(request: Request, profile_name: str,
+                                model_id: str = Form(...),
                                 _: None = Depends(require_csrf)) -> Response:
     cfg = request.app.state.cfg
-    delete_profile(cfg.config_path, profile_name)
+    mid = model_id.strip()
+    delete_profile(cfg.config_path, mid, profile_name)
     _reload_config(request)
     return RedirectResponse("/ui/models", status_code=303)
 
@@ -1725,49 +1817,41 @@ async def models_set_model_default(request: Request,
                                    model_id: str = Form(...),
                                    profile_name: str = Form(""),
                                    _: None = Depends(require_csrf)) -> Response:
-    """Set the default profile for a specific model. Empty profile_name
-    clears the per-model default (falling back to the global default)."""
+    """Set/clear the default profile for a specific model."""
     cfg = request.app.state.cfg
     mid = model_id.strip()
     pname = profile_name.strip()
     if not mid:
         return _error_html("model_id required", status_code=400)
     if pname:
-        prof = cfg.profiles.get(pname)
-        if not prof:
-            return _error_html(f"unknown profile: {pname}", status_code=400)
-        if prof.model and prof.model != mid:
+        if cfg.get_profile(mid, pname) is None:
             return _error_html(
-                f"profile '{pname}' is bound to '{prof.model}', not '{mid}'",
+                f"unknown profile '{pname}' for model '{mid}'",
                 status_code=400,
             )
-        _set_mdp(cfg.config_path, mid, pname)
-    else:
-        _clear_mdp(cfg.config_path, mid)
+    set_model_default_profile(cfg.config_path, mid, pname)
     _reload_config(request)
     return RedirectResponse("/ui/models", status_code=303)
 
 
-@router.post("/models/profiles/set-global-default", response_class=HTMLResponse)
-async def models_set_global_default(request: Request,
-                                    profile_name: str = Form(""),
-                                    _: None = Depends(require_csrf)) -> Response:
-    """Set or clear the global default profile (the args-only fallback
-    applied when neither the request nor the model has a profile)."""
+@router.post("/models/default-args/save", response_class=HTMLResponse)
+async def models_default_args_save(request: Request,
+                                   engine: str = Form(...),
+                                   args_json: str = Form("{}"),
+                                   _: None = Depends(require_csrf)) -> Response:
+    """Replace the engine-keyed default-args bucket (the "minimum defaults"
+    inherited by every model of that engine)."""
     cfg = request.app.state.cfg
-    pname = profile_name.strip()
-    if pname:
-        prof = cfg.profiles.get(pname)
-        if not prof:
-            return _error_html(f"unknown profile: {pname}", status_code=400)
-        if prof.model:
-            return _error_html(
-                f"profile '{pname}' is bound to '{prof.model}' and cannot be "
-                "used as the global default. Create a model-less profile to "
-                "use as the global default.",
-                status_code=400,
-            )
-    update_defaults(cfg.config_path, default_profile=pname)
+    eng = engine.strip().lower()
+    if eng not in ("llama", "mlx"):
+        return _error_html(f"unknown engine: {eng}", status_code=400)
+    try:
+        args = json.loads(args_json.strip() or "{}")
+    except json.JSONDecodeError as e:
+        return _error_html(f"invalid JSON in args: {e}", status_code=400)
+    if not isinstance(args, dict):
+        return _error_html("args must be a JSON object", status_code=400)
+    set_default_args(cfg.config_path, eng, args)
     _reload_config(request)
     return RedirectResponse("/ui/models", status_code=303)
 

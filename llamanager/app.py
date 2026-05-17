@@ -340,7 +340,7 @@ def create_app(config_path: Path | None = None,
         _templates = Jinja2Templates(directory=str(_Path(__file__).parent / "templates"))
         # Profiles are emitted as [name, bound_model] pairs so the page can
         # filter the dropdown to the user's chosen model.
-        profile_pairs = [(p.name, p.model) for p in cfg.profiles.values()]
+        profile_pairs = [(p.name, mid) for mid, p in cfg.iter_profiles()]
         model_ids = [m.model_id for m in registry.list()]
         return _templates.TemplateResponse(request, "chat_public.html", {
             "request": request,

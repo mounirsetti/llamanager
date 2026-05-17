@@ -21,7 +21,10 @@ from typing import Any
 
 import httpx
 
-from .config import Config, save_profile, update_defaults
+from .config import (
+    Config, Profile, delete_model_entry, save_profile,
+    set_model_default_profile, update_defaults,
+)
 from .db import DB
 
 log = logging.getLogger(__name__)
@@ -250,16 +253,11 @@ class Registry:
                 parent = parent.parent
             except OSError:
                 break
-        # Cascade: drop any profiles bound to this model and the per-model
-        # default-profile pointer. In-memory cfg is also updated so the rest
-        # of the request observes a consistent picture.
-        from . import config as _cfg
-        removed_profiles = _cfg.delete_model_profiles(self.cfg.config_path, model_id)
-        for name in removed_profiles:
-            self.cfg.profiles.pop(name, None)
-        self.cfg.model_default_profiles.pop(model_id, None)
-        if self.cfg.default_profile in removed_profiles:
-            self.cfg.default_profile = ""
+        # Cascade: drop the model's entire entry (profiles + default
+        # pointer). In-memory cfg is also updated so the rest of the
+        # request observes a consistent picture.
+        removed_profiles = delete_model_entry(self.cfg.config_path, model_id)
+        self.cfg.models.pop(model_id, None)
         self.db.log_event("model_deleted", {
             "model_id": model_id, "force": force,
             "removed_profiles": removed_profiles,
@@ -455,10 +453,10 @@ class Registry:
         # Pick the first main model (alphabetically — usually the best quant)
         model_id = main_models[0]
 
-        # Check if any existing profile already references this model
-        for prof in self.cfg.profiles.values():
-            if prof.model == model_id:
-                return
+        # Skip if this model already has any profile.
+        existing_model = self.cfg.get_model(model_id)
+        if existing_model and existing_model.profiles:
+            return
 
         # Build a profile name from the repo + filename
         # e.g. "bartowski/Llama-3.2-1B-Instruct-GGUF/Q4_K_M.gguf"
@@ -473,33 +471,36 @@ class Registry:
         raw_name = f"{repo_name}-{stem}"
         # Normalise to lowercase, replace non-alnum with hyphens, collapse
         profile_name = re.sub(r"[^a-z0-9]+", "-", raw_name.lower()).strip("-")
-        # Ensure uniqueness
+        # Ensure uniqueness within this model.
         base_name = profile_name
         counter = 2
-        while profile_name in self.cfg.profiles:
-            profile_name = f"{base_name}-{counter}"
-            counter += 1
+        if existing_model:
+            while profile_name in existing_model.profiles:
+                profile_name = f"{base_name}-{counter}"
+                counter += 1
 
         # Pick the first mmproj if one exists in the same repo
         mmproj = mmproj_files[0] if mmproj_files else ""
 
-        args: dict[str, object] = {"ctx-size": 4096, "temp": 0.7}
+        prof = Profile(
+            name=profile_name,
+            mmproj=mmproj,
+            ctx_size=4096,
+            args={"temp": 0.7},
+        )
 
         try:
-            save_profile(self.cfg.config_path, profile_name, model_id, mmproj, args)
+            save_profile(self.cfg.config_path, model_id, profile_name, prof)
             # Hot-reload into the running config so the profile is immediately
-            # visible without a restart
-            from .config import Profile
-            self.cfg.profiles[profile_name] = Profile(
-                name=profile_name, model=model_id, mmproj=mmproj, args=args,
-            )
+            # visible without a restart.
+            m = self.cfg.ensure_model(model_id)
+            m.profiles[profile_name] = prof
             # Register this as the model's default profile if the model
             # doesn't already have one. Also seed cfg.default_model if no
             # default model is set, but never overwrite an existing one.
-            from . import config as _cfg
-            if model_id not in self.cfg.model_default_profiles:
-                self.cfg.model_default_profiles[model_id] = profile_name
-                _cfg.set_model_default_profile(
+            if not m.default_profile:
+                m.default_profile = profile_name
+                set_model_default_profile(
                     self.cfg.config_path, model_id, profile_name,
                 )
             if not self.cfg.default_model:

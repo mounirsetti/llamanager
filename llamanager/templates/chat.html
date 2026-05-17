@@ -150,7 +150,7 @@
         <select id="chat-profile" class="lm-select" style="font-size: 0.8125rem; padding: 4px 8px; min-width: 140px;">
           <option value="">— model default —</option>
           {% for p in profiles %}
-          <option value="{{ p.name }}" data-model="{{ p.model or '' }}">{{ p.name }}{% if not p.model %} (global){% endif %}</option>
+          <option value="{{ p.name }}" data-model="{{ p.model }}">{{ p.name }} ({{ p.model }})</option>
           {% endfor %}
         </select>
       </div>

@@ -26,8 +26,9 @@ def test_config_defaults_and_paths(tmp_path: Path):
     c = load_config(tmp_path / "missing.toml")
     assert c.port == 7200
     assert c.llama_server_port == 7201
-    assert c.default_profile == ""
-    assert c.profiles == {}  # no bundled profiles
+    assert c.models == {}  # no bundled models
+    # Bundled defaults seed per-engine default_args.
+    assert "llama" in c.default_args
     assert c.models_dir.is_dir()
 
 
@@ -167,12 +168,16 @@ def test_resolve_spec_scenario_2_model_only(app):
 
 
 def test_resolve_spec_scenario_2_model_only_no_default(app):
-    """Model only, with no per-model default and no global default
-    -> the model loads with the request's args only."""
+    """Model only, with no per-model default profile -> the model loads
+    with engine defaults + the request's args. Per-engine defaults seeded
+    by the bundled config provide the baseline."""
     from llamanager.server_manager import resolve_spec
     cfg = app.state.cfg
     _seed_fake_model(cfg)
-    cfg.model_default_profiles.pop("test/model.gguf", None)
+    m = cfg.get_model("test/model.gguf")
+    if m:
+        m.default_profile = ""
+    cfg.default_args.pop("llama", None)
     spec = resolve_spec(cfg, model="test/model.gguf", args={"temp": 0.1})
     assert spec.profile_name is None
     assert spec.extra_args == {"temp": 0.1}
@@ -190,48 +195,43 @@ def test_resolve_spec_scenario_3_model_and_matching_profile(app):
     assert spec.extra_args.get("ctx-size") == 1024  # from profile
 
 
-def test_resolve_spec_rejects_profile_without_model(app):
-    """Profile alone is no longer accepted."""
+def test_resolve_spec_profile_alone_uses_default_model(app):
+    """Profile alone falls back to cfg.default_model + that profile."""
     from llamanager.server_manager import resolve_spec
     cfg = app.state.cfg
     _seed_fake_model(cfg)
-    with pytest.raises(ValueError, match="profile requires a model"):
-        resolve_spec(cfg, profile="test")
+    spec = resolve_spec(cfg, profile="test")
+    assert spec.model_id == "test/model.gguf"
+    assert spec.profile_name == "test"
 
 
-def test_resolve_spec_rejects_mismatched_profile(app):
-    """Profile bound to model A cannot be used with model B."""
-    from llamanager.config import Profile
+def test_resolve_spec_unknown_profile_for_model(app):
+    """A profile name that doesn't exist under the chosen model is rejected."""
     from llamanager.server_manager import resolve_spec
     cfg = app.state.cfg
     _seed_fake_model(cfg)
-    # Add a second fake model + a profile bound to it.
-    other = cfg.models_dir / "other" / "model.gguf"
-    other.parent.mkdir(parents=True, exist_ok=True)
-    other.write_bytes(b"")
-    cfg.profiles["other-only"] = Profile(name="other-only",
-                                          model="other/model.gguf",
-                                          mmproj="", args={"temp": 0.2})
-    with pytest.raises(ValueError, match="bound to"):
-        resolve_spec(cfg, model="test/model.gguf", profile="other-only")
+    with pytest.raises(ValueError, match="unknown profile"):
+        resolve_spec(cfg, model="test/model.gguf", profile="nonexistent")
 
 
-def test_resolve_spec_global_profile_applies_to_any_model(app):
-    """A profile with model='' is a valid args-only fallback for any model."""
-    from llamanager.config import Profile
+def test_resolve_spec_default_args_applied(app):
+    """cfg.default_args[engine] provides a minimum baseline that profile
+    and request args layer on top of."""
     from llamanager.server_manager import resolve_spec
     cfg = app.state.cfg
     _seed_fake_model(cfg)
-    cfg.profiles["balanced"] = Profile(name="balanced", model="",
-                                        mmproj="", args={"top-p": 0.95})
-    spec = resolve_spec(cfg, model="test/model.gguf", profile="balanced")
-    assert spec.profile_name == "balanced"
-    assert spec.extra_args.get("top-p") == 0.95
+    cfg.default_args["llama"] = {"top-p": 0.92, "temp": 0.5}
+    spec = resolve_spec(cfg, model="test/model.gguf", args={"temp": 0.1})
+    # default_args supplies top-p; request overrides temp.
+    assert spec.extra_args.get("top-p") == 0.92
+    assert spec.extra_args.get("temp") == 0.1
+    # ctx-size still comes from the profile (translated from ctx_size).
+    assert spec.extra_args.get("ctx-size") == 1024
 
 
-def test_load_config_migrates_legacy_default_profile(tmp_path: Path):
-    """A legacy [defaults] profile that names a model-bound profile becomes
-    a [model_defaults] entry. default_profile is cleared in memory."""
+def test_load_config_migrates_legacy_layout(tmp_path: Path):
+    """Legacy [profiles.X] with model= flat layout migrates into nested
+    [models."x/m.gguf".profiles.fast] plus a per-model default_profile."""
     from llamanager.config import load_config
     p = tmp_path / "config.toml"
     p.write_text(f'''
@@ -242,18 +242,35 @@ data_dir = "{tmp_path.as_posix()}"
 model = "x/m.gguf"
 profile = "fast"
 
+[model_defaults]
+"x/m.gguf" = "fast"
+
 [profiles.fast]
 model = "x/m.gguf"
 [profiles.fast.args]
 temp = 0.3
+ctx-size = 2048
+
+[profiles.house]
+model = ""
+[profiles.house.args]
+top-p = 0.9
 ''', encoding="utf-8")
     cfg = load_config(p)
-    assert cfg.default_profile == ""
-    assert cfg.model_default_profiles == {"x/m.gguf": "fast"}
-    # Re-loading should be a no-op (migration is idempotent).
+    # Model-bound profile migrated into nested layout.
+    m = cfg.get_model("x/m.gguf")
+    assert m is not None
+    assert "fast" in m.profiles
+    fast = m.profiles["fast"]
+    assert fast.args.get("temp") == 0.3
+    assert fast.ctx_size == 2048
+    assert m.default_profile == "fast"
+    # Empty-model "house" profile merged into engine defaults.
+    assert cfg.default_args.get("llama", {}).get("top-p") == 0.9
+    # Reloading is a no-op (migration idempotent).
     cfg2 = load_config(p)
-    assert cfg2.default_profile == ""
-    assert cfg2.model_default_profiles == {"x/m.gguf": "fast"}
+    m2 = cfg2.get_model("x/m.gguf")
+    assert m2 is not None and m2.default_profile == "fast"
 
 
 def test_v1_rejects_legacy_profile_shorthand(app):
@@ -274,22 +291,24 @@ def test_v1_rejects_legacy_profile_shorthand(app):
     assert "no longer supported" in r.json()["detail"]
 
 
-def test_v1_rejects_profile_header_without_model(app):
-    """X-Llamanager-Profile without X-Llamanager-Model returns 400."""
-    from fastapi.testclient import TestClient
-    am = app.state.auth
-    new_key = am.rotate_key(am.get_origin_by_name("bootstrap").id)
-    client = TestClient(app)
-    r = client.post(
-        "/v1/chat/completions",
-        json={"messages": []},
-        headers={
-            "Authorization": f"Bearer {new_key}",
-            "X-Llamanager-Profile": "fast",
-        },
-    )
-    assert r.status_code == 400
-    assert "requires X-Llamanager-Model" in r.json()["detail"]
+def test_v1_accepts_profile_header_without_model(app):
+    """X-Llamanager-Profile without X-Llamanager-Model is allowed; the
+    dispatcher will resolve it against the default model. Tested at the
+    request-parse layer so we don't have to spin up a real upstream."""
+    from llamanager.api_v1 import _model_required
+
+    class _StubRequest:
+        def __init__(self, headers: dict[str, str]) -> None:
+            self.headers = headers
+
+    class _StubOrigin:
+        name = "test"
+        allowed_models = ["*"]
+
+    req = _StubRequest({"x-llamanager-profile": "test"})
+    model, profile = _model_required(req, _StubOrigin())  # type: ignore[arg-type]
+    assert model is None
+    assert profile == "test"
 
 
 def test_priority_queue_ordering(app):

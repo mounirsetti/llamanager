@@ -896,6 +896,42 @@
       }
     }, true);
 
+    /* Profile basic/advanced tabs + RAM-spill conditional limit input.
+       Delegated, so re-rendered htmx partials keep working. */
+    document.addEventListener('click', function (e) {
+      var tab = e.target.closest && e.target.closest('.lm-tab');
+      if (!tab) return;
+      e.preventDefault();
+      var form = tab.closest('.lm-profile-form');
+      if (!form) return;
+      var want = tab.getAttribute('data-tab');
+      form.querySelectorAll('.lm-tab').forEach(function (t) {
+        t.classList.toggle('is-active', t.getAttribute('data-tab') === want);
+      });
+      form.querySelectorAll('.lm-tab-panel').forEach(function (p) {
+        p.hidden = p.getAttribute('data-panel') !== want;
+      });
+    });
+
+    document.addEventListener('change', function (e) {
+      var sel = e.target;
+      if (!sel || sel.name !== 'ram_spill_policy') return;
+      var form = sel.closest('form');
+      if (!form) return;
+      var limit = form.querySelector('input[name="ram_spill_limit_gb"]');
+      if (limit) limit.style.display = (sel.value === 'limited') ? '' : 'none';
+    });
+
+    /* "no cap" toggle disables the VRAM number input. */
+    document.addEventListener('change', function (e) {
+      var cb = e.target;
+      if (!cb || cb.name !== 'vram_unlimited') return;
+      var form = cb.closest('form');
+      if (!form) return;
+      var input = form.querySelector('input[name="vram_limit_gb"]');
+      if (input) input.disabled = cb.checked;
+    });
+
     /* Register service worker for PWA install support */
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function () {});

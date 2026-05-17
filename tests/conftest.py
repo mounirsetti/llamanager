@@ -43,11 +43,7 @@ data_dir = "{data_dir.as_posix()}"
 
 [defaults]
 model = "test/model.gguf"
-profile = ""
 origin_priority = 50
-
-[model_defaults]
-"test/model.gguf" = "test"
 
 [restart_policy]
 max_restarts_in_window = 3
@@ -62,10 +58,11 @@ hf_token_env = "HF_TOKEN"
 max_concurrent = 1
 max_queue_depth = 200
 
-[profiles.test]
-model = "test/model.gguf"
-mmproj = ""
-args = {{ ctx-size = 1024 }}
+[models."test/model.gguf"]
+default_profile = "test"
+
+[models."test/model.gguf".profiles.test]
+ctx_size = 1024
 """, encoding="utf-8")
     from llamanager.app import create_app
     return create_app(cfg_path, print_bootstrap=False)

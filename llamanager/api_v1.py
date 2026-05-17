@@ -82,11 +82,8 @@ def _model_required(req: Request, origin: Origin) -> tuple[str | None, str | Non
                 "X-Llamanager-Profile: <name> as separate headers."
             ),
         )
-    if profile and not model:
-        raise HTTPException(
-            status_code=400,
-            detail="X-Llamanager-Profile requires X-Llamanager-Model",
-        )
+    # ``X-Llamanager-Profile`` without a model is allowed: the dispatcher
+    # resolves it against the default (or currently-loaded) model.
     if model:
         _check_model_allowed(origin, model)
     return (model or None), (profile or None)

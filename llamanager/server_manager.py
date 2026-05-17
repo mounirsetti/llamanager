@@ -20,8 +20,9 @@ from typing import Any
 import httpx
 
 from . import runtime_state as rt
-from .config import Config, Profile
+from .config import Config, Profile, detect_engine_for_path
 from .db import DB
+from .gguf_meta import GgufMeta, compute_n_gpu_layers, read_gguf_meta
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,13 @@ _MLX_SUPPORTED_ARGS = {
     "temp", "top-p", "top-k", "min-p",
     "max-tokens",  # default; per-request override comes from the API
 }
+
+
+def _normalize_arg_key(k: str) -> str:
+    """Engine flags are kebab-case on the command line. Accept snake_case
+    keys (TOML-friendly) and emit kebab-case so config can stay readable
+    without leaking quoting issues."""
+    return k.replace("_", "-")
 
 
 @dataclass
@@ -65,6 +73,7 @@ class StartSpec:
             cmd += ["--mmproj", str(self.mmproj_path)]
         cmd += ["--host", "127.0.0.1", "--port", str(port)]
         for k, v in self.extra_args.items():
+            k = _normalize_arg_key(k)
             if k in ("host", "port"):
                 continue
             flag = f"--{k}"
@@ -81,6 +90,7 @@ class StartSpec:
                "--model", str(self.model_path),
                "--host", "127.0.0.1", "--port", str(port)]
         for k, v in self.extra_args.items():
+            k = _normalize_arg_key(k)
             if k in ("host", "port", "mmproj"):
                 continue
             if k not in _MLX_SUPPORTED_ARGS:
@@ -141,7 +151,7 @@ def _port_free(port: int, host: str = "127.0.0.1") -> bool:
 
 def resolve_default(cfg: Config) -> tuple[str, str | None]:
     """Return the (model_id, profile_name) pair used when a request specifies
-    neither. Profile is None when no model-default and no global-default exist.
+    neither. Profile is None when no per-model default exists.
 
     Returns ("", None) when no default_model is configured — callers should
     treat that as "nothing to start" rather than crashing.
@@ -149,65 +159,94 @@ def resolve_default(cfg: Config) -> tuple[str, str | None]:
     model = cfg.default_model
     if not model:
         return "", None
-    profile = cfg.model_default_profiles.get(model) or cfg.default_profile or None
+    m = cfg.get_model(model)
+    profile = (m.default_profile or None) if m else None
     return model, profile
+
+
+def _basic_to_args(prof: Profile, engine: str, model_path: Path) -> dict[str, Any]:
+    """Translate the structured 'basic' fields on a profile into engine
+    flags. Returns a fresh dict — caller layers raw profile.args on top."""
+    out: dict[str, Any] = {}
+    if prof.ctx_size is not None and engine == "llama":
+        out["ctx-size"] = int(prof.ctx_size)
+    # VRAM/RAM caps → n-gpu-layers (llama only; mlx ignores it).
+    if engine == "llama":
+        if (prof.vram_limit_gb is not None
+                or prof.ram_spill_policy != "default"):
+            meta: GgufMeta | None = None
+            try:
+                if model_path.is_file():
+                    meta = read_gguf_meta(model_path)
+            except Exception as e:
+                log.debug("gguf meta read failed for %s: %s", model_path, e)
+            if meta is None:
+                meta = GgufMeta(file_size=(model_path.stat().st_size
+                                            if model_path.is_file() else 0))
+            n = compute_n_gpu_layers(
+                meta,
+                vram_limit_gb=prof.vram_limit_gb,
+                ram_spill_policy=prof.ram_spill_policy,
+                ram_spill_limit_gb=prof.ram_spill_limit_gb,
+                ctx_size=prof.ctx_size,
+            )
+            if n is not None:
+                out["n-gpu-layers"] = n
+    return out
 
 
 def resolve_spec(cfg: Config, *, profile: str | None = None,
                  model: str | None = None,
                  mmproj: str | None = None,
                  args: dict[str, Any] | None = None) -> StartSpec:
-    """Turn a request into a concrete StartSpec under the three-scenario rule:
+    """Turn a request into a concrete StartSpec.
 
-    1. Nothing specified           → cfg.default_model + its default profile
-    2. Only model specified        → that model + its default profile
-    3. Both specified              → that exact pair (profile must be bound to
-                                     that model, or be the global default)
+    Resolution rules:
 
-    Profile-without-model is rejected.
+    * Nothing specified           → ``cfg.default_model`` + its default profile.
+    * Only model specified        → that model + its default profile (if any).
+    * Only profile specified      → ``cfg.default_model`` + that profile.
+    * Both specified              → look up ``cfg.models[model].profiles[profile]``.
 
-    The ``profile:foo`` shorthand on ``model`` is no longer accepted; callers
-    that used it must migrate to passing ``model`` and ``profile`` separately.
+    Merge order for ``extra_args``:
+        engine-default args → profile basic-derived args → profile.args → request args.
     """
     args = dict(args or {})
     model = (model or "").strip() or None
     profile = (profile or "").strip() or None
 
-    if profile and not model:
-        raise ValueError(
-            "profile requires a model: pass model + profile, not profile alone"
-        )
-
     if not model:
-        # Scenarios 1/2: fall through to the default. Note: scenario 2 (model
-        # only) is handled below — we only reach this branch when *neither*
-        # was given, so use cfg.default_model.
-        model, default_prof = resolve_default(cfg)
-        if not model:
+        if cfg.default_model:
+            model = cfg.default_model
+        else:
             raise ValueError("no model specified and no default configured")
-        if profile is None:
-            profile = default_prof
-    elif profile is None:
-        # Scenario 2: pick the model's default profile, then the global one.
-        profile = cfg.model_default_profiles.get(model) or cfg.default_profile or None
+
+    if profile is None:
+        m = cfg.get_model(model)
+        profile = (m.default_profile or None) if m else None
 
     prof: Profile | None = None
     if profile:
-        prof = cfg.profiles.get(profile)
+        prof = cfg.get_profile(model, profile)
         if not prof:
-            raise ValueError(f"unknown profile: {profile}")
-        if prof.model and prof.model != model:
             raise ValueError(
-                f"profile {profile!r} is bound to model {prof.model!r}, "
-                f"not {model!r}"
+                f"unknown profile {profile!r} for model {model!r}"
             )
-
-    chosen_mmproj = mmproj if mmproj is not None else (prof.mmproj if prof else "")
-    merged_args = dict(prof.args) if prof else {}
-    merged_args.update(args)
 
     _validate_model_id(model)
     model_path = _safe_under(cfg.models_dir, cfg.models_dir / model)
+
+    engine = (detect_engine_for_path(model_path)
+              if model_path.exists() else cfg.llama_server_engine)
+
+    # Merge args: engine defaults → profile basic → profile.args → request args.
+    merged_args: dict[str, Any] = dict(cfg.default_args.get(engine, {}))
+    if prof:
+        merged_args.update(_basic_to_args(prof, engine, model_path))
+        merged_args.update(prof.args)
+    merged_args.update(args)
+
+    chosen_mmproj = mmproj if mmproj is not None else (prof.mmproj if prof else "")
     mmproj_path: Path | None
     if chosen_mmproj:
         _validate_model_id(chosen_mmproj)
@@ -259,7 +298,9 @@ class ServerManager:
         async with self._lock:
             if self.is_running:
                 raise ServerError("inference engine already running")
-            engine = getattr(self.cfg, "llama_server_engine", "llama") or "llama"
+            engine = (detect_engine_for_path(spec.model_path)
+                      if spec.model_path.exists()
+                      else (getattr(self.cfg, "llama_server_engine", "llama") or "llama"))
             if not spec.model_path.exists():
                 raise ServerError(f"model not found: {spec.model_path}")
             if spec.mmproj_path and not spec.mmproj_path.exists():
