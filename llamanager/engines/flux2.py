@@ -141,6 +141,23 @@ def build_command(
     if seed is not None:
         argv += ["-s", str(int(seed))]
 
+    # Reference image: sd-cli's --init-img (img2img). FLUX 2 Dev is not a
+    # Flux Kontext model, so the --ref-image (-r) flag does not apply —
+    # we use the classic init-image path. Strength defaults to sd.cpp's
+    # built-in 0.75 unless the request or profile overrides it.
+    if req.ref_images:
+        if len(req.ref_images) != 1:
+            raise RuntimeError(
+                f"flux2 supports at most one reference image (img2img); "
+                f"got {len(req.ref_images)}"
+            )
+        argv += ["-i", str(req.ref_images[0])]
+        strength = req.strength
+        if strength is None and profile.image_strength is not None:
+            strength = float(profile.image_strength)
+        if strength is not None:
+            argv += ["--strength", f"{float(strength):.4f}"]
+
     # Profile.args is raw passthrough (snake_case → --kebab-case).
     for k, v in (profile.args or {}).items():
         flag = "--" + str(k).replace("_", "-")

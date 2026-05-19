@@ -360,3 +360,200 @@ def test_yield_to_image_skips_when_concurrent_mode(cfg, tmp_path):
 
     asyncio.run(go())
     db.close()
+
+
+# ---------- reference-image helpers ----------
+
+def test_decode_ref_image_accepts_raw_base64_png():
+    """Bare base64 (no data URL) decodes when bytes start with a PNG header."""
+    import base64
+    from llamanager.api_v1 import _decode_ref_image
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    payload = base64.b64encode(png_bytes).decode("ascii")
+    blob, ext = _decode_ref_image(payload, 0)
+    assert blob == png_bytes
+    assert ext == "png"
+
+
+def test_decode_ref_image_accepts_data_url_jpeg():
+    """data:image/jpeg;base64,... is parsed and sniffed by magic bytes."""
+    import base64
+    from llamanager.api_v1 import _decode_ref_image
+    jpg_bytes = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+    payload = "data:image/jpeg;base64," + base64.b64encode(jpg_bytes).decode("ascii")
+    blob, ext = _decode_ref_image(payload, 0)
+    assert blob == jpg_bytes
+    assert ext == "jpg"
+
+
+def test_decode_ref_image_rejects_non_image_bytes():
+    """Bytes that don't match PNG/JPEG/WebP magic raise a 400."""
+    import base64
+    from fastapi import HTTPException
+    from llamanager.api_v1 import _decode_ref_image
+    payload = base64.b64encode(b"this is plain text, not an image").decode("ascii")
+    try:
+        _decode_ref_image(payload, 3)
+    except HTTPException as e:
+        assert e.status_code == 400
+        assert "image[3]" in e.detail
+    else:
+        raise AssertionError("expected HTTPException")
+
+
+def test_image_request_carries_ref_fields():
+    """ImageRequest stores ref-image fields and they survive copy."""
+    from llamanager.engines._base import ImageRequest
+    from pathlib import Path as _P
+    req = ImageRequest(
+        prompt="x", width=0, height=0, steps=None, seed=None, n=3,
+        ref_images=[_P("/tmp/a.png"), _P("/tmp/b.png")],
+        keep_original_aspect=True,
+        layout_bboxes="[[0.1,0.4,0.2,0.6]]",
+        strength=0.65,
+    )
+    assert req.ref_images == [_P("/tmp/a.png"), _P("/tmp/b.png")]
+    assert req.keep_original_aspect is True
+    assert req.layout_bboxes == "[[0.1,0.4,0.2,0.6]]"
+    assert req.strength == 0.65
+
+
+def test_hidream_adapter_emits_ref_flags(tmp_path: Path):
+    """HiDream's build_command forwards --ref_images, --keep_original_aspect,
+    and --editing_scheduler from request + profile."""
+    from llamanager.engines import hidream
+    from llamanager.config import Config, Profile
+    from llamanager.engines._base import ImageRequest
+    cfg = Config()
+    fake_py = tmp_path / "python.exe"
+    fake_py.write_text("")
+    cfg.hidream_python = str(fake_py)
+    cfg.hidream_repo = str(tmp_path)
+    (tmp_path / "inference.py").write_text("")
+    model_dir = tmp_path / "HiDream-O1-Image"
+    model_dir.mkdir()
+    (model_dir / "tokenizer_config.json").write_text("{}")
+    (model_dir / "preprocessor_config.json").write_text("{}")
+    (model_dir / "model.safetensors").write_bytes(b"")
+    prof = Profile(name="hidream-dev", image_model_type="dev",
+                   image_editing_scheduler="flow_match")
+    refs = [tmp_path / "ref0.png"]
+    refs[0].write_bytes(b"\x89PNG\r\n\x1a\n")
+    req = ImageRequest(
+        prompt="edit me", width=2048, height=2048,
+        steps=None, seed=42, n=1,
+        ref_images=refs, keep_original_aspect=True,
+    )
+    argv, env = hidream.build_command(cfg, model_dir, prof, req,
+                                       tmp_path / "out.png")
+    assert "--ref_images" in argv
+    assert str(refs[0]) in argv
+    assert "--keep_original_aspect" in argv
+    assert "--editing_scheduler" in argv
+    sched_idx = argv.index("--editing_scheduler")
+    assert argv[sched_idx + 1] == "flow_match"
+    # UTF-8 env survives.
+    assert env.get("PYTHONIOENCODING") == "utf-8"
+
+
+def test_flux2_adapter_rejects_multiple_refs(tmp_path: Path):
+    """Flux2 only supports one reference (img2img); two refs => RuntimeError."""
+    import pytest as _pytest
+    from llamanager.engines import flux2
+    from llamanager.config import Config, Profile
+    from llamanager.engines._base import ImageRequest
+    cfg = Config()
+    sd_cli = tmp_path / "sd-cli.exe"
+    sd_cli.write_bytes(b"")
+    cfg.flux2_sd_cli = str(sd_cli)
+    model_dir = tmp_path / "flux2-dev"
+    model_dir.mkdir()
+    (model_dir / "flux2-dev-Q6_K.gguf").write_bytes(b"")
+    (model_dir / "ae.safetensors").write_bytes(b"")
+    refs = [tmp_path / "a.png", tmp_path / "b.png"]
+    for r in refs:
+        r.write_bytes(b"\x89PNG\r\n\x1a\n")
+    req = ImageRequest(
+        prompt="img2img", width=1024, height=1024,
+        steps=None, seed=None, n=1, ref_images=refs, strength=0.6,
+    )
+    with _pytest.raises(RuntimeError, match="at most one reference"):
+        flux2.build_command(cfg, model_dir, Profile(name="x"), req,
+                            tmp_path / "out.png")
+
+
+def test_flux2_adapter_emits_init_img_and_strength(tmp_path: Path):
+    """Single ref + strength => -i <path> --strength <s>."""
+    from llamanager.engines import flux2
+    from llamanager.config import Config, Profile
+    from llamanager.engines._base import ImageRequest
+    cfg = Config()
+    sd_cli = tmp_path / "sd-cli.exe"
+    sd_cli.write_bytes(b"")
+    cfg.flux2_sd_cli = str(sd_cli)
+    model_dir = tmp_path / "flux2-dev"
+    model_dir.mkdir()
+    (model_dir / "flux2-dev-Q6_K.gguf").write_bytes(b"")
+    (model_dir / "ae.safetensors").write_bytes(b"")
+    ref = tmp_path / "init.png"
+    ref.write_bytes(b"\x89PNG\r\n\x1a\n")
+    req = ImageRequest(
+        prompt="vary me", width=1024, height=1024,
+        steps=None, seed=None, n=1, ref_images=[ref], strength=0.65,
+    )
+    argv, _env = flux2.build_command(cfg, model_dir, Profile(name="x"), req,
+                                      tmp_path / "out.png")
+    assert "-i" in argv
+    assert str(ref) in argv
+    assert "--strength" in argv
+    s_idx = argv.index("--strength")
+    assert float(argv[s_idx + 1]) == 0.65
+
+
+def test_new_image_filename_uses_engine_prefix_and_hhmm(tmp_path: Path):
+    """Filenames follow <eng><hhmm>[-NN].png with engine-prefix + wall-clock
+    time, and collide-safely append -2, -3 within the same minute."""
+    import re
+    from llamanager.image_runner import _new_image_filename
+    fn1 = _new_image_filename("hidream", tmp_path)
+    assert re.fullmatch(r"hid\d{4}\.png", fn1), fn1
+    # Pre-create that exact name so the next call has to disambiguate.
+    (tmp_path / fn1).write_bytes(b"")
+    fn2 = _new_image_filename("hidream", tmp_path)
+    assert re.fullmatch(r"hid\d{4}-2\.png", fn2), fn2
+    (tmp_path / fn2).write_bytes(b"")
+    fn3 = _new_image_filename("hidream", tmp_path)
+    assert re.fullmatch(r"hid\d{4}-3\.png", fn3), fn3
+    # Different engine → different prefix.
+    fn_flux = _new_image_filename("flux2", tmp_path)
+    assert re.fullmatch(r"flu\d{4}\.png", fn_flux), fn_flux
+    # Unknown engine name still produces a 3-letter prefix.
+    fn_other = _new_image_filename("z", tmp_path)
+    assert re.fullmatch(r"z\d{4}\.png", fn_other), fn_other
+
+
+def test_profile_roundtrips_new_image_ref_fields(tmp_path: Path):
+    """image_editing_scheduler and image_strength survive save+reload."""
+    from llamanager.config import (
+        DEFAULT_CONFIG_TOML, Profile, load_config, save_profile,
+    )
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(DEFAULT_CONFIG_TOML, encoding="utf-8")
+    import tomlkit
+    doc = tomlkit.load(cfg_path.open("rb"))
+    doc["server"]["data_dir"] = tmp_path.as_posix()
+    cfg_path.write_bytes(tomlkit.dumps(doc).encode("utf-8"))
+
+    prof = Profile(
+        name="hidream-edit",
+        image_model_type="dev",
+        image_editing_scheduler="flow_match",
+        image_strength=0.55,
+    )
+    save_profile(cfg_path, "HiDream-O1-Image", "hidream-edit", prof)
+    reloaded = load_config(cfg_path)
+    m = reloaded.get_model("HiDream-O1-Image")
+    assert m is not None
+    p = m.profiles["hidream-edit"]
+    assert p.image_editing_scheduler == "flow_match"
+    assert p.image_strength == 0.55

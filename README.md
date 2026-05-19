@@ -43,6 +43,10 @@
   - [Requesting a specific model](#requesting-a-specific-model)
 - [Chat in the browser](#chat-in-the-browser)
 - [Image generation](#image-generation)
+  - [Generate from the UI](#generate-from-the-ui)
+  - [Generate from the API](#generate-from-the-api)
+  - [Reference images (editing, composition, img2img)](#reference-images-editing-composition-img2img)
+  - [Coexistence with text engines](#coexistence-with-text-engines)
 - [Auto-start at boot or login](#auto-start-at-boot-or-login)
   - [macOS — launchd](#macos--launchd)
   - [Linux — user systemd unit](#linux--user-systemd-unit)
@@ -385,6 +389,121 @@ curl -X POST http://localhost:7200/v1/images/generations \
 ```
 
 Streaming (`"stream": true`) emits `: step=N/M` SSE comments while generating, then a final `data:` event with the result.
+
+### Reference images (editing, composition, img2img)
+
+`/v1/images/generations` accepts one or more reference images alongside the prompt. The engines interpret them differently:
+
+| engine | refs | what it does |
+|---|---|---|
+| HiDream-O1-Image | 1 | **Editing**. With `--model_type dev`, the flash scheduler is replaced with flow-match, shift drops to 1.0, and the ref is treated as the image being edited. Add `keep_original_aspect: true` to preserve the ref's aspect ratio and bypass the 2048-bucket snap. |
+| HiDream-O1-Image | 2–8 | **Composition / multi-subject**. Optionally steer layout with `layout_bboxes`. |
+| FLUX 2 / sd.cpp  | exactly 1 | **img2img**. Sent as sd-cli's `-i / --init-img` with `--strength` controlling how much of the init image is preserved (`0.0` = exact copy, `1.0` = full re-generation). |
+| FLUX 2 / sd.cpp  | 2+ | Rejected with 400 — sd-cli's init-image path is single-slot. |
+
+#### Request fields
+
+Add any of these to the JSON body of `POST /v1/images/generations` (alongside the usual `prompt`, `model`, `size`, `n`, `seed`, `profile`, `response_format`, `stream`):
+
+| field | type | meaning |
+|---|---|---|
+| `image` | base64 string or `data:image/...;base64,...` URL | Single reference image. Shorthand for `images: [image]`. |
+| `images` | array of base64 strings / data URLs | Up to 8 reference images (HiDream); exactly 1 (Flux2). |
+| `keep_original_aspect` | bool | **HiDream-only.** With exactly one ref, resize it to max 2048 on the long side and use those dimensions for the output. |
+| `layout_bboxes` | string (JSON) | **HiDream-only.** Forwarded verbatim to `--layout_bboxes`, e.g. `"[[0.1,0.4,0.2,0.6]]"` (relative `x1,x2,y1,y2` per box). |
+| `strength` | float in `[0, 1]` | **Flux2-only.** sd-cli img2img denoise strength. Default `0.75` (sd.cpp built-in). |
+
+Reference image bytes are:
+- decoded server-side and sniffed against PNG / JPEG / WebP magic bytes — the request 400s if the bytes don't match,
+- capped at **20 MiB per image** and **8 images per request**,
+- staged to `~/.llamanager/refs/<request_id>/` for the duration of the run, then deleted by a `finally` block regardless of how the run terminates (success, engine crash, queue cancel, timeout). They are **not** copied into the gallery — only the sidecar JSON next to the output preserves the prompt-and-ref provenance.
+
+#### Example — HiDream editing (replace a subject, keep everything else)
+
+```bash
+REF_B64=$(base64 -w0 ./input.png)     # macOS: base64 -i ./input.png | tr -d '\n'
+
+curl -X POST http://localhost:7200/v1/images/generations \
+  -H "Authorization: Bearer $ORIGIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"HiDream-O1-Image\",
+    \"profile\": \"hidream-dev-fast\",
+    \"prompt\": \"Replace the puppy with a small calico kitten, keep the wooden sign and garden background identical.\",
+    \"image\": \"data:image/png;base64,$REF_B64\",
+    \"keep_original_aspect\": true,
+    \"seed\": 11,
+    \"response_format\": \"url\"
+  }"
+```
+
+PowerShell equivalent:
+
+```powershell
+$ref    = [Convert]::ToBase64String([IO.File]::ReadAllBytes(".\input.png"))
+$origin = $env:ORIGIN_KEY
+$body   = @{
+  model                 = "HiDream-O1-Image"
+  profile               = "hidream-dev-fast"
+  prompt                = "Replace the puppy with a small calico kitten, keep the wooden sign and garden background identical."
+  image                 = "data:image/png;base64,$ref"
+  keep_original_aspect  = $true
+  seed                  = 11
+  response_format       = "url"
+} | ConvertTo-Json -Compress
+
+Invoke-WebRequest -Uri "http://127.0.0.1:7200/v1/images/generations" `
+  -Method POST `
+  -Headers @{ Authorization = "Bearer $origin"; "Content-Type" = "application/json" } `
+  -Body $body -UseBasicParsing -TimeoutSec 600
+```
+
+#### Example — HiDream multi-ref composition with a layout box
+
+```bash
+curl -X POST http://localhost:7200/v1/images/generations \
+  -H "Authorization: Bearer $ORIGIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "HiDream-O1-Image",
+    "profile": "hidream-dev-fast",
+    "prompt": "The cat from image 1 sitting on the bookshelf from image 2.",
+    "images": ["data:image/png;base64,'"$CAT_B64"'", "data:image/png;base64,'"$SHELF_B64"'"],
+    "layout_bboxes": "[[0.30, 0.70, 0.40, 0.85]]",
+    "response_format": "b64_json"
+  }'
+```
+
+#### Example — Flux2 img2img with strength
+
+```bash
+curl -X POST http://localhost:7200/v1/images/generations \
+  -H "Authorization: Bearer $ORIGIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "flux2-dev",
+    "profile": "flux2-fast",
+    "prompt": "Same composition, oil-painting style, heavy brush texture.",
+    "image": "data:image/png;base64,'"$REF_B64"'",
+    "strength": 0.55,
+    "size": "1024x1024",
+    "response_format": "url"
+  }'
+```
+
+#### Streaming with refs
+
+`"stream": true` works exactly the same — the SSE channel emits `: step=N/M` ticks while the engine runs, then a `data:` event with the OpenAI-shaped result. The ref bytes are decoded **before** the request enters the queue, so any base64 / size / format failure surfaces as a synchronous 4xx response rather than mid-stream.
+
+#### From the UI
+
+Both `/images` (any origin key) and `/ui/images` (admin session) include:
+
+- **`+ Image`** button → opens a multi-select file picker (PNG / JPEG / WebP).
+- **Drag-and-drop** onto the prompt textarea adds the dropped files as refs.
+- **Thumbnail strip** above the prompt with an `×` on each chip to remove individual refs.
+- **Keep original aspect** checkbox — wires `keep_original_aspect` on HiDream.
+- The selection is **engine-aware**: switching to a flux2 model auto-trims a multi-ref selection down to one, and the picker caps further selections accordingly.
 
 ### Coexistence with text engines
 

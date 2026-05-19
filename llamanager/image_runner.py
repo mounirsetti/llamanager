@@ -21,7 +21,6 @@ import os
 import secrets
 import shutil
 import time
-import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -189,79 +188,113 @@ class ImageTaskRunner:
         sidecar_base: dict[str, Any] = {}
         t0 = time.time()
 
-        async with self._lock:
-            # Coordinate with the text engine if running.
-            yield_cm = (
-                self.sm.yield_to_image(reason=f"image:{engine}")
-                if self.sm is not None
-                else _nullcontext()
-            )
-            async with yield_cm:
-                for i in range(n):
-                    # Different seed per image when not pinned.
-                    per_req = ImageRequest(
-                        prompt=req.prompt,
-                        width=req.width,
-                        height=req.height,
-                        steps=req.steps,
-                        seed=req.seed if req.seed is not None else _new_seed(),
-                        n=1,
-                    )
-                    seed_used = per_req.seed
-                    out_path = gallery / _new_image_filename()
-                    argv, env = adapter.build_command(
-                        self.cfg, model_path, profile, per_req, out_path,
-                    )
-                    sidecar_base = {
-                        "engine": engine,
-                        "model_id": model_id,
-                        "profile": profile.name,
-                        "prompt": per_req.prompt,
-                        "width": per_req.width,
-                        "height": per_req.height,
-                        "steps": per_req.steps,
-                        "seed": per_req.seed,
-                    }
-                    try:
-                        await self._run_one(
-                            engine=engine,
-                            model_id=model_id,
-                            profile_name=profile.name,
-                            request_id=request_id,
-                            argv=argv,
-                            env=env,
-                            out_path=out_path,
-                            adapter=adapter,
-                            progress_cb=progress_cb,
-                            sidecar=sidecar_base,
-                        )
-                    except Exception:
-                        self._record_failure()
-                        raise
-                    outputs.append(out_path)
-            # Recovery: window resets after a successful run.
-            self._failures.clear()
+        # Reference-image staging directory (populated by the API layer at
+        # ``<data_dir>/refs/<request_id>``). We don't strictly require it
+        # to be a child of that path — just clean up the parent of the
+        # first ref if all refs live in the same directory.
+        ref_tempdir: Path | None = None
+        if req.ref_images:
+            parents = {p.parent for p in req.ref_images}
+            if len(parents) == 1:
+                only_parent = next(iter(parents))
+                # Sanity-guard: only auto-clean dirs that live under our
+                # data_dir/refs/, never paths the operator might have set
+                # by hand.
+                try:
+                    only_parent.relative_to(self.cfg.data_dir / "refs")
+                    ref_tempdir = only_parent
+                except ValueError:
+                    pass
 
-        _enforce_disk_cap(self.cfg)
-        duration = time.time() - t0
-        # When n > 1 we return the *first* image as the canonical result
-        # alongside a manifest of all paths inside sidecar.
-        if not outputs:
-            raise ImageError("image generation produced no output")
-        primary = outputs[0]
-        sidecar = {**sidecar_base, "duration_s": round(duration, 3)}
-        if len(outputs) > 1:
-            sidecar["batch"] = [str(p) for p in outputs]
-        return ImageResult(
-            request_id=request_id,
-            engine=engine,
-            model_id=model_id,
-            profile_name=profile.name,
-            output_path=primary,
-            seed=seed_used,
-            duration_s=duration,
-            sidecar=sidecar,
-        )
+        try:
+            async with self._lock:
+                # Coordinate with the text engine if running.
+                yield_cm = (
+                    self.sm.yield_to_image(reason=f"image:{engine}")
+                    if self.sm is not None
+                    else _nullcontext()
+                )
+                async with yield_cm:
+                    for i in range(n):
+                        # Different seed per image when not pinned. Ref images
+                        # and the other reference-input knobs are shared across
+                        # the whole batch — they describe the input, not the
+                        # individual sample.
+                        per_req = ImageRequest(
+                            prompt=req.prompt,
+                            width=req.width,
+                            height=req.height,
+                            steps=req.steps,
+                            seed=req.seed if req.seed is not None else _new_seed(),
+                            n=1,
+                            ref_images=list(req.ref_images),
+                            keep_original_aspect=req.keep_original_aspect,
+                            layout_bboxes=req.layout_bboxes,
+                            strength=req.strength,
+                        )
+                        seed_used = per_req.seed
+                        out_path = gallery / _new_image_filename(engine, gallery)
+                        argv, env = adapter.build_command(
+                            self.cfg, model_path, profile, per_req, out_path,
+                        )
+                        sidecar_base = {
+                            "engine": engine,
+                            "model_id": model_id,
+                            "profile": profile.name,
+                            "prompt": per_req.prompt,
+                            "width": per_req.width,
+                            "height": per_req.height,
+                            "steps": per_req.steps,
+                            "seed": per_req.seed,
+                        }
+                        try:
+                            await self._run_one(
+                                engine=engine,
+                                model_id=model_id,
+                                profile_name=profile.name,
+                                request_id=request_id,
+                                argv=argv,
+                                env=env,
+                                out_path=out_path,
+                                adapter=adapter,
+                                progress_cb=progress_cb,
+                                sidecar=sidecar_base,
+                            )
+                        except Exception:
+                            self._record_failure()
+                            raise
+                        outputs.append(out_path)
+                # Recovery: window resets after a successful run.
+                self._failures.clear()
+
+            _enforce_disk_cap(self.cfg)
+            duration = time.time() - t0
+            # When n > 1 we return the *first* image as the canonical result
+            # alongside a manifest of all paths inside sidecar.
+            if not outputs:
+                raise ImageError("image generation produced no output")
+            primary = outputs[0]
+            sidecar = {**sidecar_base, "duration_s": round(duration, 3)}
+            if len(outputs) > 1:
+                sidecar["batch"] = [str(p) for p in outputs]
+            return ImageResult(
+                request_id=request_id,
+                engine=engine,
+                model_id=model_id,
+                profile_name=profile.name,
+                output_path=primary,
+                seed=seed_used,
+                duration_s=duration,
+                sidecar=sidecar,
+            )
+        finally:
+            # Drop the staged reference-image directory regardless of how
+            # we exited — success, engine crash, queue cancel, timeout.
+            # ``shutil.rmtree`` with ignore_errors is safe even if the
+            # adapter never touched the dir; we already vetted ``ref_tempdir``
+            # is under ``data_dir/refs/`` above, so this can't escape.
+            if ref_tempdir is not None:
+                shutil.rmtree(ref_tempdir, ignore_errors=True)
 
     # ---- internals ----
     async def _run_one(
@@ -426,8 +459,30 @@ def _new_seed() -> int:
     return int.from_bytes(secrets.token_bytes(4), "big") & 0x7FFFFFFF
 
 
-def _new_image_filename() -> str:
-    return f"{uuid.uuid4().hex[:12]}.png"
+def _new_image_filename(engine: str, gallery: Path) -> str:
+    """Build an output filename of the form ``<eng><hhmm>[-NN].png``.
+
+    ``<eng>`` is the first three letters of the engine name (hidream → hid,
+    flux2 → flu) — a short, eyeball-friendly tag rather than an opaque
+    hash. ``<hhmm>`` is the local wall-clock time at filename allocation,
+    which is what an operator will be looking for when they ask "where's
+    the image I just generated at 14:23". An incrementing ``-NN`` suffix
+    breaks ties when more than one image is produced in the same minute
+    (n>1 requests, or back-to-back single requests). Falls back to a
+    random hex suffix after 99 same-minute collisions so the function
+    cannot get stuck.
+    """
+    prefix = (engine or "img")[:3].lower()
+    hhmm = datetime.now().strftime("%H%M")
+    base = f"{prefix}{hhmm}"
+    candidate = gallery / f"{base}.png"
+    if not candidate.exists():
+        return candidate.name
+    for i in range(2, 100):
+        candidate = gallery / f"{base}-{i}.png"
+        if not candidate.exists():
+            return candidate.name
+    return f"{base}-{secrets.token_hex(2)}.png"
 
 
 @contextlib.asynccontextmanager

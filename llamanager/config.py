@@ -218,6 +218,13 @@ class Profile:
     image_guidance: float | None = None
     image_size: str = ""              # "WxH" — engine adapters validate/snap
     image_seed: int | None = None
+    # Reference-image knobs. ``image_editing_scheduler`` is HiDream's
+    # --editing_scheduler flag ("flow_match" | "flash"); only meaningful
+    # when exactly one reference image is passed with --model_type dev.
+    # ``image_strength`` is Flux2's img2img --strength (0..1); ignored by
+    # HiDream. Both can be overridden per-request.
+    image_editing_scheduler: str = ""
+    image_strength: float | None = None
     args: dict[str, Any] = field(default_factory=dict)
 
 
@@ -396,6 +403,8 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
         image_guidance=_coerce_float(body.get("image_guidance")),
         image_size=str(body.get("image_size", "") or ""),
         image_seed=_coerce_int(body.get("image_seed")),
+        image_editing_scheduler=str(body.get("image_editing_scheduler", "") or ""),
+        image_strength=_coerce_float(body.get("image_strength")),
         args=dict(body.get("args") or {}),
     )
 
@@ -667,6 +676,10 @@ def _profile_to_tomlkit(prof: Profile):
         tbl.add("image_size", prof.image_size)
     if prof.image_seed is not None:
         tbl.add("image_seed", prof.image_seed)
+    if prof.image_editing_scheduler:
+        tbl.add("image_editing_scheduler", prof.image_editing_scheduler)
+    if prof.image_strength is not None:
+        tbl.add("image_strength", prof.image_strength)
     if prof.args:
         tbl.add("args", _dict_to_tomlkit(prof.args))
     return tbl

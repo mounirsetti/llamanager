@@ -342,21 +342,139 @@ def _parse_size(size: str | None) -> tuple[int, int]:
         return 0, 0
 
 
+# Reference-image constraints. Per-image and per-request caps protect the
+# daemon from OOM and disk-bomb shapes; format whitelist matches what the
+# downstream engines actually accept.
+_REF_IMAGE_MAX_BYTES = 20 * 1024 * 1024     # 20 MiB per image, decoded
+_REF_IMAGE_MAX_COUNT = 8                     # mirrors n's upper bound
+_REF_IMAGE_MAGIC = {
+    b"\x89PNG\r\n\x1a\n":          ("png",  "image/png"),
+    b"\xff\xd8\xff":                ("jpg",  "image/jpeg"),
+    b"RIFF":                        ("webp", "image/webp"),   # checked further below
+}
+
+
+def _decode_ref_image(raw: str, index: int) -> tuple[bytes, str]:
+    """Decode one base64 reference-image string from the request body.
+
+    Accepts either a bare base64 payload or a ``data:image/...;base64,...``
+    URL. Returns ``(bytes, file_extension)``. Raises ``HTTPException`` with
+    a 400 for any decoding or validation failure.
+    """
+    import binascii
+    s = (raw or "").strip()
+    if not s:
+        raise HTTPException(status_code=400,
+                            detail=f"image[{index}] is empty")
+    if s.startswith("data:"):
+        # data URL — header is "data:<mime>;base64,<payload>"
+        try:
+            header, payload = s.split(",", 1)
+        except ValueError:
+            raise HTTPException(status_code=400,
+                                detail=f"image[{index}] is not a valid data URL")
+        if ";base64" not in header.lower():
+            raise HTTPException(
+                status_code=400,
+                detail=f"image[{index}] data URL must be base64-encoded",
+            )
+        s = payload
+    try:
+        blob = base64.b64decode(s, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"image[{index}] is not valid base64: {e}",
+        )
+    if not blob:
+        raise HTTPException(status_code=400,
+                            detail=f"image[{index}] decoded to 0 bytes")
+    if len(blob) > _REF_IMAGE_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(f"image[{index}] is {len(blob)} bytes; max is "
+                    f"{_REF_IMAGE_MAX_BYTES}"),
+        )
+    # Sniff format from the magic bytes — never trust the data URL's mime.
+    ext: str | None = None
+    if blob.startswith(b"\x89PNG\r\n\x1a\n"):
+        ext = "png"
+    elif blob.startswith(b"\xff\xd8\xff"):
+        ext = "jpg"
+    elif blob.startswith(b"RIFF") and len(blob) >= 12 and blob[8:12] == b"WEBP":
+        ext = "webp"
+    if ext is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"image[{index}] is not a recognised PNG / JPEG / WebP "
+                    f"payload (sniffed from the decoded bytes)"),
+        )
+    return blob, ext
+
+
+def _stage_ref_images(
+    cfg, request_id: str, payloads: list[str]
+) -> list:
+    """Decode + persist a list of base64 reference images.
+
+    Files land under ``<data_dir>/refs/<request_id>/`` as ``ref_NN.<ext>``.
+    Returns the list of absolute paths. Caller (ImageTaskRunner) is
+    responsible for removing the parent directory after use.
+    """
+    from pathlib import Path as _Path
+    if not payloads:
+        return []
+    if len(payloads) > _REF_IMAGE_MAX_COUNT:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"too many reference images ({len(payloads)}); max is "
+                    f"{_REF_IMAGE_MAX_COUNT}"),
+        )
+    ref_root = _Path(cfg.data_dir) / "refs" / request_id
+    ref_root.mkdir(parents=True, exist_ok=True)
+    paths: list[_Path] = []
+    for i, raw in enumerate(payloads):
+        if not isinstance(raw, str):
+            raise HTTPException(
+                status_code=400,
+                detail=f"image[{i}] must be a base64 string or data URL",
+            )
+        blob, ext = _decode_ref_image(raw, i)
+        p = ref_root / f"ref_{i:02d}.{ext}"
+        p.write_bytes(blob)
+        paths.append(p)
+    return paths
+
+
 @router.post("/images/generations")
 async def images_generations(request: Request) -> Response:
     """Generate one or more images.
 
     OpenAI-compatible request body:
-        prompt:           str (required)
-        model:            str — bare model id (image-family); if omitted, falls
-                          back to the X-Llamanager-Model header.
-        n:                int (default 1)
-        size:             "WxH" (default per adapter)
-        response_format:  "b64_json" (default) | "url"
-        stream:           bool — when true, returns SSE progress with a final
-                          data event carrying the result.
-        seed:             int (optional)
-        profile:          llamanager-specific — selects an image profile by name.
+        prompt:                str (required)
+        model:                 str — bare model id (image-family); if omitted, falls
+                               back to the X-Llamanager-Model header.
+        n:                     int (default 1)
+        size:                  "WxH" (default per adapter)
+        response_format:       "b64_json" (default) | "url"
+        stream:                bool — when true, returns SSE progress with a final
+                               data event carrying the result.
+        seed:                  int (optional)
+        profile:               llamanager-specific — selects an image profile by name.
+
+    Reference-image fields (llamanager extension):
+        image:                 str — single base64-encoded image (data URL or
+                               raw base64). Shorthand for ``images: [image]``.
+        images:                list[str] — up to 8 base64 reference images.
+                               HiDream accepts multiple (composition / multi-
+                               subject); Flux2 accepts exactly one (img2img).
+        keep_original_aspect:  bool — HiDream only. With exactly one ref,
+                               resize it to max 2048 on the long side and use
+                               those dimensions for the output (bypasses the
+                               2048-bucket snap).
+        layout_bboxes:         str — HiDream only. JSON forwarded verbatim to
+                               --layout_bboxes (e.g. ``"[[0.1,0.4,0.2,0.6]]"``).
+        strength:              float — Flux2 img2img denoise strength (0..1).
     """
     origin = await _origin_from_request(request)
     body_bytes = await request.body()
@@ -410,6 +528,69 @@ async def images_generations(request: Request) -> Response:
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="seed must be an integer")
 
+    # ---- reference-image inputs (llamanager extension) -------------------
+    # Accept ``image`` (single) or ``images`` (list); the OpenAI Images
+    # API uses both spellings depending on the route. We unify them here.
+    raw_ref_payloads: list[str] = []
+    single_ref = body.get("image")
+    multi_refs = body.get("images")
+    if multi_refs is not None:
+        if not isinstance(multi_refs, list):
+            raise HTTPException(
+                status_code=400,
+                detail="'images' must be an array of base64 strings",
+            )
+        raw_ref_payloads = list(multi_refs)
+    if single_ref is not None:
+        if not isinstance(single_ref, str):
+            raise HTTPException(
+                status_code=400,
+                detail="'image' must be a base64 string or data URL",
+            )
+        # If both are sent, prepend the single-image field for stability —
+        # callers that send both probably meant the singular as primary.
+        raw_ref_payloads = [single_ref] + raw_ref_payloads
+
+    # Engine-specific arity guard. Adapters re-check too, but we want a
+    # clear 400 before we burn a queue slot or decode bytes.
+    if engine == "flux2" and len(raw_ref_payloads) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=("flux2 supports at most one reference image (img2img); "
+                    f"got {len(raw_ref_payloads)}"),
+        )
+
+    keep_original_aspect = bool(body.get("keep_original_aspect", False))
+    layout_bboxes_raw = body.get("layout_bboxes")
+    layout_bboxes: str | None
+    if layout_bboxes_raw is None or layout_bboxes_raw == "":
+        layout_bboxes = None
+    elif isinstance(layout_bboxes_raw, str):
+        layout_bboxes = layout_bboxes_raw
+    else:
+        # Allow callers to send a JSON value directly — re-serialize it.
+        try:
+            layout_bboxes = json.dumps(layout_bboxes_raw)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail="layout_bboxes must be a JSON string or JSON-serialisable value",
+            )
+
+    strength_raw = body.get("strength")
+    strength: float | None
+    if strength_raw is None:
+        strength = None
+    else:
+        try:
+            strength = float(strength_raw)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400, detail="strength must be a number")
+        if not 0.0 <= strength <= 1.0:
+            raise HTTPException(
+                status_code=400, detail="strength must be in [0, 1]")
+
     try:
         qr = await qm.enqueue(
             origin=origin,
@@ -420,6 +601,17 @@ async def images_generations(request: Request) -> Response:
     except QueueFull:
         raise HTTPException(status_code=503, detail="queue full")
 
+    # Stage refs to disk *after* enqueue so we have a stable request_id to
+    # namespace them by, but *before* the runner kicks off so the adapter
+    # sees real paths. Any decode failure unwinds the queue slot.
+    try:
+        ref_paths = _stage_ref_images(cfg, qr.request_id, raw_ref_payloads)
+    except HTTPException:
+        qm.mark_in_flight_done(qr, error="invalid reference image",
+                               cancelled=False, prompt_tokens=None,
+                               completion_tokens=None)
+        raise
+
     # Build the typed request now so adapter errors fail fast.
     image_req = ImageRequest(
         prompt=prompt,
@@ -428,6 +620,10 @@ async def images_generations(request: Request) -> Response:
         steps=None,    # adapter pulls from profile/defaults
         seed=seed_int,
         n=n,
+        ref_images=ref_paths,
+        keep_original_aspect=keep_original_aspect,
+        layout_bboxes=layout_bboxes,
+        strength=strength,
     )
 
     # Resolve the profile object (may be None — runner accepts that).

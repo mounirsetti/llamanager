@@ -108,6 +108,18 @@
     height: 100%; color: var(--fg-3); font-size: 0.875rem;
     grid-column: 1 / -1;
   }
+  .img-ref-thumb {
+    position: relative; width: 56px; height: 56px; flex-shrink: 0;
+    border: 1px solid var(--bg-3); background: var(--bg-2); overflow: hidden;
+  }
+  .img-ref-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .img-ref-thumb-del {
+    position: absolute; top: 2px; right: 2px; width: 16px; height: 16px;
+    background: rgba(0,0,0,0.7); color: #fff; border: 0; cursor: pointer;
+    font-size: 0.625rem; line-height: 14px; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .img-ref-thumb-del:hover { background: var(--bad); }
   @media (max-width: 640px) {
     #img-app { height: calc(100vh - 140px); flex-direction: column; }
     .img-rail { width: 100%; border-right: 0; border-bottom: 1px solid var(--bg-2); max-height: 140px; }
@@ -160,8 +172,17 @@
     </div>
 
     <div class="img-composer">
+      <div id="img-refs-row" style="display:none; flex-direction:column; gap:6px; padding:4px 0 2px;">
+        <div id="img-refs-thumbs" style="display:flex; gap:6px; flex-wrap:wrap;"></div>
+        <label style="display:flex; align-items:center; gap:6px; font-size:0.6875rem; color:var(--fg-2); cursor:pointer; user-select:none;">
+          <input type="checkbox" id="img-keep-aspect" style="margin:0;">
+          <span>Keep original aspect (single ref only)</span>
+        </label>
+      </div>
       <textarea id="img-prompt" placeholder="A still life of three pears on a blue table, soft window light, oil paint texture."></textarea>
       <div class="img-composer-row">
+        <button type="button" id="img-attach" class="lm-btn lm-btn--ghost">+ Image</button>
+        <input id="img-ref-files" type="file" accept="image/png,image/jpeg,image/webp" multiple style="display:none;">
         <span class="img-status" id="img-status"></span>
         <button type="button" id="img-cancel" class="lm-btn lm-btn--ghost" style="display:none;">Cancel</button>
         <button type="button" id="img-generate" class="lm-btn lm-btn--primary">Generate</button>
@@ -286,6 +307,89 @@
     }
     $('img-model').addEventListener('change', refreshProfiles);
 
+    // ----- reference images -----
+    // Engine arity comes from IMAGE_MODELS (each entry has .engine).
+    let pendingRefs = [];   // [{ dataUrl, filename }]
+    function currentEngine() {
+      const modelId = $('img-model').value;
+      const entry = IMAGE_MODELS.find((m) => m.model_id === modelId);
+      return entry ? entry.engine : '';
+    }
+    function maxRefs() {
+      return currentEngine() === 'flux2' ? 1 : 8;
+    }
+    function renderRefs() {
+      const row = $('img-refs-row');
+      const wrap = $('img-refs-thumbs');
+      wrap.innerHTML = '';
+      if (!pendingRefs.length) { row.style.display = 'none'; return; }
+      row.style.display = 'flex';
+      pendingRefs.forEach((r, idx) => {
+        const thumb = document.createElement('div');
+        thumb.className = 'img-ref-thumb';
+        thumb.title = r.filename;
+        const im = document.createElement('img');
+        im.src = r.dataUrl;
+        im.alt = r.filename;
+        thumb.appendChild(im);
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'img-ref-thumb-del';
+        del.textContent = '×';
+        del.title = 'Remove';
+        del.addEventListener('click', () => {
+          pendingRefs.splice(idx, 1);
+          renderRefs();
+        });
+        thumb.appendChild(del);
+        wrap.appendChild(thumb);
+      });
+    }
+    function readAsDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(fr.result);
+        fr.onerror = () => reject(fr.error || new Error('read failed'));
+        fr.readAsDataURL(file);
+      });
+    }
+    function addRefFiles(fileList) {
+      const max = maxRefs();
+      let files = Array.from(fileList || []);
+      if (max === 1) pendingRefs = [];
+      const room = Math.max(0, max - pendingRefs.length);
+      if (files.length > room) {
+        setStatus(`Only ${room} more ref allowed for ${currentEngine()}.`);
+        files = files.slice(0, room);
+      }
+      Promise.all(files.map((f) =>
+        readAsDataUrl(f).then((url) => ({ dataUrl: url, filename: f.name }))))
+        .then((entries) => {
+          pendingRefs = pendingRefs.concat(entries);
+          renderRefs();
+        })
+        .catch((err) => setStatus('Image read failed: ' + err.message));
+    }
+    $('img-attach').addEventListener('click', () => $('img-ref-files').click());
+    $('img-ref-files').addEventListener('change', (e) => {
+      addRefFiles(e.target.files);
+      e.target.value = '';
+    });
+    $('img-model').addEventListener('change', () => {
+      const max = maxRefs();
+      if (pendingRefs.length > max) {
+        pendingRefs = pendingRefs.slice(0, max);
+        renderRefs();
+      }
+    });
+    $('img-prompt').addEventListener('dragover', (e) => { e.preventDefault(); });
+    $('img-prompt').addEventListener('drop', (e) => {
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+        e.preventDefault();
+        addRefFiles(e.dataTransfer.files);
+      }
+    });
+
     // ----- generate -----
     let currentRequest = null;
 
@@ -302,6 +406,12 @@
       const body = { prompt, model, n, response_format: 'b64_json' };
       if (profile) body.profile = profile;
       if (seed !== null && !isNaN(seed)) body.seed = seed;
+      if (pendingRefs.length) {
+        body.images = pendingRefs.map((r) => r.dataUrl);
+        if ($('img-keep-aspect').checked && pendingRefs.length === 1) {
+          body.keep_original_aspect = true;
+        }
+      }
 
       setBusy(true);
       setStatus('Queued&hellip;');

@@ -113,14 +113,37 @@ def build_command(
         "--width", str(width),
         "--height", str(height),
     ]
-    # The dev recipe is fixed-step in the upstream script; we still pass
-    # --num_inference_steps where supported, and full ignores it.
-    if steps is not None:
-        argv += ["--num_inference_steps", str(steps)]
+    # Upstream's dev path is hardwired to 28 timesteps via DEFAULT_TIMESTEPS
+    # and ignores --num_inference_steps. The full path now does accept it
+    # (we patched inference.py to expose the flag) — so forward image_steps
+    # there, but only there.
+    if model_type == "full" and steps is not None:
+        argv += ["--num_inference_steps", str(int(steps))]
     if seed is not None:
         argv += ["--seed", str(int(seed))]
     if profile.image_guidance is not None and model_type == "full":
         argv += ["--guidance_scale", str(float(profile.image_guidance))]
+
+    # Reference images: forwarded as one or more positional values to
+    # --ref_images. Upstream treats one ref + --model_type dev as editing
+    # mode; multiple refs as composition / multi-subject. The width/height
+    # bucket-snap still applies unless --keep_original_aspect is set with
+    # exactly one ref.
+    if req.ref_images:
+        argv.append("--ref_images")
+        argv += [str(p) for p in req.ref_images]
+        if req.keep_original_aspect and len(req.ref_images) == 1:
+            argv.append("--keep_original_aspect")
+        # Editing scheduler is only consulted by upstream when the editing
+        # branch is taken (exactly one ref + dev model). Sending it in
+        # other configs is harmless — argparse accepts and the pipeline
+        # discards.
+        if profile.image_editing_scheduler:
+            sched = profile.image_editing_scheduler.lower()
+            if sched in ("flow_match", "flash"):
+                argv += ["--editing_scheduler", sched]
+    if req.layout_bboxes:
+        argv += ["--layout_bboxes", req.layout_bboxes]
 
     # Honour profile.args as raw passthrough (snake_case → --kebab-case).
     for k, v in (profile.args or {}).items():
@@ -131,7 +154,15 @@ def build_command(
         else:
             argv += [flag, str(v)]
 
-    env: dict[str, str] = {}
+    # Force UTF-8 for the subprocess pipes. Transformers' @auto_docstring
+    # prints a 🚨 character at import time; with no console attached
+    # (asyncio PIPE) Python defaults to the active legacy ANSI codepage
+    # on Windows — cp1252 — and that import raises UnicodeEncodeError,
+    # killing the model load before generation can start.
+    env: dict[str, str] = {
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+    }
     return argv, env
 
 

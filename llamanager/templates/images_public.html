@@ -201,6 +201,36 @@
     .img-btn:disabled { opacity: 0.4; cursor: not-allowed; }
     .img-btn--ghost { background: transparent; color: var(--fg-1); border-color: var(--bg-3); }
 
+    /* Reference-image attachments */
+    .img-refs-row {
+      display: flex; flex-direction: column; gap: 6px;
+      padding: 4px 0 2px;
+    }
+    .img-refs-thumbs {
+      display: flex; gap: 6px; flex-wrap: wrap;
+    }
+    .img-ref-thumb {
+      position: relative; width: 56px; height: 56px; flex-shrink: 0;
+      border: 1px solid var(--bg-3); background: var(--bg-2);
+      overflow: hidden;
+    }
+    .img-ref-thumb img {
+      width: 100%; height: 100%; object-fit: cover; display: block;
+    }
+    .img-ref-thumb-del {
+      position: absolute; top: 2px; right: 2px; width: 16px; height: 16px;
+      background: rgba(0,0,0,0.7); color: #fff; border: 0; cursor: pointer;
+      font-size: 0.625rem; line-height: 14px; padding: 0;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .img-ref-thumb-del:hover { background: var(--bad); }
+    .img-refs-keep {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 0.6875rem; color: var(--fg-2);
+      cursor: pointer; user-select: none;
+    }
+    .img-refs-keep input { margin: 0; }
+
     /* Login */
     .img-login {
       display: flex; flex-direction: column; align-items: center;
@@ -327,9 +357,18 @@
       </div>
 
       <div class="img-composer">
+        <div id="refs-row" class="img-refs-row" style="display: none;">
+          <div id="refs-thumbs" class="img-refs-thumbs"></div>
+          <label class="img-refs-keep">
+            <input type="checkbox" id="keep-aspect-input">
+            <span>Keep original aspect (single ref only)</span>
+          </label>
+        </div>
         <textarea id="prompt-input" rows="2"
                   placeholder="A still life of three pears on a blue table, soft window light, oil paint texture."></textarea>
         <div class="img-composer-row">
+          <button id="attach-btn" class="img-btn img-btn--ghost" type="button" title="Attach reference image(s)">+ Image</button>
+          <input id="ref-file-input" type="file" accept="image/png,image/jpeg,image/webp" multiple style="display: none;">
           <span id="message" class="img-message"></span>
           <button id="cancel-btn" class="img-btn img-btn--ghost" style="display: none;">Cancel</button>
           <button id="generate-btn" class="img-btn">Generate</button>
@@ -350,6 +389,11 @@
   var engineEl = document.getElementById('img-engine');
   var logoutBtn = document.getElementById('logout-btn');
   var modelSel = document.getElementById('model-select');
+  var attachBtn = document.getElementById('attach-btn');
+  var refFileInput = document.getElementById('ref-file-input');
+  var refsRow = document.getElementById('refs-row');
+  var refsThumbs = document.getElementById('refs-thumbs');
+  var keepAspectInput = document.getElementById('keep-aspect-input');
   var profileSel = document.getElementById('profile-select');
   var sizeSel = document.getElementById('size-select');
   var nInput = document.getElementById('n-input');
@@ -380,6 +424,75 @@
   var activeId = null;
   var inflight = null;
   var statusPoll = null;
+
+  // Reference images selected for the next generate. Each entry is
+  // { dataUrl, filename } — dataUrl carries the base64-encoded bytes
+  // already prefixed with the right ``data:image/...;base64,`` header.
+  var pendingRefs = [];
+  // Per-engine cap. HiDream accepts up to 8; flux2 accepts exactly 1.
+  var MAX_REFS_DEFAULT = 8;
+  var MAX_REFS_FLUX2 = 1;
+  function maxRefsForCurrentModel() {
+    return currentEngine() === 'flux2' ? MAX_REFS_FLUX2 : MAX_REFS_DEFAULT;
+  }
+  function renderRefs() {
+    refsThumbs.innerHTML = '';
+    if (!pendingRefs.length) {
+      refsRow.style.display = 'none';
+      return;
+    }
+    refsRow.style.display = 'flex';
+    pendingRefs.forEach(function (r, idx) {
+      var thumb = document.createElement('div');
+      thumb.className = 'img-ref-thumb';
+      thumb.title = r.filename;
+      var img = document.createElement('img');
+      img.src = r.dataUrl;
+      img.alt = r.filename;
+      thumb.appendChild(img);
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'img-ref-thumb-del';
+      del.textContent = '×';
+      del.title = 'Remove';
+      del.addEventListener('click', function () {
+        pendingRefs.splice(idx, 1);
+        renderRefs();
+      });
+      thumb.appendChild(del);
+      refsThumbs.appendChild(thumb);
+    });
+  }
+  function readFileAsDataUrl(file) {
+    return new Promise(function (resolve, reject) {
+      var fr = new FileReader();
+      fr.onload = function () { resolve(fr.result); };
+      fr.onerror = function () { reject(fr.error || new Error('read failed')); };
+      fr.readAsDataURL(file);
+    });
+  }
+  function addRefFiles(fileList) {
+    var max = maxRefsForCurrentModel();
+    var files = Array.prototype.slice.call(fileList || []);
+    // For flux2, the latest pick replaces the existing one (single-slot).
+    if (max === 1) pendingRefs = [];
+    var room = Math.max(0, max - pendingRefs.length);
+    if (files.length > room) {
+      setMessage('Only ' + room + ' more ref' + (room === 1 ? '' : 's') +
+                 ' allowed for this engine (' + currentEngine() + ').', true);
+      files = files.slice(0, room);
+    }
+    Promise.all(files.map(function (f) {
+      return readFileAsDataUrl(f).then(function (url) {
+        return { dataUrl: url, filename: f.name };
+      });
+    })).then(function (entries) {
+      pendingRefs = pendingRefs.concat(entries);
+      renderRefs();
+    }).catch(function (err) {
+      setMessage('Image read failed: ' + err.message, true);
+    });
+  }
 
   // ---- Theme toggle ----
   var root = document.documentElement;
@@ -700,6 +813,12 @@
       var seed = parseInt(seedRaw, 10);
       if (!isNaN(seed)) body.seed = seed;
     }
+    if (pendingRefs.length) {
+      body.images = pendingRefs.map(function (r) { return r.dataUrl; });
+      if (keepAspectInput.checked && pendingRefs.length === 1) {
+        body.keep_original_aspect = true;
+      }
+    }
 
     setBusy(true);
     setMessage('Queued...');
@@ -757,6 +876,27 @@
       pollStatus();
     });
   }
+  attachBtn.addEventListener('click', function () { refFileInput.click(); });
+  refFileInput.addEventListener('change', function (ev) {
+    addRefFiles(ev.target.files);
+    ev.target.value = '';  // allow re-selecting the same file
+  });
+  // When the model changes, prune refs that exceed the new engine's cap.
+  modelSel.addEventListener('change', function () {
+    var max = maxRefsForCurrentModel();
+    if (pendingRefs.length > max) {
+      pendingRefs = pendingRefs.slice(0, max);
+      renderRefs();
+    }
+  });
+  // Optional drag-and-drop onto the prompt textarea.
+  promptInput.addEventListener('dragover', function (e) { e.preventDefault(); });
+  promptInput.addEventListener('drop', function (e) {
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+      e.preventDefault();
+      addRefFiles(e.dataTransfer.files);
+    }
+  });
   generateBtn.addEventListener('click', generate);
   cancelBtn.addEventListener('click', function () {
     if (inflight) inflight.abort();
