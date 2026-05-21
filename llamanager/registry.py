@@ -426,15 +426,26 @@ class Registry:
         return total
 
     def _check_disk(self, estimate_bytes: int) -> str | None:
+        gb = 1024 ** 3
         free = _free_bytes(self.models_dir)
         if estimate_bytes + SAFETY_MARGIN_BYTES > free:
-            return f"insufficient disk: need {estimate_bytes + SAFETY_MARGIN_BYTES}B, free {free}B"
+            return (
+                f"insufficient disk in {self.models_dir}: need "
+                f"{(estimate_bytes + SAFETY_MARGIN_BYTES) / gb:.1f} GB "
+                f"(model + 2 GB safety margin), only "
+                f"{free / gb:.1f} GB free"
+            )
         if self.cfg.max_disk_gb:
-            cap = self.cfg.max_disk_gb * 1024 ** 3
+            cap = self.cfg.max_disk_gb * gb
             current = _dir_size(self.models_dir)
             if current + estimate_bytes > cap:
-                return (f"would exceed max_disk_gb={self.cfg.max_disk_gb}: "
-                        f"{current + estimate_bytes} > {cap}")
+                return (
+                    f"would exceed the configured max_disk_gb cap of "
+                    f"{self.cfg.max_disk_gb} GB "
+                    f"(models dir is {current / gb:.1f} GB, "
+                    f"this download needs {estimate_bytes / gb:.1f} GB). "
+                    f"Raise or set max_disk_gb=0 in config.toml to disable."
+                )
         return None
 
     def _set_download(self, did: str, **fields: Any) -> None:

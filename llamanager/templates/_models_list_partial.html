@@ -2,6 +2,338 @@
 {% set active_downloads = active_downloads + (downloads | selectattr('status', 'equalto', 'pending') | list) %}
 {% set finished_downloads = downloads | selectattr('status', 'in', ['failed', 'cancelled']) | list %}
 
+{# Backwards-compat for callers that didn't pre-split the list. #}
+{% if text_models is not defined or image_models is not defined %}
+  {% set _text = [] %}
+  {% set _image = [] %}
+  {% for _m in models %}
+    {% if _m.engine_family == 'image' %}
+      {% set _ = _image.append(_m) %}
+    {% else %}
+      {% set _ = _text.append(_m) %}
+    {% endif %}
+  {% endfor %}
+  {% set text_models = _text %}
+  {% set image_models = _image %}
+{% endif %}
+
+{% macro render_model_card(m) %}
+  {% set is_loaded = m.model_id == current_model %}
+  {% set is_default_model = m.model_id == default_model %}
+  <article class="lm-model {% if is_loaded %}lm-model--loaded{% endif %}"
+           data-model-id="{{ m.model_id }}">
+    <details class="lm-model__expand" {% if is_loaded %}open{% endif %}>
+      <summary class="lm-model__summary">
+        <span class="lm-model__chevron" aria-hidden="true">▸</span>
+        <code class="lm-model__id">{{ m.model_id.rsplit('/', 1)[-1] }}</code>
+        {% if is_loaded %}<span class="lm-pill lm-pill--running">loaded</span>{% endif %}
+        {% if is_default_model %}<span class="lm-pill" style="color: var(--accent); border-color: var(--accent);">default</span>{% endif %}
+        <span class="lm-model__summary-spacer"></span>
+        <span class="lm-model__summary-meta">
+          {{ '%.1f GB' % (m.size / (1024**3)) }}
+          <span class="lm-model__sep">·</span>
+          <code>{{ m.engine }}</code>
+        </span>
+      </summary>
+
+      <div class="lm-model__body">
+        <div class="lm-model__meta">
+          <span title="full model id">{{ m.model_id }}</span>
+          <span class="lm-model__sep">·</span>
+          <span>{{ m.source or 'local' }}</span>
+          <span class="lm-model__sep">·</span>
+          <span>{{ m.profiles | length }} profile{% if m.profiles|length != 1 %}s{% endif %}</span>
+        </div>
+
+        <div class="lm-model__actions">
+          <form method="post" action="/ui/models/load" style="display: inline;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="model_id" value="{{ m.model_id }}">
+            <button type="submit" class="lm-btn lm-btn--xs">{% if is_loaded %}Reload{% else %}Load{% endif %}</button>
+          </form>
+          {% if not is_default_model %}
+          <form method="post" action="/ui/models/set-default" style="display: inline;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="model_id" value="{{ m.model_id }}">
+            <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Set as default</button>
+          </form>
+          {% endif %}
+          <form method="post" action="/ui/models/locate" style="display: inline;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="model_id" value="{{ m.model_id }}">
+            <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Locate</button>
+          </form>
+          <form method="post" action="/ui/models/delete"
+                data-confirm="Delete this model? Its profiles will be removed too."
+                style="display: inline;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="model_id" value="{{ m.model_id }}">
+            {% if is_loaded %}<input type="hidden" name="force" value="true">{% endif %}
+            <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">
+              Delete{% if is_loaded %} (force){% endif %}
+            </button>
+          </form>
+        </div>
+
+        {# ---- Profiles for this model ---- #}
+        <details class="lm-model__profiles">
+          <summary class="lm-model__profiles-summary">
+            <span class="lm-eyebrow">Profiles</span>
+            {% if m.default_profile %}
+            <span style="font-size: 0.75rem; color: var(--fg-2);">
+              default: <code style="color: var(--accent);">{{ m.default_profile }}</code>
+            </span>
+            {% endif %}
+          </summary>
+
+          <div class="lm-model__profiles-body">
+            {% if m.profiles %}
+            <ul class="lm-profile-list">
+              {% for prof in m.profiles %}
+              {% set is_model_default = prof.name == m.default_profile %}
+              <li class="lm-profile {% if is_model_default %}is-default{% endif %}">
+                <div class="lm-profile__head">
+                  <span class="lm-profile__name">{{ prof.name }}</span>
+                  {% if is_model_default %}<span class="lm-pill" style="color: var(--accent); border-color: var(--accent); font-size: 0.625rem;">default</span>{% endif %}
+                </div>
+                <details class="lm-profile__details">
+                  <summary class="lm-profile__summary">edit</summary>
+                  <form method="post" action="/ui/models/profiles/{{ prof.name }}/update"
+                        class="lm-form lm-form--inline lm-profile-form"
+                        data-engine="{{ m.engine }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="model_id" value="{{ m.model_id }}">
+
+                    <div class="lm-tabs" role="tablist">
+                      <button type="button" class="lm-tab is-active" data-tab="basic">Basic</button>
+                      <button type="button" class="lm-tab" data-tab="advanced">Advanced</button>
+                    </div>
+
+                    <div class="lm-tab-panel" data-panel="basic">
+                      {% if m.engine == 'llama' %}
+                      <label class="lm-field-label">Context size (tokens)
+                        <span class="lm-field-hint">model max: {{ "{:,}".format(m.ctx_max) }}</span>
+                      </label>
+                      <div class="lm-slider-pair">
+                        <input type="range" class="lm-slider"
+                               min="128" max="{{ m.ctx_max }}" step="128"
+                               value="{{ prof.ctx_size if prof.ctx_size is not none else 4096 }}">
+                        <input class="lm-input lm-slider-pair__num" type="number"
+                               name="ctx_size" min="128" max="{{ m.ctx_max }}" step="128"
+                               value="{{ prof.ctx_size if prof.ctx_size is not none else '' }}"
+                               placeholder="e.g. 4096">
+                      </div>
+                      {% elif m.engine == 'mlx' %}
+                      <label class="lm-field-label">Context size (read-only — fixed by the MLX model)</label>
+                      <input class="lm-input" type="text" disabled
+                             value="defined by model config.json"
+                             title="MLX models read context length from their config.json; it cannot be overridden at launch.">
+                      <input type="hidden" name="ctx_size" value="">
+                      {% else %}
+                      <p class="lm-help">Diffusion engines (<code>{{ m.engine }}</code>) don't use a context size. Use the Advanced tab to tweak raw engine args.</p>
+                      <input type="hidden" name="ctx_size" value="">
+                      {% endif %}
+
+                      <label class="lm-field-label">VRAM limit (GB)
+                        <span class="lm-field-hint">system: {{ vram_total_gb }} GB</span>
+                      </label>
+                      <div class="lm-slider-pair">
+                        <input type="range" class="lm-slider"
+                               min="0" max="{{ vram_total_gb }}" step="0.5"
+                               value="{{ prof.vram_limit_gb if prof.vram_limit_gb is not none else 0 }}"
+                               {% if m.engine != 'llama' %}disabled{% endif %}>
+                        <input class="lm-input lm-slider-pair__num" type="number"
+                               name="vram_limit_gb" min="0" max="{{ vram_total_gb }}" step="0.5"
+                               value="{{ prof.vram_limit_gb if prof.vram_limit_gb is not none else '' }}"
+                               placeholder="e.g. 8.0"
+                               {% if m.engine != 'llama' %}disabled{% endif %}>
+                        <label class="lm-slider-pair__cap">
+                          <input type="checkbox" name="vram_unlimited" value="on"
+                                 {% if prof.vram_limit_gb is none and prof.ram_spill_policy in ('default','unlimited','limited') %}checked{% endif %}
+                                 {% if m.engine != 'llama' %}disabled{% endif %}>
+                          no cap
+                        </label>
+                      </div>
+
+                      <label class="lm-field-label">RAM spill</label>
+                      <select class="lm-input" name="ram_spill_policy"
+                              {% if m.engine != 'llama' %}disabled{% endif %}>
+                        <option value="default" {% if prof.ram_spill_policy == 'default' %}selected{% endif %}>engine default</option>
+                        <option value="unlimited" {% if prof.ram_spill_policy == 'unlimited' %}selected{% endif %}>allow unlimited spill to RAM</option>
+                        <option value="limited" {% if prof.ram_spill_policy == 'limited' %}selected{% endif %}>limit spill to RAM (GB)</option>
+                        <option value="none" {% if prof.ram_spill_policy == 'none' %}selected{% endif %}>no spill — all layers on GPU</option>
+                      </select>
+                      <div class="lm-slider-pair"
+                           {% if prof.ram_spill_policy != 'limited' %}style="display:none;"{% endif %}>
+                        <input type="range" class="lm-slider"
+                               min="0" max="{{ ram_total_gb }}" step="0.5"
+                               value="{{ prof.ram_spill_limit_gb if prof.ram_spill_limit_gb is not none else 0 }}">
+                        <input class="lm-input lm-slider-pair__num" type="number"
+                               name="ram_spill_limit_gb" min="0" max="{{ ram_total_gb }}" step="0.5"
+                               value="{{ prof.ram_spill_limit_gb if prof.ram_spill_limit_gb is not none else '' }}"
+                               placeholder="GB on CPU/RAM">
+                        <span class="lm-field-hint" style="white-space:nowrap;">/ {{ ram_total_gb }} GB</span>
+                      </div>
+
+                      <label class="lm-field-label">mmproj (optional, GGUF multimodal)</label>
+                      <input class="lm-input lm-input--mono" type="text" name="mmproj" value="{{ prof.mmproj or '' }}"
+                             placeholder="repo/mmproj.gguf"
+                             {% if m.engine != 'llama' %}disabled{% endif %}>
+                    </div>
+
+                    <div class="lm-tab-panel" data-panel="advanced" hidden>
+                      <p class="lm-help">
+                        Raw engine flags — pass through directly to
+                        {% if m.engine == 'llama' %}llama-server{% elif m.engine == 'mlx' %}mlx_lm.server{% else %}the <code>{{ m.engine }}</code> adapter{% endif %}.
+                        These win over the basic settings above.
+                      </p>
+                      <label class="lm-field-label">args (JSON object)</label>
+                      <textarea class="lm-input lm-input--mono" name="args_json" rows="6" spellcheck="false"
+                                style="resize: vertical;">{{ prof.args_json or '{}' }}</textarea>
+                    </div>
+
+                    <div class="lm-profile__actions">
+                      <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Save</button>
+                    </div>
+                  </form>
+                </details>
+                <div class="lm-profile__row-actions">
+                  {% if not is_model_default %}
+                  <form method="post" action="/ui/models/profiles/set-model-default" style="display: inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="model_id" value="{{ m.model_id }}">
+                    <input type="hidden" name="profile_name" value="{{ prof.name }}">
+                    <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Make default</button>
+                  </form>
+                  {% else %}
+                  <form method="post" action="/ui/models/profiles/set-model-default" style="display: inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="model_id" value="{{ m.model_id }}">
+                    <input type="hidden" name="profile_name" value="">
+                    <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Unset default</button>
+                  </form>
+                  {% endif %}
+                  <form method="post" action="/ui/models/profiles/{{ prof.name }}/delete"
+                        data-confirm="Delete profile '{{ prof.name }}'?"
+                        style="display: inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="model_id" value="{{ m.model_id }}">
+                    <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Delete</button>
+                  </form>
+                </div>
+              </li>
+              {% endfor %}
+            </ul>
+            {% else %}
+            <p class="lm-profile-empty">No profiles yet for this model.</p>
+            {% endif %}
+
+            <details class="lm-profile-add">
+              <summary class="lm-profile-add__summary">+ Add profile</summary>
+              <form method="post" action="/ui/models/profiles/create"
+                    class="lm-form lm-form--inline lm-profile-form"
+                    data-engine="{{ m.engine }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="model_id" value="{{ m.model_id }}">
+
+                <label class="lm-field-label">Profile name</label>
+                <input class="lm-input" type="text" name="name" required
+                       pattern="[a-z0-9][a-z0-9\-]*"
+                       placeholder="e.g. fast, balanced, creative">
+
+                <div class="lm-tabs" role="tablist">
+                  <button type="button" class="lm-tab is-active" data-tab="basic">Basic</button>
+                  <button type="button" class="lm-tab" data-tab="advanced">Advanced</button>
+                </div>
+
+                <div class="lm-tab-panel" data-panel="basic">
+                  {% if m.engine == 'llama' %}
+                  <label class="lm-field-label">Context size (tokens)
+                    <span class="lm-field-hint">model max: {{ "{:,}".format(m.ctx_max) }}</span>
+                  </label>
+                  <div class="lm-slider-pair">
+                    <input type="range" class="lm-slider"
+                           min="128" max="{{ m.ctx_max }}" step="128" value="4096">
+                    <input class="lm-input lm-slider-pair__num" type="number"
+                           name="ctx_size" min="128" max="{{ m.ctx_max }}" step="128"
+                           value="4096">
+                  </div>
+                  {% elif m.engine == 'mlx' %}
+                  <label class="lm-field-label">Context size (read-only — fixed by the MLX model)</label>
+                  <input class="lm-input" type="text" disabled value="defined by model config.json">
+                  <input type="hidden" name="ctx_size" value="">
+                  {% else %}
+                  <p class="lm-help">Diffusion engines (<code>{{ m.engine }}</code>) don't use a context size. Use the Advanced tab to tweak raw engine args.</p>
+                  <input type="hidden" name="ctx_size" value="">
+                  {% endif %}
+
+                  <label class="lm-field-label">VRAM limit (GB)
+                    <span class="lm-field-hint">system: {{ vram_total_gb }} GB</span>
+                  </label>
+                  <div class="lm-slider-pair">
+                    <input type="range" class="lm-slider"
+                           min="0" max="{{ vram_total_gb }}" step="0.5" value="0"
+                           {% if m.engine != 'llama' %}disabled{% endif %}>
+                    <input class="lm-input lm-slider-pair__num" type="number"
+                           name="vram_limit_gb" min="0" max="{{ vram_total_gb }}" step="0.5"
+                           placeholder="e.g. 8.0"
+                           {% if m.engine != 'llama' %}disabled{% endif %}>
+                    <label class="lm-slider-pair__cap">
+                      <input type="checkbox" name="vram_unlimited" value="on" checked
+                             {% if m.engine != 'llama' %}disabled{% endif %}>
+                      no cap
+                    </label>
+                  </div>
+
+                  <label class="lm-field-label">RAM spill</label>
+                  <select class="lm-input" name="ram_spill_policy"
+                          {% if m.engine != 'llama' %}disabled{% endif %}>
+                    <option value="default" selected>engine default</option>
+                    <option value="unlimited">allow unlimited spill to RAM</option>
+                    <option value="limited">limit spill to RAM (GB)</option>
+                    <option value="none">no spill — all layers on GPU</option>
+                  </select>
+                  <div class="lm-slider-pair" style="display: none;">
+                    <input type="range" class="lm-slider"
+                           min="0" max="{{ ram_total_gb }}" step="0.5" value="0">
+                    <input class="lm-input lm-slider-pair__num" type="number"
+                           name="ram_spill_limit_gb" min="0" max="{{ ram_total_gb }}" step="0.5"
+                           placeholder="GB on CPU/RAM">
+                    <span class="lm-field-hint" style="white-space:nowrap;">/ {{ ram_total_gb }} GB</span>
+                  </div>
+
+                  <label class="lm-field-label">mmproj (optional)</label>
+                  <input class="lm-input lm-input--mono" type="text" name="mmproj"
+                         placeholder="repo/mmproj.gguf"
+                         {% if m.engine != 'llama' %}disabled{% endif %}>
+                </div>
+
+                <div class="lm-tab-panel" data-panel="advanced" hidden>
+                  <p class="lm-help">
+                    Raw engine flags — pass through to
+                    {% if m.engine == 'llama' %}llama-server{% elif m.engine == 'mlx' %}mlx_lm.server{% else %}the <code>{{ m.engine }}</code> adapter{% endif %}.
+                    Wins over basic settings.
+                  </p>
+                  <label class="lm-field-label">args (JSON object)</label>
+                  <textarea class="lm-input lm-input--mono" name="args_json" rows="5" spellcheck="false"
+                            style="resize: vertical;">{}</textarea>
+                </div>
+
+                <label style="font-size: 0.75rem; color: var(--fg-2); display: inline-flex; align-items: center; gap: 6px; margin-top: 6px;">
+                  <input type="checkbox" name="make_default" value="on"> Make this the default profile for the model
+                </label>
+                <div class="lm-profile__actions">
+                  <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Create profile</button>
+                </div>
+              </form>
+            </details>
+          </div>
+        </details>
+      </div>
+    </details>
+  </article>
+{% endmacro %}
+
 <div id="models-list"
      {% if active_downloads %}
      hx-get="/ui/models/_list"
@@ -49,311 +381,34 @@
 </table>
 {% endif %}
 
-{# ---- On-disk models — one card per model with inline profile management ---- #}
-{% if models %}
-<div class="lm-model-cards">
-  {% for m in models %}
-  {% set is_loaded = m.model_id == current_model %}
-  {% set is_default_model = m.model_id == default_model %}
-  <article class="lm-model {% if is_loaded %}lm-model--loaded{% endif %}"
-           data-model-id="{{ m.model_id }}">
-    <header class="lm-model__head">
-      <div class="lm-model__title-row">
-        <code class="lm-model__id">{{ m.model_id }}</code>
-        {% if is_loaded %}<span class="lm-pill lm-pill--running">loaded</span>{% endif %}
-        {% if is_default_model %}<span class="lm-pill" style="color: var(--accent); border-color: var(--accent);">default</span>{% endif %}
-      </div>
-      <div class="lm-model__meta">
-        <span>{{ '%.2f GB' % (m.size / (1024**3)) }}</span>
-        <span class="lm-model__sep">·</span>
-        <span>{{ m.source or 'local' }}</span>
-        <span class="lm-model__sep">·</span>
-        <span>{{ m.profiles | length }} profile{% if m.profiles|length != 1 %}s{% endif %}</span>
-      </div>
-    </header>
-
-    <div class="lm-model__actions">
-      <form method="post" action="/ui/models/load" style="display: inline;">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="model_id" value="{{ m.model_id }}">
-        <button type="submit" class="lm-btn lm-btn--xs">{% if is_loaded %}Reload{% else %}Load{% endif %}</button>
-      </form>
-      {% if not is_default_model %}
-      <form method="post" action="/ui/models/set-default" style="display: inline;">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="model_id" value="{{ m.model_id }}">
-        <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Set as default</button>
-      </form>
-      {% endif %}
-      <form method="post" action="/ui/models/locate" style="display: inline;">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="model_id" value="{{ m.model_id }}">
-        <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Locate</button>
-      </form>
-      <form method="post" action="/ui/models/delete"
-            data-confirm="Delete this model? Its profiles will be removed too."
-            style="display: inline;">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="model_id" value="{{ m.model_id }}">
-        {% if is_loaded %}<input type="hidden" name="force" value="true">{% endif %}
-        <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">
-          Delete{% if is_loaded %} (force){% endif %}
-        </button>
-      </form>
-    </div>
-
-    {# ---- Profiles for this model ---- #}
-    <details class="lm-model__profiles" open>
-      <summary class="lm-model__profiles-summary">
-        <span class="lm-eyebrow">Profiles</span>
-        <span style="font-size: 0.7rem; color: var(--fg-2);">engine: <code>{{ m.engine }}</code></span>
-        {% if m.default_profile %}
-        <span style="font-size: 0.75rem; color: var(--fg-2);">
-          default: <code style="color: var(--accent);">{{ m.default_profile }}</code>
-        </span>
-        {% endif %}
-      </summary>
-
-      <div class="lm-model__profiles-body">
-        {% if m.profiles %}
-        <ul class="lm-profile-list">
-          {% for prof in m.profiles %}
-          {% set is_model_default = prof.name == m.default_profile %}
-          <li class="lm-profile {% if is_model_default %}is-default{% endif %}">
-            <div class="lm-profile__head">
-              <span class="lm-profile__name">{{ prof.name }}</span>
-              {% if is_model_default %}<span class="lm-pill" style="color: var(--accent); border-color: var(--accent); font-size: 0.625rem;">default</span>{% endif %}
-            </div>
-            <details class="lm-profile__details">
-              <summary class="lm-profile__summary">edit</summary>
-              <form method="post" action="/ui/models/profiles/{{ prof.name }}/update"
-                    class="lm-form lm-form--inline lm-profile-form"
-                    data-engine="{{ m.engine }}">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <input type="hidden" name="model_id" value="{{ m.model_id }}">
-
-                <div class="lm-tabs" role="tablist">
-                  <button type="button" class="lm-tab is-active" data-tab="basic">Basic</button>
-                  <button type="button" class="lm-tab" data-tab="advanced">Advanced</button>
-                </div>
-
-                <div class="lm-tab-panel" data-panel="basic">
-                  {% if m.engine == 'llama' %}
-                  <label class="lm-field-label">Context size (tokens)
-                    <span class="lm-field-hint">model max: {{ "{:,}".format(m.ctx_max) }}</span>
-                  </label>
-                  <div class="lm-slider-pair">
-                    <input type="range" class="lm-slider"
-                           min="128" max="{{ m.ctx_max }}" step="128"
-                           value="{{ prof.ctx_size if prof.ctx_size is not none else 4096 }}">
-                    <input class="lm-input lm-slider-pair__num" type="number"
-                           name="ctx_size" min="128" max="{{ m.ctx_max }}" step="128"
-                           value="{{ prof.ctx_size if prof.ctx_size is not none else '' }}"
-                           placeholder="e.g. 4096">
-                  </div>
-                  {% else %}
-                  <label class="lm-field-label">Context size (read-only — fixed by the MLX model)</label>
-                  <input class="lm-input" type="text" disabled
-                         value="defined by model config.json"
-                         title="MLX models read context length from their config.json; it cannot be overridden at launch.">
-                  <input type="hidden" name="ctx_size" value="">
-                  {% endif %}
-
-                  <label class="lm-field-label">VRAM limit (GB)
-                    <span class="lm-field-hint">system: {{ vram_total_gb }} GB</span>
-                  </label>
-                  <div class="lm-slider-pair">
-                    <input type="range" class="lm-slider"
-                           min="0" max="{{ vram_total_gb }}" step="0.5"
-                           value="{{ prof.vram_limit_gb if prof.vram_limit_gb is not none else 0 }}"
-                           {% if m.engine != 'llama' %}disabled{% endif %}>
-                    <input class="lm-input lm-slider-pair__num" type="number"
-                           name="vram_limit_gb" min="0" max="{{ vram_total_gb }}" step="0.5"
-                           value="{{ prof.vram_limit_gb if prof.vram_limit_gb is not none else '' }}"
-                           placeholder="e.g. 8.0"
-                           {% if m.engine != 'llama' %}disabled{% endif %}>
-                    <label class="lm-slider-pair__cap">
-                      <input type="checkbox" name="vram_unlimited" value="on"
-                             {% if prof.vram_limit_gb is none and prof.ram_spill_policy in ('default','unlimited','limited') %}checked{% endif %}
-                             {% if m.engine != 'llama' %}disabled{% endif %}>
-                      no cap
-                    </label>
-                  </div>
-
-                  <label class="lm-field-label">RAM spill</label>
-                  <select class="lm-input" name="ram_spill_policy"
-                          {% if m.engine != 'llama' %}disabled{% endif %}>
-                    <option value="default" {% if prof.ram_spill_policy == 'default' %}selected{% endif %}>engine default</option>
-                    <option value="unlimited" {% if prof.ram_spill_policy == 'unlimited' %}selected{% endif %}>allow unlimited spill to RAM</option>
-                    <option value="limited" {% if prof.ram_spill_policy == 'limited' %}selected{% endif %}>limit spill to RAM (GB)</option>
-                    <option value="none" {% if prof.ram_spill_policy == 'none' %}selected{% endif %}>no spill — all layers on GPU</option>
-                  </select>
-                  <div class="lm-slider-pair"
-                       {% if prof.ram_spill_policy != 'limited' %}style="display:none;"{% endif %}>
-                    <input type="range" class="lm-slider"
-                           min="0" max="{{ ram_total_gb }}" step="0.5"
-                           value="{{ prof.ram_spill_limit_gb if prof.ram_spill_limit_gb is not none else 0 }}">
-                    <input class="lm-input lm-slider-pair__num" type="number"
-                           name="ram_spill_limit_gb" min="0" max="{{ ram_total_gb }}" step="0.5"
-                           value="{{ prof.ram_spill_limit_gb if prof.ram_spill_limit_gb is not none else '' }}"
-                           placeholder="GB on CPU/RAM">
-                    <span class="lm-field-hint" style="white-space:nowrap;">/ {{ ram_total_gb }} GB</span>
-                  </div>
-
-                  <label class="lm-field-label">mmproj (optional, GGUF multimodal)</label>
-                  <input class="lm-input lm-input--mono" type="text" name="mmproj" value="{{ prof.mmproj or '' }}"
-                         placeholder="repo/mmproj.gguf"
-                         {% if m.engine != 'llama' %}disabled{% endif %}>
-                </div>
-
-                <div class="lm-tab-panel" data-panel="advanced" hidden>
-                  <p class="lm-help">
-                    Raw engine flags — pass through directly to {% if m.engine == 'llama' %}llama-server{% else %}mlx_lm.server{% endif %}.
-                    These win over the basic settings above.
-                  </p>
-                  <label class="lm-field-label">args (JSON object)</label>
-                  <textarea class="lm-input lm-input--mono" name="args_json" rows="6" spellcheck="false"
-                            style="resize: vertical;">{{ prof.args_json or '{}' }}</textarea>
-                </div>
-
-                <div class="lm-profile__actions">
-                  <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Save</button>
-                </div>
-              </form>
-            </details>
-            <div class="lm-profile__row-actions">
-              {% if not is_model_default %}
-              <form method="post" action="/ui/models/profiles/set-model-default" style="display: inline;">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <input type="hidden" name="model_id" value="{{ m.model_id }}">
-                <input type="hidden" name="profile_name" value="{{ prof.name }}">
-                <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Make default</button>
-              </form>
-              {% else %}
-              <form method="post" action="/ui/models/profiles/set-model-default" style="display: inline;">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <input type="hidden" name="model_id" value="{{ m.model_id }}">
-                <input type="hidden" name="profile_name" value="">
-                <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Unset default</button>
-              </form>
-              {% endif %}
-              <form method="post" action="/ui/models/profiles/{{ prof.name }}/delete"
-                    data-confirm="Delete profile '{{ prof.name }}'?"
-                    style="display: inline;">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <input type="hidden" name="model_id" value="{{ m.model_id }}">
-                <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Delete</button>
-              </form>
-            </div>
-          </li>
-          {% endfor %}
-        </ul>
-        {% else %}
-        <p class="lm-profile-empty">No profiles yet for this model.</p>
-        {% endif %}
-
-        <details class="lm-profile-add">
-          <summary class="lm-profile-add__summary">+ Add profile</summary>
-          <form method="post" action="/ui/models/profiles/create"
-                class="lm-form lm-form--inline lm-profile-form"
-                data-engine="{{ m.engine }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="model_id" value="{{ m.model_id }}">
-
-            <label class="lm-field-label">Profile name</label>
-            <input class="lm-input" type="text" name="name" required
-                   pattern="[a-z0-9][a-z0-9\-]*"
-                   placeholder="e.g. fast, balanced, creative">
-
-            <div class="lm-tabs" role="tablist">
-              <button type="button" class="lm-tab is-active" data-tab="basic">Basic</button>
-              <button type="button" class="lm-tab" data-tab="advanced">Advanced</button>
-            </div>
-
-            <div class="lm-tab-panel" data-panel="basic">
-              {% if m.engine == 'llama' %}
-              <label class="lm-field-label">Context size (tokens)
-                <span class="lm-field-hint">model max: {{ "{:,}".format(m.ctx_max) }}</span>
-              </label>
-              <div class="lm-slider-pair">
-                <input type="range" class="lm-slider"
-                       min="128" max="{{ m.ctx_max }}" step="128" value="4096">
-                <input class="lm-input lm-slider-pair__num" type="number"
-                       name="ctx_size" min="128" max="{{ m.ctx_max }}" step="128"
-                       value="4096">
-              </div>
-              {% else %}
-              <label class="lm-field-label">Context size (read-only — fixed by the MLX model)</label>
-              <input class="lm-input" type="text" disabled value="defined by model config.json">
-              <input type="hidden" name="ctx_size" value="">
-              {% endif %}
-
-              <label class="lm-field-label">VRAM limit (GB)
-                <span class="lm-field-hint">system: {{ vram_total_gb }} GB</span>
-              </label>
-              <div class="lm-slider-pair">
-                <input type="range" class="lm-slider"
-                       min="0" max="{{ vram_total_gb }}" step="0.5" value="0"
-                       {% if m.engine != 'llama' %}disabled{% endif %}>
-                <input class="lm-input lm-slider-pair__num" type="number"
-                       name="vram_limit_gb" min="0" max="{{ vram_total_gb }}" step="0.5"
-                       placeholder="e.g. 8.0"
-                       {% if m.engine != 'llama' %}disabled{% endif %}>
-                <label class="lm-slider-pair__cap">
-                  <input type="checkbox" name="vram_unlimited" value="on" checked
-                         {% if m.engine != 'llama' %}disabled{% endif %}>
-                  no cap
-                </label>
-              </div>
-
-              <label class="lm-field-label">RAM spill</label>
-              <select class="lm-input" name="ram_spill_policy"
-                      {% if m.engine != 'llama' %}disabled{% endif %}>
-                <option value="default" selected>engine default</option>
-                <option value="unlimited">allow unlimited spill to RAM</option>
-                <option value="limited">limit spill to RAM (GB)</option>
-                <option value="none">no spill — all layers on GPU</option>
-              </select>
-              <div class="lm-slider-pair" style="display: none;">
-                <input type="range" class="lm-slider"
-                       min="0" max="{{ ram_total_gb }}" step="0.5" value="0">
-                <input class="lm-input lm-slider-pair__num" type="number"
-                       name="ram_spill_limit_gb" min="0" max="{{ ram_total_gb }}" step="0.5"
-                       placeholder="GB on CPU/RAM">
-                <span class="lm-field-hint" style="white-space:nowrap;">/ {{ ram_total_gb }} GB</span>
-              </div>
-
-              <label class="lm-field-label">mmproj (optional)</label>
-              <input class="lm-input lm-input--mono" type="text" name="mmproj"
-                     placeholder="repo/mmproj.gguf"
-                     {% if m.engine != 'llama' %}disabled{% endif %}>
-            </div>
-
-            <div class="lm-tab-panel" data-panel="advanced" hidden>
-              <p class="lm-help">
-                Raw engine flags — pass through to {% if m.engine == 'llama' %}llama-server{% else %}mlx_lm.server{% endif %}.
-                Wins over basic settings.
-              </p>
-              <label class="lm-field-label">args (JSON object)</label>
-              <textarea class="lm-input lm-input--mono" name="args_json" rows="5" spellcheck="false"
-                        style="resize: vertical;">{}</textarea>
-            </div>
-
-            <label style="font-size: 0.75rem; color: var(--fg-2); display: inline-flex; align-items: center; gap: 6px; margin-top: 6px;">
-              <input type="checkbox" name="make_default" value="on"> Make this the default profile for the model
-            </label>
-            <div class="lm-profile__actions">
-              <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Create profile</button>
-            </div>
-          </form>
-        </details>
-      </div>
-    </details>
-  </article>
-  {% endfor %}
+{# ---- LLMs (text engines) ---- #}
+{% if text_models or not image_models %}
+<div class="lm-models-group">
+  <header class="lm-models-group__head">
+    <span class="lm-eyebrow">Language models</span>
+    <span class="lm-models-group__count">{{ text_models|length }} on disk</span>
+  </header>
+  {% if text_models %}
+  <div class="lm-model-cards">
+    {% for m in text_models %}{{ render_model_card(m) }}{% endfor %}
+  </div>
+  {% else %}
+  <p class="lm-empty">No language models yet. Pull one below to get started.</p>
+  {% endif %}
 </div>
-{% else %}
-<p class="lm-empty">No models on disk yet. Pull one below to get started.</p>
+{% endif %}
+
+{# ---- Diffusion / image models ---- #}
+{% if image_models %}
+<div class="lm-models-group" style="margin-top: 28px;">
+  <header class="lm-models-group__head">
+    <span class="lm-eyebrow">Diffusion models</span>
+    <span class="lm-models-group__count">{{ image_models|length }} on disk</span>
+  </header>
+  <div class="lm-model-cards">
+    {% for m in image_models %}{{ render_model_card(m) }}{% endfor %}
+  </div>
+</div>
 {% endif %}
 
 {# ---- Failed / cancelled downloads ---- #}

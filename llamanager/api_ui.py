@@ -266,6 +266,134 @@ async def require_csrf(request: Request,
         raise HTTPException(status_code=403, detail="invalid csrf token")
 
 
+_VRAM_USAGE_CACHE: dict[str, Any] = {"at": 0.0, "value": None}
+_PER_PROCESS_VRAM_CACHE: dict[str, Any] = {"at": 0.0, "value": {}}
+
+
+def _pdh_query(counter_path: str) -> list[tuple[str, int]] | None:
+    """Run a single PDH wildcard query and return (instance_name, value)
+    pairs. Uses ``PdhAddEnglishCounterW`` so the path is locale-independent.
+    Returns ``None`` on any failure."""
+    try:
+        import ctypes
+        from ctypes import POINTER, byref, c_int64, c_uint32, c_void_p, c_wchar_p
+        from ctypes.wintypes import DWORD, LPCWSTR
+
+        pdh = ctypes.WinDLL("pdh")
+        PDH_FMT_LARGE = 0x00000400
+        PDH_MORE_DATA = 0x800007D2
+
+        class PDH_FMT_COUNTERVALUE(ctypes.Structure):
+            _fields_ = [("CStatus", DWORD), ("largeValue", c_int64)]
+
+        class PDH_FMT_COUNTERVALUE_ITEM_W(ctypes.Structure):
+            _fields_ = [("szName", c_wchar_p),
+                        ("FmtValue", PDH_FMT_COUNTERVALUE)]
+
+        PdhOpenQueryW = pdh.PdhOpenQueryW
+        PdhOpenQueryW.argtypes = [LPCWSTR, c_void_p, POINTER(c_void_p)]
+        PdhOpenQueryW.restype = c_uint32
+        PdhAddEnglishCounterW = pdh.PdhAddEnglishCounterW
+        PdhAddEnglishCounterW.argtypes = [c_void_p, LPCWSTR, c_void_p,
+                                          POINTER(c_void_p)]
+        PdhAddEnglishCounterW.restype = c_uint32
+        PdhCollectQueryData = pdh.PdhCollectQueryData
+        PdhCollectQueryData.argtypes = [c_void_p]
+        PdhCollectQueryData.restype = c_uint32
+        PdhGetFormattedCounterArrayW = pdh.PdhGetFormattedCounterArrayW
+        PdhGetFormattedCounterArrayW.argtypes = [c_void_p, DWORD,
+                                                 POINTER(DWORD),
+                                                 POINTER(DWORD), c_void_p]
+        PdhGetFormattedCounterArrayW.restype = c_uint32
+        PdhCloseQuery = pdh.PdhCloseQuery
+        PdhCloseQuery.argtypes = [c_void_p]
+        PdhCloseQuery.restype = c_uint32
+
+        query = c_void_p()
+        if PdhOpenQueryW(None, 0, byref(query)) != 0:
+            return None
+        try:
+            counter = c_void_p()
+            if PdhAddEnglishCounterW(query, counter_path, 0,
+                                     byref(counter)) != 0:
+                return None
+            if PdhCollectQueryData(query) != 0:
+                return None
+            buf_size = DWORD(0)
+            item_count = DWORD(0)
+            rc = PdhGetFormattedCounterArrayW(
+                counter, PDH_FMT_LARGE,
+                byref(buf_size), byref(item_count), None,
+            )
+            if rc != PDH_MORE_DATA or buf_size.value == 0:
+                return None
+            buf = (ctypes.c_ubyte * buf_size.value)()
+            rc = PdhGetFormattedCounterArrayW(
+                counter, PDH_FMT_LARGE,
+                byref(buf_size), byref(item_count),
+                ctypes.cast(buf, c_void_p),
+            )
+            if rc != 0:
+                return None
+            items = ctypes.cast(buf, POINTER(PDH_FMT_COUNTERVALUE_ITEM_W))
+            out: list[tuple[str, int]] = []
+            for i in range(item_count.value):
+                it = items[i]
+                if it.FmtValue.CStatus != 0:
+                    continue
+                out.append((it.szName or "", int(it.FmtValue.largeValue)))
+            return out
+        finally:
+            PdhCloseQuery(query)
+    except Exception:
+        return None
+
+
+def _windows_per_process_vram() -> dict[int, int]:
+    """Map of PID → dedicated VRAM bytes, summed across GPU engines/adapters
+    on Windows. Cached for 2 s. Empty dict if the counter isn't available."""
+    now = time.monotonic()
+    if now - _PER_PROCESS_VRAM_CACHE["at"] < 2.0:
+        return _PER_PROCESS_VRAM_CACHE["value"]
+
+    by_pid: dict[int, int] = {}
+    rows = _pdh_query(r"\GPU Process Memory(*)\Dedicated Usage")
+    if rows:
+        import re
+        pid_re = re.compile(r"pid_(\d+)")
+        for name, value in rows:
+            m = pid_re.search(name)
+            if not m or value <= 0:
+                continue
+            pid = int(m.group(1))
+            by_pid[pid] = by_pid.get(pid, 0) + value
+    _PER_PROCESS_VRAM_CACHE.update({"at": now, "value": by_pid})
+    return by_pid
+
+
+def _windows_vram_usage_bytes() -> int | None:
+    """System-wide dedicated-VRAM usage in bytes, summed across all
+    GPU adapters. Uses Windows Performance Data Helper (PDH) with the
+    locale-independent English counter API — works on Windows 10+ for
+    any GPU vendor (NVIDIA, AMD, Intel) without vendor SDKs.
+
+    Returns ``None`` if the counter is unavailable (older Windows,
+    counter not registered, etc.). Result cached for 2 s.
+
+    Note: DXGI's ``QueryVideoMemoryInfo`` is per-process, not system-wide
+    — Task Manager itself uses the same perfcounter source we query here.
+    """
+    now = time.monotonic()
+    if now - _VRAM_USAGE_CACHE["at"] < 2.0:
+        return _VRAM_USAGE_CACHE["value"]
+    rows = _pdh_query(r"\GPU Adapter Memory(*)\Dedicated Usage")
+    used: int | None = None
+    if rows is not None:
+        used = sum(v for _, v in rows if v > 0)
+    _VRAM_USAGE_CACHE.update({"at": now, "value": used})
+    return used
+
+
 def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
     """Gather hardware info relevant to llama-server inference."""
     import psutil
@@ -296,8 +424,11 @@ def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
     info["ram_available_gb"] = round(mem.available / (1024**3), 1)
     info["ram_used_pct"] = mem.percent
 
-    # Collect per-process memory; separate llamanager processes from the rest
+    # Collect per-process RAM; separate llamanager processes from the rest.
+    # Also build a (pid → name) lookup we can reuse for the per-process VRAM
+    # table below.
     LLAMA_NAMES = {"llama-server", "llamanager", "llama_server"}
+    pid_names: dict[int, str] = {}
     try:
         procs = []
         llama_mem_bytes = 0
@@ -307,18 +438,54 @@ def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
                 if mi is None:
                     continue
                 name = p.info["name"] or ""
+                pid = p.info["pid"]
+                pid_names[pid] = name
                 rss = mi.rss
                 if name in LLAMA_NAMES:
                     llama_mem_bytes += rss
                 else:
-                    procs.append({"name": name, "pid": p.info["pid"], "mem_mb": round(rss / (1024**2), 1)})
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, AttributeError):
+                    procs.append({"name": name, "pid": pid,
+                                  "mem_mb": round(rss / (1024**2), 1)})
+            except (psutil.NoSuchProcess, psutil.AccessDenied,
+                    psutil.ZombieProcess, AttributeError):
                 continue
         procs.sort(key=lambda x: x["mem_mb"], reverse=True)
-        info["top_mem_procs"] = procs[:5]
+        info["top_ram_procs"] = procs[:5]
     except Exception:
         llama_mem_bytes = 0
-        info["top_mem_procs"] = []
+        info["top_ram_procs"] = []
+    # Back-compat alias for any external template that still reads this.
+    info["top_mem_procs"] = info["top_ram_procs"]
+
+    # Per-process VRAM (Windows only — Linux/Mac would need nvidia-smi
+    # pmon or sysctl iokit, which we don't wire up here).
+    vram_procs: list[dict[str, Any]] = []
+    if platform.system() == "Windows":
+        try:
+            by_pid = _windows_per_process_vram()
+            rows = []
+            for pid, used_bytes in by_pid.items():
+                if used_bytes <= 0:
+                    continue
+                name = pid_names.get(pid)
+                if not name:
+                    # Process may have started after our psutil sweep, or
+                    # we don't have permission to read its name.
+                    try:
+                        name = psutil.Process(pid).name()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied,
+                            psutil.ZombieProcess):
+                        name = f"pid {pid}"
+                rows.append({
+                    "name": name,
+                    "pid": pid,
+                    "mem_mb": round(used_bytes / (1024**2), 1),
+                })
+            rows.sort(key=lambda x: x["mem_mb"], reverse=True)
+            vram_procs = rows[:5]
+        except Exception:
+            vram_procs = []
+    info["top_vram_procs"] = vram_procs
 
     info["llama_mem_gb"] = round(llama_mem_bytes / (1024**3), 1)
     # Effective available = OS available + what llamanager/llama-server is using
@@ -426,7 +593,100 @@ def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
                             )
                             break
                 except Exception:
-                    info["gpu_type"] = "No compatible GPU detected"
+                    pass
+
+        # Windows fallback: ROCm/xpu-smi aren't shipped on Windows for
+        # most users (AMD cards run llama.cpp via Vulkan/HIP-SDK), and
+        # nvidia-smi only covers NVIDIA. Read the display-adapter info
+        # from the Windows registry so we still surface the card.
+        if system == "Windows" and not info.get("gpu_name"):
+            try:
+                import winreg
+                base = (r"SYSTEM\CurrentControlSet\Control\Class"
+                        r"\{4d36e968-e325-11ce-bfc1-08002be10318}")
+                best: tuple[int, str, int] | None = None  # (priority, name, mem_bytes)
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as root:
+                    i = 0
+                    while True:
+                        try:
+                            sub = winreg.EnumKey(root, i)
+                        except OSError:
+                            break
+                        i += 1
+                        if not sub.isdigit():
+                            continue
+                        try:
+                            with winreg.OpenKey(root, sub) as k:
+                                name = winreg.QueryValueEx(k, "DriverDesc")[0]
+                                mem_bytes = 0
+                                # qwMemorySize is 64-bit (reliable for >4 GB)
+                                for key_name in ("HardwareInformation.qwMemorySize",
+                                                 "HardwareInformation.MemorySize"):
+                                    try:
+                                        raw = winreg.QueryValueEx(k, key_name)[0]
+                                        if isinstance(raw, bytes):
+                                            mem_bytes = int.from_bytes(raw, "little")
+                                        else:
+                                            mem_bytes = int(raw)
+                                            if mem_bytes < 0:  # 32-bit signed → wrap
+                                                mem_bytes += 2**32
+                                        if mem_bytes > 0:
+                                            break
+                                    except (FileNotFoundError, OSError, ValueError):
+                                        continue
+                        except OSError:
+                            continue
+                        low = name.lower()
+                        # Prefer discrete GPUs over integrated/basic display
+                        if "nvidia" in low or "geforce" in low or "quadro" in low:
+                            pri = 0
+                        elif ("amd" in low or "radeon" in low
+                              or low.startswith("ati ") or "rx " in low):
+                            pri = 0
+                        elif "arc" in low:
+                            pri = 1
+                        elif "intel" in low:
+                            pri = 2
+                        elif "microsoft basic" in low or "remote" in low:
+                            continue
+                        else:
+                            pri = 3
+                        if best is None or pri < best[0]:
+                            best = (pri, name, mem_bytes)
+                if best is not None:
+                    _, name, mem_bytes = best
+                    low = name.lower()
+                    if "nvidia" in low or "geforce" in low or "quadro" in low:
+                        info["gpu_type"] = "NVIDIA (driver)"
+                    elif ("amd" in low or "radeon" in low
+                          or low.startswith("ati ") or "rx " in low):
+                        info["gpu_type"] = "AMD (Vulkan/HIP)"
+                    elif "arc" in low:
+                        info["gpu_type"] = "Intel Arc"
+                    elif "intel" in low:
+                        info["gpu_type"] = "Intel iGPU"
+                    else:
+                        info["gpu_type"] = "GPU"
+                    info["gpu_name"] = name
+                    if mem_bytes > 0:
+                        info["gpu_vram_total_gb"] = round(mem_bytes / (1024**3), 1)
+            except Exception:
+                pass
+
+        # Live VRAM usage on Windows — DXGI works for any vendor when we
+        # don't have a vendor-specific CLI (rocm-smi/nvidia-smi are rare
+        # on Windows for AMD users). Only fill ``gpu_vram_free_gb`` if it
+        # isn't already set by an earlier vendor-specific path.
+        if (system == "Windows" and "gpu_vram_total_gb" in info
+                and "gpu_vram_free_gb" not in info):
+            used_bytes = _windows_vram_usage_bytes()
+            if used_bytes is not None:
+                used_gb = used_bytes / (1024**3)
+                free_gb = max(0.0, info["gpu_vram_total_gb"] - used_gb)
+                info["gpu_vram_free_gb"] = round(free_gb, 1)
+
+        if not info.get("gpu_name") and info.get("gpu_type") in ("unknown", ""):
+            info["gpu_type"] = "No compatible GPU detected"
 
     # Disk free in models dir
     try:
@@ -441,6 +701,45 @@ def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
     info["os"] = f"{platform.system()} {platform.release()}"
 
     return info
+
+
+def _topbar_models(request: Request) -> dict[str, Any]:
+    """Build the dataset the sticky top-bar model selector needs:
+    text/image model lists, each model's profiles, and the currently
+    loaded LLM + saved default-image model."""
+    cfg = request.app.state.cfg
+    reg: Registry = request.app.state.registry
+    sm: ServerManager = request.app.state.sm
+
+    text: list[dict[str, Any]] = []
+    image: list[dict[str, Any]] = []
+    for entry in reg.list():
+        engine = detect_engine_for_id(entry.model_id, cfg.models_dir)
+        m = cfg.get_model(entry.model_id)
+        profile_names = sorted(m.profiles.keys()) if m else []
+        default_profile = m.default_profile if m else ""
+        row = {
+            "model_id": entry.model_id,
+            "engine": engine,
+            "profiles": profile_names,
+            "default_profile": default_profile,
+        }
+        if ENGINE_FAMILY.get(engine, "text") == "image":
+            image.append(row)
+        else:
+            text.append(row)
+
+    text.sort(key=lambda r: r["model_id"])
+    image.sort(key=lambda r: r["model_id"])
+    return {
+        "topbar_text_models": text,
+        "topbar_image_models": image,
+        "topbar_current_llm": sm.runtime.current_model or "",
+        "topbar_current_llm_profile": sm.runtime.current_profile or "",
+        "topbar_default_llm": cfg.default_model or "",
+        "topbar_default_image": cfg.default_image_model or "",
+        "topbar_default_image_profile": cfg.default_image_profile or "",
+    }
 
 
 def _ctx(request: Request, **extra: Any) -> dict[str, Any]:
@@ -466,6 +765,7 @@ def _ctx(request: Request, **extra: Any) -> dict[str, Any]:
         "dot_status": dot_status,
         "has_models": has_models,
     }
+    base.update(_topbar_models(request))
     base.update(extra)
     return base
 
@@ -647,11 +947,13 @@ def _models_ctx(request: Request) -> dict:
     # Profiles live nested under their parent model in cfg.models. We hand
     # the template a flattened per-model list of dicts so Jinja can render
     # without poking dataclasses.
-    models = []
+    text_models: list[dict] = []
+    image_models: list[dict] = []
     for entry in reg.list():
         d = entry.to_dict()
         engine = detect_engine_for_id(entry.model_id, cfg.models_dir)
         d["engine"] = engine
+        d["engine_family"] = ENGINE_FAMILY.get(engine, "text")
         d["ctx_max"] = _ctx_max_for(entry.path, engine)
         m = cfg.get_model(entry.model_id)
         prof_entries: list[dict] = []
@@ -672,11 +974,19 @@ def _models_ctx(request: Request) -> dict:
             prof_entries.sort(key=lambda e: e["name"])
         d["profiles"] = prof_entries
         d["default_profile"] = default_profile
-        models.append(d)
+        if d["engine_family"] == "image":
+            image_models.append(d)
+        else:
+            text_models.append(d)
+
+    # Combined list kept for any callers that still expect ``models``.
+    all_models = text_models + image_models
 
     return _ctx(
         request,
-        models=models,
+        models=all_models,
+        text_models=text_models,
+        image_models=image_models,
         downloads=reg.list_downloads(),
         current_model=request.app.state.sm.runtime.current_model,
         current_profile=request.app.state.sm.runtime.current_profile,
@@ -698,13 +1008,9 @@ async def models_view(request: Request, _: Origin = Depends(require_admin_ui)) -
 @router.get("/models/_list", response_class=HTMLResponse)
 async def models_list_partial(request: Request,
                               _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    reg: Registry = request.app.state.registry
-    return templates.TemplateResponse(request, "_models_list_partial.html", _ctx(
-        request,
-        models=[m.to_dict() for m in reg.list()],
-        downloads=reg.list_downloads(),
-        current_model=request.app.state.sm.runtime.current_model,
-    ))
+    return templates.TemplateResponse(
+        request, "_models_list_partial.html", _models_ctx(request),
+    )
 
 
 @router.post("/models/load", response_class=HTMLResponse)
@@ -2155,4 +2461,83 @@ async def models_set_default(request: Request,
     update_defaults(cfg.config_path, default_model=model_id.strip())
     _reload_config(request)
     return RedirectResponse("/ui/models", status_code=303)
+
+
+# ---- Top-bar (sticky model selector) routes ----
+
+def _topbar_redirect(request: Request) -> RedirectResponse:
+    """Send the operator back to where they triggered the top bar from
+    so the selector doesn't yank them to /ui/models on every action."""
+    referer = request.headers.get("referer", "") or "/ui/"
+    # Only honour same-origin referers; otherwise fall back to dashboard.
+    try:
+        ref_host = urlparse(referer).netloc
+    except Exception:
+        ref_host = ""
+    if ref_host and ref_host != request.url.netloc:
+        referer = "/ui/"
+    return RedirectResponse(referer, status_code=303)
+
+
+@router.post("/topbar/llm/load", response_class=HTMLResponse)
+async def topbar_llm_load(request: Request,
+                          model_id: str = Form(...),
+                          profile: str = Form(""),
+                          _: None = Depends(require_csrf)) -> Response:
+    """Load (or swap to) the requested LLM model + optional profile."""
+    sm: ServerManager = request.app.state.sm
+    cfg = request.app.state.cfg
+    try:
+        spec = resolve_spec(cfg, model=model_id.strip(),
+                            profile=profile.strip() or None)
+        if sm.is_running:
+            await sm.swap(spec)
+        else:
+            await sm.start(spec)
+    except (ServerError, ValueError) as e:
+        return _error_html(f"load failed: {e}", status_code=400)
+    return _topbar_redirect(request)
+
+
+@router.post("/topbar/llm/unload", response_class=HTMLResponse)
+async def topbar_llm_unload(request: Request,
+                            _: None = Depends(require_csrf)) -> Response:
+    """Stop the currently loaded LLM (if any)."""
+    sm: ServerManager = request.app.state.sm
+    if sm.is_running:
+        try:
+            await sm.stop()
+        except ServerError as e:
+            return _error_html(f"unload failed: {e}", status_code=400)
+    return _topbar_redirect(request)
+
+
+@router.post("/topbar/llm/set-default", response_class=HTMLResponse)
+async def topbar_llm_set_default(request: Request,
+                                 model_id: str = Form(""),
+                                 _: None = Depends(require_csrf)) -> Response:
+    """Persist ``default_model`` so the LLM is auto-loaded on startup
+    when ``autolaunch`` is enabled, and used by requests that omit
+    ``model``."""
+    cfg = request.app.state.cfg
+    update_defaults(cfg.config_path, default_model=model_id.strip())
+    _reload_config(request)
+    return _topbar_redirect(request)
+
+
+@router.post("/topbar/image/set-default", response_class=HTMLResponse)
+async def topbar_image_set_default(request: Request,
+                                   model_id: str = Form(""),
+                                   profile: str = Form(""),
+                                   _: None = Depends(require_csrf)) -> Response:
+    """Persist the default image model + profile. /v1/images/generations
+    uses these when the request omits ``model``."""
+    cfg = request.app.state.cfg
+    update_defaults(
+        cfg.config_path,
+        default_image_model=model_id.strip(),
+        default_image_profile=profile.strip(),
+    )
+    _reload_config(request)
+    return _topbar_redirect(request)
 

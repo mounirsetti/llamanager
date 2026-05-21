@@ -67,7 +67,9 @@ window_seconds = 300
 success_run_seconds = 300
 
 [downloads]
-max_disk_gb = 80
+# 0 = no cap (only the actual partition free-space check applies).
+# Set to a non-zero GB value to cap the cumulative size of the models dir.
+max_disk_gb = 0
 hf_token_env = "HF_TOKEN"
 
 [queue]
@@ -248,6 +250,11 @@ class Config:
     data_dir: Path = field(default_factory=lambda: expand("~/.llamanager"))
 
     default_model: str = ""
+    # Image-family default — used by /v1/images/generations when the
+    # request body omits ``model``. Profile defaults to the model's own
+    # default_profile when blank.
+    default_image_model: str = ""
+    default_image_profile: str = ""
     default_origin_priority: int = 50
     autolaunch: bool = False
 
@@ -255,7 +262,10 @@ class Config:
     window_seconds: int = 300
     success_run_seconds: int = 300
 
-    max_disk_gb: int = 80
+    # 0 = no cap; the actual free-disk check in registry.py still guards
+    # against running out of space. A non-zero value caps the cumulative
+    # size of the models directory.
+    max_disk_gb: int = 0
     hf_token_env: str = "HF_TOKEN"
 
     max_concurrent: int = 1
@@ -432,12 +442,14 @@ def load_config(path: Path | None = None) -> Config:
         llama_server_port=int(server.get("llama_server_port", 7201)),
         data_dir=expand(server.get("data_dir", "~/.llamanager")),
         default_model=defaults.get("model", ""),
+        default_image_model=defaults.get("image_model", ""),
+        default_image_profile=defaults.get("image_profile", ""),
         default_origin_priority=int(defaults.get("origin_priority", 50)),
         autolaunch=bool(defaults.get("autolaunch", False)),
         max_restarts_in_window=int(rp.get("max_restarts_in_window", 3)),
         window_seconds=int(rp.get("window_seconds", 300)),
         success_run_seconds=int(rp.get("success_run_seconds", 300)),
-        max_disk_gb=int(dl.get("max_disk_gb", 80)),
+        max_disk_gb=int(dl.get("max_disk_gb", 0)),
         hf_token_env=dl.get("hf_token_env", "HF_TOKEN"),
         max_concurrent=int(q.get("max_concurrent", 1)),
         max_queue_depth=int(q.get("max_queue_depth", 200)),
@@ -794,14 +806,22 @@ def set_default_args(cfg_path: Path, engine: str, args: dict[str, Any]) -> None:
 
 def update_defaults(cfg_path: Path, *,
                     default_model: str | None = None,
+                    default_image_model: str | None = None,
+                    default_image_profile: str | None = None,
                     autolaunch: bool | None = None) -> None:
-    """Update the [defaults] section in config.toml."""
+    """Update the [defaults] section in config.toml. Pass an empty string
+    for ``default_image_model`` / ``default_image_profile`` to clear the
+    saved value."""
     import tomlkit
     doc = _load_tomlkit(cfg_path)
     if "defaults" not in doc:
         doc.add("defaults", tomlkit.table())
     if default_model is not None:
         doc["defaults"]["model"] = default_model
+    if default_image_model is not None:
+        doc["defaults"]["image_model"] = default_image_model
+    if default_image_profile is not None:
+        doc["defaults"]["image_profile"] = default_image_profile
     if autolaunch is not None:
         doc["defaults"]["autolaunch"] = autolaunch
     _save_tomlkit(cfg_path, doc)

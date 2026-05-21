@@ -6,15 +6,25 @@
 <style>
   /* ====== Models-page composition (model cards + inline profiles) ====== */
 
+  .lm-models-group { display: flex; flex-direction: column; gap: 8px; }
+  .lm-models-group__head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 8px; padding: 4px 0 8px;
+    border-bottom: 1px solid var(--bg-3);
+    margin-bottom: 6px;
+  }
+  .lm-models-group__count {
+    font-size: 0.75rem; color: var(--fg-2);
+  }
+
   .lm-model-cards {
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    gap: 6px;
   }
   .lm-model {
     border: 1px solid var(--bg-3);
     background: var(--bg-1);
-    padding: 16px 18px;
     position: relative;
   }
   .lm-model--loaded {
@@ -29,23 +39,47 @@
     left: -1px; top: -1px; bottom: -1px;
     width: 3px;
     background: var(--accent);
+    z-index: 1;
   }
-  .lm-model__head {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    margin-bottom: 12px;
-  }
-  .lm-model__title-row {
+  /* Lean summary: only the model name + key pills + size/engine. Click to expand. */
+  .lm-model__expand > .lm-model__summary {
+    cursor: pointer;
+    list-style: none;
     display: flex;
     align-items: center;
     gap: 8px;
+    padding: 10px 14px;
+    user-select: none;
     flex-wrap: wrap;
   }
+  .lm-model__expand > .lm-model__summary::-webkit-details-marker { display: none; }
+  .lm-model__chevron {
+    color: var(--fg-3);
+    font-size: 0.7rem;
+    transition: transform 160ms ease;
+    display: inline-block;
+    width: 0.7em;
+  }
+  .lm-model__expand[open] > .lm-model__summary > .lm-model__chevron {
+    transform: rotate(90deg);
+  }
+  .lm-model__expand[open] > .lm-model__summary {
+    border-bottom: 1px solid var(--bg-3);
+  }
   .lm-model__id {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 0.875rem;
     color: var(--fg-0);
     word-break: break-all;
+  }
+  .lm-model__summary-spacer { flex: 1; }
+  .lm-model__summary-meta {
+    font-size: 0.75rem;
+    color: var(--fg-2);
+    white-space: nowrap;
+  }
+  .lm-model__body {
+    padding: 12px 14px 14px;
   }
   .lm-model__meta {
     display: flex;
@@ -53,6 +87,8 @@
     gap: 8px;
     font-size: 0.75rem;
     color: var(--fg-2);
+    margin-bottom: 12px;
+    flex-wrap: wrap;
   }
   .lm-model__sep { color: var(--fg-3); }
 
@@ -329,11 +365,14 @@
   </div>
 </section>
 
-{# ---- Models (unified: on-disk + downloads + per-model profiles) ---- #}
+{# ---- Models (split into LLM vs diffusion, on-disk + downloads + profiles) ---- #}
 <section class="lm-section">
   <header class="lm-section-head">
     <span class="lm-section-marker">Models</span>
-    <span class="lm-section-meta">{{ models|length }} on disk</span>
+    <span class="lm-section-meta">
+      {{ text_models|length }} LLM{% if text_models|length != 1 %}s{% endif %}
+      · {{ image_models|length }} diffusion
+    </span>
   </header>
 
   <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 16px; font-size: 0.8125rem; color: var(--fg-2);">

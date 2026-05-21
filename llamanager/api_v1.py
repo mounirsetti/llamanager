@@ -491,12 +491,16 @@ async def images_generations(request: Request) -> Response:
     cfg = request.app.state.cfg
     runner: ImageTaskRunner = request.app.state.image_runner
 
-    # Resolve model id: body `model`, or X-Llamanager-Model header.
-    model_required = body.get("model") or request.headers.get("x-llamanager-model")
+    # Resolve model id: body `model`, X-Llamanager-Model header, or the
+    # operator-set default image model.
+    model_required = (body.get("model")
+                      or request.headers.get("x-llamanager-model")
+                      or cfg.default_image_model)
     if not model_required:
         raise HTTPException(
             status_code=400,
-            detail="image requests require 'model' (an image-family model id)",
+            detail=("image requests require 'model' (an image-family model id) "
+                    "or a default image model set in the UI top bar"),
         )
     _check_model_allowed(origin, model_required)
     # Verify it's an image-family model before queueing.
@@ -505,7 +509,14 @@ async def images_generations(request: Request) -> Response:
     except ImageError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    profile_required = body.get("profile") or request.headers.get("x-llamanager-profile")
+    profile_required = (body.get("profile")
+                        or request.headers.get("x-llamanager-profile"))
+    # When the caller didn't specify a profile but the default-image model
+    # is in play, fall back to the default profile saved for that model.
+    if (not profile_required
+            and model_required == cfg.default_image_model
+            and cfg.default_image_profile):
+        profile_required = cfg.default_image_profile
 
     n = int(body.get("n", 1) or 1)
     if n < 1 or n > 8:
