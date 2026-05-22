@@ -1,20 +1,30 @@
 {% extends "base.html" %}
 {% set active = 'models' %}
-{% block title %}Models - llamanager{% endblock %}
+{% block title %}LLM models - llamanager{% endblock %}
 {% block content %}
 
 <style>
   /* ====== Models-page composition (model cards + inline profiles) ====== */
 
+  .lm-models-group { display: flex; flex-direction: column; gap: 8px; }
+  .lm-models-group__head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 8px; padding: 4px 0 8px;
+    border-bottom: 1px solid var(--bg-3);
+    margin-bottom: 6px;
+  }
+  .lm-models-group__count {
+    font-size: 0.75rem; color: var(--fg-2);
+  }
+
   .lm-model-cards {
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    gap: 6px;
   }
   .lm-model {
     border: 1px solid var(--bg-3);
     background: var(--bg-1);
-    padding: 16px 18px;
     position: relative;
   }
   .lm-model--loaded {
@@ -29,23 +39,47 @@
     left: -1px; top: -1px; bottom: -1px;
     width: 3px;
     background: var(--accent);
+    z-index: 1;
   }
-  .lm-model__head {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    margin-bottom: 12px;
-  }
-  .lm-model__title-row {
+  /* Lean summary: only the model name + key pills + size/engine. Click to expand. */
+  .lm-model__expand > .lm-model__summary {
+    cursor: pointer;
+    list-style: none;
     display: flex;
     align-items: center;
     gap: 8px;
+    padding: 10px 14px;
+    user-select: none;
     flex-wrap: wrap;
   }
+  .lm-model__expand > .lm-model__summary::-webkit-details-marker { display: none; }
+  .lm-model__chevron {
+    color: var(--fg-3);
+    font-size: 0.7rem;
+    transition: transform 160ms ease;
+    display: inline-block;
+    width: 0.7em;
+  }
+  .lm-model__expand[open] > .lm-model__summary > .lm-model__chevron {
+    transform: rotate(90deg);
+  }
+  .lm-model__expand[open] > .lm-model__summary {
+    border-bottom: 1px solid var(--bg-3);
+  }
   .lm-model__id {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 0.875rem;
     color: var(--fg-0);
     word-break: break-all;
+  }
+  .lm-model__summary-spacer { flex: 1; }
+  .lm-model__summary-meta {
+    font-size: 0.75rem;
+    color: var(--fg-2);
+    white-space: nowrap;
+  }
+  .lm-model__body {
+    padding: 12px 14px 14px;
   }
   .lm-model__meta {
     display: flex;
@@ -53,6 +87,8 @@
     gap: 8px;
     font-size: 0.75rem;
     color: var(--fg-2);
+    margin-bottom: 12px;
+    flex-wrap: wrap;
   }
   .lm-model__sep { color: var(--fg-3); }
 
@@ -255,8 +291,8 @@
 </style>
 
 <div class="lm-eyebrow">Operate</div>
-<h1 class="lm-page-title">Models</h1>
-<p class="lm-page-lede">Manage on-disk models and their profiles. Profiles attach to their model and configure how the engine launches it.</p>
+<h1 class="lm-page-title">LLM models</h1>
+<p class="lm-page-lede">Pull, organise, and tune language models for the <code>llama</code> and <code>mlx</code> engines. Diffusion models live on the <a href="/ui/setup-diffusion" style="color: var(--accent);">Diffusion engines</a> page.</p>
 
 {# ---- Storage location ---- #}
 <section class="lm-section" style="margin-top: 32px;">
@@ -329,11 +365,13 @@
   </div>
 </section>
 
-{# ---- Models (unified: on-disk + downloads + per-model profiles) ---- #}
+{# ---- Models (LLMs only on this page) ---- #}
 <section class="lm-section">
   <header class="lm-section-head">
-    <span class="lm-section-marker">Models</span>
-    <span class="lm-section-meta">{{ models|length }} on disk</span>
+    <span class="lm-section-marker">Language models</span>
+    <span class="lm-section-meta">
+      {{ text_models|length }} on disk
+    </span>
   </header>
 
   <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 16px; font-size: 0.8125rem; color: var(--fg-2);">
@@ -344,18 +382,20 @@
     </form>
   </div>
 
-  {% include "_models_list_partial.html" %}
+  {% with show_image=False %}
+    {% include "_models_list_partial.html" %}
+  {% endwith %}
 </section>
 
-{# ---- Find a model ---- #}
+{# ---- Find a language model ---- #}
 <section class="lm-section">
   <header class="lm-section-head">
-    <span class="lm-section-marker">Find a model</span>
-    <span class="lm-section-meta">search Hugging Face</span>
+    <span class="lm-section-marker">Find a language model</span>
+    <span class="lm-section-meta">search Hugging Face — GGUF</span>
   </header>
 
   <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
-    Search for GGUF models on Hugging Face. Results are sorted by popularity. Click a model to see the available files and pull one with a single click.
+    Search Hugging Face for GGUF-format models (compatible with the <code>llama</code> engine). Results are filtered by the <code>gguf</code> tag and sorted by popularity. Click a model to see its files and pull one with a single click.
   </p>
 
   <div style="margin-bottom: 20px;">
@@ -376,15 +416,15 @@
   </div>
 </section>
 
-{# ---- Pull a model (manual) ---- #}
+{# ---- Pull a language model (manual) ---- #}
 <section class="lm-section">
   <header class="lm-section-head">
-    <span class="lm-section-marker">Pull a model</span>
+    <span class="lm-section-marker">Pull a language model</span>
     <span class="lm-section-meta">manual entry</span>
   </header>
 
   <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
-    Already know what you want? Enter a Hugging Face repo or direct URL and the specific GGUF file. Downloads run in the background.
+    Already know what you want? Enter a Hugging Face repo and the specific GGUF file (or paste a direct URL). Downloads run in the background. For MLX models, point at an MLX-formatted repo and leave the file blank.
   </p>
 
   <form class="lm-form lm-form--wide" method="post" action="/ui/models/pull">

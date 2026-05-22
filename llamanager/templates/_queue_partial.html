@@ -10,11 +10,12 @@
   <div class="lm-eyebrow">In flight</div>
   <table class="lm-table">
     <thead>
-      <tr><th>Id</th><th>Origin</th><th>Prio</th><th>Model</th><th>Status</th><th></th></tr>
+      <tr><th>Type</th><th>Id</th><th>Origin</th><th>Prio</th><th>Model</th><th>Status</th><th></th></tr>
     </thead>
     <tbody>
     {% for r in queue.in_flight %}
       <tr>
+        <td data-label="Type"><code title="{{ r.task_type or 'text' }}">{{ 'I' if r.task_type == 'image' else 'T' }}</code></td>
         <td data-label="Id"><code>{{ r.id[:12] }}</code></td>
         <td data-label="Origin">{{ r.origin }}</td>
         <td data-label="Prio" class="num">{{ r.priority }}</td>
@@ -43,11 +44,12 @@
   {% if queue.pending %}
   <table class="lm-table">
     <thead>
-      <tr><th>Id</th><th>Origin</th><th>Prio</th><th>Model</th><th>Status</th><th></th></tr>
+      <tr><th>Type</th><th>Id</th><th>Origin</th><th>Prio</th><th>Model</th><th>Status</th><th></th></tr>
     </thead>
     <tbody>
     {% for r in queue.pending %}
     <tr>
+      <td data-label="Type"><code title="{{ r.task_type or 'text' }}">{{ 'I' if r.task_type == 'image' else 'T' }}</code></td>
       <td data-label="Id"><code>{{ r.id[:12] }}</code></td>
       <td data-label="Origin">{{ r.origin }}</td>
       <td data-label="Prio" class="num">{{ r.priority }}</td>

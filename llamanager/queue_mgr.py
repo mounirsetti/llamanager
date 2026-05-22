@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .auth import Origin
-from .config import Config
+from .config import Config, ENGINE_FAMILY, detect_engine_for_id
 from .db import DB
 from .server_manager import ServerManager, StartSpec, resolve_spec
 
@@ -47,6 +47,10 @@ class QueuedRequest:
     enqueued_at: float
     seq: int
     profile_required: str | None = None  # optional per-request profile selection
+    # "text" or "image" — set at enqueue time based on the model's engine
+    # family. Text requests proxy through llama-server; image requests
+    # are dispatched to ImageTaskRunner.
+    task_type: str = "text"
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     # signalled by dispatcher when it's this request's turn:
     ready: asyncio.Event = field(default_factory=asyncio.Event)
@@ -56,6 +60,11 @@ class QueuedRequest:
     started_at: float | None = None
     # optional: populated by handler when finished
     finished_at: float | None = None
+    # True once the dispatcher has counted this request against the
+    # family in-flight quota. ``mark_in_flight_done`` decrements only
+    # when this is set, so early-abort paths (failures before dispatch)
+    # don't leak capacity.
+    dispatched: bool = False
 
     def heap_key(self) -> tuple[int, float, int]:
         # higher priority first → negate. Then FIFO by enqueued_at, then seq.
@@ -71,11 +80,22 @@ class QueueManager:
         self._by_id: dict[str, QueuedRequest] = {}
         self._in_flight: dict[str, QueuedRequest] = {}
         self._cancelled_in_heap: int = 0
+        # The condition is signalled when:
+        #   * a new request enters the heap (enqueue, resume)
+        #   * an in-flight request completes (mark_in_flight_done)
+        #   * a request is cancelled (cancel)
+        # The dispatcher waits on it while no eligible work exists.
         self._cv = asyncio.Condition()
         self._seq = itertools.count()
         self._dispatcher_task: asyncio.Task[None] | None = None
         self._paused = False
-        self._slot = asyncio.Semaphore(max(1, cfg.max_concurrent))
+        # Family-aware in-flight counters. Text has cfg.max_concurrent
+        # capacity (typically 1); image has a fixed 1-slot ceiling because
+        # diffusion generations are heavy and the runner already serializes
+        # them internally via its own lock. When cfg.allow_concurrent is
+        # False (the default), the two families are mutually exclusive:
+        # no image starts while text is in flight and vice versa.
+        self._in_flight_count: dict[str, int] = {"text": 0, "image": 0}
 
     # ---- lifecycle ----
     def start(self) -> None:
@@ -94,16 +114,20 @@ class QueueManager:
     # ---- enqueue / cancel ----
     async def enqueue(self, *, origin: Origin, model_required: str | None,
                       profile_required: str | None = None,
+                      task_type: str | None = None,
                       ) -> QueuedRequest:
         active_pending = len(self._heap) - self._cancelled_in_heap
         if active_pending + len(self._in_flight) >= self.cfg.max_queue_depth:
             raise QueueFull("queue is full")
+        if task_type is None:
+            task_type = _infer_task_type(self.cfg, model_required)
         req = QueuedRequest(
             request_id=str(uuid.uuid4()),
             origin=origin,
             priority=origin.priority,
             model_required=model_required,
             profile_required=profile_required,
+            task_type=task_type,
             enqueued_at=time.time(),
             seq=next(self._seq),
         )
@@ -125,9 +149,10 @@ class QueueManager:
             return False
         if req.cancel.is_set():
             return True
+        was_queued = req.status == "queued"
         req.cancel.set()
         if req.status in ("queued", "swapping_model"):
-            if req.status == "queued":
+            if was_queued:
                 self._cancelled_in_heap += 1
             req.status = "cancelled"
         if not req.ready.is_set():
@@ -135,6 +160,16 @@ class QueueManager:
         self.db.update_request_status(req.request_id, "cancelled",
                                       finished_at=time.time())
         self.db.log_event("request_cancelled", {"id": req.request_id})
+        # Pre-dispatch cancellations have no handler waiting in the
+        # ``mark_in_flight_done`` finally block to clean up, so drop the
+        # bookkeeping here. The heap tombstone is removed lazily by
+        # _pop_next the next time it reaches the top.
+        if was_queued and not req.dispatched:
+            self._by_id.pop(req.request_id, None)
+        # Wake the dispatcher: a cancelled high-priority entry no longer
+        # blocks any starvation-window calculations, and another family
+        # may now be eligible.
+        self._wake_dispatcher_soon()
         return True
 
     def cancel_all_for_origin(self, origin_id: int) -> int:
@@ -207,33 +242,101 @@ class QueueManager:
                                           finished_at=req.finished_at,
                                           prompt_tokens=prompt_tokens,
                                           completion_tokens=completion_tokens)
-        # Release dispatcher slot only if one was actually acquired (i.e.,
-        # the request progressed past "queued" — it was dispatched).
-        if req.request_id in self._in_flight or req.status in (
-            "running", "swapping_model", "done", "failed",
-        ):
-            self._slot.release()
+        # Family-aware capacity release. We only refund the slot when this
+        # request was actually counted as in-flight; the early-abort
+        # paths (ref-image decode failure, profile not found, etc.) call
+        # mark_in_flight_done before dispatch and must not free a slot
+        # they never took.
+        if req.dispatched:
+            family = req.task_type if req.task_type in self._in_flight_count else "text"
+            self._in_flight_count[family] = max(
+                0, self._in_flight_count[family] - 1,
+            )
+            req.dispatched = False
+            # Wake the dispatcher in case freeing this slot makes another
+            # waiting request eligible (especially across families when
+            # allow_concurrent=false).
+            self._wake_dispatcher_soon()
         # remove from registry
         self._by_id.pop(req.request_id, None)
         self._in_flight.pop(req.request_id, None)
 
-    # ---- dispatcher ----
-    def _pop_next(self) -> QueuedRequest | None:
-        """Pop the next request, applying starvation protection.
+    def _wake_dispatcher_soon(self) -> None:
+        """Fire-and-forget notify on the dispatcher condition. Called from
+        sync contexts (mark_in_flight_done) where we can't ``async with``
+        the underlying lock directly."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # not in an event loop (test setup, shutdown)
+        loop.create_task(self._notify_cv())
 
-        If max_wait_s > 0, any request waiting longer than that threshold
-        is promoted ahead of higher-priority items (oldest-starved first).
+    async def _notify_cv(self) -> None:
+        async with self._cv:
+            self._cv.notify_all()
+
+    # ---- dispatcher ----
+    def _can_dispatch(self, req: QueuedRequest) -> bool:
+        """Family-aware eligibility check. Honours:
+
+          * ``cfg.max_concurrent`` for the text family
+          * a hard 1-slot ceiling for image (heavy generations; the runner
+            also has its own internal lock as a backstop)
+          * ``cfg.allow_concurrent`` — when False, text and image are
+            mutually exclusive (single-slot dashboard invariant); when
+            True, they can run in parallel up to their per-family caps.
+        """
+        text_in = self._in_flight_count.get("text", 0)
+        image_in = self._in_flight_count.get("image", 0)
+        if req.task_type == "image":
+            if image_in >= 1:
+                return False
+            if not self.cfg.allow_concurrent and text_in > 0:
+                return False
+            return True
+        # text
+        if text_in >= max(1, self.cfg.max_concurrent):
+            return False
+        if not self.cfg.allow_concurrent and image_in > 0:
+            return False
+        return True
+
+    def _pop_next(self) -> QueuedRequest | None:
+        """Pick the next dispatchable request, applying starvation
+        protection AND family-aware eligibility.
+
+        Returns ``None`` when nothing currently in the heap can be
+        dispatched (either the heap is empty or every remaining entry's
+        family is blocked by the in-flight count). The caller (the
+        dispatch loop) then waits on the condition variable until either
+        a new request arrives or an in-flight one finishes.
+
         Cancelled entries are drained as encountered.
         """
         now = time.time()
         max_wait = self.cfg.max_wait_s
 
-        # Check for starved requests when anti-starvation is enabled.
+        # First pass: drain any cancelled entries from the top of the heap
+        # so they don't keep us awake. (Mid-heap cancellations are removed
+        # lazily when we eventually pop them.)
+        while self._heap and (
+            self._heap[0][1].cancel.is_set()
+            or self._heap[0][1].status == "cancelled"
+        ):
+            heapq.heappop(self._heap)
+            self._cancelled_in_heap = max(0, self._cancelled_in_heap - 1)
+
+        # Starvation: any request waiting longer than max_wait gets
+        # promoted, but only if its family is currently eligible. (A
+        # starved image task behind a long-running text task in
+        # non-concurrent mode still has to wait for text to finish.)
         if max_wait > 0:
             starved_idx: int | None = None
-            starved_at: float = now  # track the oldest starved entry
+            starved_at: float = now
             for i, (_, r) in enumerate(self._heap):
                 if r.cancel.is_set() or r.status == "cancelled":
+                    continue
+                if not self._can_dispatch(r):
                     continue
                 wait = now - r.enqueued_at
                 if wait > max_wait and r.enqueued_at < starved_at:
@@ -241,42 +344,65 @@ class QueueManager:
                     starved_idx = i
             if starved_idx is not None:
                 _, req = self._heap[starved_idx]
-                # Remove from heap and re-heapify.
                 self._heap[starved_idx] = self._heap[-1]
                 self._heap.pop()
                 if self._heap:
                     heapq.heapify(self._heap)
                 return req
 
-        # Normal priority-ordered pop, skipping cancelled entries.
-        while self._heap:
-            _, req = heapq.heappop(self._heap)
-            if req.cancel.is_set() or req.status == "cancelled":
-                self._cancelled_in_heap = max(0, self._cancelled_in_heap - 1)
+        # Normal priority-ordered scan. We can't just heappop() and put
+        # back if ineligible (heapq has no peek-then-skip primitive), so
+        # walk in sorted order. For typical depths (a few in flight, a
+        # handful pending) this is fine; heap operations elsewhere
+        # dominate.
+        for i, (_, r) in enumerate(sorted(self._heap)):
+            if r.cancel.is_set() or r.status == "cancelled":
                 continue
-            return req
+            if self._can_dispatch(r):
+                # Remove this entry from the heap (linear scan to find it
+                # since sorted() produced a copy).
+                for j, (_, hr) in enumerate(self._heap):
+                    if hr is r:
+                        self._heap[j] = self._heap[-1]
+                        self._heap.pop()
+                        if self._heap:
+                            heapq.heapify(self._heap)
+                        break
+                return r
         return None
 
     async def _dispatch_loop(self) -> None:
         while True:
             try:
                 async with self._cv:
-                    while self._paused or not self._heap:
+                    while True:
+                        if self._paused:
+                            await self._cv.wait()
+                            continue
+                        req = self._pop_next()
+                        if req is not None:
+                            # Count the in-flight slot here, while we
+                            # still hold the cv lock, so the next
+                            # eligibility check sees the updated count.
+                            family = req.task_type if req.task_type in self._in_flight_count else "text"
+                            self._in_flight_count[family] += 1
+                            req.dispatched = True
+                            break
                         await self._cv.wait()
-                    req = self._pop_next()
-                    if req is None:
-                        continue
-                # Acquire slot before deciding on swap.
-                await self._slot.acquire()
+                # Outside the cv: prepare the upstream engine for this
+                # request (model swap for text; for image we just hand
+                # over to the runner — it coordinates GPU yield itself).
                 try:
                     await self._prepare_and_release(req)
                 except Exception as e:
-                    log.exception("dispatcher: prepare failed for %s", req.request_id)
+                    log.exception("dispatcher: prepare failed for %s",
+                                  req.request_id)
                     req.error = str(e)
                     req.status = "failed"
                     req.ready.set()
-                    # Don't release slot here — the handler owns slot
-                    # release via mark_in_flight_done in its finally block.
+                    # Slot release happens in mark_in_flight_done via
+                    # the handler's finally block. req.dispatched stays
+                    # True so the refund actually occurs.
             except asyncio.CancelledError:
                 return
             except Exception:
@@ -289,10 +415,25 @@ class QueueManager:
         ``req.model_required`` is a bare model id or None. The legacy
         ``profile:foo`` shorthand is no longer accepted; per-request profile
         selection arrives via the X-Llamanager-Profile header path instead.
+
+        For image-family tasks (``req.task_type == "image"``), no swap is
+        done here — the image runner owns the cross-family coordination
+        via ServerManager.yield_to_image() at dispatch time. We just mark
+        the slot in-flight and let the handler invoke the runner.
         """
         wanted = req.model_required
         wanted_profile = getattr(req, "profile_required", None)
         loaded = self.sm.runtime.current_model
+
+        # Image-family tasks bypass the text server swap entirely.
+        if req.task_type == "image":
+            self._in_flight[req.request_id] = req
+            req.status = "running"
+            req.started_at = time.time()
+            self.db.update_request_status(req.request_id, "running",
+                                          started_at=req.started_at)
+            req.ready.set()
+            return
 
         need_swap = False
         target_spec: StartSpec | None = None
@@ -350,8 +491,24 @@ def _request_public(req: QueuedRequest | None) -> dict[str, Any] | None:
         "origin": req.origin.name,
         "priority": req.priority,
         "model_required": req.model_required,
+        "task_type": req.task_type,
         "status": req.status,
         "enqueued_at": req.enqueued_at,
         "started_at": req.started_at,
         "finished_at": req.finished_at,
     }
+
+
+def _infer_task_type(cfg: Config, model_id: str | None) -> str:
+    """Map a request's model id to a task family. Falls back to ``text``
+    when the model is unknown (preserves legacy behaviour for callers
+    that don't specify a model)."""
+    if not model_id:
+        # Inherit from the configured default model, if any. Otherwise
+        # we'd treat "no model header" as text, which matches the
+        # historical assumption.
+        model_id = cfg.default_model or None
+    if not model_id:
+        return "text"
+    engine = detect_engine_for_id(model_id, cfg.models_dir)
+    return "image" if ENGINE_FAMILY.get(engine, "text") == "image" else "text"

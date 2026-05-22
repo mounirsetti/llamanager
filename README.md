@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <strong>Queue AI work against a local model and reach it from anywhere on your network.</strong>
+  <strong>One open-source server to install, serve, and manage local LLMs and diffusion models.</strong>
 </p>
 
 <p align="center">
@@ -31,33 +31,29 @@
 
 ---
 
+llamanager runs on a single host you already own. It installs the inference engines, downloads model weights from Hugging Face, supervises the processes, queues requests with per-origin priorities, and exposes everything behind one OpenAI-compatible endpoint. Text and image families share the same dashboard, the same queue, and the same auth.
+
+The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silicon. The image side runs three diffusion stacks: HiDream-O1-Image, FLUX 2 via `sd.cpp`, and Z-Image (Tongyi-MAI), with Z-Anime supported as a Z-Image fine-tune. New engines plug in as small adapter modules.
+
 ## Table of contents
 
-- [Why this exists](#why-this-exists)
-- [What you get](#what-you-get)
-- [Platforms](#platforms)
-- [Prerequisites](#prerequisites)
-  - [GPU compatibility](#gpu-compatibility)
-  - [Alternative engines](#alternative-engines)
-- [Download](#download)
-  - [Getting `git` on your system](#getting-git-on-your-system)
+- [What it is](#what-it-is)
+- [Supported engines](#supported-engines)
+- [Platforms and GPUs](#platforms-and-gpus)
 - [Install](#install)
 - [First run](#first-run)
-  - [Accessing from other devices (Tailscale, LAN, etc.)](#accessing-from-other-devices-tailscale-lan-etc)
-- [Quick dev uninstall & reinstall (macOS)](#quick-dev-uninstall--reinstall-macos)
-- [Pulling a model](#pulling-a-model)
-- [Listing available models](#listing-available-models)
-- [Sending an inference request](#sending-an-inference-request)
-  - [Requesting a specific model](#requesting-a-specific-model)
+- [The model picker top bar](#the-model-picker-top-bar)
+- [LLM models](#llm-models)
+- [Diffusion models](#diffusion-models)
+  - [Install dependencies](#install-dependencies)
+  - [Download models](#download-models)
+  - [Reference images (editing, composition, img2img)](#reference-images-editing-composition-img2img)
+  - [Sharing the GPU with the text engine](#sharing-the-gpu-with-the-text-engine)
+- [Calling the API](#calling-the-api)
 - [Chat in the browser](#chat-in-the-browser)
 - [Auto-start at boot or login](#auto-start-at-boot-or-login)
-  - [macOS — launchd](#macos--launchd)
-  - [Linux — user systemd unit](#linux--user-systemd-unit)
-  - [Windows](#windows)
 - [CLI](#cli)
-  - [Admin verbs (drive a running daemon)](#admin-verbs-drive-a-running-daemon)
 - [Configuration](#configuration)
-- [API](#api)
 - [Filesystem layout](#filesystem-layout)
 - [Troubleshooting](#troubleshooting)
 - [Releasing a new version](#releasing-a-new-version)
@@ -66,131 +62,108 @@
 
 ---
 
-llamanager wraps `llama-server` (from llama.cpp) so a single GPU can serve a phone, a laptop, a CI job, and whatever else you point at it. Requests land on a per-origin priority queue, the loaded model swaps on demand, and the whole thing is reachable through one OpenAI-compatible endpoint.
+## What it is
 
-## Why this exists
+`llama-server` and the various diffusion CLIs are good at running one model at a time. None of them are good at being shared. Two clients hitting `llama-server` directly will collide on context, you can't swap models without restarting, image stacks need their own Python environments, and there's no auth on either side. llamanager fills that gap on a single machine: a queue, a supervisor, a key per client, a one-stop UI for installing dependencies and pulling weights, and a coexistence policy so a diffusion request doesn't blow up the LLM you have loaded.
 
-`llama-server` is great at running a model. It is not great at being shared. Two processes hitting it directly will collide on context, you cannot swap models without restarting, and there is no auth. If you want your home workstation to act as a small private inference service for everything you own, you need a queue, a supervisor, a key per client, and a way to swap models without dropping in-flight work. That is what this is.
+What you get out of the box:
 
-## What you get
-
-- **OpenAI-compatible `/v1/*` proxy** — any existing client library works out of the box
-- **Per-origin priority queue** with cancellation, so a long batch job cannot block your editor
-- **Model lifecycle** — start, stop, restart, hot-swap by model alias on a per-request header
-- **Crash supervisor** with a 3-in-5-minutes restart cap, so a broken GGUF cannot melt the box
-- **Hugging Face GGUF puller** with disk-space checks
-- **HTMX web UI** that is usable from a phone over Tailscale
-- **Bearer-token auth** — one key per origin, hashed with argon2id at rest
+- **OpenAI-compatible `/v1/*` proxy** for chat, completions, and image generations. Any existing client library works.
+- **Per-engine install flow** in the web UI. Click `Install dependencies` for HiDream or Z-Image and llamanager creates a Python venv under `~/.llamanager/venvs/<engine>/` and pip-installs the right packages. The disk footprint and live install log are visible on the page.
+- **Model download manager** that pulls whole HF repos (or a single subfolder, useful for monster repos like SeeSee21/Z-Anime where only the `diffusers/` subtree is needed). Progress streams to the UI every 2 s.
+- **Per-origin priority queue** with cancellation that propagates all the way to the running subprocess. A long batch can't block your editor; cancelling a queued or in-flight image task actually stops the work.
+- **Family-aware concurrency.** Text and image are mutually exclusive by default (they fight over the same GPU), but the policy is one toggle to switch when you have the VRAM headroom.
+- **Hot-swap by header.** Requests can name a specific model via `X-Llamanager-Model`; the queue swaps the loaded model in-flight without dropping in-flight work.
+- **Crash supervisor** with a 3-in-5-minutes restart cap, applied to text servers and image engines alike.
+- **Sticky model picker** at the top of every page: pick the loaded LLM, save default LLM and default diffusion model, with a live "loaded" indicator.
+- **HTMX web UI** that works from a phone over Tailscale or any LAN.
+- **Bearer-token auth.** One key per origin, argon2id-hashed at rest.
 
 Full design notes are in [`llamanager-spec.md`](llamanager-spec.md).
 
-## Platforms
+## Supported engines
 
-| os      | status         | auto-start                                                                              | `llama-server` binary                          |
-|---------|----------------|-----------------------------------------------------------------------------------------|------------------------------------------------|
-| macos   | primary target | `llamanager install-launchd`                                                            | Homebrew `llama.cpp` (Metal)                   |
-| linux   | supported      | `llamanager install-systemd`                                                            | distro / source / ROCm / Vulkan                |
-| windows | supported      | `install-windows-service` (real service, pywin32) or `install-windows` (Task Scheduler) | `llama-server.exe` (Vulkan or ROCm via HIP SDK)|
+| family    | engine                       | inference path                          | install flow                                |
+|-----------|------------------------------|-----------------------------------------|---------------------------------------------|
+| text      | `llama` (llama.cpp)          | persistent HTTP server                  | auto-install from the LLM engines page      |
+| text      | `mlx`                        | persistent HTTP server (Apple Silicon)  | manual: `pip install mlx-lm`                |
+| diffusion | `hidream` (HiDream-O1-Image) | one-shot Python subprocess              | auto-install venv + deps                    |
+| diffusion | `flux2` (FLUX 2 via sd.cpp)  | one-shot `sd-cli` binary                | manual: download from sd.cpp releases       |
+| diffusion | `z_image` (Z-Image / Z-Anime)| one-shot Python subprocess (diffusers)  | auto-install venv + deps                    |
 
-Python 3.11 or newer is required. The daemon uses `tomllib` and recent asyncio features.
+Adding a new engine is a single Python module in [`llamanager/engines/`](llamanager/engines/) plus three lines of registration. The existing five live there as references.
 
-## Prerequisites
+## Platforms and GPUs
 
-llamanager requires `llama-server` — the inference engine from [llama.cpp](https://github.com/ggerganov/llama.cpp) — to be installed separately. llamanager manages and proxies it; it does not bundle the binary.
+| os      | status         | auto-start                                                                              |
+|---------|----------------|-----------------------------------------------------------------------------------------|
+| macOS   | primary target | `llamanager install-launchd`                                                            |
+| Linux   | supported      | `llamanager install-systemd`                                                            |
+| Windows | supported      | `install-windows-service` (real service via pywin32) or `install-windows` (Task Scheduler) |
 
-| os      | easiest install |
-|---------|-----------------|
-| macOS   | `brew install llama.cpp` |
-| Linux   | auto-install via the llamanager UI (CPU build), or download a CUDA/ROCm/Vulkan/SYCL build from [releases](https://github.com/ggerganov/llama.cpp/releases) |
-| Windows | auto-install via the llamanager UI (AVX2 CPU build), or download a CUDA/ROCm/SYCL build from [releases](https://github.com/ggerganov/llama.cpp/releases) |
+Python 3.11 or newer is required.
 
-### GPU compatibility
+The dashboard auto-detects your GPU and reports VRAM. RAM and VRAM are summed into one capacity estimate that the model-size suggestions use. On Apple Silicon the two are the same unified pool, so they're counted once.
 
-The dashboard auto-detects your GPU and reports available VRAM (or unified memory on Apple Silicon). The capacity estimate uses whichever memory pool is relevant for inference.
+| GPU vendor       | how llamanager reads it                              | notes                                                  |
+|------------------|------------------------------------------------------|--------------------------------------------------------|
+| Apple Silicon    | `system_profiler`                                    | Unified memory                                         |
+| NVIDIA           | `nvidia-smi`                                         | Reports total + free VRAM live                         |
+| AMD              | `rocm-smi` on Linux, Windows registry + PDH counters | Linux: ROCm runtime required. Windows: works via Vulkan/HIP without rocm-smi |
+| Intel Arc / DC   | `xpu-smi` from [XPU Manager](https://github.com/intel/xpumanager) | oneAPI runtime required                                |
 
-| GPU vendor     | backend         | detection tool | notes                                                  |
-|----------------|-----------------|----------------|--------------------------------------------------------|
-| Apple Silicon  | Metal           | `system_profiler` | Unified memory — RAM and VRAM are the same pool     |
-| NVIDIA         | CUDA            | `nvidia-smi`   | Install NVIDIA drivers; CUDA toolkit optional for llama.cpp CUDA builds |
-| AMD            | ROCm (HIP)     | `rocm-smi`     | Requires ROCm runtime; supported on RDNA2+ and CDNA GPUs |
-| Intel Arc / DC | SYCL (oneAPI)   | `xpu-smi`      | Requires Intel oneAPI runtime and `xpu-smi` from [XPU Manager](https://github.com/intel/xpumanager) |
+If none of those tools are available, llamanager falls back to system RAM for capacity estimates and shows "No compatible GPU detected" on the dashboard. CPU inference still works; it's just slower.
 
-If no compatible GPU tool is found, llamanager falls back to system RAM for capacity estimates and shows "No compatible GPU detected" on the dashboard. Inference still works (CPU-only) but will be slower.
+On Windows specifically: AMD users running llama.cpp's Vulkan build no longer need `rocm-smi`. llamanager reads the adapter name and VRAM from the driver's registry entries and live VRAM usage from the `\GPU Adapter Memory(*)\Dedicated Usage` performance counter. Per-process VRAM (which process is holding what) is queried from `\GPU Process Memory(*)\Dedicated Usage` and shown alongside per-process RAM on the dashboard.
 
-After installing llamanager, open the [Setup page](http://localhost:7200/ui/setup) to verify detection, set the binary path if needed, or trigger an automatic install directly from the UI.
+After installing llamanager, open <http://localhost:7200/ui/setup> to verify detection. The LLM engines page lets you install `llama-server` directly without leaving the browser, or point at an existing binary.
 
-If `llama-server` is already installed but not on `PATH`, you can point llamanager at it by setting `llama_server_binary` in `~/.llamanager/config.toml`, or using the path field on the Setup page.
+### Alternative LLM engines
 
-### Alternative engines
-
-llamanager supports installing compatible llama.cpp forks **alongside** the default engine. Switching engines does not remove the original installation — both binaries live side-by-side under `~/.llamanager/bin/`.
+llamanager supports installing compatible `llama.cpp` forks side-by-side with the default engine. Switching does not remove the original install. Both binaries live under `~/.llamanager/bin/` and the active one is selected from the LLM engines page.
 
 | engine | what it adds | install location |
 |--------|-------------|-----------------|
 | [llama.cpp](https://github.com/ggerganov/llama.cpp) (default) | Official CPU/Metal/CUDA build | `~/.llamanager/bin/llama-server` |
-| [Atomic TurboQuant](https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant) | TurboQuant compression (2–4 bit KV cache, up to 6.4x compression vs FP16) and Gemma 4 MTP speculative decoding (~30–50% throughput gains) | `~/.llamanager/bin/atomic/llama-server` |
+| [Atomic TurboQuant](https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant) | TurboQuant compression (2–4 bit KV cache, up to 6.4x compression vs FP16) and Gemma 4 MTP speculative decoding | `~/.llamanager/bin/atomic/llama-server` |
 
-To install or switch engines, open **Setup** in the web UI. The **Alternative engines** section lets you auto-install a fork from its GitHub releases and switch the active binary with one click. You can also switch via the CLI by setting `llama_server_binary` in `config.toml` to the fork's binary path.
-
-When using Atomic TurboQuant, add the relevant flags to your profile args to enable its features. Profiles are nested under their parent model:
+When using Atomic TurboQuant, add its flags to a profile's args:
 
 ```toml
-[models."your-model.gguf"]
-default_profile = "turbo-example"
-
-[models."your-model.gguf".profiles.turbo-example]
-ctx_size = 16384
-[models."your-model.gguf".profiles.turbo-example.args]
-ctk = "turbo3"
-ctv = "turbo3"
-fa = true
+[models."your-model.gguf".profiles.turbo]
+args = { ctx-size = 16384, ctk = "turbo3", ctv = "turbo3", fa = true }
 ```
 
-For MTP speculative decoding with Gemma 4 models:
+For MTP speculative decoding with Gemma 4:
 
 ```toml
-[models."gemma4-target.gguf".profiles.gemma4-mtp]
-ctx_size = 16384
-[models."gemma4-target.gguf".profiles.gemma4-mtp.args]
-mtp-head = "gemma4-assistant.gguf"
-spec-type = "mtp"
+[models."gemma4-target.gguf".profiles.mtp]
+args = { ctx-size = 16384, mtp-head = "gemma4-assistant.gguf", spec-type = "mtp" }
 ```
 
-## Download
+## Install
 
-Clone the repo with git, or grab a zip from the [releases page](https://github.com/mounirsetti/Llamanager/releases) if you'd rather not install git.
+Clone the repo, or grab a zip from the [releases page](https://github.com/mounirsetti/Llamanager/releases) if you don't have git.
 
 ```bash
 git clone https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
-To pin to a tagged release instead of `main`:
+Pin to a tagged release:
 
 ```bash
 git clone --branch "v0.1.7" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
-Updating an existing checkout later:
+Update an existing checkout:
 
 ```bash
 git pull origin main
 ```
 
-### Getting `git` on your system
-
-| os      | install command                                                                                                 |
-|---------|-----------------------------------------------------------------------------------------------------------------|
-| macOS   | `xcode-select --install` (ships git), or `brew install git`                                                     |
-| Linux   | Debian/Ubuntu: `sudo apt install git` · Fedora: `sudo dnf install git` · Arch: `sudo pacman -S git`             |
-| Windows | `winget install --id Git.Git -e`, or download the installer from [git-scm.com](https://git-scm.com/download/win) |
-
-Verify with `git --version`. On Windows, run the cloned commands above from **Git Bash**, **PowerShell**, or **Windows Terminal** — all three work once Git for Windows is on `PATH` (the installer adds it by default).
-
-If you're behind a proxy, set it once with `git config --global http.proxy http://user:pass@host:port` before cloning. For private/internal forks, GitHub now requires either an SSH key (`ssh-keygen -t ed25519` → add the `.pub` to GitHub → clone with `git@github.com:...`) or a personal access token in place of the password.
-
-## Install
+Install the package and run the tests:
 
 ```bash
 python3 -m venv .venv                      # python 3.11 or newer required
@@ -202,17 +175,27 @@ pip install -e '.[dev]'
 pytest
 ```
 
-After install, `llamanager` is on `PATH` inside the venv:
+`llamanager` is on `PATH` inside the venv:
 
-- macos / linux: `.venv/bin/llamanager`
-- windows: `.venv\Scripts\llamanager.exe`
+- macOS / Linux: `.venv/bin/llamanager`
+- Windows: `.venv\Scripts\llamanager.exe`
 
-You can also call it without activating the venv:
+You can call it without activating the venv:
 
 ```bash
 .venv/bin/llamanager serve                 # macos / linux
 .venv\Scripts\llamanager.exe serve         # windows
 ```
+
+### Getting `git` on your system
+
+| os      | install command                                                                                                 |
+|---------|-----------------------------------------------------------------------------------------------------------------|
+| macOS   | `xcode-select --install` (ships git), or `brew install git`                                                     |
+| Linux   | Debian/Ubuntu: `sudo apt install git` · Fedora: `sudo dnf install git` · Arch: `sudo pacman -S git`             |
+| Windows | `winget install --id Git.Git -e`, or download from [git-scm.com](https://git-scm.com/download/win) |
+
+On Windows, run the clone command from Git Bash, PowerShell, or Windows Terminal. The installer adds `git` to `PATH` by default.
 
 ## First run
 
@@ -231,7 +214,7 @@ The first launch prints a bootstrap admin key to stdout:
 ==============================================================================
 ```
 
-Copy it now. Only the argon2id hash is stored. If you lose the key before creating a second admin origin, your only recovery is to delete `~/.llamanager/state.db` and start over.
+Copy it now. Only the argon2id hash is stored. If you lose the key before creating a second admin origin, the only recovery is deleting `~/.llamanager/state.db` and starting over.
 
 Default ports:
 
@@ -242,33 +225,32 @@ Default ports:
 
 Open the web UI at <http://localhost:7200/ui/login> and paste the bootstrap key.
 
-### Accessing from other devices (Tailscale, LAN, etc.)
+### Reaching it from other devices (Tailscale, LAN, etc.)
 
-By default llamanager binds to `127.0.0.1` (localhost only). To reach it from a phone, another laptop, or any device on your Tailscale network:
-
-**1. Bind to all interfaces** — set this in `~/.llamanager/config.toml`:
+By default llamanager binds to `127.0.0.1`. To reach it from a phone, another laptop, or any device on your Tailscale network, set this in `~/.llamanager/config.toml`:
 
 ```toml
 [server]
 bind = "0.0.0.0"
 ```
 
-**2. Restart** the server and access it at `http://<your-ip>:7200/ui/`.
+Restart and access at `http://<your-ip>:7200/ui/`.
 
-## Quick dev uninstall & reinstall (macOS)
+## The model picker top bar
 
-```bash
-  deactivate
-  rm -rf .venv
-  python3.14 -m venv .venv
-  source .venv/bin/activate
-  pip install -e '.[dev]'
-  llamanager serve
-```
+Every page in the admin UI has a sticky model-picker strip at the top, designed like a mixer-channel: status sigil, model selector, profile selector, then an action cluster.
 
-## Pulling a model
+The LLM lane has a pulsing dot when a model is loaded, the model and profile dropdowns, a primary `Load` button, an `Unload` icon, and a star toggle that saves the current selection as the default LLM. Clicking the filled star clears the default; clicking the hollow one sets it.
 
-Either through the web UI (Models → "Pull a model") or the API:
+The diffusion lane has the same shape with one action: a star toggle that saves the selected model + profile as the default diffusion model. There's no `Load` for diffusion because the engines are one-shot per request; "default" means "use this when `/v1/images/generations` omits the model field".
+
+Setting both defaults is the fastest way to use llamanager from a client that doesn't know about your specific model IDs: send a request without a model and the right engine picks it up.
+
+## LLM models
+
+The LLM models page (formerly just "Models") manages text-family models for the `llama` and `mlx` engines. Pull, organise, set the default, edit per-model profiles.
+
+Either from the UI (LLM models → "Find a language model" or "Pull a language model") or the API:
 
 ```bash
 curl -X POST http://localhost:7200/admin/models/pull \
@@ -279,23 +261,180 @@ curl -X POST http://localhost:7200/admin/models/pull \
 
 The response returns a `download_id`. Poll `GET /admin/downloads/{id}` for progress.
 
-## Listing available models
-
-Query the OpenAI-compatible models endpoint to see what is on disk:
+To see what's on disk:
 
 ```bash
 curl http://localhost:7200/v1/models \
   -H "Authorization: Bearer $ORIGIN_KEY"
 ```
 
-Or use the admin endpoint for more detail (size, source, sha256):
+Or the admin endpoint, which adds size / source / sha256:
 
 ```bash
 curl http://localhost:7200/admin/models \
   -H "Authorization: Bearer $ADMIN_KEY"
 ```
 
-## Sending an inference request
+llamanager auto-creates a default profile when you pull a model. Add more from the LLM models page or in `config.toml` (see [Configuration](#configuration)).
+
+## Diffusion models
+
+The Diffusion engines page is the one-stop shop for the image side: per-engine setup cards, dependency installer, model downloader with progress, profile editor for the installed models, and the coexistence policy at the bottom.
+
+Three engines are wired today:
+
+| engine | layout | typical disk | typical VRAM | reference model |
+|--------|--------|--------------|--------------|-----------------|
+| Z-Image (Tongyi-MAI) | Diffusers pipeline (`model_index.json` + `transformer/`, `text_encoder/`, `vae/`) | ~20 GB | ~14 GB at bf16 | [Tongyi-MAI/Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image) |
+| HiDream-O1-Image | tokenizer + safetensors shards | ~33 GB | ~16 GB | [HiDream-ai/HiDream-O1-Image](https://huggingface.co/HiDream-ai/HiDream-O1-Image) |
+| FLUX 2 (sd.cpp) | flux*.gguf + ae.safetensors + text-encoder GGUF | varies by quant | ~12-27 GB | community GGUF re-hosts |
+
+Z-Image's adapter also handles fine-tunes that ship the same Diffusers layout, including [SeeSee21/Z-Anime](https://huggingface.co/SeeSee21/Z-Anime). Z-Anime's full repo is 203 GB, so the download form lets you specify a `diffusers/` subfolder and pull only the runnable variant (~12-20 GB).
+
+### Install dependencies
+
+Each engine card on the Diffusion engines page has an `Install dependencies` button when an auto-install plan exists. Clicking it creates a fresh Python venv under `~/.llamanager/venvs/<engine>/`, runs `pip install` for the engine's package set, and writes the resulting interpreter path back to your config so the engine is ready to use immediately.
+
+| engine | what gets installed | rough size |
+|--------|---------------------|------------|
+| Z-Image | torch, transformers, accelerate, huggingface_hub, safetensors, Pillow, sentencepiece, `git+https://github.com/huggingface/diffusers` | ~8.5 GB |
+| HiDream | torch, transformers, accelerate, diffusers, huggingface_hub, safetensors, Pillow, einops, sentencepiece | ~7.5 GB |
+| FLUX 2 | (no auto-install — see below) | — |
+
+The installer streams pip's stdout into the page, so you can watch it work and cancel mid-flight. Failures surface inline with the last 200 KB of log.
+
+FLUX 2 uses the `sd-cli` binary from [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp), which ships per-backend builds (Vulkan, CUDA, ROCm) that are too platform-specific to auto-install reliably. Download the matching release zip, extract, and point the `sd-cli executable` field on the engine card at the binary.
+
+The auto-installer also picks a generic `torch` wheel. On AMD ROCm or Apple Silicon you should build the venv yourself with the right vendor wheels and point the engine at it. The card calls this out in plain language.
+
+### Download models
+
+Each engine card has a Models section with two inputs: an HF repo (`org/name`) and an optional subfolder. The Download button kicks off a `huggingface_hub.snapshot_download` in the background, with a live progress bar that compares bytes-on-disk against an up-front size estimate from the HF API.
+
+For Z-Image, the recommended downloads are:
+
+```
+Tongyi-MAI/Z-Image                                      # the base model, ~20 GB
+SeeSee21/Z-Anime          subfolder: diffusers          # the anime fine-tune, ~12-20 GB
+```
+
+For HiDream, point at `HiDream-ai/HiDream-O1-Image` and leave the subfolder blank.
+
+For FLUX 2, the canonical fp16 weights live at `black-forest-labs/FLUX.2-dev`; for runnable GGUF quants search Hugging Face for community re-hosts.
+
+Downloads land in `~/.llamanager/models/<repo>/...` (or `<repo>/<subfolder>/...` for subfolder pulls). llamanager auto-detects the layout, registers the model with the right engine, and seeds default profiles on first detection (`z-image-fast`, `z-image-quality`; `hidream-dev`, `hidream-full`; `flux2-fast`, `flux2-quality`).
+
+### Generating from the API
+
+OpenAI-compatible:
+
+```bash
+curl -X POST http://localhost:7200/v1/images/generations \
+  -H "Authorization: Bearer $ORIGIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Tongyi-MAI/Z-Image",
+    "prompt": "A still life of three pears on a blue table",
+    "size": "1280x1280",
+    "n": 1,
+    "response_format": "b64_json"
+  }'
+```
+
+Omit `model` to use the saved default diffusion model from the top bar. Streaming (`"stream": true`) emits `: step=N/M` SSE comments while generating, then a final `data:` event with the result.
+
+### Reference images (editing, composition, img2img)
+
+`/v1/images/generations` accepts one or more reference images alongside the prompt. The engines interpret them differently:
+
+| engine | refs | what it does |
+|---|---|---|
+| HiDream-O1-Image | 1 | Editing. With `--model_type dev` the flash scheduler is replaced with flow-match, shift drops to 1.0, and the ref is treated as the image being edited. Set `keep_original_aspect: true` to preserve the ref's aspect ratio and bypass the 2048-bucket snap. |
+| HiDream-O1-Image | 2–8 | Composition / multi-subject. Optionally steer layout with `layout_bboxes`. |
+| FLUX 2 / sd.cpp  | exactly 1 | img2img. Forwarded as sd-cli's `--init-img` with `--strength` controlling how much of the init image is preserved (`0.0` = exact copy, `1.0` = full re-generation). |
+| FLUX 2 / sd.cpp  | 2+ | Rejected with 400. sd-cli's init-image path is single-slot. |
+| Z-Image          | any | Currently ignored. The base Z-Image pipeline doesn't accept refs. |
+
+Request fields (alongside the usual `prompt`, `model`, `size`, `n`, `seed`, `profile`, `response_format`, `stream`):
+
+| field | type | meaning |
+|---|---|---|
+| `image` | base64 string or `data:image/...;base64,...` URL | Single reference image. Shorthand for `images: [image]`. |
+| `images` | array of base64 strings / data URLs | Up to 8 reference images (HiDream); exactly 1 (Flux2). |
+| `keep_original_aspect` | bool | HiDream only. With exactly one ref, resize it to max 2048 on the long side and use those dimensions for the output. |
+| `layout_bboxes` | string (JSON) | HiDream only. Forwarded to `--layout_bboxes`, e.g. `"[[0.1,0.4,0.2,0.6]]"` (relative `x1,x2,y1,y2` per box). |
+| `strength` | float in `[0, 1]` | Flux2 only. sd-cli img2img denoise strength. Default `0.75`. |
+
+Reference bytes are decoded server-side and sniffed against PNG / JPEG / WebP magic bytes (a request 400s if the bytes don't match), capped at 20 MiB per image and 8 images per request, and staged to `~/.llamanager/refs/<request_id>/` for the duration of the run. A `finally` block deletes the staging directory regardless of how the run terminates (success, engine crash, queue cancel, timeout). Refs are not copied into the gallery, only the sidecar JSON next to each output preserves the prompt-and-ref provenance.
+
+Example, HiDream editing:
+
+```bash
+REF_B64=$(base64 -w0 ./input.png)     # macOS: base64 -i ./input.png | tr -d '\n'
+
+curl -X POST http://localhost:7200/v1/images/generations \
+  -H "Authorization: Bearer $ORIGIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"HiDream-O1-Image\",
+    \"profile\": \"hidream-dev\",
+    \"prompt\": \"Replace the puppy with a small calico kitten, keep the wooden sign and garden background identical.\",
+    \"image\": \"data:image/png;base64,$REF_B64\",
+    \"keep_original_aspect\": true,
+    \"seed\": 11,
+    \"response_format\": \"url\"
+  }"
+```
+
+Example, Flux2 img2img:
+
+```bash
+curl -X POST http://localhost:7200/v1/images/generations \
+  -H "Authorization: Bearer $ORIGIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "flux2-dev",
+    "profile": "flux2-fast",
+    "prompt": "Same composition, oil-painting style, heavy brush texture.",
+    "image": "data:image/png;base64,'"$REF_B64"'",
+    "strength": 0.55,
+    "size": "1024x1024",
+    "response_format": "url"
+  }'
+```
+
+### Generating from the UI
+
+Open <http://localhost:7200/ui/images>. Pick a model, pick a profile, type a prompt, hit Generate. Results land in an asymmetric gallery; per-session history is in browser localStorage. Generated PNGs and a sidecar JSON live under `~/.llamanager/images/YYYY-MM-DD/<origin>/`. The gallery is size-capped (`[image].max_disk_gb = 10` by default, oldest-first GC).
+
+The images page also has a reference-image picker: an `+ Image` button, drag-and-drop onto the prompt, thumbnail strip with per-chip remove, and a `Keep original aspect` checkbox. The picker is engine-aware: switching to a Flux2 model auto-trims a multi-ref selection down to one.
+
+### Sharing the GPU with the text engine
+
+A single GPU usually can't hold a large LLM and a diffusion model at the same time. When an image request lands while a text engine is running, llamanager by default:
+
+1. Snapshots the current text spec (model + profile + args)
+2. Stops the text server to free VRAM
+3. Runs the image task to completion
+4. Restarts the text server from the snapshot
+
+This is the single-slot invariant. The dashboard "Now serving" hero shows one engine at a time, the same way LLM swaps work. The queue enforces it: when `allow_concurrent` is off, the text and image families are mutually exclusive at the dispatcher level, so no image starts while a text request is in flight and vice versa.
+
+Two toggles on the Diffusion engines page change the behaviour:
+
+- **Restart text engine after image completes** (default on). Turn off to stay in image-only mode after a generation.
+- **Allow concurrent text + image** (default off). Lets both families run in parallel up to their per-family caps (`max_concurrent` for text, 1 for image). Risks VRAM OOM on cards with less than ~48 GB; enable only when you know both fit.
+
+```toml
+[coexistence]
+unload_text_on_arrival = true
+restart_text_after_image = true
+allow_concurrent = false
+```
+
+Cancellation: cancelling a queued image request removes it before it starts. Cancelling an in-flight one terminates the subprocess (SIGTERM, escalating to SIGKILL after 5 s) so the GPU is freed promptly.
+
+## Calling the API
 
 Any OpenAI-compatible client works. With `curl`:
 
@@ -310,51 +449,46 @@ curl -N http://localhost:7200/v1/chat/completions \
   }'
 ```
 
-### Requesting a specific model
+By default, requests use whichever model is loaded (or the configured default if nothing is running). To request a different model, add the `X-Llamanager-Model` header. llamanager hot-swaps if needed.
 
-By default, requests use whatever model is currently loaded (or the default model and its default profile if nothing is running yet). To request a different model or profile, add the relevant headers. llamanager hot-swaps automatically if needed.
-
-**By model ID** (the path relative to the models directory):
+By model ID (the path relative to the models directory):
 
 ```bash
 curl -N http://localhost:7200/v1/chat/completions \
   -H "Authorization: Bearer $ORIGIN_KEY" \
   -H "X-Llamanager-Model: bartowski/Llama-3.2-1B-Instruct-GGUF/Llama-3.2-1B-Instruct-Q4_K_M.gguf" \
+  -H "X-Llamanager-Profile: balanced" \
   -H "Content-Type: application/json" \
   -d '{"model": "any", "messages": [{"role": "user", "content": "Hi!"}]}'
 ```
 
-**By profile name** — profiles always belong to a model, so send both headers (or send `X-Llamanager-Profile` alone to apply it against the default/currently-loaded model):
+Each origin's `allowed_models` setting restricts which models it can request. Set to `*` for any model, `default` for the default only, or a comma-separated list of specific model IDs.
+
+While a request is queued or a model swap is happening, llamanager emits SSE comment lines (`: status=swapping_model`, `: keepalive`) every 10 seconds so client connections don't time out.
+
+### Reasoning / thinking control
+
+Thinking-capable models (Qwen3, GLM, MiniCPM, …) emit a `<think>…</think>` preamble that wastes leading tokens when you don't want it. llamanager lets you turn it off two ways:
+
+- **As a profile default** — set `thinking = "off"` on a profile (UI: LLM models → edit profile → *Reasoning / thinking* dropdown; or in `config.toml`). Every `/v1/chat/completions` call routed through that profile gets `chat_template_kwargs.enable_thinking = false` merged into the body. You stop having to send the field on every request.
+- **As a per-request override** — send the `X-Llamanager-Thinking: on|off` header. It wins over the profile default *and* over any `chat_template_kwargs.enable_thinking` the caller put in the body. Use it as the escape hatch when one client needs the opposite of the profile default.
 
 ```bash
+# force thinking off for this one request, regardless of profile
 curl -N http://localhost:7200/v1/chat/completions \
   -H "Authorization: Bearer $ORIGIN_KEY" \
-  -H "X-Llamanager-Model: bartowski/Llama-3.2-1B-Instruct-GGUF/Llama-3.2-1B-Instruct-Q4_K_M.gguf" \
-  -H "X-Llamanager-Profile: my-vision-profile" \
+  -H "X-Llamanager-Thinking: off" \
   -H "Content-Type: application/json" \
   -d '{"model": "any", "messages": [{"role": "user", "content": "Hi!"}]}'
 ```
 
-> Note: the legacy `X-Llamanager-Model: profile:<name>` shorthand has been removed. Use the separate `X-Llamanager-Model` and `X-Llamanager-Profile` headers instead.
-
-Each origin's `allowed_models` setting restricts which models it can request. Set to `*` to allow any model, `default` to allow only the default, or a comma-separated list of specific model IDs.
-
-While a request is queued or a model swap is happening, llamanager emits SSE comment lines (`: status=swapping_model`, `: keepalive`) every 10 seconds so client connections do not time out.
+Precedence (highest wins): `X-Llamanager-Thinking` header → caller's own `chat_template_kwargs.enable_thinking` in the body → profile's `thinking` setting → upstream/template default. The merge only fires on `/v1/chat/completions` (the bare `/v1/completions` endpoint doesn't render the chat template that consumes the kwarg). The kwarg is silently ignored by templates that don't reference it, so setting it on a non-reasoning model is harmless.
 
 ## Chat in the browser
 
-llamanager includes a built-in chat interface at <http://localhost:7200/chat>. Any user with a valid origin API key can use it. No admin access required.
+A built-in chat UI lives at <http://localhost:7200/chat>. Any user with a valid origin API key can use it; no admin access required.
 
-Features:
-
-- streaming responses with real-time token display
-- chat history stored in the browser (localStorage), with multiple conversations
-- system prompt configuration
-- profile and model selection per conversation
-- markdown rendering toggle
-- dark/light theme
-
-The admin panel also has a chat page at `/ui/chat` that uses the admin session key automatically.
+The UI has streaming token display, multiple conversations stored in localStorage, configurable system prompt, per-conversation profile and model selection, a markdown toggle, and dark/light theme. The admin panel has its own chat page at `/ui/chat` that reuses the admin session.
 
 ## Auto-start at boot or login
 
@@ -365,7 +499,7 @@ llamanager install-launchd
 launchctl load -w ~/Library/LaunchAgents/com.llamanager.plist
 ```
 
-To unload:
+Unload:
 
 ```bash
 launchctl unload -w ~/Library/LaunchAgents/com.llamanager.plist
@@ -386,9 +520,7 @@ For a system-wide service, copy the generated unit file to `/etc/systemd/system/
 
 Two options. Pick a real Windows service if you want it always-on with no logon required, or a Task Scheduler entry if you want fewer dependencies.
 
-#### Option A — real Windows service (recommended for headless boxes)
-
-Needs the `pywin32` extra and an elevated PowerShell or cmd.
+**Option A — real Windows service (recommended for headless boxes).** Needs the `pywin32` extra and an elevated PowerShell or cmd.
 
 ```powershell
 pip install -e ".[windows-service]"
@@ -397,7 +529,7 @@ pip install -e ".[windows-service]"
 llamanager install-windows-service
 ```
 
-The service registers as `llamanager` ("llamanager — manager and proxy for llama-server"), startup `auto`. Logs land in `%USERPROFILE%\.llamanager\logs\llamanager.log`. Lifecycle events also show up in the Windows Event Viewer under Windows Logs → Application.
+The service registers as `llamanager`, startup `auto`. Logs land in `%USERPROFILE%\.llamanager\logs\llamanager.log`. Lifecycle events also show up in the Windows Event Viewer under Windows Logs → Application.
 
 ```powershell
 sc query llamanager
@@ -413,9 +545,9 @@ To run as a domain account instead of `LocalSystem`:
 llamanager install-windows-service --username "DOMAIN\svc-llamanager" --password "..."
 ```
 
-> **Important:** before installing the service for the first time, run `llamanager serve` once interactively so the bootstrap admin key prints to a console you can copy from. The service has no stdout. If it generates the bootstrap key, the key is gone.
+> Before installing the service for the first time, run `llamanager serve` once interactively so the bootstrap admin key prints to a console you can copy. The service has no stdout; if it generates the bootstrap key, the key is gone.
 
-#### Option B — Task Scheduler (no extra deps, logon-triggered)
+**Option B — Task Scheduler (no extra deps, logon-triggered).**
 
 ```powershell
 llamanager install-windows
@@ -423,7 +555,7 @@ schtasks /Create /XML "$env:USERPROFILE\.llamanager\llamanager.task.xml" /TN lla
 schtasks /Run /TN llamanager
 ```
 
-The task is logon-triggered (closer to the macOS LaunchAgent than to a system service), retries 5 times on failure with a 1 minute interval, and runs at LeastPrivilege as the current user. It is the right pick for desktop or single-user setups where pulling in Visual Studio Build Tools for `pywin32` is overkill.
+The task is logon-triggered, retries 5 times on failure with a 1-minute interval, and runs at `LeastPrivilege` as the current user. This is the right pick for desktop or single-user setups where pulling in Visual Studio Build Tools for `pywin32` would be overkill.
 
 ```powershell
 schtasks /Delete /TN llamanager /F
@@ -448,9 +580,7 @@ llamanager --config /path/to/config.toml <subcommand>
 
 ### Admin verbs (drive a running daemon)
 
-These talk to a running `llamanager serve` over `/admin/*`, so an agent or
-shell script can manage models, queue, and origins without a custom client.
-They print JSON to stdout (pipe through `jq` if you want to slice the result).
+These talk to a running `llamanager serve` over `/admin/*`, so an agent or shell script can manage models, queue, and origins without a custom client. They print JSON to stdout (pipe through `jq` to slice the result).
 
 Auth resolution order:
 
@@ -462,8 +592,7 @@ Base URL resolution order:
 
 1. `--url` flag
 2. `$LLAMANAGER_URL`
-3. derived from config (`http://<bind>:<port>`, with `0.0.0.0` rewritten to
-   `127.0.0.1` since the CLI usually runs on the same host)
+3. derived from config (`http://<bind>:<port>`, with `0.0.0.0` rewritten to `127.0.0.1` since the CLI usually runs on the same host)
 
 ```text
 llamanager server status                    # full daemon snapshot
@@ -495,8 +624,7 @@ llamanager reload
 llamanager logs [--source llama-server|llamanager] [--tail 200]
 ```
 
-Example: an agent that wants to swap models before a long batch and revert
-after can do this without writing any HTTP code:
+Example, an agent that wants to swap models before a long batch and revert after:
 
 ```bash
 export LLAMANAGER_ADMIN_KEY=lm_...
@@ -508,7 +636,7 @@ llamanager server swap --profile my-default-profile
 
 ## Configuration
 
-Lives at `~/.llamanager/config.toml` (windows: `%USERPROFILE%\.llamanager\config.toml`). Hot-reload with `POST /admin/reload` or `SIGHUP` (POSIX only). Full schema is in spec §7.
+Lives at `~/.llamanager/config.toml` (Windows: `%USERPROFILE%\.llamanager\config.toml`). Hot-reload with `POST /admin/reload` or `SIGHUP` (POSIX only). Full schema is in spec §7.
 
 A minimal example:
 
@@ -516,39 +644,48 @@ A minimal example:
 [server]
 bind = "0.0.0.0"
 port = 7200
-llama_server_binary = "llama-server"   # or "C:\\path\\to\\llama-server.exe"
+llama_server_binary = "llama-server"   # or 'C:\path\to\llama-server.exe' as a TOML literal
 llama_server_port = 7201
 data_dir = "~/.llamanager"
 
 [defaults]
-model = ""       # set after pulling your first model
+model = ""             # set by the top bar's LLM star toggle
+image_model = ""       # set by the top bar's diffusion star toggle
+image_profile = ""
 
-# Engine-keyed minimum defaults — applied to every model of that engine
-# unless its profile (or the request itself) overrides the key.
-[default_args.llama]
-temp = 0.7
+[downloads]
+# 0 = no cap. The actual partition free-space check still applies.
+# Set to a non-zero GB value to cap the cumulative size of the models dir.
+max_disk_gb = 0
 
-[default_args.mlx]
-temp = 0.6
+[image]
+# Per-engine paths. Each is filled either by clicking Install dependencies
+# on the engine card (auto), or by pasting an existing install path.
+# hidream_python     = "/path/to/.venv-hidream/bin/python"
+# hidream_repo       = "/path/to/HiDream-O1-Image"
+# flux2_sd_cli       = "/path/to/sd-cli"
+# flux2_device_index = 1                  # GGML_VK_VISIBLE_DEVICES
+# z_image_python     = "/path/to/.venv-z-image/bin/python"
+max_disk_gb = 10                          # cap for the on-disk image gallery
 
-# Profiles are auto-created when you pull a model. They nest under the
-# model they configure. Example of a manual entry:
-#
-# [models."org/repo-GGUF/Q4_K_M.gguf"]
-# default_profile = "fast"
-#
-# [models."org/repo-GGUF/Q4_K_M.gguf".profiles.fast]
-# mmproj = ""                      # optional, for GGUF multimodal models
-# ctx_size = 4096                  # llama.cpp only; MLX reads ctx from the model
-# vram_limit_gb = 8.0              # optional; omit (or set ram_spill_policy
-#                                  # = "default") to let the engine decide
-# ram_spill_policy = "limited"     # "default" | "unlimited" | "limited" | "none"
-# ram_spill_limit_gb = 4.0         # only used when policy = "limited"
-#
-# [models."org/repo-GGUF/Q4_K_M.gguf".profiles.fast.args]
-# # Raw engine flags — pass through to llama-server / mlx_lm.server.
-# # These win over the basic fields above.
-# temp = 0.7
+[coexistence]
+unload_text_on_arrival = true
+restart_text_after_image = true
+allow_concurrent = false
+```
+
+> **Windows paths in TOML.** Backslashes inside double-quoted strings are escape sequences; `"C:\Users\..."` will fail to parse (the `\U` looks like a Unicode escape). Use TOML literal strings (single quotes), e.g. `'C:\Soulthread\Models'`, or escape every backslash: `"C:\\Soulthread\\Models"`.
+
+Per-model profiles are auto-created when you pull a model. You can edit them on the LLM models or Diffusion engines page, or write them by hand:
+
+```toml
+[models."your-model.gguf"]
+default_profile = "balanced"
+
+[models."your-model.gguf".profiles.balanced]
+ctx_size = 4096
+thinking = "off"      # optional; "on" / "off" / omit. See "Reasoning / thinking control" above.
+args = { temp = 0.7 }
 ```
 
 The VRAM / RAM-spill knobs are basic fields that translate into a
@@ -573,17 +710,26 @@ Full endpoint list is in spec §5.
 ```text
 ~/.llamanager/
 ├── config.toml             static config (you edit this)
-├── state.db                sqlite: origins, requests, downloads, events
+├── state.db                sqlite: origins, requests, downloads, events, engine_installs
 ├── runtime.json            current run state (atomic writes)
 ├── .session-secret         signed-cookie secret (mode 0600)
-├── models/                 downloaded GGUFs
+├── bin/                    installed llama.cpp / fork binaries
+├── venvs/                  per-engine Python venvs created by the installer
+│   ├── z_image/
+│   └── hidream/
+├── models/                 downloaded weights, mixed text + image
+├── images/                 generated PNGs, organised YYYY-MM-DD/<origin>/
+├── refs/                   transient reference-image staging (cleaned after each run)
 ├── logs/
 │   ├── llamanager.log      llamanager's own log (rotated 5 × 50 MB)
-│   └── llama-server.log    captured stdout/stderr of the child
+│   ├── llama-server.log    captured stdout/stderr of the text engine
+│   ├── hidream.log         captured output of the HiDream subprocess
+│   ├── flux2.log           captured output of FLUX 2 / sd.cpp
+│   └── z_image.log         captured output of the Z-Image subprocess
 └── llamanager.task.xml     windows: generated by `install-windows` (if used)
 ```
 
-On windows, `~` resolves to `%USERPROFILE%`, e.g. `C:\Users\<you>\.llamanager`.
+On Windows, `~` resolves to `%USERPROFILE%`, e.g. `C:\Users\<you>\.llamanager`.
 
 ## Troubleshooting
 
@@ -591,21 +737,29 @@ On windows, `~` resolves to `%USERPROFILE%`, e.g. `C:\Users\<you>\.llamanager`.
 
 **Port 7200 or 7201 already in use.** Change `[server].port` (llamanager) or `[server].llama_server_port` (the upstream `llama-server`) in `config.toml`. Make sure the same port shows up under any matching `args = { ... port = ... }` profile entry.
 
+**TOML parse error: "Invalid hex value (at line N)".** A Windows path with single backslashes in a double-quoted string. Switch the value to a single-quoted literal string, e.g. `models_dir = 'C:\Soulthread\Models'`.
+
+**"would exceed max_disk_gb" when pulling a model.** The historical default cap was 80 GB and is easy to trip with diffusion checkpoints. New installs default to `0` (no cap, only the partition free-space check applies). To raise an existing config: set `[downloads].max_disk_gb = 0` and reload.
+
 **Lost the bootstrap key.** No recovery, argon2id is one-way. Stop the daemon, delete `~/.llamanager/state.db`, restart, and a new bootstrap key prints. Existing origins and keys go with it, so this is only safe if you have not created real origins yet.
 
 **Web UI says "invalid admin key" but the key is admin.** The verification cache is per-process. If you just rotated the key, restart the daemon or wait 5 minutes for the cache TTL.
 
-**Crash loop, `state: crashed` and 503s.** The 3-in-5 restart policy gave up. Check `~/.llamanager/logs/llama-server.log`, fix the cause, then `POST /admin/server/start` (or use the UI).
+**Crash loop, `state: crashed` and 503s.** The 3-in-5 restart policy gave up. Check `~/.llamanager/logs/llama-server.log` (or `hidream.log` / `flux2.log` / `z_image.log` for the image engines), fix the cause, then `POST /admin/server/start` (or use the UI).
+
+**Z-Image `Install dependencies` finishes but `pipe(...)` fails at runtime.** The auto-install picks a generic torch wheel. For AMD ROCm, Apple Silicon, or specific CUDA versions, build the venv yourself with the vendor wheels and point the engine at it, then skip the install button.
+
+**"No compatible GPU detected" on Windows with an AMD card.** Older builds required `rocm-smi`. Update llamanager: the new path reads the adapter name and VRAM total from the driver registry and live VRAM usage from the Windows GPU performance counters, without any vendor CLI.
 
 **Windows: argon2-cffi fails to install.** Python 3.11+ ships prebuilt wheels for argon2-cffi on Windows. If you hit a build error, upgrade pip (`python -m pip install -U pip`) and retry. As a last resort, install Microsoft's [Build Tools for Visual Studio](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
 
 ## Releasing a new version
 
-The version is defined in one place: the **`VERSION`** file in the project root. `pyproject.toml`, `llamanager.__version__`, and the web UI all read from it automatically.
+The version is defined in one place: the `VERSION` file in the project root. `pyproject.toml`, `llamanager.__version__`, and the web UI all read from it.
 
 ### 1. Bump the version
 
-Edit the `VERSION` file, then reinstall so package metadata is updated:
+Edit `VERSION`, then reinstall so package metadata is updated:
 
 ```bash
 pip install -e .
@@ -622,14 +776,14 @@ git push origin "v$(cat VERSION)"
 
 ### 3. Create a GitHub release
 
-Tags are just pointers — a GitHub **Release** adds release notes and makes the version visible on the repo's Releases page. The llamanager update checker looks for releases first, then falls back to tags.
+Tags are pointers. A GitHub Release adds notes and makes the version visible on the repo's Releases page; the llamanager update checker looks for releases first and falls back to tags.
 
 **Option A — GitHub web UI** (recommended)
 
-1. Go to the repo → **Releases** → **Draft a new release**
-2. Click **Choose a tag** → select the `v...` tag you just pushed
+1. Go to the repo → Releases → Draft a new release
+2. Choose a tag → select the `v...` tag you just pushed
 3. Set the title and write release notes
-4. Click **Publish release**
+4. Publish release
 
 **Option B — GitHub CLI** (`gh`)
 
@@ -637,33 +791,34 @@ Tags are just pointers — a GitHub **Release** adds release notes and makes the
 gh release create "v$(cat VERSION)" --title "v$(cat VERSION)" --notes "Release notes here."
 ```
 
-> **Note:** `gh` requires the [GitHub CLI](https://cli.github.com/) to be installed and authenticated (`gh auth login`). If `gh release create` fails with a permission error, use the web UI instead.
+> `gh` requires the [GitHub CLI](https://cli.github.com/) to be installed and authenticated (`gh auth login`). If `gh release create` fails with a permission error, use the web UI instead.
 
 ### How the update checker works
 
-When a user clicks **Check for updates** on the About page, llamanager:
+When a user clicks Check for updates on the About page, llamanager:
 
 1. Queries `https://api.github.com/repos/{repo}/releases/latest`
 2. If no releases exist (404), falls back to `https://api.github.com/repos/{repo}/tags`
-3. Compares the remote version against the local version using semver (major.minor.patch)
-4. Only shows the update banner if the remote version is **strictly greater** — it will never suggest downgrading
+3. Compares the remote version against the local one using semver (major.minor.patch)
+4. Shows the update banner only if the remote version is strictly greater, never suggesting a downgrade
 
 ## Credits
 
-llamanager is built on top of excellent open-source projects:
+llamanager builds on excellent open-source projects:
 
 | component | project |
 |-----------|---------|
-| Inference | [llama.cpp / llama-server](https://github.com/ggerganov/llama.cpp) |
-| Alternative engine | [Atomic TurboQuant](https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant) |
+| LLM inference | [llama.cpp / llama-server](https://github.com/ggerganov/llama.cpp), [mlx-lm](https://github.com/ml-explore/mlx-examples/tree/main/llms) |
+| Alternative LLM engine | [Atomic TurboQuant](https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant) |
+| Diffusion | [HiDream-O1-Image](https://huggingface.co/HiDream-ai/HiDream-O1-Image), [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp), [Tongyi-MAI/Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image), [SeeSee21/Z-Anime](https://huggingface.co/SeeSee21/Z-Anime), [Hugging Face Diffusers](https://github.com/huggingface/diffusers) |
 | Web framework | [FastAPI](https://fastapi.tiangolo.com) |
 | Templates | [Jinja2](https://jinja.palletsprojects.com) |
 | Interactivity | [HTMX](https://htmx.org) |
-| Model hub | [Hugging Face](https://huggingface.co) (huggingface_hub) |
+| Model hub | [Hugging Face](https://huggingface.co) (`huggingface_hub`) |
 | Typography | [Fraunces](https://fonts.google.com/specimen/Fraunces), [Inter](https://fonts.google.com/specimen/Inter), [JetBrains Mono](https://fonts.google.com/specimen/JetBrains+Mono) |
 
 ## License
 
-Copyright 2025 Mounir Ould Setti / [SoulThread Technologies](https://soulthread.group)
+Copyright 2025–2026 Mounir Ould Setti / [SoulThread Technologies](https://soulthread.group)
 
 Licensed under the [Apache License, Version 2.0](LICENSE). See `LICENSE` for the full text.

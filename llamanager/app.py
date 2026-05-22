@@ -20,6 +20,7 @@ from .api_v1 import router as v1_router
 from .auth import AuthManager, load_or_create_lookup_secret
 from .config import Config, load_config
 from .db import DB
+from .image_runner import ImageTaskRunner
 from .queue_mgr import QueueManager
 from .registry import Registry
 from .server_manager import ServerManager
@@ -117,6 +118,7 @@ def create_app(config_path: Path | None = None,
     queue = QueueManager(cfg, db, sm)
     supervisor = Supervisor(cfg, sm)
     registry = Registry(cfg, db)
+    image_runner = ImageTaskRunner(cfg, db, sm=sm)
 
     # Warn if llama-server binary is not found
     if not detect_binary(cfg.llama_server_binary):
@@ -196,6 +198,9 @@ def create_app(config_path: Path | None = None,
     app.state.queue = queue
     app.state.supervisor = supervisor
     app.state.registry = registry
+    app.state.image_runner = image_runner
+    from .engine_installer import EngineInstaller
+    app.state.engine_installer = EngineInstaller(cfg, db)
     # One InstallState per installable variant (source + backend), so the UI
     # can poll progress per variant independently.
     app.state.install_states = {v["id"]: InstallState() for v in list_variants()}
@@ -346,6 +351,69 @@ def create_app(config_path: Path | None = None,
             "request": request,
             "profiles_json": _json.dumps(profile_pairs),
             "models_json": _json.dumps(model_ids),
+        })
+
+    @app.get("/images")
+    async def images_public(request: Request):
+        """Public images page — any valid origin key, no admin session.
+
+        Sibling to /chat. Surfaces only image-family models in the picker,
+        plus their image profiles (with adapter-declared size buckets),
+        plus per-engine default sizes as a fallback when a profile doesn't
+        constrain sizes itself.
+        """
+        from fastapi.templating import Jinja2Templates
+        from pathlib import Path as _Path
+        import json as _json
+        from .config import ENGINE_FAMILY, detect_engine_for_id
+        from . import engines as _engines_pkg
+
+        _templates = Jinja2Templates(directory=str(_Path(__file__).parent / "templates"))
+
+        # Image-family models only.
+        image_models: list[dict[str, str]] = []
+        image_model_ids: set[str] = set()
+        for m in registry.list():
+            engine = detect_engine_for_id(m.model_id, cfg.models_dir)
+            if ENGINE_FAMILY.get(engine, "text") == "image":
+                image_models.append({"model_id": m.model_id, "engine": engine})
+                image_model_ids.add(m.model_id)
+
+        # Each profile entry: [name, model_id, sizes_csv].
+        # sizes_csv is "WxH|WxH|..." — derived from the adapter schema's
+        # select-type image_size field if present; empty otherwise.
+        adapter_sizes_cache: dict[str, list[str]] = {}
+
+        def _engine_sizes(engine: str) -> list[str]:
+            if engine in adapter_sizes_cache:
+                return adapter_sizes_cache[engine]
+            sizes: list[str] = []
+            try:
+                adapter = _engines_pkg.get(engine)
+                for field in adapter.profile_schema():
+                    if field.key == "image_size" and field.kind == "select":
+                        sizes = list(field.options or [])
+                        break
+            except (KeyError, AttributeError):
+                pass
+            adapter_sizes_cache[engine] = sizes
+            return sizes
+
+        profile_entries: list[list] = []
+        model_to_engine = {m["model_id"]: m["engine"] for m in image_models}
+        for mid, p in cfg.iter_profiles():
+            if mid not in image_model_ids:
+                continue
+            sizes_csv = "|".join(_engine_sizes(model_to_engine[mid]))
+            profile_entries.append([p.name, mid, sizes_csv])
+
+        engine_sizes = {e: _engine_sizes(e) for e in {m["engine"] for m in image_models}}
+
+        return _templates.TemplateResponse(request, "images_public.html", {
+            "request": request,
+            "image_models_json": _json.dumps(image_models),
+            "profiles_json": _json.dumps(profile_entries),
+            "engine_sizes_json": _json.dumps(engine_sizes),
         })
 
     @app.get("/")

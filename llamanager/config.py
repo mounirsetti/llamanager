@@ -67,7 +67,9 @@ window_seconds = 300
 success_run_seconds = 300
 
 [downloads]
-max_disk_gb = 80
+# 0 = no cap (only the actual partition free-space check applies).
+# Set to a non-zero GB value to cap the cumulative size of the models dir.
+max_disk_gb = 0
 hf_token_env = "HF_TOKEN"
 
 [queue]
@@ -75,6 +77,27 @@ max_concurrent = 1
 max_queue_depth = 200
 max_wait_s = 300
 queue_timeout_s = 300
+
+[image]
+# Image-engine paths. Both stacks have hardware-pinned dependency chains
+# (see docs/hidream.md and docs/flux2.md) and are NOT auto-installed —
+# set these to point at an existing install.
+# hidream_python    = "/path/to/.venv-hidream/bin/python"
+# hidream_repo      = "/path/to/HiDream-O1-Image"
+# flux2_sd_cli      = "/path/to/sd-cli"
+# flux2_device_index = 1     # GGML_VK_VISIBLE_DEVICES for the AMD card
+# images_dir        = "~/.llamanager/images"
+max_disk_gb = 10               # cap for the on-disk image gallery
+
+[coexistence]
+# Default: when an image task is dispatched and a text engine is running,
+# snapshot the text spec, stop it, run the image task, then restart text.
+# This keeps the single-slot dashboard invariant.
+unload_text_on_arrival = true
+restart_text_after_image = true
+# Concurrent mode: keep both loaded at once. Risks VRAM OOM on cards with
+# less than ~48 GiB. Recommended only when you know both fit.
+allow_concurrent = false
 """
 
 
@@ -86,14 +109,99 @@ def expand(p: str) -> Path:
 # Engine detection
 # ---------------------------------------------------------------------------
 
+# Engine name → family. Text engines run as long-running HTTP servers
+# managed by ServerManager. Image engines are one-shot CLI invocations
+# managed by ImageTaskRunner.
+ENGINE_FAMILY: dict[str, str] = {
+    "llama":   "text",
+    "mlx":     "text",
+    "hidream": "image",
+    "flux2":   "image",
+    "z_image": "image",
+}
+
+# Text engines that are still managed by the existing HTTP-server path.
+TEXT_ENGINES = frozenset(e for e, f in ENGINE_FAMILY.items() if f == "text")
+IMAGE_ENGINES = frozenset(e for e, f in ENGINE_FAMILY.items() if f == "image")
+
+
+def engine_family(engine: str) -> str:
+    """Return ``"text"`` or ``"image"`` (defaults to ``"text"`` for unknown
+    engines so legacy configs keep working)."""
+    return ENGINE_FAMILY.get(engine, "text")
+
+
+def _looks_like_hidream(d: Path) -> bool:
+    """HiDream-O1-Image checkpoint directory shape:
+    ``tokenizer_config.json`` + ``preprocessor_config.json`` + safetensors
+    shards. See docs/hidream.md."""
+    return (
+        (d / "tokenizer_config.json").exists()
+        and (d / "preprocessor_config.json").exists()
+        and any(d.glob("*.safetensors"))
+    )
+
+
+def _looks_like_flux2(d: Path) -> bool:
+    """FLUX 2 / sd.cpp checkpoint directory shape: a FLUX diffusion GGUF
+    plus a VAE safetensors and (typically) a text-encoder GGUF in the
+    same folder. See docs/flux2.md."""
+    names = {p.name.lower() for p in d.iterdir() if p.is_file()} \
+            if d.is_dir() else set()
+    has_diffusion = any("flux" in n and n.endswith(".gguf") for n in names)
+    has_vae = any(n == "ae.safetensors"
+                  or n.endswith("flux2-vae.safetensors")
+                  or (n.startswith("ae") and n.endswith(".safetensors"))
+                  for n in names)
+    return has_diffusion and has_vae
+
+
+def _looks_like_z_image(d: Path) -> bool:
+    """Z-Image / Z-Anime checkpoint directory shape: a Diffusers
+    ``model_index.json`` whose ``_class_name`` is ``ZImagePipeline``.
+    Both Tongyi-MAI/Z-Image and SeeSee21/Z-Anime ship this layout.
+
+    Reading the JSON is the *only* way to disambiguate Z-Image from
+    other Diffusers pipelines that share the same on-disk shape (FLUX,
+    SD3, etc.). The file is small (~500 bytes) so the read is cheap.
+    """
+    if not d.is_dir():
+        return False
+    mi = d / "model_index.json"
+    if not mi.is_file():
+        return False
+    try:
+        import json as _json
+        data = _json.loads(mi.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (data.get("_class_name") or "").strip() == "ZImagePipeline"
+
+
 def detect_engine_for_path(model_path: Path) -> str:
-    """Return ``"llama"`` for GGUF files, ``"mlx"`` for MLX/HF directory
-    layouts, and fall back to ``"llama"`` when ambiguous."""
+    """Return the engine name for a model on disk.
+
+    Order matters: image engines are checked before the generic MLX
+    directory shape because a HiDream dir technically also contains
+    safetensors + (some) tokenizer config.
+    """
     if model_path.is_file() and model_path.suffix.lower() == ".gguf":
         return "llama"
-    if model_path.is_dir() and (model_path / "config.json").exists():
-        if any(model_path.glob("*.safetensors")) or any(model_path.glob("*.npz")):
-            return "mlx"
+    if model_path.is_dir():
+        if _looks_like_z_image(model_path):
+            return "z_image"
+        if _looks_like_hidream(model_path):
+            return "hidream"
+        if _looks_like_flux2(model_path):
+            return "flux2"
+        # Z-Anime ships its Diffusers pipeline in a ``diffusers/``
+        # subfolder; check one level down too so the parent folder is
+        # surfaced as a Z-Image model.
+        if _looks_like_z_image(model_path / "diffusers"):
+            return "z_image"
+        if (model_path / "config.json").exists():
+            if any(model_path.glob("*.safetensors")) or any(model_path.glob("*.npz")):
+                return "mlx"
     return "llama"
 
 
@@ -110,24 +218,50 @@ def detect_engine_for_id(model_id: str, models_dir: Path) -> str:
 # ---------------------------------------------------------------------------
 
 VALID_RAM_SPILL_POLICIES = ("default", "unlimited", "limited", "none")
+VALID_THINKING = ("", "on", "off")
 
 
 @dataclass
 class Profile:
     """A named launch preset for a model.
 
-    ``ctx_size`` / ``vram_limit_gb`` / ``ram_spill_policy`` /
-    ``ram_spill_limit_gb`` are the "basic" UI knobs — they map to engine
-    flags (mostly ``--ctx-size`` + a heuristic ``--n-gpu-layers``).
-    ``args`` is the raw advanced override map; it wins over basic-derived
-    args during launch.
+    For text-family engines: ``ctx_size`` / ``vram_limit_gb`` /
+    ``ram_spill_policy`` / ``ram_spill_limit_gb`` are the basic UI knobs.
+    They map to engine flags (mostly ``--ctx-size`` + a heuristic
+    ``--n-gpu-layers``).
+
+    For image-family engines: ``image_model_type`` / ``image_steps`` /
+    ``image_guidance`` / ``image_size`` / ``image_seed`` are surfaced in
+    the Images page UI. Each image engine adapter decides which of these
+    are meaningful for its CLI.
+
+    ``args`` is the raw advanced override map for either family; it wins
+    over basic-derived args during launch.
     """
     name: str
+    # text-family knobs
     mmproj: str = ""
     ctx_size: int | None = None
     vram_limit_gb: float | None = None
     ram_spill_policy: str = "default"
     ram_spill_limit_gb: float | None = None
+    # image-family knobs (ignored by text engines)
+    image_model_type: str = ""        # e.g. "dev" | "full" (HiDream)
+    image_steps: int | None = None
+    image_guidance: float | None = None
+    image_size: str = ""              # "WxH" — engine adapters validate/snap
+    image_seed: int | None = None
+    # Reference-image knobs. ``image_editing_scheduler`` is HiDream's
+    # --editing_scheduler flag ("flow_match" | "flash"); only meaningful
+    # when exactly one reference image is passed with --model_type dev.
+    # ``image_strength`` is Flux2's img2img --strength (0..1); ignored by
+    # HiDream. Both can be overridden per-request.
+    image_editing_scheduler: str = ""
+    image_strength: float | None = None
+    # Chat reasoning default. "on" / "off" inject
+    # ``chat_template_kwargs.enable_thinking`` into the upstream body for
+    # /v1/chat/completions; "" leaves the model/template default alone.
+    thinking: str = ""
     args: dict[str, Any] = field(default_factory=dict)
 
 
@@ -151,6 +285,11 @@ class Config:
     data_dir: Path = field(default_factory=lambda: expand("~/.llamanager"))
 
     default_model: str = ""
+    # Image-family default — used by /v1/images/generations when the
+    # request body omits ``model``. Profile defaults to the model's own
+    # default_profile when blank.
+    default_image_model: str = ""
+    default_image_profile: str = ""
     default_origin_priority: int = 50
     autolaunch: bool = False
 
@@ -158,7 +297,10 @@ class Config:
     window_seconds: int = 300
     success_run_seconds: int = 300
 
-    max_disk_gb: int = 80
+    # 0 = no cap; the actual free-disk check in registry.py still guards
+    # against running out of space. A non-zero value caps the cumulative
+    # size of the models directory.
+    max_disk_gb: int = 0
     hf_token_env: str = "HF_TOKEN"
 
     max_concurrent: int = 1
@@ -168,12 +310,39 @@ class Config:
 
     # New: profiles nest under their parent model.
     models: dict[str, ModelConfig] = field(default_factory=dict)
-    # Engine-keyed minimum defaults ("llama" / "mlx" → args dict).
+    # Engine-keyed minimum defaults ("llama" / "mlx" / "hidream" / "flux2"
+    # → args dict).
     default_args: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     # Set by the operator via /ui/models/set-dir or [server].models_dir in
     # config.toml. When None, models_dir falls back to data_dir/models.
     models_dir_override: Path | None = None
+
+    # ---- image engines ----
+    # Per-engine paths the operator sets via /ui/setup (no auto-install:
+    # both stacks have hardware-pinned dependency chains documented in
+    # docs/hidream.md and docs/flux2.md).
+    hidream_python: str = ""         # path to the .venv-hidream Python
+    hidream_repo: str = ""           # path to the HiDream-O1-Image source folder
+    flux2_sd_cli: str = ""           # path to sd-cli (or sd-cli.exe)
+    flux2_device_index: int | None = None  # GGML_VK_VISIBLE_DEVICES value
+    # Z-Image only needs a Python interpreter — the runner script ships
+    # with llamanager (engines/_z_image_runner.py), so there's no
+    # separate source folder to clone.
+    z_image_python: str = ""
+
+    # ---- coexistence policy ----
+    # Default: when an image task arrives, snapshot the running text spec,
+    # stop the text engine, run the image task, restart text. Set
+    # ``unload_text_on_arrival = false`` to keep text running (concurrent
+    # mode — risks VRAM OOM).
+    unload_text_on_arrival: bool = True
+    restart_text_after_image: bool = True
+    allow_concurrent: bool = False
+
+    # Where image outputs land. None → data_dir/images/.
+    images_dir_override: Path | None = None
+    images_max_disk_gb: int = 10
 
     raw: dict[str, Any] = field(default_factory=dict)
     path: Path | None = None
@@ -188,6 +357,12 @@ class Config:
     @property
     def logs_dir(self) -> Path:
         return self.data_dir / "logs"
+
+    @property
+    def images_dir(self) -> Path:
+        if self.images_dir_override is not None:
+            return self.images_dir_override
+        return self.data_dir / "images"
 
     @property
     def db_path(self) -> Path:
@@ -265,6 +440,9 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
     policy = str(body.get("ram_spill_policy", "default") or "default")
     if policy not in VALID_RAM_SPILL_POLICIES:
         policy = "default"
+    thinking = str(body.get("thinking", "") or "").strip().lower()
+    if thinking not in VALID_THINKING:
+        thinking = ""
     return Profile(
         name=name,
         mmproj=str(body.get("mmproj", "") or ""),
@@ -272,6 +450,14 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
         vram_limit_gb=_coerce_float(body.get("vram_limit_gb")),
         ram_spill_policy=policy,
         ram_spill_limit_gb=_coerce_float(body.get("ram_spill_limit_gb")),
+        image_model_type=str(body.get("image_model_type", "") or ""),
+        image_steps=_coerce_int(body.get("image_steps")),
+        image_guidance=_coerce_float(body.get("image_guidance")),
+        image_size=str(body.get("image_size", "") or ""),
+        image_seed=_coerce_int(body.get("image_seed")),
+        image_editing_scheduler=str(body.get("image_editing_scheduler", "") or ""),
+        image_strength=_coerce_float(body.get("image_strength")),
+        thinking=thinking,
         args=dict(body.get("args") or {}),
     )
 
@@ -288,6 +474,8 @@ def load_config(path: Path | None = None) -> Config:
     rp = raw.get("restart_policy", {})
     dl = raw.get("downloads", {})
     q = raw.get("queue", {})
+    image_cfg = raw.get("image", {}) if isinstance(raw.get("image"), dict) else {}
+    coex_cfg = raw.get("coexistence", {}) if isinstance(raw.get("coexistence"), dict) else {}
 
     cfg = Config(
         bind=server.get("bind", "127.0.0.1"),
@@ -297,20 +485,33 @@ def load_config(path: Path | None = None) -> Config:
         llama_server_port=int(server.get("llama_server_port", 7201)),
         data_dir=expand(server.get("data_dir", "~/.llamanager")),
         default_model=defaults.get("model", ""),
+        default_image_model=defaults.get("image_model", ""),
+        default_image_profile=defaults.get("image_profile", ""),
         default_origin_priority=int(defaults.get("origin_priority", 50)),
         autolaunch=bool(defaults.get("autolaunch", False)),
         max_restarts_in_window=int(rp.get("max_restarts_in_window", 3)),
         window_seconds=int(rp.get("window_seconds", 300)),
         success_run_seconds=int(rp.get("success_run_seconds", 300)),
-        max_disk_gb=int(dl.get("max_disk_gb", 80)),
+        max_disk_gb=int(dl.get("max_disk_gb", 0)),
         hf_token_env=dl.get("hf_token_env", "HF_TOKEN"),
         max_concurrent=int(q.get("max_concurrent", 1)),
         max_queue_depth=int(q.get("max_queue_depth", 200)),
         max_wait_s=int(q.get("max_wait_s", 300)),
         queue_timeout_s=int(q.get("queue_timeout_s", 300)),
+        hidream_python=str(image_cfg.get("hidream_python", "") or ""),
+        hidream_repo=str(image_cfg.get("hidream_repo", "") or ""),
+        flux2_sd_cli=str(image_cfg.get("flux2_sd_cli", "") or ""),
+        flux2_device_index=_coerce_int(image_cfg.get("flux2_device_index")),
+        z_image_python=str(image_cfg.get("z_image_python", "") or ""),
+        images_max_disk_gb=int(image_cfg.get("max_disk_gb", 10)),
+        unload_text_on_arrival=bool(coex_cfg.get("unload_text_on_arrival", True)),
+        restart_text_after_image=bool(coex_cfg.get("restart_text_after_image", True)),
+        allow_concurrent=bool(coex_cfg.get("allow_concurrent", False)),
         raw=raw,
         path=cfg_path,
     )
+    if "images_dir" in image_cfg:
+        cfg.images_dir_override = expand(str(image_cfg["images_dir"]))
 
     if "models_dir" in server:
         cfg.models_dir_override = expand(str(server["models_dir"]))
@@ -521,6 +722,22 @@ def _profile_to_tomlkit(prof: Profile):
         tbl.add("ram_spill_policy", prof.ram_spill_policy)
     if prof.ram_spill_limit_gb is not None:
         tbl.add("ram_spill_limit_gb", prof.ram_spill_limit_gb)
+    if prof.image_model_type:
+        tbl.add("image_model_type", prof.image_model_type)
+    if prof.image_steps is not None:
+        tbl.add("image_steps", prof.image_steps)
+    if prof.image_guidance is not None:
+        tbl.add("image_guidance", prof.image_guidance)
+    if prof.image_size:
+        tbl.add("image_size", prof.image_size)
+    if prof.image_seed is not None:
+        tbl.add("image_seed", prof.image_seed)
+    if prof.image_editing_scheduler:
+        tbl.add("image_editing_scheduler", prof.image_editing_scheduler)
+    if prof.image_strength is not None:
+        tbl.add("image_strength", prof.image_strength)
+    if prof.thinking:
+        tbl.add("thinking", prof.thinking)
     if prof.args:
         tbl.add("args", _dict_to_tomlkit(prof.args))
     return tbl
@@ -635,14 +852,78 @@ def set_default_args(cfg_path: Path, engine: str, args: dict[str, Any]) -> None:
 
 def update_defaults(cfg_path: Path, *,
                     default_model: str | None = None,
+                    default_image_model: str | None = None,
+                    default_image_profile: str | None = None,
                     autolaunch: bool | None = None) -> None:
-    """Update the [defaults] section in config.toml."""
+    """Update the [defaults] section in config.toml. Pass an empty string
+    for ``default_image_model`` / ``default_image_profile`` to clear the
+    saved value."""
     import tomlkit
     doc = _load_tomlkit(cfg_path)
     if "defaults" not in doc:
         doc.add("defaults", tomlkit.table())
     if default_model is not None:
         doc["defaults"]["model"] = default_model
+    if default_image_model is not None:
+        doc["defaults"]["image_model"] = default_image_model
+    if default_image_profile is not None:
+        doc["defaults"]["image_profile"] = default_image_profile
     if autolaunch is not None:
         doc["defaults"]["autolaunch"] = autolaunch
+    _save_tomlkit(cfg_path, doc)
+
+
+def update_image_config(cfg_path: Path, *,
+                        hidream_python: str | None = None,
+                        hidream_repo: str | None = None,
+                        flux2_sd_cli: str | None = None,
+                        flux2_device_index: int | None = None,
+                        clear_flux2_device_index: bool = False,
+                        z_image_python: str | None = None,
+                        images_dir: str | None = None,
+                        max_disk_gb: int | None = None) -> None:
+    """Update the [image] section in config.toml. Each kwarg is persisted
+    only when non-None. Pass ``clear_flux2_device_index=True`` to remove
+    the key entirely."""
+    import tomlkit
+    doc = _load_tomlkit(cfg_path)
+    if "image" not in doc:
+        doc.add("image", tomlkit.table())
+    img = doc["image"]
+    if hidream_python is not None:
+        img["hidream_python"] = hidream_python
+    if hidream_repo is not None:
+        img["hidream_repo"] = hidream_repo
+    if flux2_sd_cli is not None:
+        img["flux2_sd_cli"] = flux2_sd_cli
+    if clear_flux2_device_index:
+        if "flux2_device_index" in img:
+            del img["flux2_device_index"]
+    elif flux2_device_index is not None:
+        img["flux2_device_index"] = int(flux2_device_index)
+    if z_image_python is not None:
+        img["z_image_python"] = z_image_python
+    if images_dir is not None:
+        img["images_dir"] = images_dir
+    if max_disk_gb is not None:
+        img["max_disk_gb"] = int(max_disk_gb)
+    _save_tomlkit(cfg_path, doc)
+
+
+def update_coexistence_policy(cfg_path: Path, *,
+                              unload_text_on_arrival: bool | None = None,
+                              restart_text_after_image: bool | None = None,
+                              allow_concurrent: bool | None = None) -> None:
+    """Update the [coexistence] section in config.toml."""
+    import tomlkit
+    doc = _load_tomlkit(cfg_path)
+    if "coexistence" not in doc:
+        doc.add("coexistence", tomlkit.table())
+    sect = doc["coexistence"]
+    if unload_text_on_arrival is not None:
+        sect["unload_text_on_arrival"] = bool(unload_text_on_arrival)
+    if restart_text_after_image is not None:
+        sect["restart_text_after_image"] = bool(restart_text_after_image)
+    if allow_concurrent is not None:
+        sect["allow_concurrent"] = bool(allow_concurrent)
     _save_tomlkit(cfg_path, doc)

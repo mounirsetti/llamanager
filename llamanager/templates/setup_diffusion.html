@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+{% set active = 'setup-diffusion' %}
+{% block title %}Diffusion engines - llamanager{% endblock %}
+{% block content %}
+
+<style>
+  /* ===== Per-engine card composition. Reuses lm-* tokens from base. ===== */
+
+  .lm-engine-card {
+    border: 1px solid var(--bg-3);
+    background: var(--bg-1);
+    padding: 22px 24px;
+    margin-bottom: 20px;
+    position: relative;
+  }
+  .lm-engine-card__head {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+  }
+  .lm-engine-card__name {
+    font-family: 'Fraunces', serif;
+    font-size: 1.375rem;
+    margin: 0;
+    letter-spacing: -0.01em;
+    color: var(--fg-0);
+  }
+  .lm-engine-card__name em {
+    font-style: italic;
+    color: var(--fg-2);
+    font-weight: normal;
+  }
+  .lm-engine-card__tag {
+    font-size: 0.6875rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--fg-2);
+  }
+  .lm-engine-card__status {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 0.8125rem;
+    color: var(--fg-1);
+    margin: 6px 0 18px;
+  }
+  .lm-engine-card__status::before {
+    content: '';
+    width: 7px; height: 7px;
+    border-radius: 999px;
+    background: var(--fg-3);
+    display: inline-block;
+    flex-shrink: 0;
+  }
+  .lm-engine-card__status[data-state="ready"]::before { background: var(--ok); }
+  .lm-engine-card__status[data-state="busy"]::before  { background: var(--warn); }
+  .lm-engine-card__status[data-state="error"]::before { background: var(--bad); }
+
+  /* Section dividers inside an engine card */
+  .lm-engine-section {
+    border-top: 1px solid var(--bg-3);
+    margin-top: 18px;
+    padding-top: 16px;
+  }
+  .lm-engine-section__head {
+    font-size: 0.6875rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--fg-2);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .lm-engine-section__meta {
+    font-size: 0.75rem;
+    color: var(--fg-3);
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .lm-engine-section__note {
+    font-size: 0.75rem;
+    color: var(--fg-2);
+    max-width: 70ch;
+    margin: 0 0 12px;
+    line-height: 1.5;
+  }
+
+  /* Progress meter, used for both pip-install and HF download. */
+  .lm-progress {
+    margin-top: 12px;
+    padding: 10px 14px;
+    background: var(--bg-2);
+    border: 1px solid var(--bg-3);
+    border-radius: 2px;
+  }
+  .lm-progress__head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 0.8125rem;
+    color: var(--fg-1);
+    margin-bottom: 8px;
+  }
+  .lm-progress__pct {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+    color: var(--fg-0);
+  }
+  .lm-progress__bar {
+    height: 4px;
+    background: var(--bg-3);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .lm-progress__fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 250ms ease;
+  }
+  .lm-progress__fill--ok    { background: var(--ok); }
+  .lm-progress__fill--bad   { background: var(--bad); }
+  .lm-progress__fill--warn  { background: var(--warn); }
+  .lm-progress__log {
+    margin-top: 10px;
+    max-height: 140px;
+    overflow-y: auto;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.6875rem;
+    line-height: 1.5;
+    color: var(--fg-2);
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .lm-progress__row-actions { margin-top: 8px; }
+
+  .lm-pkg-list {
+    list-style: none;
+    padding: 0;
+    margin: 6px 0 12px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.75rem;
+    color: var(--fg-2);
+  }
+  .lm-pkg-list li {
+    padding: 2px 8px;
+    background: var(--bg-2);
+    border: 1px solid var(--bg-3);
+    border-radius: 2px;
+  }
+</style>
+
+<div class="lm-eyebrow">Configure</div>
+<h1 class="lm-page-title">Diffusion engines</h1>
+<p class="lm-page-lede">Install Python dependencies, download model weights, tune how text and image engines share the GPU. Each engine card walks you through the setup end-to-end.</p>
+
+{# Poll the page wrapper while any install or download is in flight so
+   progress bars update without a manual refresh. #}
+{% set _any_install_busy = (engine_installs.z_image and engine_installs.z_image.status in ('pending','running'))
+                       or (engine_installs.hidream and engine_installs.hidream.status in ('pending','running')) %}
+{% set _any_download_busy = (downloads | selectattr('status', 'equalto', 'running') | list)
+                         or (downloads | selectattr('status', 'equalto', 'pending') | list) %}
+
+<div id="setup-diffusion-body"
+     {% if _any_install_busy or _any_download_busy %}
+     hx-get="/ui/setup-diffusion/_partial"
+     hx-trigger="every 2s"
+     hx-swap="outerHTML"
+     {% endif %}>
+
+  {% include "_setup_diffusion_partial.html" %}
+
+</div>
+
+{% endblock %}

@@ -1,0 +1,403 @@
+{# Per-engine cards + diffusion model list + coexistence. Re-rendered
+   by HTMX every 2s when an install/download is running. #}
+
+{# ---------- Sub-macros ----------------------------------------------- #}
+
+{% macro install_progress(engine, install) %}
+<div class="lm-progress" data-install-id="{{ install.id }}">
+  <div class="lm-progress__head">
+    <span>{{ install.message or 'Installing…' }}</span>
+    <span class="lm-progress__pct">{{ install.progress_pct }}%</span>
+  </div>
+  <div class="lm-progress__bar">
+    <div class="lm-progress__fill" style="width: {{ install.progress_pct }}%;"></div>
+  </div>
+  {% if install.log %}
+  <div class="lm-progress__log">{{ install.log[-2000:] }}</div>
+  {% endif %}
+  <div class="lm-progress__row-actions">
+    <form method="post"
+          action="/ui/setup-diffusion/engine/{{ engine }}/install-deps/{{ install.id }}/cancel"
+          style="display: inline;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Cancel install</button>
+    </form>
+  </div>
+</div>
+{% endmacro %}
+
+{% macro install_section(engine) %}
+{% set install = engine_installs.get(engine) %}
+{% set plan = engine_plans.get(engine) %}
+<div class="lm-engine-section">
+  <div class="lm-engine-section__head">
+    <span>Dependencies</span>
+    {% if plan %}
+    <span class="lm-engine-section__meta">
+      {{ plan.packages|length }} package{% if plan.packages|length != 1 %}s{% endif %}
+      · ~{% if plan.space_mb >= 1024 %}{{ '%.1f GB' % (plan.space_mb / 1024) }}{% else %}{{ plan.space_mb }} MB{% endif %} on disk
+    </span>
+    {% endif %}
+  </div>
+  {% if plan %}
+    {% if plan.notes %}<p class="lm-engine-section__note">{{ plan.notes }}</p>{% endif %}
+    <ul class="lm-pkg-list">
+      {% for pkg in plan.packages %}<li>{{ pkg }}</li>{% endfor %}
+    </ul>
+    {% if install and install.status in ('pending', 'running') %}
+      {{ install_progress(engine, install) }}
+    {% else %}
+      <form method="post" action="/ui/setup-diffusion/engine/{{ engine }}/install-deps"
+            style="display: inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm"
+                data-confirm="Create a Python venv and install {{ plan.packages|length }} packages? This will take several minutes and ~{% if plan.space_mb >= 1024 %}{{ '%.1f GB' % (plan.space_mb / 1024) }}{% else %}{{ plan.space_mb }} MB{% endif %} of disk.">
+          {% if install and install.status == 'done' %}Reinstall dependencies{% else %}Install dependencies{% endif %}
+        </button>
+      </form>
+      {% if install %}
+        {% if install.status == 'done' %}
+        <span style="margin-left: 10px; font-size: 0.75rem; color: var(--ok);">✓ installed</span>
+        {% elif install.status == 'failed' %}
+        <span style="margin-left: 10px; font-size: 0.75rem; color: var(--bad);">✗ last install failed{% if install.error %}: {{ install.error[:120] }}{% endif %}</span>
+        {% elif install.status == 'cancelled' %}
+        <span style="margin-left: 10px; font-size: 0.75rem; color: var(--fg-3);">◌ last install was cancelled</span>
+        {% endif %}
+      {% endif %}
+    {% endif %}
+  {% else %}
+  <p class="lm-engine-section__note">
+    Auto-install isn't wired for this engine — the binary is too
+    platform-sensitive. Build it yourself per the docs and point the
+    path field above at the result.
+  </p>
+  {% endif %}
+</div>
+{% endmacro %}
+
+{% macro model_download_form(engine, default_repo, placeholder_sub, hint) %}
+<form method="post" action="/ui/setup-diffusion/engine/{{ engine }}/download-model"
+      class="lm-form" style="display: grid; grid-template-columns: 1.6fr 1fr auto; gap: 8px; align-items: end; margin-bottom: 14px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <div class="lm-field" style="margin: 0;">
+    <label class="lm-field-label">HF repo (org/name)</label>
+    <input class="lm-input lm-input--mono" type="text" name="repo"
+           placeholder="{{ default_repo }}" required>
+  </div>
+  <div class="lm-field" style="margin: 0;">
+    <label class="lm-field-label">Subfolder (optional)</label>
+    <input class="lm-input lm-input--mono" type="text" name="subfolder"
+           placeholder="{{ placeholder_sub }}">
+  </div>
+  <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Download</button>
+</form>
+{% if hint %}
+<p class="lm-engine-section__note" style="margin-top: -6px;">{{ hint|safe }}</p>
+{% endif %}
+{% endmacro %}
+
+{% macro download_progress() %}
+{% set active = downloads | selectattr('status', 'in', ['running', 'pending']) | list %}
+{% if active %}
+{% for d in active %}
+<div class="lm-progress">
+  <div class="lm-progress__head">
+    <span>
+      <code style="color: var(--fg-1);">{{ d.source }}</code>
+      {% if d.subfolder %}<span style="color: var(--fg-3);"> · subfolder <code>{{ d.subfolder }}</code></span>{% endif %}
+    </span>
+    <span class="lm-progress__pct">
+      {% if d.bytes_total %}
+        {{ '%.1f' % (d.bytes_done / (1024**3)) }} / {{ '%.1f' % (d.bytes_total / (1024**3)) }} GB
+        ({{ '%.0f' % (100 * d.bytes_done / d.bytes_total) }}%)
+      {% elif d.bytes_done %}
+        {{ '%.2f' % (d.bytes_done / (1024**3)) }} GB
+      {% else %}
+        starting…
+      {% endif %}
+    </span>
+  </div>
+  {% if d.bytes_total %}
+  <div class="lm-progress__bar">
+    <div class="lm-progress__fill" style="width: {{ (100 * d.bytes_done / d.bytes_total) | round(0) }}%;"></div>
+  </div>
+  {% endif %}
+  <div class="lm-progress__row-actions">
+    <form method="post" action="/ui/downloads/{{ d.id }}/cancel" style="display: inline;"
+          data-confirm="Cancel this download and remove partial files?">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Cancel</button>
+    </form>
+  </div>
+</div>
+{% endfor %}
+{% endif %}
+{% endmacro %}
+
+{% macro engine_models_list(engine) %}
+{% set matching = image_models | selectattr('engine', 'equalto', engine) | list %}
+{% if matching %}
+<div style="display: flex; flex-direction: column; gap: 4px; font-size: 0.8125rem; color: var(--fg-1); margin-top: 8px;">
+  <span style="text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.6875rem; color: var(--fg-2); margin-bottom: 4px;">
+    Installed ({{ matching|length }})
+  </span>
+  {% for m in matching %}
+  <div style="display: flex; align-items: baseline; gap: 10px;">
+    <code style="color: var(--fg-1);">{{ m.model_id }}</code>
+    <span style="color: var(--fg-3); font-size: 0.75rem;">{{ '%.1f GB' % (m.size / (1024**3)) }}</span>
+    {% if m.model_id == default_model %}
+    <span class="lm-pill" style="color: var(--accent); border-color: var(--accent); font-size: 0.625rem;">default</span>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="lm-engine-section__note" style="margin: 8px 0 0;">No {{ engine }} models on disk yet.</p>
+{% endif %}
+{% endmacro %}
+
+
+{# ===================================================================
+   Z-IMAGE  (Tongyi-MAI · Z-Anime)
+   =================================================================== #}
+{% set zi_state = 'ready' if image_cfg.z_image_python else 'idle' %}
+<div class="lm-engine-card" data-engine="z_image">
+  <div class="lm-engine-card__head">
+    <h2 class="lm-engine-card__name">Z-Image <em>(Tongyi-MAI · Z-Anime)</em></h2>
+    <span class="lm-engine-card__tag">Diffusers · DiT · CUDA/CPU verified</span>
+  </div>
+  <div class="lm-engine-card__status" data-state="{{ zi_state }}">
+    {% if image_cfg.z_image_python %}
+      Ready — Python at <code style="margin-left: 4px;">{{ image_cfg.z_image_python }}</code>
+    {% else %}
+      Not configured. Install dependencies below or point at an existing Python.
+    {% endif %}
+  </div>
+
+  <form class="lm-form" method="post" action="/ui/setup/image/z-image">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-field">
+      <label class="lm-field-label" for="z-image-python">Python executable</label>
+      <div style="display: flex; gap: 8px; align-items: flex-end;">
+        <input id="z-image-python" class="lm-input lm-input--mono" type="text"
+               name="z_image_python" value="{{ image_cfg.z_image_python }}"
+               placeholder="{{ engine_venv_python.z_image }}"
+               style="flex: 1; min-width: 0;">
+        <button type="button"
+                class="lm-btn lm-btn--ghost lm-btn--xs"
+                hx-get="/ui/fs/browse?kind=file&target=z-image-python"
+                data-fs-prefill="z-image-python"
+                hx-target="[data-fs-host='z-image-python']"
+                hx-swap="innerHTML">Browse…</button>
+      </div>
+      <div class="lm-fs-host" data-fs-host="z-image-python"></div>
+      <p class="lm-engine-section__note">
+        A Python interpreter from an environment with <code>diffusers</code>,
+        <code>transformers</code>, <code>accelerate</code>, and <code>torch</code>
+        installed. Clicking <strong>Install dependencies</strong> below creates
+        <code>{{ engine_venv_python.z_image }}</code> and fills this field automatically.
+      </p>
+    </div>
+    <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Save path</button>
+  </form>
+
+  {{ install_section('z_image') }}
+
+  <div class="lm-engine-section">
+    <div class="lm-engine-section__head"><span>Models</span></div>
+    {{ model_download_form(
+        'z_image',
+        'Tongyi-MAI/Z-Image',
+        'diffusers',
+        'Tongyi-MAI/Z-Image is ~20 GB. For Z-Anime, set repo to <code>SeeSee21/Z-Anime</code> and subfolder to <code>diffusers</code> to grab just the usable variant (~12-20 GB) instead of the full 203 GB.'
+    ) }}
+    {{ download_progress() }}
+    {{ engine_models_list('z_image') }}
+  </div>
+</div>
+
+
+{# ===================================================================
+   HIDREAM
+   =================================================================== #}
+{% set hd_state = 'ready' if image_cfg.hidream_python and image_cfg.hidream_repo else 'idle' %}
+<div class="lm-engine-card" data-engine="hidream">
+  <div class="lm-engine-card__head">
+    <h2 class="lm-engine-card__name">HiDream-O1-Image</h2>
+    <span class="lm-engine-card__tag">Linux · ROCm 7.2+ · gfx1201 verified</span>
+  </div>
+  <div class="lm-engine-card__status" data-state="{{ hd_state }}">
+    {% if image_cfg.hidream_python and image_cfg.hidream_repo %}
+      Ready — Python at <code style="margin-left: 4px;">{{ image_cfg.hidream_python }}</code>
+    {% else %}
+      Not configured. Install dependencies below or point at your own venv + source folder.
+    {% endif %}
+  </div>
+
+  <form class="lm-form" method="post" action="/ui/setup/image/hidream">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-field">
+      <label class="lm-field-label" for="hidream-python">Python executable</label>
+      <div style="display: flex; gap: 8px; align-items: flex-end;">
+        <input id="hidream-python" class="lm-input lm-input--mono" type="text"
+               name="hidream_python" value="{{ image_cfg.hidream_python }}"
+               placeholder="{{ engine_venv_python.hidream }}"
+               style="flex: 1; min-width: 0;">
+        <button type="button"
+                class="lm-btn lm-btn--ghost lm-btn--xs"
+                hx-get="/ui/fs/browse?kind=file&target=hidream-python"
+                data-fs-prefill="hidream-python"
+                hx-target="[data-fs-host='hidream-python']"
+                hx-swap="innerHTML">Browse…</button>
+      </div>
+      <div class="lm-fs-host" data-fs-host="hidream-python"></div>
+    </div>
+    <div class="lm-field">
+      <label class="lm-field-label" for="hidream-repo">Source folder</label>
+      <div style="display: flex; gap: 8px; align-items: flex-end;">
+        <input id="hidream-repo" class="lm-input lm-input--mono" type="text"
+               name="hidream_repo" value="{{ image_cfg.hidream_repo }}"
+               placeholder="/path/to/HiDream-O1-Image"
+               style="flex: 1; min-width: 0;">
+        <button type="button"
+                class="lm-btn lm-btn--ghost lm-btn--xs"
+                hx-get="/ui/fs/browse?kind=dir&target=hidream-repo"
+                data-fs-prefill="hidream-repo"
+                hx-target="[data-fs-host='hidream-repo']"
+                hx-swap="innerHTML">Browse…</button>
+      </div>
+      <div class="lm-fs-host" data-fs-host="hidream-repo"></div>
+      <p class="lm-engine-section__note">
+        Folder where you cloned HiDream-O1-Image source (the one
+        containing <code>inference.py</code>).
+      </p>
+    </div>
+    <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Save paths</button>
+  </form>
+
+  {{ install_section('hidream') }}
+
+  <div class="lm-engine-section">
+    <div class="lm-engine-section__head"><span>Models</span></div>
+    {{ model_download_form(
+        'hidream',
+        'HiDream-ai/HiDream-O1-Image',
+        'leave blank',
+        'HiDream-O1-Image is ~18 GB. Leave subfolder blank to grab the whole repo.'
+    ) }}
+    {{ download_progress() }}
+    {{ engine_models_list('hidream') }}
+  </div>
+</div>
+
+
+{# ===================================================================
+   FLUX 2
+   =================================================================== #}
+{% set fx_state = 'ready' if image_cfg.flux2_sd_cli else 'idle' %}
+<div class="lm-engine-card" data-engine="flux2">
+  <div class="lm-engine-card__head">
+    <h2 class="lm-engine-card__name">FLUX&nbsp;2 Dev <em>via sd.cpp</em></h2>
+    <span class="lm-engine-card__tag">Linux + Windows · Vulkan</span>
+  </div>
+  <div class="lm-engine-card__status" data-state="{{ fx_state }}">
+    {% if image_cfg.flux2_sd_cli %}
+      Ready — sd-cli at <code style="margin-left: 4px;">{{ image_cfg.flux2_sd_cli }}</code>
+    {% else %}
+      Not configured. Build sd-cli yourself (see <code>docs/flux2.md</code>) and point at the executable.
+    {% endif %}
+  </div>
+
+  <form class="lm-form" method="post" action="/ui/setup/image/flux2">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-field">
+      <label class="lm-field-label" for="flux2-sd-cli">sd-cli executable</label>
+      <div style="display: flex; gap: 8px; align-items: flex-end;">
+        <input id="flux2-sd-cli" class="lm-input lm-input--mono" type="text"
+               name="flux2_sd_cli" value="{{ image_cfg.flux2_sd_cli }}"
+               placeholder="/path/to/sd-cli or C:\path\to\sd-cli.exe"
+               style="flex: 1; min-width: 0;">
+        <button type="button"
+                class="lm-btn lm-btn--ghost lm-btn--xs"
+                hx-get="/ui/fs/browse?kind=file&target=flux2-sd-cli"
+                data-fs-prefill="flux2-sd-cli"
+                hx-target="[data-fs-host='flux2-sd-cli']"
+                hx-swap="innerHTML">Browse…</button>
+      </div>
+      <div class="lm-fs-host" data-fs-host="flux2-sd-cli"></div>
+    </div>
+    <div class="lm-field">
+      <label class="lm-field-label" for="flux2-device">Vulkan device index</label>
+      <input id="flux2-device" class="lm-input lm-input--mono" type="number"
+             name="flux2_device_index" value="{{ image_cfg.flux2_device_index if image_cfg.flux2_device_index is not none else '' }}"
+             placeholder="1" min="0" max="8" style="max-width: 140px;">
+      <p class="lm-engine-section__note">
+        Which GPU sd-cli should use (only matters with multiple GPUs).
+        Sets <code>GGML_VK_VISIBLE_DEVICES</code>.
+      </p>
+    </div>
+    <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Save paths</button>
+  </form>
+
+  {{ install_section('flux2') }}
+
+  <div class="lm-engine-section">
+    <div class="lm-engine-section__head"><span>Models</span></div>
+    {{ model_download_form(
+        'flux2',
+        'black-forest-labs/FLUX.2-dev',
+        'leave blank',
+        'FLUX 2 needs a diffusion GGUF, an <code>ae.safetensors</code> VAE, and a text-encoder GGUF in the same folder. The Hugging Face repo holds the canonical fp16 weights — for runnable GGUF quants, search for a community re-host.'
+    ) }}
+    {{ download_progress() }}
+    {{ engine_models_list('flux2') }}
+  </div>
+</div>
+
+
+{# ---------- Coexistence policy ----------------------------------- #}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Coexistence</span>
+    <span class="lm-section-meta">how text and image share the GPU</span>
+  </header>
+
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 16px;">
+    A single GPU usually can't hold both a large LLM and a diffusion model at once.
+    These switches govern what happens when an image request arrives while an LLM is loaded.
+  </p>
+
+  <div class="lm-engine-card" style="margin-bottom: 0;">
+    <form class="lm-form" method="post" action="/ui/setup/coexistence">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; font-size: 0.875rem;">
+        <input type="checkbox" name="unload_text_on_arrival" {% if coex.unload_text_on_arrival %}checked{% endif %}>
+        <span>
+          <strong>Unload text engine when image task arrives</strong>
+          <span style="display: block; color: var(--fg-2); font-size: 0.8125rem;">
+            Default. Single-slot dashboard invariant. Image task gets the GPU; the text engine pauses.
+          </span>
+        </span>
+      </label>
+      <label style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; font-size: 0.875rem;">
+        <input type="checkbox" name="restart_text_after_image" {% if coex.restart_text_after_image %}checked{% endif %}>
+        <span>
+          <strong>Restart text engine after image completes</strong>
+          <span style="display: block; color: var(--fg-2); font-size: 0.8125rem;">
+            Re-launches the text engine from its prior spec. Disable to stay in image-only mode after a generation.
+          </span>
+        </span>
+      </label>
+      <label style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 14px; font-size: 0.875rem;">
+        <input type="checkbox" name="allow_concurrent" {% if coex.allow_concurrent %}checked{% endif %}>
+        <span>
+          <strong>Allow concurrent text + image</strong>
+          <span style="display: block; color: var(--accent); font-size: 0.8125rem;">
+            ⚠ Risks VRAM OOM. Only enable on cards with ≥ 48 GB VRAM or when you know both fit.
+          </span>
+        </span>
+      </label>
+      <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Save policy</button>
+    </form>
+  </div>
+</section>

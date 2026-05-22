@@ -33,9 +33,10 @@ from fastapi.templating import Jinja2Templates
 
 from .auth import AuthManager, Origin
 from .config import (
-    Profile, VALID_RAM_SPILL_POLICIES, delete_profile, detect_engine_for_id,
-    load_config, rename_profile, save_profile, set_default_args,
-    set_model_default_profile, update_defaults,
+    ENGINE_FAMILY, Profile, VALID_RAM_SPILL_POLICIES, VALID_THINKING,
+    delete_profile, detect_engine_for_id, load_config, rename_profile,
+    save_profile, set_default_args, set_model_default_profile,
+    update_coexistence_policy, update_defaults, update_image_config,
 )
 from .llama_installer import (
     BACKENDS,
@@ -265,6 +266,134 @@ async def require_csrf(request: Request,
         raise HTTPException(status_code=403, detail="invalid csrf token")
 
 
+_VRAM_USAGE_CACHE: dict[str, Any] = {"at": 0.0, "value": None}
+_PER_PROCESS_VRAM_CACHE: dict[str, Any] = {"at": 0.0, "value": {}}
+
+
+def _pdh_query(counter_path: str) -> list[tuple[str, int]] | None:
+    """Run a single PDH wildcard query and return (instance_name, value)
+    pairs. Uses ``PdhAddEnglishCounterW`` so the path is locale-independent.
+    Returns ``None`` on any failure."""
+    try:
+        import ctypes
+        from ctypes import POINTER, byref, c_int64, c_uint32, c_void_p, c_wchar_p
+        from ctypes.wintypes import DWORD, LPCWSTR
+
+        pdh = ctypes.WinDLL("pdh")
+        PDH_FMT_LARGE = 0x00000400
+        PDH_MORE_DATA = 0x800007D2
+
+        class PDH_FMT_COUNTERVALUE(ctypes.Structure):
+            _fields_ = [("CStatus", DWORD), ("largeValue", c_int64)]
+
+        class PDH_FMT_COUNTERVALUE_ITEM_W(ctypes.Structure):
+            _fields_ = [("szName", c_wchar_p),
+                        ("FmtValue", PDH_FMT_COUNTERVALUE)]
+
+        PdhOpenQueryW = pdh.PdhOpenQueryW
+        PdhOpenQueryW.argtypes = [LPCWSTR, c_void_p, POINTER(c_void_p)]
+        PdhOpenQueryW.restype = c_uint32
+        PdhAddEnglishCounterW = pdh.PdhAddEnglishCounterW
+        PdhAddEnglishCounterW.argtypes = [c_void_p, LPCWSTR, c_void_p,
+                                          POINTER(c_void_p)]
+        PdhAddEnglishCounterW.restype = c_uint32
+        PdhCollectQueryData = pdh.PdhCollectQueryData
+        PdhCollectQueryData.argtypes = [c_void_p]
+        PdhCollectQueryData.restype = c_uint32
+        PdhGetFormattedCounterArrayW = pdh.PdhGetFormattedCounterArrayW
+        PdhGetFormattedCounterArrayW.argtypes = [c_void_p, DWORD,
+                                                 POINTER(DWORD),
+                                                 POINTER(DWORD), c_void_p]
+        PdhGetFormattedCounterArrayW.restype = c_uint32
+        PdhCloseQuery = pdh.PdhCloseQuery
+        PdhCloseQuery.argtypes = [c_void_p]
+        PdhCloseQuery.restype = c_uint32
+
+        query = c_void_p()
+        if PdhOpenQueryW(None, 0, byref(query)) != 0:
+            return None
+        try:
+            counter = c_void_p()
+            if PdhAddEnglishCounterW(query, counter_path, 0,
+                                     byref(counter)) != 0:
+                return None
+            if PdhCollectQueryData(query) != 0:
+                return None
+            buf_size = DWORD(0)
+            item_count = DWORD(0)
+            rc = PdhGetFormattedCounterArrayW(
+                counter, PDH_FMT_LARGE,
+                byref(buf_size), byref(item_count), None,
+            )
+            if rc != PDH_MORE_DATA or buf_size.value == 0:
+                return None
+            buf = (ctypes.c_ubyte * buf_size.value)()
+            rc = PdhGetFormattedCounterArrayW(
+                counter, PDH_FMT_LARGE,
+                byref(buf_size), byref(item_count),
+                ctypes.cast(buf, c_void_p),
+            )
+            if rc != 0:
+                return None
+            items = ctypes.cast(buf, POINTER(PDH_FMT_COUNTERVALUE_ITEM_W))
+            out: list[tuple[str, int]] = []
+            for i in range(item_count.value):
+                it = items[i]
+                if it.FmtValue.CStatus != 0:
+                    continue
+                out.append((it.szName or "", int(it.FmtValue.largeValue)))
+            return out
+        finally:
+            PdhCloseQuery(query)
+    except Exception:
+        return None
+
+
+def _windows_per_process_vram() -> dict[int, int]:
+    """Map of PID → dedicated VRAM bytes, summed across GPU engines/adapters
+    on Windows. Cached for 2 s. Empty dict if the counter isn't available."""
+    now = time.monotonic()
+    if now - _PER_PROCESS_VRAM_CACHE["at"] < 2.0:
+        return _PER_PROCESS_VRAM_CACHE["value"]
+
+    by_pid: dict[int, int] = {}
+    rows = _pdh_query(r"\GPU Process Memory(*)\Dedicated Usage")
+    if rows:
+        import re
+        pid_re = re.compile(r"pid_(\d+)")
+        for name, value in rows:
+            m = pid_re.search(name)
+            if not m or value <= 0:
+                continue
+            pid = int(m.group(1))
+            by_pid[pid] = by_pid.get(pid, 0) + value
+    _PER_PROCESS_VRAM_CACHE.update({"at": now, "value": by_pid})
+    return by_pid
+
+
+def _windows_vram_usage_bytes() -> int | None:
+    """System-wide dedicated-VRAM usage in bytes, summed across all
+    GPU adapters. Uses Windows Performance Data Helper (PDH) with the
+    locale-independent English counter API — works on Windows 10+ for
+    any GPU vendor (NVIDIA, AMD, Intel) without vendor SDKs.
+
+    Returns ``None`` if the counter is unavailable (older Windows,
+    counter not registered, etc.). Result cached for 2 s.
+
+    Note: DXGI's ``QueryVideoMemoryInfo`` is per-process, not system-wide
+    — Task Manager itself uses the same perfcounter source we query here.
+    """
+    now = time.monotonic()
+    if now - _VRAM_USAGE_CACHE["at"] < 2.0:
+        return _VRAM_USAGE_CACHE["value"]
+    rows = _pdh_query(r"\GPU Adapter Memory(*)\Dedicated Usage")
+    used: int | None = None
+    if rows is not None:
+        used = sum(v for _, v in rows if v > 0)
+    _VRAM_USAGE_CACHE.update({"at": now, "value": used})
+    return used
+
+
 def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
     """Gather hardware info relevant to llama-server inference."""
     import psutil
@@ -295,8 +424,11 @@ def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
     info["ram_available_gb"] = round(mem.available / (1024**3), 1)
     info["ram_used_pct"] = mem.percent
 
-    # Collect per-process memory; separate llamanager processes from the rest
+    # Collect per-process RAM; separate llamanager processes from the rest.
+    # Also build a (pid → name) lookup we can reuse for the per-process VRAM
+    # table below.
     LLAMA_NAMES = {"llama-server", "llamanager", "llama_server"}
+    pid_names: dict[int, str] = {}
     try:
         procs = []
         llama_mem_bytes = 0
@@ -306,18 +438,54 @@ def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
                 if mi is None:
                     continue
                 name = p.info["name"] or ""
+                pid = p.info["pid"]
+                pid_names[pid] = name
                 rss = mi.rss
                 if name in LLAMA_NAMES:
                     llama_mem_bytes += rss
                 else:
-                    procs.append({"name": name, "pid": p.info["pid"], "mem_mb": round(rss / (1024**2), 1)})
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, AttributeError):
+                    procs.append({"name": name, "pid": pid,
+                                  "mem_mb": round(rss / (1024**2), 1)})
+            except (psutil.NoSuchProcess, psutil.AccessDenied,
+                    psutil.ZombieProcess, AttributeError):
                 continue
         procs.sort(key=lambda x: x["mem_mb"], reverse=True)
-        info["top_mem_procs"] = procs[:5]
+        info["top_ram_procs"] = procs[:5]
     except Exception:
         llama_mem_bytes = 0
-        info["top_mem_procs"] = []
+        info["top_ram_procs"] = []
+    # Back-compat alias for any external template that still reads this.
+    info["top_mem_procs"] = info["top_ram_procs"]
+
+    # Per-process VRAM (Windows only — Linux/Mac would need nvidia-smi
+    # pmon or sysctl iokit, which we don't wire up here).
+    vram_procs: list[dict[str, Any]] = []
+    if platform.system() == "Windows":
+        try:
+            by_pid = _windows_per_process_vram()
+            rows = []
+            for pid, used_bytes in by_pid.items():
+                if used_bytes <= 0:
+                    continue
+                name = pid_names.get(pid)
+                if not name:
+                    # Process may have started after our psutil sweep, or
+                    # we don't have permission to read its name.
+                    try:
+                        name = psutil.Process(pid).name()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied,
+                            psutil.ZombieProcess):
+                        name = f"pid {pid}"
+                rows.append({
+                    "name": name,
+                    "pid": pid,
+                    "mem_mb": round(used_bytes / (1024**2), 1),
+                })
+            rows.sort(key=lambda x: x["mem_mb"], reverse=True)
+            vram_procs = rows[:5]
+        except Exception:
+            vram_procs = []
+    info["top_vram_procs"] = vram_procs
 
     info["llama_mem_gb"] = round(llama_mem_bytes / (1024**3), 1)
     # Effective available = OS available + what llamanager/llama-server is using
@@ -425,7 +593,100 @@ def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
                             )
                             break
                 except Exception:
-                    info["gpu_type"] = "No compatible GPU detected"
+                    pass
+
+        # Windows fallback: ROCm/xpu-smi aren't shipped on Windows for
+        # most users (AMD cards run llama.cpp via Vulkan/HIP-SDK), and
+        # nvidia-smi only covers NVIDIA. Read the display-adapter info
+        # from the Windows registry so we still surface the card.
+        if system == "Windows" and not info.get("gpu_name"):
+            try:
+                import winreg
+                base = (r"SYSTEM\CurrentControlSet\Control\Class"
+                        r"\{4d36e968-e325-11ce-bfc1-08002be10318}")
+                best: tuple[int, str, int] | None = None  # (priority, name, mem_bytes)
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as root:
+                    i = 0
+                    while True:
+                        try:
+                            sub = winreg.EnumKey(root, i)
+                        except OSError:
+                            break
+                        i += 1
+                        if not sub.isdigit():
+                            continue
+                        try:
+                            with winreg.OpenKey(root, sub) as k:
+                                name = winreg.QueryValueEx(k, "DriverDesc")[0]
+                                mem_bytes = 0
+                                # qwMemorySize is 64-bit (reliable for >4 GB)
+                                for key_name in ("HardwareInformation.qwMemorySize",
+                                                 "HardwareInformation.MemorySize"):
+                                    try:
+                                        raw = winreg.QueryValueEx(k, key_name)[0]
+                                        if isinstance(raw, bytes):
+                                            mem_bytes = int.from_bytes(raw, "little")
+                                        else:
+                                            mem_bytes = int(raw)
+                                            if mem_bytes < 0:  # 32-bit signed → wrap
+                                                mem_bytes += 2**32
+                                        if mem_bytes > 0:
+                                            break
+                                    except (FileNotFoundError, OSError, ValueError):
+                                        continue
+                        except OSError:
+                            continue
+                        low = name.lower()
+                        # Prefer discrete GPUs over integrated/basic display
+                        if "nvidia" in low or "geforce" in low or "quadro" in low:
+                            pri = 0
+                        elif ("amd" in low or "radeon" in low
+                              or low.startswith("ati ") or "rx " in low):
+                            pri = 0
+                        elif "arc" in low:
+                            pri = 1
+                        elif "intel" in low:
+                            pri = 2
+                        elif "microsoft basic" in low or "remote" in low:
+                            continue
+                        else:
+                            pri = 3
+                        if best is None or pri < best[0]:
+                            best = (pri, name, mem_bytes)
+                if best is not None:
+                    _, name, mem_bytes = best
+                    low = name.lower()
+                    if "nvidia" in low or "geforce" in low or "quadro" in low:
+                        info["gpu_type"] = "NVIDIA (driver)"
+                    elif ("amd" in low or "radeon" in low
+                          or low.startswith("ati ") or "rx " in low):
+                        info["gpu_type"] = "AMD (Vulkan/HIP)"
+                    elif "arc" in low:
+                        info["gpu_type"] = "Intel Arc"
+                    elif "intel" in low:
+                        info["gpu_type"] = "Intel iGPU"
+                    else:
+                        info["gpu_type"] = "GPU"
+                    info["gpu_name"] = name
+                    if mem_bytes > 0:
+                        info["gpu_vram_total_gb"] = round(mem_bytes / (1024**3), 1)
+            except Exception:
+                pass
+
+        # Live VRAM usage on Windows — DXGI works for any vendor when we
+        # don't have a vendor-specific CLI (rocm-smi/nvidia-smi are rare
+        # on Windows for AMD users). Only fill ``gpu_vram_free_gb`` if it
+        # isn't already set by an earlier vendor-specific path.
+        if (system == "Windows" and "gpu_vram_total_gb" in info
+                and "gpu_vram_free_gb" not in info):
+            used_bytes = _windows_vram_usage_bytes()
+            if used_bytes is not None:
+                used_gb = used_bytes / (1024**3)
+                free_gb = max(0.0, info["gpu_vram_total_gb"] - used_gb)
+                info["gpu_vram_free_gb"] = round(free_gb, 1)
+
+        if not info.get("gpu_name") and info.get("gpu_type") in ("unknown", ""):
+            info["gpu_type"] = "No compatible GPU detected"
 
     # Disk free in models dir
     try:
@@ -440,6 +701,45 @@ def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
     info["os"] = f"{platform.system()} {platform.release()}"
 
     return info
+
+
+def _topbar_models(request: Request) -> dict[str, Any]:
+    """Build the dataset the sticky top-bar model selector needs:
+    text/image model lists, each model's profiles, and the currently
+    loaded LLM + saved default-image model."""
+    cfg = request.app.state.cfg
+    reg: Registry = request.app.state.registry
+    sm: ServerManager = request.app.state.sm
+
+    text: list[dict[str, Any]] = []
+    image: list[dict[str, Any]] = []
+    for entry in reg.list():
+        engine = detect_engine_for_id(entry.model_id, cfg.models_dir)
+        m = cfg.get_model(entry.model_id)
+        profile_names = sorted(m.profiles.keys()) if m else []
+        default_profile = m.default_profile if m else ""
+        row = {
+            "model_id": entry.model_id,
+            "engine": engine,
+            "profiles": profile_names,
+            "default_profile": default_profile,
+        }
+        if ENGINE_FAMILY.get(engine, "text") == "image":
+            image.append(row)
+        else:
+            text.append(row)
+
+    text.sort(key=lambda r: r["model_id"])
+    image.sort(key=lambda r: r["model_id"])
+    return {
+        "topbar_text_models": text,
+        "topbar_image_models": image,
+        "topbar_current_llm": sm.runtime.current_model or "",
+        "topbar_current_llm_profile": sm.runtime.current_profile or "",
+        "topbar_default_llm": cfg.default_model or "",
+        "topbar_default_image": cfg.default_image_model or "",
+        "topbar_default_image_profile": cfg.default_image_profile or "",
+    }
 
 
 def _ctx(request: Request, **extra: Any) -> dict[str, Any]:
@@ -465,6 +765,7 @@ def _ctx(request: Request, **extra: Any) -> dict[str, Any]:
         "dot_status": dot_status,
         "has_models": has_models,
     }
+    base.update(_topbar_models(request))
     base.update(extra)
     return base
 
@@ -528,6 +829,8 @@ async def dashboard(request: Request, _: Origin = Depends(require_admin_ui)) -> 
     host = request.headers.get("host", f"{cfg.bind}:{cfg.port}")
     base_url = f"http://{host}"
     sysinfo = _get_system_info(cfg.models_dir)
+    image_runner = getattr(request.app.state, "image_runner", None)
+    image_status = image_runner.status() if image_runner else None
     return templates.TemplateResponse(request, "dashboard.html", _ctx(
         request,
         status=sm.status(),
@@ -535,6 +838,7 @@ async def dashboard(request: Request, _: Origin = Depends(require_admin_ui)) -> 
         recent=[dict(r) for r in recent],
         base_url=base_url,
         sysinfo=sysinfo,
+        image_status=image_status,
     ))
 
 
@@ -550,12 +854,15 @@ async def dashboard_partial(request: Request, _: Origin = Depends(require_admin_
         " ORDER BY enqueued_at DESC LIMIT 10"
     )
     sysinfo = _get_system_info(cfg.models_dir)
+    image_runner = getattr(request.app.state, "image_runner", None)
+    image_status = image_runner.status() if image_runner else None
     return templates.TemplateResponse(request, "_dashboard_partial.html", _ctx(
         request,
         status=sm.status(),
         queue=qm.snapshot(),
         recent=[dict(r) for r in recent],
         sysinfo=sysinfo,
+        image_status=image_status,
     ))
 
 
@@ -640,11 +947,13 @@ def _models_ctx(request: Request) -> dict:
     # Profiles live nested under their parent model in cfg.models. We hand
     # the template a flattened per-model list of dicts so Jinja can render
     # without poking dataclasses.
-    models = []
+    text_models: list[dict] = []
+    image_models: list[dict] = []
     for entry in reg.list():
         d = entry.to_dict()
         engine = detect_engine_for_id(entry.model_id, cfg.models_dir)
         d["engine"] = engine
+        d["engine_family"] = ENGINE_FAMILY.get(engine, "text")
         d["ctx_max"] = _ctx_max_for(entry.path, engine)
         m = cfg.get_model(entry.model_id)
         prof_entries: list[dict] = []
@@ -665,11 +974,19 @@ def _models_ctx(request: Request) -> dict:
             prof_entries.sort(key=lambda e: e["name"])
         d["profiles"] = prof_entries
         d["default_profile"] = default_profile
-        models.append(d)
+        if d["engine_family"] == "image":
+            image_models.append(d)
+        else:
+            text_models.append(d)
+
+    # Combined list kept for any callers that still expect ``models``.
+    all_models = text_models + image_models
 
     return _ctx(
         request,
-        models=models,
+        models=all_models,
+        text_models=text_models,
+        image_models=image_models,
         downloads=reg.list_downloads(),
         current_model=request.app.state.sm.runtime.current_model,
         current_profile=request.app.state.sm.runtime.current_profile,
@@ -691,13 +1008,9 @@ async def models_view(request: Request, _: Origin = Depends(require_admin_ui)) -
 @router.get("/models/_list", response_class=HTMLResponse)
 async def models_list_partial(request: Request,
                               _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    reg: Registry = request.app.state.registry
-    return templates.TemplateResponse(request, "_models_list_partial.html", _ctx(
-        request,
-        models=[m.to_dict() for m in reg.list()],
-        downloads=reg.list_downloads(),
-        current_model=request.app.state.sm.runtime.current_model,
-    ))
+    return templates.TemplateResponse(
+        request, "_models_list_partial.html", _models_ctx(request),
+    )
 
 
 @router.post("/models/load", response_class=HTMLResponse)
@@ -1337,6 +1650,57 @@ async def chat_view(request: Request, _: Origin = Depends(require_admin_ui)) -> 
     ))
 
 
+# ---------- images ----------
+
+@router.get("/images", response_class=HTMLResponse)
+async def images_view(request: Request,
+                      _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    cfg = request.app.state.cfg
+    reg: Registry = request.app.state.registry
+    sess = _read_session(request)
+    image_models: list[dict[str, str]] = []
+    for m in reg.list():
+        engine = detect_engine_for_id(m.model_id, cfg.models_dir)
+        if ENGINE_FAMILY.get(engine, "text") == "image":
+            image_models.append({"model_id": m.model_id, "engine": engine})
+    # Profiles bound to image-family models; UI filters by selected model.
+    profiles: list[dict[str, str]] = []
+    image_model_ids = {m["model_id"] for m in image_models}
+    for mid, p in cfg.iter_profiles():
+        if mid in image_model_ids:
+            profiles.append({"name": p.name, "model": mid})
+    return templates.TemplateResponse(request, "images.html", _ctx(
+        request,
+        image_models=image_models,
+        image_models_json=json.dumps(image_models),
+        profiles_json=json.dumps(profiles),
+        api_key=sess["key"] if sess else "",
+    ))
+
+
+@router.get("/images/file/{day}/{origin}/{name}")
+async def images_file_serve(request: Request, day: str, origin: str, name: str,
+                            _: Origin = Depends(require_admin_ui)) -> Response:
+    """Serve a previously generated PNG. Authenticated by the same admin
+    session that owns the rest of /ui. Path components are sanitised
+    against traversal."""
+    from fastapi.responses import FileResponse as _FileResponse
+    cfg = request.app.state.cfg
+    for seg in (day, origin, name):
+        if "/" in seg or "\\" in seg or ".." in seg or "\x00" in seg:
+            raise HTTPException(status_code=400, detail="invalid path component")
+    if not name.lower().endswith(".png"):
+        raise HTTPException(status_code=400, detail="only .png files are served here")
+    p = (cfg.images_dir / day / origin / name).resolve()
+    try:
+        p.relative_to(cfg.images_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="path escapes images_dir")
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return _FileResponse(p, media_type="image/png")
+
+
 # ---------- logs ----------
 
 @router.get("/logs", response_class=HTMLResponse)
@@ -1381,6 +1745,88 @@ async def setup_get(request: Request, _: Origin = Depends(require_admin_ui)) -> 
     return templates.TemplateResponse(request, "setup.html", _setup_ctx(request))
 
 
+def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
+    """Context for the Diffusion engines page (full or partial reload).
+
+    Combines:
+      * the standard model-list context (text_models / image_models,
+        current_model, default_model, csrf, etc.)
+      * image-engine paths (HiDream / Flux2 / Z-Image)
+      * coexistence policy
+      * per-engine install plans + the most recent install job per engine
+      * a tiny ``downloads_by_repo`` index keyed by HF repo id so each
+        engine card can show "downloading model X — 42%" inline.
+    """
+    cfg = request.app.state.cfg
+    installer = request.app.state.engine_installer
+    from .engine_installer import ENGINE_PLANS, venv_python
+
+    ctx = _models_ctx(request)
+    ctx["image_cfg"] = {
+        "hidream_python": cfg.hidream_python,
+        "hidream_repo": cfg.hidream_repo,
+        "flux2_sd_cli": cfg.flux2_sd_cli,
+        "flux2_device_index": cfg.flux2_device_index,
+        "z_image_python": cfg.z_image_python,
+    }
+    ctx["coex"] = {
+        "unload_text_on_arrival": cfg.unload_text_on_arrival,
+        "restart_text_after_image": cfg.restart_text_after_image,
+        "allow_concurrent": cfg.allow_concurrent,
+    }
+
+    # Per-engine install state — surface the most-relevant row so the
+    # card can show "running 42%", "done", or "click to install".
+    engines = ("z_image", "hidream", "flux2")
+    install_state: dict[str, Any] = {}
+    for eng in engines:
+        active = installer.active_for_engine(eng)
+        if active:
+            install_state[eng] = active
+        else:
+            recent = installer.list_for_engine(eng, limit=1)
+            install_state[eng] = recent[0] if recent else None
+    ctx["engine_installs"] = install_state
+    ctx["engine_plans"] = {
+        e: {
+            "engine": p.engine,
+            "label": p.label,
+            "packages": p.packages,
+            "space_mb": p.space_mb,
+            "notes": p.notes,
+            "has_plan": True,
+        }
+        for e, p in ENGINE_PLANS.items()
+    }
+    # Predicted venv interpreter path so the UI can show where pip will
+    # plant things (or where it already lives).
+    ctx["engine_venv_python"] = {
+        e: str(venv_python(cfg, e)) for e in engines
+    }
+
+    # Index downloads by repo so each engine card can show in-flight
+    # pulls for its own models.
+    downloads_by_repo: dict[str, dict[str, Any]] = {}
+    for d in ctx.get("downloads", []) or []:
+        src = d.get("source") or ""
+        if src.startswith("hf://") or src.startswith("hf:"):
+            repo = src.removeprefix("hf://").removeprefix("hf:")
+            downloads_by_repo[repo] = d
+    ctx["downloads_by_repo"] = downloads_by_repo
+
+    return ctx
+
+
+@router.get("/setup-diffusion", response_class=HTMLResponse)
+async def setup_diffusion_get(request: Request,
+                              _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """Diffusion-engines page: image engine paths, coexistence policy,
+    and the installed diffusion model list."""
+    return templates.TemplateResponse(
+        request, "setup_diffusion.html", _setup_diffusion_ctx(request),
+    )
+
+
 @router.post("/setup/binary-path", response_class=HTMLResponse)
 async def setup_set_binary(request: Request,
                            binary_path: str = Form(...),
@@ -1390,6 +1836,143 @@ async def setup_set_binary(request: Request,
     cfg.llama_server_binary = binary_path
     patch_config_binary(cfg.config_path, binary_path)
     return RedirectResponse("/ui/setup", status_code=303)
+
+
+@router.post("/setup/image/hidream", response_class=HTMLResponse)
+async def setup_hidream(request: Request,
+                        hidream_python: str = Form(""),
+                        hidream_repo: str = Form(""),
+                        _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    cfg.hidream_python = hidream_python.strip()
+    cfg.hidream_repo = hidream_repo.strip()
+    update_image_config(
+        cfg.config_path,
+        hidream_python=cfg.hidream_python,
+        hidream_repo=cfg.hidream_repo,
+    )
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+
+
+@router.post("/setup/image/flux2", response_class=HTMLResponse)
+async def setup_flux2(request: Request,
+                      flux2_sd_cli: str = Form(""),
+                      flux2_device_index: str = Form(""),
+                      _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    cfg.flux2_sd_cli = flux2_sd_cli.strip()
+    idx_raw = flux2_device_index.strip()
+    idx = None
+    if idx_raw:
+        try:
+            idx = int(idx_raw)
+        except ValueError:
+            idx = None
+    cfg.flux2_device_index = idx
+    update_image_config(
+        cfg.config_path,
+        flux2_sd_cli=cfg.flux2_sd_cli,
+        flux2_device_index=idx,
+        clear_flux2_device_index=(idx is None),
+    )
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+
+
+@router.post("/setup/image/z-image", response_class=HTMLResponse)
+async def setup_z_image(request: Request,
+                        z_image_python: str = Form(""),
+                        _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    cfg.z_image_python = z_image_python.strip()
+    update_image_config(cfg.config_path, z_image_python=cfg.z_image_python)
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+
+
+@router.post("/setup/coexistence", response_class=HTMLResponse)
+async def setup_coexistence(request: Request,
+                            unload_text_on_arrival: str = Form(""),
+                            restart_text_after_image: str = Form(""),
+                            allow_concurrent: str = Form(""),
+                            _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    cfg.unload_text_on_arrival = bool(unload_text_on_arrival)
+    cfg.restart_text_after_image = bool(restart_text_after_image)
+    cfg.allow_concurrent = bool(allow_concurrent)
+    update_coexistence_policy(
+        cfg.config_path,
+        unload_text_on_arrival=cfg.unload_text_on_arrival,
+        restart_text_after_image=cfg.restart_text_after_image,
+        allow_concurrent=cfg.allow_concurrent,
+    )
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+
+
+# ---- per-engine install + download ----
+
+@router.post("/setup-diffusion/engine/{engine}/install-deps",
+             response_class=HTMLResponse)
+async def install_engine_deps(request: Request, engine: str,
+                              _: None = Depends(require_csrf)) -> Response:
+    """Kick off an opinionated venv + pip install for one engine."""
+    installer = request.app.state.engine_installer
+    try:
+        installer.start(engine)
+    except (ValueError, RuntimeError) as e:
+        return _error_html(f"install failed: {e}", status_code=400)
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+
+
+@router.post("/setup-diffusion/engine/{engine}/install-deps/{install_id}/cancel",
+             response_class=HTMLResponse)
+async def cancel_engine_install(request: Request, engine: str,
+                                install_id: str,
+                                _: None = Depends(require_csrf)) -> Response:
+    installer = request.app.state.engine_installer
+    installer.cancel(install_id)
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+
+
+@router.post("/setup-diffusion/engine/{engine}/download-model",
+             response_class=HTMLResponse)
+async def download_engine_model(request: Request, engine: str,
+                                repo: str = Form(...),
+                                subfolder: str = Form(""),
+                                _: None = Depends(require_csrf)) -> Response:
+    """Start an HF whole-repo (or subfolder) download for a diffusion engine."""
+    reg: Registry = request.app.state.registry
+    repo_clean = repo.strip()
+    if not repo_clean:
+        return _error_html("repo is required", status_code=400)
+    # Normalise: accept a full HF URL or a plain org/name.
+    if repo_clean.startswith("http"):
+        # _normalise_hf_url will rewrite when start_pull runs; pass as-is.
+        source = repo_clean
+    else:
+        # Strip an accidental hf:// prefix; we'll re-add canonically.
+        source = "hf://" + repo_clean.removeprefix("hf://").removeprefix("hf:")
+    sub = subfolder.strip().strip("/") or None
+    try:
+        # Estimate size up-front so the progress bar can show a total.
+        bare_repo = source.removeprefix("hf://").removeprefix("hf:")
+        size = await reg.estimate_repo_size(bare_repo, sub)
+        reg.start_pull(source=source, files=None,
+                       subfolder=sub, whole_repo=True,
+                       bytes_total=size)
+    except Exception as e:
+        return _error_html(f"pull failed: {e}", status_code=400)
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+
+
+@router.get("/setup-diffusion/_partial", response_class=HTMLResponse)
+async def setup_diffusion_partial(request: Request,
+                                  _: Origin = Depends(require_admin_ui)
+                                  ) -> HTMLResponse:
+    """HTMX-polled fragment so the install/download status updates live
+    on the Diffusion engines page without a full reload."""
+    return templates.TemplateResponse(
+        request, "_setup_diffusion_partial.html",
+        _setup_diffusion_ctx(request),
+    )
 
 
 def _resolve_variant(source: str, backend: str) -> tuple[str, str]:
@@ -1518,6 +2101,17 @@ def _setup_ctx(request: Request,
         config_dir=str(cfg.config_path.parent),
         config_file=str(cfg.config_path),
         open_config_label=open_config_label,
+        image_cfg={
+            "hidream_python": cfg.hidream_python,
+            "hidream_repo": cfg.hidream_repo,
+            "flux2_sd_cli": cfg.flux2_sd_cli,
+            "flux2_device_index": cfg.flux2_device_index,
+        },
+        coex={
+            "unload_text_on_arrival": cfg.unload_text_on_arrival,
+            "restart_text_after_image": cfg.restart_text_after_image,
+            "allow_concurrent": cfg.allow_concurrent,
+        },
     )
 
 
@@ -1837,6 +2431,7 @@ def _build_profile_from_form(
     vram_unlimited: str,
     ram_spill_policy: str,
     ram_spill_limit_gb: str,
+    thinking: str,
     args_json: str,
 ) -> Profile:
     try:
@@ -1854,6 +2449,11 @@ def _build_profile_from_form(
         )
     if policy != "limited":
         ram_limit_val = None
+    thinking_val = (thinking or "").strip().lower()
+    if thinking_val not in VALID_THINKING:
+        raise ValueError(
+            f"invalid thinking {thinking_val!r}; must be '', 'on', or 'off'"
+        )
     try:
         args = json.loads(args_json.strip() or "{}")
     except json.JSONDecodeError as e:
@@ -1867,6 +2467,7 @@ def _build_profile_from_form(
         vram_limit_gb=vram_val,
         ram_spill_policy=policy,
         ram_spill_limit_gb=ram_limit_val,
+        thinking=thinking_val,
         args=args,
     )
 
@@ -1881,6 +2482,7 @@ async def models_profile_create(request: Request,
                                 vram_unlimited: str = Form(""),
                                 ram_spill_policy: str = Form("default"),
                                 ram_spill_limit_gb: str = Form(""),
+                                thinking: str = Form(""),
                                 args_json: str = Form("{}"),
                                 make_default: str = Form(""),
                                 _: None = Depends(require_csrf)) -> Response:
@@ -1902,6 +2504,7 @@ async def models_profile_create(request: Request,
             vram_limit_gb=vram_limit_gb, vram_unlimited=vram_unlimited,
             ram_spill_policy=ram_spill_policy,
             ram_spill_limit_gb=ram_spill_limit_gb,
+            thinking=thinking,
             args_json=args_json,
         )
         save_profile(cfg.config_path, mid, profile_name, prof)
@@ -1923,6 +2526,7 @@ async def models_profile_update(request: Request, profile_name: str,
                                 vram_unlimited: str = Form(""),
                                 ram_spill_policy: str = Form("default"),
                                 ram_spill_limit_gb: str = Form(""),
+                                thinking: str = Form(""),
                                 args_json: str = Form("{}"),
                                 _: None = Depends(require_csrf)) -> Response:
     cfg = request.app.state.cfg
@@ -1941,6 +2545,7 @@ async def models_profile_update(request: Request, profile_name: str,
             vram_limit_gb=vram_limit_gb, vram_unlimited=vram_unlimited,
             ram_spill_policy=ram_spill_policy,
             ram_spill_limit_gb=ram_spill_limit_gb,
+            thinking=thinking,
             args_json=args_json,
         )
     except ValueError as e:
@@ -2027,4 +2632,83 @@ async def models_set_default(request: Request,
     update_defaults(cfg.config_path, default_model=model_id.strip())
     _reload_config(request)
     return RedirectResponse("/ui/models", status_code=303)
+
+
+# ---- Top-bar (sticky model selector) routes ----
+
+def _topbar_redirect(request: Request) -> RedirectResponse:
+    """Send the operator back to where they triggered the top bar from
+    so the selector doesn't yank them to /ui/models on every action."""
+    referer = request.headers.get("referer", "") or "/ui/"
+    # Only honour same-origin referers; otherwise fall back to dashboard.
+    try:
+        ref_host = urlparse(referer).netloc
+    except Exception:
+        ref_host = ""
+    if ref_host and ref_host != request.url.netloc:
+        referer = "/ui/"
+    return RedirectResponse(referer, status_code=303)
+
+
+@router.post("/topbar/llm/load", response_class=HTMLResponse)
+async def topbar_llm_load(request: Request,
+                          model_id: str = Form(...),
+                          profile: str = Form(""),
+                          _: None = Depends(require_csrf)) -> Response:
+    """Load (or swap to) the requested LLM model + optional profile."""
+    sm: ServerManager = request.app.state.sm
+    cfg = request.app.state.cfg
+    try:
+        spec = resolve_spec(cfg, model=model_id.strip(),
+                            profile=profile.strip() or None)
+        if sm.is_running:
+            await sm.swap(spec)
+        else:
+            await sm.start(spec)
+    except (ServerError, ValueError) as e:
+        return _error_html(f"load failed: {e}", status_code=400)
+    return _topbar_redirect(request)
+
+
+@router.post("/topbar/llm/unload", response_class=HTMLResponse)
+async def topbar_llm_unload(request: Request,
+                            _: None = Depends(require_csrf)) -> Response:
+    """Stop the currently loaded LLM (if any)."""
+    sm: ServerManager = request.app.state.sm
+    if sm.is_running:
+        try:
+            await sm.stop()
+        except ServerError as e:
+            return _error_html(f"unload failed: {e}", status_code=400)
+    return _topbar_redirect(request)
+
+
+@router.post("/topbar/llm/set-default", response_class=HTMLResponse)
+async def topbar_llm_set_default(request: Request,
+                                 model_id: str = Form(""),
+                                 _: None = Depends(require_csrf)) -> Response:
+    """Persist ``default_model`` so the LLM is auto-loaded on startup
+    when ``autolaunch`` is enabled, and used by requests that omit
+    ``model``."""
+    cfg = request.app.state.cfg
+    update_defaults(cfg.config_path, default_model=model_id.strip())
+    _reload_config(request)
+    return _topbar_redirect(request)
+
+
+@router.post("/topbar/image/set-default", response_class=HTMLResponse)
+async def topbar_image_set_default(request: Request,
+                                   model_id: str = Form(""),
+                                   profile: str = Form(""),
+                                   _: None = Depends(require_csrf)) -> Response:
+    """Persist the default image model + profile. /v1/images/generations
+    uses these when the request omits ``model``."""
+    cfg = request.app.state.cfg
+    update_defaults(
+        cfg.config_path,
+        default_image_model=model_id.strip(),
+        default_image_profile=profile.strip(),
+    )
+    _reload_config(request)
+    return _topbar_redirect(request)
 

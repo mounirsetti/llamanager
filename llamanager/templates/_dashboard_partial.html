@@ -23,6 +23,22 @@
     {% if status.uptime_s %}<span><span class="key">uptime</span><code>{% set u = status.uptime_s | int %}{% if u >= 86400 %}{{ '%dd %dh' % (u // 86400, (u % 86400) // 3600) }}{% elif u >= 3600 %}{{ '%dh %dm' % (u // 3600, (u % 3600) // 60) }}{% elif u >= 60 %}{{ '%dm %ds' % (u // 60, u % 60) }}{% else %}{{ '%ds' % u }}{% endif %}</code></span>{% endif %}
     {% if status.mem_rss_mb %}<span><span class="key">rss</span><code>{{ '%.0f MB' % status.mem_rss_mb }}</code></span>{% endif %}
   </div>
+
+  {% if image_status and image_status.status == 'generating' %}
+  <div style="margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--bg-3);">
+    <div class="lm-eyebrow" style="margin-bottom: 4px;">
+      Generating · <span class="lm-live" aria-label="live"></span>
+    </div>
+    <div style="font-size: 0.9375rem; color: var(--fg-0);">
+      <code>{{ image_status.engine }}</code>
+      {% if image_status.model_id %}· <code>{{ image_status.model_id }}</code>{% endif %}
+      {% if image_status.profile %}· profile <code>{{ image_status.profile }}</code>{% endif %}
+      {% if image_status.step and image_status.total_steps %}
+        · step <code>{{ image_status.step }}/{{ image_status.total_steps }}</code>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
 </section>
 
 {% if sysinfo %}
@@ -48,12 +64,40 @@
       </div>
     </div>
 
-    {# RAM #}
+    {# Memory — RAM and VRAM together. On Apple Silicon the GPU shares
+       system RAM (unified memory) so the VRAM lines are suppressed to
+       avoid double-counting. #}
+    {% set unified_mem = 'unified' in (sysinfo.gpu_type or '') %}
+    {% set has_vram = sysinfo.gpu_vram_total_gb is defined and not unified_mem %}
+    {% set combined_total = sysinfo.ram_total_gb + (sysinfo.gpu_vram_total_gb if has_vram else 0) %}
+    {% if has_vram and sysinfo.gpu_vram_free_gb is defined %}
+      {% set combined_avail = sysinfo.ram_effective_avail_gb + sysinfo.gpu_vram_free_gb %}
+    {% elif has_vram %}
+      {# VRAM total known but free isn't — fall back to assuming all VRAM available. #}
+      {% set combined_avail = sysinfo.ram_effective_avail_gb + sysinfo.gpu_vram_total_gb %}
+    {% else %}
+      {% set combined_avail = sysinfo.ram_effective_avail_gb %}
+    {% endif %}
+    {% set combined_used_pct = ((combined_total - combined_avail) / combined_total * 100) | round | int if combined_total else 0 %}
+
     <div style="background: var(--bg-0); padding: 16px 18px;">
-      <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 8px;">Memory</div>
-      <div style="font-size: 0.9375rem; color: var(--fg-0); font-weight: 500;">{{ sysinfo.ram_total_gb }} GB total</div>
+      <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 8px;">
+        Memory{% if has_vram %} (RAM + VRAM){% endif %}
+      </div>
+      <div style="font-size: 0.9375rem; color: var(--fg-0); font-weight: 500;">
+        {{ '%.1f' % combined_total }} GB total
+      </div>
       <div style="font-size: 0.8125rem; color: var(--fg-1); margin-top: 4px;">
-        {{ sysinfo.ram_available_gb }} GB available
+        {{ '%.1f' % combined_avail }} GB available
+      </div>
+      <div style="font-size: 0.75rem; color: var(--fg-2); margin-top: 4px;">
+        <span title="System RAM">RAM {{ sysinfo.ram_available_gb }} / {{ sysinfo.ram_total_gb }} GB</span>
+        {% if has_vram %}
+        <span class="lm-model__sep" style="color: var(--fg-3);"> · </span>
+        <span title="GPU VRAM">VRAM
+          {% if sysinfo.gpu_vram_free_gb is defined %}{{ sysinfo.gpu_vram_free_gb }}{% else %}?{% endif %}
+          / {{ sysinfo.gpu_vram_total_gb }} GB</span>
+        {% endif %}
       </div>
       {% if sysinfo.llama_mem_gb > 0 %}
       <div style="font-size: 0.8125rem; color: var(--accent); margin-top: 2px;">
@@ -61,7 +105,7 @@
       </div>
       {% endif %}
       <div style="margin-top: 8px; height: 4px; background: var(--bg-3); border-radius: 2px;">
-        <div style="height: 4px; border-radius: 2px; width: {{ sysinfo.ram_used_pct }}%; background: {% if sysinfo.ram_used_pct > 90 %}var(--bad){% elif sysinfo.ram_used_pct > 70 %}var(--warn){% else %}var(--ok){% endif %};"></div>
+        <div style="height: 4px; border-radius: 2px; width: {{ combined_used_pct }}%; background: {% if combined_used_pct > 90 %}var(--bad){% elif combined_used_pct > 70 %}var(--warn){% else %}var(--ok){% endif %};"></div>
       </div>
     </div>
 
@@ -113,14 +157,18 @@
     </div>
     {% endif %}
 
-    {# Model capacity estimate — use VRAM on CUDA, unified RAM on Mac #}
+    {# Model capacity estimate — combined RAM + VRAM (llama.cpp can split
+       layers across GPU and CPU/RAM, so the total pool is what fits). On
+       unified-memory systems (Apple Silicon) the VRAM share is already
+       part of system RAM so combined_avail just equals system available. #}
     <div style="background: var(--bg-0); padding: 16px 18px;">
       <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 8px;">Capacity estimate</div>
-      {% if sysinfo.gpu_vram_free_gb is defined %}
-        {% set avail = sysinfo.gpu_vram_free_gb %}
-        {% set mem_label = "VRAM" %}
+      {% set avail = combined_avail | round(1) %}
+      {% if unified_mem %}
+        {% set mem_label = "unified memory" %}
+      {% elif has_vram %}
+        {% set mem_label = "RAM + VRAM" %}
       {% else %}
-        {% set avail = sysinfo.ram_effective_avail_gb %}
         {% set mem_label = "RAM" %}
       {% endif %}
       {% if avail >= 48 %}
@@ -150,11 +198,24 @@
       {% endif %}
     </div>
 
-    {# Top memory consumers #}
-    {% if sysinfo.top_mem_procs %}
+    {# Top RAM consumers #}
+    {% if sysinfo.top_ram_procs %}
     <div style="background: var(--bg-0); padding: 16px 18px;">
-      <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 8px;">Top memory usage</div>
-      {% for proc in sysinfo.top_mem_procs %}
+      <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 8px;">Top RAM usage</div>
+      {% for proc in sysinfo.top_ram_procs %}
+      <div style="display: flex; justify-content: space-between; font-size: 0.8125rem; color: var(--fg-1); padding: 2px 0;" title="PID {{ proc.pid }}">
+        <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 12px;">{{ proc.name }}</span>
+        <span style="white-space: nowrap; flex-shrink: 0;">{% if proc.mem_mb >= 1024 %}{{ (proc.mem_mb / 1024) | round(1) }} GB{% else %}{{ proc.mem_mb | round(0) | int }} MB{% endif %}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {# Top VRAM consumers — Windows-only for now (uses PDH per-process counters). #}
+    {% if sysinfo.top_vram_procs %}
+    <div style="background: var(--bg-0); padding: 16px 18px;">
+      <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 8px;">Top VRAM usage</div>
+      {% for proc in sysinfo.top_vram_procs %}
       <div style="display: flex; justify-content: space-between; font-size: 0.8125rem; color: var(--fg-1); padding: 2px 0;" title="PID {{ proc.pid }}">
         <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 12px;">{{ proc.name }}</span>
         <span style="white-space: nowrap; flex-shrink: 0;">{% if proc.mem_mb >= 1024 %}{{ (proc.mem_mb / 1024) | round(1) }} GB{% else %}{{ proc.mem_mb | round(0) | int }} MB{% endif %}</span>
@@ -180,6 +241,7 @@
       <div class="lm-eyebrow">In flight</div>
       {% for r in queue.in_flight %}
       <div style="display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; font-size: 0.9375rem; color: var(--fg-1);{% if not loop.last %} margin-bottom: 8px;{% endif %}">
+        <code title="{{ r.task_type or 'text' }}">{{ 'I' if r.task_type == 'image' else 'T' }}</code>
         <code>{{ r.id[:8] }}</code>
         <span style="color: var(--fg-2);">from</span>
         <strong style="color: var(--fg-0); font-weight: 500;">{{ r.origin }}</strong>
@@ -195,11 +257,12 @@
   {% if queue.pending %}
   <table class="lm-table">
     <thead>
-      <tr><th>Id</th><th>Origin</th><th>Prio</th><th>Model</th><th>Status</th></tr>
+      <tr><th>Type</th><th>Id</th><th>Origin</th><th>Prio</th><th>Model</th><th>Status</th></tr>
     </thead>
     <tbody>
     {% for r in queue.pending %}
       <tr>
+        <td data-label="Type"><code title="{{ r.task_type or 'text' }}">{{ 'I' if r.task_type == 'image' else 'T' }}</code></td>
         <td data-label="Id"><code>{{ r.id[:8] }}</code></td>
         <td data-label="Origin">{{ r.origin }}</td>
         <td data-label="Prio" class="num">{{ r.priority }}</td>
