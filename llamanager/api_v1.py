@@ -29,7 +29,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .auth import AuthManager, Origin
-from .config import ENGINE_FAMILY, detect_engine_for_id
+from .config import ENGINE_FAMILY, Config, detect_engine_for_id
 from .engines._base import ImageRequest
 from .image_runner import ImageError, ImageTaskRunner, resolve_image_engine
 from .queue_mgr import Cancelled, QueueManager, QueueFull, QueuedRequest
@@ -95,6 +95,66 @@ def _model_required(req: Request, origin: Origin) -> tuple[str | None, str | Non
 
 def _is_streaming(body: dict[str, Any]) -> bool:
     return bool(body.get("stream", False))
+
+
+def _thinking_from_header(request: Request) -> str:
+    """Read the per-request reasoning override. Empty when unset.
+
+    Raises 400 on an unrecognised value so callers see the typo instead of
+    silently inheriting the profile default.
+    """
+    raw = request.headers.get("x-llamanager-thinking", "")
+    val = raw.strip().lower()
+    if not val:
+        return ""
+    if val not in ("on", "off"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"invalid X-Llamanager-Thinking value {raw!r}; "
+                f"expected 'on' or 'off'"
+            ),
+        )
+    return val
+
+
+def _profile_thinking(cfg: Config, model: str | None, profile: str | None) -> str:
+    """Resolve the profile's ``thinking`` field for a request.
+
+    Walks the same model/profile fallback chain that ``resolve_spec`` uses
+    so the body-merge default tracks the profile the dispatcher will pick
+    when no header override is supplied.
+    """
+    mid = (model or cfg.default_model or "").strip()
+    if not mid:
+        return ""
+    m = cfg.get_model(mid)
+    if not m:
+        return ""
+    pname = (profile or m.default_profile or "").strip()
+    if not pname:
+        return ""
+    prof = m.profiles.get(pname)
+    return prof.thinking if prof else ""
+
+
+def _apply_thinking_to_body(body: dict[str, Any], thinking: str,
+                            *, forced: bool) -> None:
+    """Merge ``chat_template_kwargs.enable_thinking`` into ``body``.
+
+    ``forced=True`` (the header override) wins over any caller-supplied
+    value. ``forced=False`` (the profile default) defers to whatever the
+    caller already set, so explicit per-call control still works.
+    """
+    if thinking not in ("on", "off"):
+        return
+    enable = (thinking == "on")
+    kwargs = body.get("chat_template_kwargs")
+    if not isinstance(kwargs, dict):
+        kwargs = {}
+        body["chat_template_kwargs"] = kwargs
+    if forced or "enable_thinking" not in kwargs:
+        kwargs["enable_thinking"] = enable
 
 
 async def _proxy_non_streaming(
@@ -200,6 +260,22 @@ async def _handle_inference(
     sm: ServerManager = request.app.state.sm
 
     model_required, profile_required = _model_required(request, origin)
+
+    # Apply reasoning default/override. Header wins over profile; both
+    # only touch /v1/chat/completions (the bare /completions endpoint
+    # doesn't render the chat template that consumes the kwarg).
+    if path == "/v1/chat/completions":
+        cfg: Config = request.app.state.cfg
+        header_thinking = _thinking_from_header(request)
+        if header_thinking:
+            _apply_thinking_to_body(body, header_thinking, forced=True)
+        else:
+            profile_thinking = _profile_thinking(
+                cfg, model_required, profile_required,
+            )
+            if profile_thinking:
+                _apply_thinking_to_body(body, profile_thinking, forced=False)
+
     try:
         qr = await qm.enqueue(
             origin=origin,
@@ -614,13 +690,13 @@ async def images_generations(request: Request) -> Response:
 
     # Stage refs to disk *after* enqueue so we have a stable request_id to
     # namespace them by, but *before* the runner kicks off so the adapter
-    # sees real paths. Any decode failure unwinds the queue slot.
+    # sees real paths. Any decode failure unwinds the queue entry via
+    # cancel() — using mark_in_flight_done here would incorrectly free a
+    # slot the dispatcher never acquired (the request is still queued).
     try:
         ref_paths = _stage_ref_images(cfg, qr.request_id, raw_ref_payloads)
     except HTTPException:
-        qm.mark_in_flight_done(qr, error="invalid reference image",
-                               cancelled=False, prompt_tokens=None,
-                               completion_tokens=None)
+        qm.cancel(qr.request_id)
         raise
 
     # Build the typed request now so adapter errors fail fast.
@@ -642,9 +718,7 @@ async def images_generations(request: Request) -> Response:
     if profile_required:
         profile_obj = cfg.get_profile(model_required, profile_required)
         if profile_obj is None:
-            qm.mark_in_flight_done(qr, error="profile not found",
-                                   cancelled=False, prompt_tokens=None,
-                                   completion_tokens=None)
+            qm.cancel(qr.request_id)
             raise HTTPException(
                 status_code=400,
                 detail=f"unknown profile {profile_required!r} for model {model_required!r}",
@@ -681,6 +755,7 @@ async def _images_blocking(
                 req=image_req,
                 request_id=qr.request_id,
                 origin_name=qr.origin.name,
+                cancel_event=qr.cancel,
             )
         except ImageError as e:
             error = str(e)
@@ -773,6 +848,7 @@ async def _images_stream(
                     request_id=qr.request_id,
                     origin_name=qr.origin.name,
                     progress_cb=_on_progress,
+                    cancel_event=qr.cancel,
                 )
             )
             while not run_task.done():

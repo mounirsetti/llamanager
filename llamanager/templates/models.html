@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% set active = 'models' %}
-{% block title %}Models - llamanager{% endblock %}
+{% block title %}LLM models - llamanager{% endblock %}
 {% block content %}
 
 <style>
@@ -291,8 +291,8 @@
 </style>
 
 <div class="lm-eyebrow">Operate</div>
-<h1 class="lm-page-title">Models</h1>
-<p class="lm-page-lede">Manage on-disk models and their profiles. Profiles attach to their model and configure how the engine launches it.</p>
+<h1 class="lm-page-title">LLM models</h1>
+<p class="lm-page-lede">Pull, organise, and tune language models for the <code>llama</code> and <code>mlx</code> engines. Diffusion models live on the <a href="/ui/setup-diffusion" style="color: var(--accent);">Diffusion engines</a> page.</p>
 
 {# ---- Storage location ---- #}
 <section class="lm-section" style="margin-top: 32px;">
@@ -365,13 +365,12 @@
   </div>
 </section>
 
-{# ---- Models (split into LLM vs diffusion, on-disk + downloads + profiles) ---- #}
+{# ---- Models (LLMs only on this page) ---- #}
 <section class="lm-section">
   <header class="lm-section-head">
-    <span class="lm-section-marker">Models</span>
+    <span class="lm-section-marker">Language models</span>
     <span class="lm-section-meta">
-      {{ text_models|length }} LLM{% if text_models|length != 1 %}s{% endif %}
-      · {{ image_models|length }} diffusion
+      {{ text_models|length }} on disk
     </span>
   </header>
 
@@ -383,18 +382,20 @@
     </form>
   </div>
 
-  {% include "_models_list_partial.html" %}
+  {% with show_image=False %}
+    {% include "_models_list_partial.html" %}
+  {% endwith %}
 </section>
 
-{# ---- Find a model ---- #}
+{# ---- Find a language model ---- #}
 <section class="lm-section">
   <header class="lm-section-head">
-    <span class="lm-section-marker">Find a model</span>
-    <span class="lm-section-meta">search Hugging Face</span>
+    <span class="lm-section-marker">Find a language model</span>
+    <span class="lm-section-meta">search Hugging Face — GGUF</span>
   </header>
 
   <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
-    Search for GGUF models on Hugging Face. Results are sorted by popularity. Click a model to see the available files and pull one with a single click.
+    Search Hugging Face for GGUF-format models (compatible with the <code>llama</code> engine). Results are filtered by the <code>gguf</code> tag and sorted by popularity. Click a model to see its files and pull one with a single click.
   </p>
 
   <div style="margin-bottom: 20px;">
@@ -415,15 +416,15 @@
   </div>
 </section>
 
-{# ---- Pull a model (manual) ---- #}
+{# ---- Pull a language model (manual) ---- #}
 <section class="lm-section">
   <header class="lm-section-head">
-    <span class="lm-section-marker">Pull a model</span>
+    <span class="lm-section-marker">Pull a language model</span>
     <span class="lm-section-meta">manual entry</span>
   </header>
 
   <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
-    Already know what you want? Enter a Hugging Face repo or direct URL and the specific GGUF file. Downloads run in the background.
+    Already know what you want? Enter a Hugging Face repo and the specific GGUF file (or paste a direct URL). Downloads run in the background. For MLX models, point at an MLX-formatted repo and leave the file blank.
   </p>
 
   <form class="lm-form lm-form--wide" method="post" action="/ui/models/pull">

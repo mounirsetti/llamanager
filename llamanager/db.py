@@ -66,6 +66,26 @@ SCHEMA_VERSIONS: list[str] = [
     ALTER TABLE origins ADD COLUMN key_lookup TEXT;
     CREATE INDEX idx_origins_key_lookup ON origins(key_lookup);
     """,
+    # v3: per-diffusion-engine dependency installer jobs. One row per
+    # install run; the installer task streams stdout into ``log`` and
+    # bumps ``progress_pct`` for the UI. ``kind`` distinguishes
+    # ``pip`` (create venv + pip install) from ``binary`` (future:
+    # download a release archive).
+    """
+    CREATE TABLE engine_installs (
+        id TEXT PRIMARY KEY,
+        engine TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        progress_pct INTEGER NOT NULL DEFAULT 0,
+        message TEXT NOT NULL DEFAULT '',
+        log TEXT NOT NULL DEFAULT '',
+        started_at REAL NOT NULL,
+        finished_at REAL,
+        error TEXT
+    );
+    CREATE INDEX idx_engine_installs_engine ON engine_installs(engine);
+    """,
 ]
 
 

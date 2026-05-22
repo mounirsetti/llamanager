@@ -17,6 +17,10 @@
   {% set image_models = _image %}
 {% endif %}
 
+{# Family visibility — callers can scope a page to one family. #}
+{% set show_text = show_text if show_text is defined else true %}
+{% set show_image = show_image if show_image is defined else true %}
+
 {% macro render_model_card(m) %}
   {% set is_loaded = m.model_id == current_model %}
   {% set is_default_model = m.model_id == default_model %}
@@ -179,6 +183,15 @@
                       <input class="lm-input lm-input--mono" type="text" name="mmproj" value="{{ prof.mmproj or '' }}"
                              placeholder="repo/mmproj.gguf"
                              {% if m.engine != 'llama' %}disabled{% endif %}>
+
+                      <label class="lm-field-label">Reasoning / thinking
+                        <span class="lm-field-hint">injected as <code>chat_template_kwargs.enable_thinking</code> on /v1/chat/completions</span>
+                      </label>
+                      <select class="lm-input" name="thinking">
+                        <option value="" {% if not prof.thinking %}selected{% endif %}>inherit (model/template default)</option>
+                        <option value="on" {% if prof.thinking == 'on' %}selected{% endif %}>on</option>
+                        <option value="off" {% if prof.thinking == 'off' %}selected{% endif %}>off (skip the &lt;think&gt; preamble)</option>
+                      </select>
                     </div>
 
                     <div class="lm-tab-panel" data-panel="advanced" hidden>
@@ -306,6 +319,15 @@
                   <input class="lm-input lm-input--mono" type="text" name="mmproj"
                          placeholder="repo/mmproj.gguf"
                          {% if m.engine != 'llama' %}disabled{% endif %}>
+
+                  <label class="lm-field-label">Reasoning / thinking
+                    <span class="lm-field-hint">injected as <code>chat_template_kwargs.enable_thinking</code> on /v1/chat/completions</span>
+                  </label>
+                  <select class="lm-input" name="thinking">
+                    <option value="" selected>inherit (model/template default)</option>
+                    <option value="on">on</option>
+                    <option value="off">off (skip the &lt;think&gt; preamble)</option>
+                  </select>
                 </div>
 
                 <div class="lm-tab-panel" data-panel="advanced" hidden>
@@ -382,7 +404,7 @@
 {% endif %}
 
 {# ---- LLMs (text engines) ---- #}
-{% if text_models or not image_models %}
+{% if show_text %}
 <div class="lm-models-group">
   <header class="lm-models-group__head">
     <span class="lm-eyebrow">Language models</span>
@@ -399,15 +421,19 @@
 {% endif %}
 
 {# ---- Diffusion / image models ---- #}
-{% if image_models %}
-<div class="lm-models-group" style="margin-top: 28px;">
+{% if show_image %}
+<div class="lm-models-group" {% if show_text %}style="margin-top: 28px;"{% endif %}>
   <header class="lm-models-group__head">
     <span class="lm-eyebrow">Diffusion models</span>
     <span class="lm-models-group__count">{{ image_models|length }} on disk</span>
   </header>
+  {% if image_models %}
   <div class="lm-model-cards">
     {% for m in image_models %}{{ render_model_card(m) }}{% endfor %}
   </div>
+  {% else %}
+  <p class="lm-empty">No diffusion models on disk. HiDream and Flux2 models are added via the engine setup or the <em>Add existing model</em> section below.</p>
+  {% endif %}
 </div>
 {% endif %}
 

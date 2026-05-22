@@ -33,10 +33,10 @@ from fastapi.templating import Jinja2Templates
 
 from .auth import AuthManager, Origin
 from .config import (
-    ENGINE_FAMILY, Profile, VALID_RAM_SPILL_POLICIES, delete_profile,
-    detect_engine_for_id, load_config, rename_profile, save_profile,
-    set_default_args, set_model_default_profile, update_coexistence_policy,
-    update_defaults, update_image_config,
+    ENGINE_FAMILY, Profile, VALID_RAM_SPILL_POLICIES, VALID_THINKING,
+    delete_profile, detect_engine_for_id, load_config, rename_profile,
+    save_profile, set_default_args, set_model_default_profile,
+    update_coexistence_policy, update_defaults, update_image_config,
 )
 from .llama_installer import (
     BACKENDS,
@@ -1745,6 +1745,88 @@ async def setup_get(request: Request, _: Origin = Depends(require_admin_ui)) -> 
     return templates.TemplateResponse(request, "setup.html", _setup_ctx(request))
 
 
+def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
+    """Context for the Diffusion engines page (full or partial reload).
+
+    Combines:
+      * the standard model-list context (text_models / image_models,
+        current_model, default_model, csrf, etc.)
+      * image-engine paths (HiDream / Flux2 / Z-Image)
+      * coexistence policy
+      * per-engine install plans + the most recent install job per engine
+      * a tiny ``downloads_by_repo`` index keyed by HF repo id so each
+        engine card can show "downloading model X — 42%" inline.
+    """
+    cfg = request.app.state.cfg
+    installer = request.app.state.engine_installer
+    from .engine_installer import ENGINE_PLANS, venv_python
+
+    ctx = _models_ctx(request)
+    ctx["image_cfg"] = {
+        "hidream_python": cfg.hidream_python,
+        "hidream_repo": cfg.hidream_repo,
+        "flux2_sd_cli": cfg.flux2_sd_cli,
+        "flux2_device_index": cfg.flux2_device_index,
+        "z_image_python": cfg.z_image_python,
+    }
+    ctx["coex"] = {
+        "unload_text_on_arrival": cfg.unload_text_on_arrival,
+        "restart_text_after_image": cfg.restart_text_after_image,
+        "allow_concurrent": cfg.allow_concurrent,
+    }
+
+    # Per-engine install state — surface the most-relevant row so the
+    # card can show "running 42%", "done", or "click to install".
+    engines = ("z_image", "hidream", "flux2")
+    install_state: dict[str, Any] = {}
+    for eng in engines:
+        active = installer.active_for_engine(eng)
+        if active:
+            install_state[eng] = active
+        else:
+            recent = installer.list_for_engine(eng, limit=1)
+            install_state[eng] = recent[0] if recent else None
+    ctx["engine_installs"] = install_state
+    ctx["engine_plans"] = {
+        e: {
+            "engine": p.engine,
+            "label": p.label,
+            "packages": p.packages,
+            "space_mb": p.space_mb,
+            "notes": p.notes,
+            "has_plan": True,
+        }
+        for e, p in ENGINE_PLANS.items()
+    }
+    # Predicted venv interpreter path so the UI can show where pip will
+    # plant things (or where it already lives).
+    ctx["engine_venv_python"] = {
+        e: str(venv_python(cfg, e)) for e in engines
+    }
+
+    # Index downloads by repo so each engine card can show in-flight
+    # pulls for its own models.
+    downloads_by_repo: dict[str, dict[str, Any]] = {}
+    for d in ctx.get("downloads", []) or []:
+        src = d.get("source") or ""
+        if src.startswith("hf://") or src.startswith("hf:"):
+            repo = src.removeprefix("hf://").removeprefix("hf:")
+            downloads_by_repo[repo] = d
+    ctx["downloads_by_repo"] = downloads_by_repo
+
+    return ctx
+
+
+@router.get("/setup-diffusion", response_class=HTMLResponse)
+async def setup_diffusion_get(request: Request,
+                              _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """Diffusion-engines page: image engine paths, coexistence policy,
+    and the installed diffusion model list."""
+    return templates.TemplateResponse(
+        request, "setup_diffusion.html", _setup_diffusion_ctx(request),
+    )
+
+
 @router.post("/setup/binary-path", response_class=HTMLResponse)
 async def setup_set_binary(request: Request,
                            binary_path: str = Form(...),
@@ -1769,7 +1851,7 @@ async def setup_hidream(request: Request,
         hidream_python=cfg.hidream_python,
         hidream_repo=cfg.hidream_repo,
     )
-    return RedirectResponse("/ui/setup", status_code=303)
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
 
 
 @router.post("/setup/image/flux2", response_class=HTMLResponse)
@@ -1793,7 +1875,17 @@ async def setup_flux2(request: Request,
         flux2_device_index=idx,
         clear_flux2_device_index=(idx is None),
     )
-    return RedirectResponse("/ui/setup", status_code=303)
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+
+
+@router.post("/setup/image/z-image", response_class=HTMLResponse)
+async def setup_z_image(request: Request,
+                        z_image_python: str = Form(""),
+                        _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    cfg.z_image_python = z_image_python.strip()
+    update_image_config(cfg.config_path, z_image_python=cfg.z_image_python)
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
 
 
 @router.post("/setup/coexistence", response_class=HTMLResponse)
@@ -1812,7 +1904,75 @@ async def setup_coexistence(request: Request,
         restart_text_after_image=cfg.restart_text_after_image,
         allow_concurrent=cfg.allow_concurrent,
     )
-    return RedirectResponse("/ui/setup", status_code=303)
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+
+
+# ---- per-engine install + download ----
+
+@router.post("/setup-diffusion/engine/{engine}/install-deps",
+             response_class=HTMLResponse)
+async def install_engine_deps(request: Request, engine: str,
+                              _: None = Depends(require_csrf)) -> Response:
+    """Kick off an opinionated venv + pip install for one engine."""
+    installer = request.app.state.engine_installer
+    try:
+        installer.start(engine)
+    except (ValueError, RuntimeError) as e:
+        return _error_html(f"install failed: {e}", status_code=400)
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+
+
+@router.post("/setup-diffusion/engine/{engine}/install-deps/{install_id}/cancel",
+             response_class=HTMLResponse)
+async def cancel_engine_install(request: Request, engine: str,
+                                install_id: str,
+                                _: None = Depends(require_csrf)) -> Response:
+    installer = request.app.state.engine_installer
+    installer.cancel(install_id)
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+
+
+@router.post("/setup-diffusion/engine/{engine}/download-model",
+             response_class=HTMLResponse)
+async def download_engine_model(request: Request, engine: str,
+                                repo: str = Form(...),
+                                subfolder: str = Form(""),
+                                _: None = Depends(require_csrf)) -> Response:
+    """Start an HF whole-repo (or subfolder) download for a diffusion engine."""
+    reg: Registry = request.app.state.registry
+    repo_clean = repo.strip()
+    if not repo_clean:
+        return _error_html("repo is required", status_code=400)
+    # Normalise: accept a full HF URL or a plain org/name.
+    if repo_clean.startswith("http"):
+        # _normalise_hf_url will rewrite when start_pull runs; pass as-is.
+        source = repo_clean
+    else:
+        # Strip an accidental hf:// prefix; we'll re-add canonically.
+        source = "hf://" + repo_clean.removeprefix("hf://").removeprefix("hf:")
+    sub = subfolder.strip().strip("/") or None
+    try:
+        # Estimate size up-front so the progress bar can show a total.
+        bare_repo = source.removeprefix("hf://").removeprefix("hf:")
+        size = await reg.estimate_repo_size(bare_repo, sub)
+        reg.start_pull(source=source, files=None,
+                       subfolder=sub, whole_repo=True,
+                       bytes_total=size)
+    except Exception as e:
+        return _error_html(f"pull failed: {e}", status_code=400)
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+
+
+@router.get("/setup-diffusion/_partial", response_class=HTMLResponse)
+async def setup_diffusion_partial(request: Request,
+                                  _: Origin = Depends(require_admin_ui)
+                                  ) -> HTMLResponse:
+    """HTMX-polled fragment so the install/download status updates live
+    on the Diffusion engines page without a full reload."""
+    return templates.TemplateResponse(
+        request, "_setup_diffusion_partial.html",
+        _setup_diffusion_ctx(request),
+    )
 
 
 def _resolve_variant(source: str, backend: str) -> tuple[str, str]:
@@ -2271,6 +2431,7 @@ def _build_profile_from_form(
     vram_unlimited: str,
     ram_spill_policy: str,
     ram_spill_limit_gb: str,
+    thinking: str,
     args_json: str,
 ) -> Profile:
     try:
@@ -2288,6 +2449,11 @@ def _build_profile_from_form(
         )
     if policy != "limited":
         ram_limit_val = None
+    thinking_val = (thinking or "").strip().lower()
+    if thinking_val not in VALID_THINKING:
+        raise ValueError(
+            f"invalid thinking {thinking_val!r}; must be '', 'on', or 'off'"
+        )
     try:
         args = json.loads(args_json.strip() or "{}")
     except json.JSONDecodeError as e:
@@ -2301,6 +2467,7 @@ def _build_profile_from_form(
         vram_limit_gb=vram_val,
         ram_spill_policy=policy,
         ram_spill_limit_gb=ram_limit_val,
+        thinking=thinking_val,
         args=args,
     )
 
@@ -2315,6 +2482,7 @@ async def models_profile_create(request: Request,
                                 vram_unlimited: str = Form(""),
                                 ram_spill_policy: str = Form("default"),
                                 ram_spill_limit_gb: str = Form(""),
+                                thinking: str = Form(""),
                                 args_json: str = Form("{}"),
                                 make_default: str = Form(""),
                                 _: None = Depends(require_csrf)) -> Response:
@@ -2336,6 +2504,7 @@ async def models_profile_create(request: Request,
             vram_limit_gb=vram_limit_gb, vram_unlimited=vram_unlimited,
             ram_spill_policy=ram_spill_policy,
             ram_spill_limit_gb=ram_spill_limit_gb,
+            thinking=thinking,
             args_json=args_json,
         )
         save_profile(cfg.config_path, mid, profile_name, prof)
@@ -2357,6 +2526,7 @@ async def models_profile_update(request: Request, profile_name: str,
                                 vram_unlimited: str = Form(""),
                                 ram_spill_policy: str = Form("default"),
                                 ram_spill_limit_gb: str = Form(""),
+                                thinking: str = Form(""),
                                 args_json: str = Form("{}"),
                                 _: None = Depends(require_csrf)) -> Response:
     cfg = request.app.state.cfg
@@ -2375,6 +2545,7 @@ async def models_profile_update(request: Request, profile_name: str,
             vram_limit_gb=vram_limit_gb, vram_unlimited=vram_unlimited,
             ram_spill_policy=ram_spill_policy,
             ram_spill_limit_gb=ram_spill_limit_gb,
+            thinking=thinking,
             args_json=args_json,
         )
     except ValueError as e:

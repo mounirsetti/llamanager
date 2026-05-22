@@ -144,6 +144,31 @@ def _write_meta(p: Path, data: dict[str, Any]) -> None:
     mp.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def _decode_files_json(raw: str) -> tuple[list[str], str, bool]:
+    """Read a downloads.files_json column in either the legacy (list of
+    filenames) or new (object with ``files`` / ``subfolder`` /
+    ``whole_repo``) format. Returns ``(files, subfolder, whole_repo)``.
+    Safe against malformed JSON — returns sensible empty defaults."""
+    if not raw:
+        return [], "", False
+    try:
+        decoded = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return [], "", False
+    if isinstance(decoded, list):
+        return [str(x) for x in decoded if isinstance(x, str)], "", False
+    if isinstance(decoded, dict):
+        files = decoded.get("files") or []
+        if not isinstance(files, list):
+            files = []
+        return (
+            [str(x) for x in files if isinstance(x, str)],
+            str(decoded.get("subfolder") or ""),
+            bool(decoded.get("whole_repo")),
+        )
+    return [], "", False
+
+
 def _free_bytes(path: Path) -> int:
     return shutil.disk_usage(path).free
 
@@ -174,11 +199,12 @@ class Registry:
             return out
 
         # Pass 1: discover image-engine directories. Each candidate dir
-        # is identified by a marker file (tokenizer_config / config.json)
-        # or by containing a flux*.gguf alongside a VAE. We collect their
-        # paths so the GGUF and MLX passes can skip files inside them.
+        # is identified by a marker file (tokenizer_config / config.json
+        # / model_index.json for Diffusers pipelines) or by containing a
+        # flux*.gguf alongside a VAE. We collect their paths so the
+        # GGUF and MLX passes can skip files inside them.
         image_dirs: set[Path] = set()
-        for marker in ("tokenizer_config.json", "config.json"):
+        for marker in ("tokenizer_config.json", "config.json", "model_index.json"):
             for p in self.models_dir.rglob(marker):
                 d = p.parent
                 if d == self.models_dir:
@@ -242,6 +268,12 @@ class Registry:
         for cfg_path in self.models_dir.rglob("config.json"):
             d = cfg_path.parent
             if d in seen or d == self.models_dir:
+                continue
+            # A Diffusers pipeline contains many subdirs that each have
+            # their own config.json (text_encoder/, vae/, transformer/…).
+            # Skip anything that lives inside an already-registered
+            # image dir — those are pipeline components, not models.
+            if _is_inside_image_dir(d):
                 continue
             engine = detect_engine_for_path(d)
             if engine == "llama":
@@ -314,20 +346,87 @@ class Registry:
         return True, None
 
     # ---- pull ----
-    def start_pull(self, *, source: str, files: list[str] | None) -> str:
+    def start_pull(self, *, source: str, files: list[str] | None,
+                   subfolder: str | None = None,
+                   whole_repo: bool = False,
+                   bytes_total: int = 0) -> str:
+        """Kick off a background download.
+
+        Modes:
+          - ``files=[...]`` — fetch specific filenames inside an HF repo
+            or a direct URL. The original pull behaviour.
+          - ``whole_repo=True`` — fetch every file in the HF repo via
+            ``snapshot_download``. Used for Diffusers pipelines and any
+            non-GGUF model where the on-disk layout matters.
+          - ``subfolder="dir"`` — fetch only files under ``dir/``
+            (e.g. Z-Anime's ``diffusers/`` subdirectory). Implies
+            ``whole_repo`` for that subtree.
+
+        ``bytes_total`` lets the caller seed the progress bar when the
+        size is known up-front (e.g. computed via :meth:`estimate_repo_size`).
+        """
         download_id = secrets.token_urlsafe(8)
+        # Stash mode metadata inside files_json so the run loop can
+        # decide which fetch path to take without a separate column.
+        meta = {
+            "files": files or [],
+            "subfolder": subfolder or "",
+            "whole_repo": bool(whole_repo) or bool(subfolder),
+        }
         self.db.execute(
-            "INSERT INTO downloads(id, source, files_json, status, started_at)"
-            " VALUES (?, ?, ?, 'pending', ?)",
-            (download_id, source, json.dumps(files or []), time.time()),
+            "INSERT INTO downloads(id, source, files_json, status, "
+            "bytes_total, started_at) VALUES (?, ?, ?, 'pending', ?, ?)",
+            (download_id, source, json.dumps(meta),
+             int(bytes_total or 0), time.time()),
         )
         cancel = asyncio.Event()
         self._cancel_flags[download_id] = cancel
-        task = asyncio.create_task(self._run_pull(download_id, source, files or [], cancel))
+        task = asyncio.create_task(
+            self._run_pull(download_id, source, files or [],
+                           subfolder or None,
+                           bool(whole_repo) or bool(subfolder),
+                           cancel),
+        )
         self._tasks[download_id] = task
-        self.db.log_event("download_started",
-                          {"id": download_id, "source": source, "files": files or []})
+        self.db.log_event("download_started", {
+            "id": download_id, "source": source,
+            "files": files or [], "subfolder": subfolder or "",
+            "whole_repo": bool(whole_repo) or bool(subfolder),
+        })
         return download_id
+
+    async def estimate_repo_size(self, repo: str,
+                                 subfolder: str | None = None) -> int:
+        """Sum the byte sizes of files in an HF repo (or a single subfolder).
+        Cheap — one metadata API call. Returns 0 if the call fails so the
+        UI can still proceed with an unknown estimate."""
+        try:
+            from huggingface_hub import HfApi  # type: ignore
+        except Exception:
+            return 0
+        try:
+            repo = _sanitize_hf_repo(repo)
+        except ValueError:
+            return 0
+        token = os.environ.get(self.cfg.hf_token_env or "", None) or None
+        api = HfApi(token=token)
+        try:
+            info = await asyncio.to_thread(
+                api.model_info, repo, files_metadata=True,
+            )
+        except Exception as exc:
+            log.warning("estimate_repo_size(%s) failed: %s", repo, exc)
+            return 0
+        total = 0
+        prefix = (subfolder.strip("/") + "/") if subfolder else ""
+        for sib in getattr(info, "siblings", []):
+            name = getattr(sib, "rfilename", "") or ""
+            if prefix and not name.startswith(prefix):
+                continue
+            size = getattr(sib, "size", None)
+            if isinstance(size, int) and size > 0:
+                total += size
+        return total
 
     def cancel_pull(self, download_id: str) -> bool:
         ev = self._cancel_flags.get(download_id)
@@ -345,10 +444,7 @@ class Registry:
         self.cancel_pull(download_id)
         # Clean up partial files in _direct/
         files_json = row["files_json"] if "files_json" in row.keys() else "[]"
-        try:
-            files = json.loads(files_json) if files_json else []
-        except (json.JSONDecodeError, TypeError):
-            files = []
+        files, _subfolder, _whole = _decode_files_json(files_json)
         direct_dir = self.models_dir / "_direct"
         # Try to infer filename from source or files list
         source = row["source"] if "source" in row.keys() else ""
@@ -379,13 +475,24 @@ class Registry:
             repo = source.removeprefix("hf://").removeprefix("hf:")
             repo_dir = self.models_dir / repo
             if repo_dir.exists():
-                for fn in candidates:
-                    base = os.path.basename(fn.replace("\\", "/"))
-                    for p in repo_dir.rglob(base + "*"):
+                if _whole:
+                    # Whole-repo / subfolder pull: nuke the (sub)tree that
+                    # got downloaded so partial bytes don't litter the
+                    # models_dir.
+                    target = repo_dir / _subfolder if _subfolder else repo_dir
+                    if target.exists() and target != self.models_dir:
                         try:
-                            p.unlink()
+                            shutil.rmtree(target, ignore_errors=True)
                         except OSError:
                             pass
+                else:
+                    for fn in candidates:
+                        base = os.path.basename(fn.replace("\\", "/"))
+                        for p in repo_dir.rglob(base + "*"):
+                            try:
+                                p.unlink()
+                            except OSError:
+                                pass
         self.db.execute("DELETE FROM downloads WHERE id=?", (download_id,))
         return True
 
@@ -393,10 +500,13 @@ class Registry:
         row = self.db.query_one("SELECT * FROM downloads WHERE id=?", (download_id,))
         if not row:
             return None
+        files, subfolder, whole_repo = _decode_files_json(row["files_json"])
         return {
             "id": row["id"],
             "source": row["source"],
-            "files": json.loads(row["files_json"]),
+            "files": files,
+            "subfolder": subfolder,
+            "whole_repo": whole_repo,
             "status": row["status"],
             "bytes_done": row["bytes_done"],
             "bytes_total": row["bytes_total"],
@@ -618,13 +728,18 @@ class Registry:
                               pname, model_id)
 
     async def _run_pull(self, did: str, source: str, files: list[str],
+                        subfolder: str | None,
+                        whole_repo: bool,
                         cancel: asyncio.Event) -> None:
         try:
             self._set_download(did, status="running")
             # Convert HF web URLs to hf:// sources automatically
             source, files = self._normalise_hf_url(source, files)
             if source.startswith("hf://") or source.startswith("hf:"):
-                await self._pull_hf(did, source, files, cancel)
+                if whole_repo or subfolder:
+                    await self._pull_hf_snapshot(did, source, subfolder, cancel)
+                else:
+                    await self._pull_hf(did, source, files, cancel)
             elif source.startswith("http://") or source.startswith("https://"):
                 await self._pull_http(did, source, files[0] if files else None, cancel)
             else:
@@ -646,6 +761,80 @@ class Registry:
         finally:
             self._cancel_flags.pop(did, None)
             self._tasks.pop(did, None)
+
+    async def _pull_hf_snapshot(self, did: str, source: str,
+                                 subfolder: str | None,
+                                 cancel: asyncio.Event) -> None:
+        """Fetch an entire HF repo (or a single subfolder) via
+        ``snapshot_download``. Used for Diffusers pipelines like
+        Z-Image and Z-Anime where the model is a tree of files."""
+        from huggingface_hub import snapshot_download  # type: ignore
+
+        repo = _sanitize_hf_repo(source.removeprefix("hf://").removeprefix("hf:"))
+        token = os.environ.get(self.cfg.hf_token_env or "", None) or None
+        target_root = _ensure_under(self.models_dir, self.models_dir / repo)
+        target_root.mkdir(parents=True, exist_ok=True)
+
+        allow_patterns: list[str] | None = None
+        if subfolder:
+            sf = subfolder.strip("/")
+            if not sf or ".." in sf.split("/"):
+                raise ValueError(f"unsafe subfolder: {subfolder!r}")
+            allow_patterns = [f"{sf}/*", f"{sf}/**/*"]
+
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(
+            None,
+            lambda: snapshot_download(
+                repo_id=repo,
+                local_dir=str(target_root),
+                token=token,
+                allow_patterns=allow_patterns,
+                resume_download=True,
+                # tqdm would spam stderr; we poll dir size instead.
+                tqdm_class=None,
+            ),
+        )
+
+        # Poll for progress via on-disk byte count while the snapshot
+        # download runs. We compare against ``bytes_total`` (seeded by
+        # ``estimate_repo_size`` before start_pull was called); if that
+        # was zero, the UI shows raw bytes-done only.
+        scan_root = target_root / subfolder if subfolder else target_root
+        while not future.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(future), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                break
+            try:
+                cur = _dir_size(scan_root)
+            except OSError:
+                cur = 0
+            self._set_download(did, bytes_done=cur)
+            if cancel.is_set():
+                future.cancel()
+                return
+
+        # Surface any exception from the executor.
+        future.result()
+
+        # Final size reconciliation: prefer the actual on-disk total over
+        # the API-estimated bytes_total so the bar lands at 100%.
+        final = _dir_size(scan_root)
+        self._set_download(did, bytes_done=final, bytes_total=final)
+        _ensure_under(self.models_dir, scan_root)
+        _write_meta(target_root, {
+            "source": f"hf://{repo}",
+            "subfolder": subfolder or "",
+            "whole_repo": True,
+            "pulled_at": time.time(),
+        })
+        # Cap enforcement after the whole pull lands.
+        err = self._check_disk(0)
+        if err:
+            raise RuntimeError(err)
 
     async def _pull_hf(self, did: str, source: str, files: list[str],
                        cancel: asyncio.Event) -> None:

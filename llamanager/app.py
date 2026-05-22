@@ -199,6 +199,8 @@ def create_app(config_path: Path | None = None,
     app.state.supervisor = supervisor
     app.state.registry = registry
     app.state.image_runner = image_runner
+    from .engine_installer import EngineInstaller
+    app.state.engine_installer = EngineInstaller(cfg, db)
     # One InstallState per installable variant (source + backend), so the UI
     # can poll progress per variant independently.
     app.state.install_states = {v["id"]: InstallState() for v in list_variants()}

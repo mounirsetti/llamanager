@@ -153,11 +153,17 @@ class ImageTaskRunner:
         request_id: str,
         origin_name: str,
         progress_cb: Callable[[ProgressEvent], Any] | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> ImageResult:
         """Generate ``req.n`` images for ``model_id``.
 
         Holds the per-runner lock for the full generation: this enforces
         single-task mutual exclusion in the image family.
+
+        ``cancel_event`` lets the queue-level cancel signal reach the
+        running subprocess. When set, the in-flight image generation is
+        terminated and an ``ImageError("cancelled")`` is raised so the
+        handler can surface a 499.
         """
         if self.in_cooldown:
             wait = int(self._cooldown_until - time.time())
@@ -259,11 +265,17 @@ class ImageTaskRunner:
                                 adapter=adapter,
                                 progress_cb=progress_cb,
                                 sidecar=sidecar_base,
+                                cancel_event=cancel_event,
                             )
                         except Exception:
                             self._record_failure()
                             raise
                         outputs.append(out_path)
+                        # Honour cancellation between samples of an n>1
+                        # batch so we don't keep burning compute after
+                        # the client gave up.
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise ImageError("cancelled")
                 # Recovery: window resets after a successful run.
                 self._failures.clear()
 
@@ -310,6 +322,7 @@ class ImageTaskRunner:
         adapter,
         progress_cb: Callable[[ProgressEvent], Any] | None,
         sidecar: dict[str, Any],
+        cancel_event: asyncio.Event | None = None,
     ) -> None:
         log_path = self.cfg.logs_dir / f"{engine}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -386,6 +399,30 @@ class ImageTaskRunner:
         drain_out = asyncio.create_task(_drain(proc.stdout, "out"))
         drain_err = asyncio.create_task(_drain(proc.stderr, "err"))
 
+        # If the caller hands us a cancel event, spawn a watcher that
+        # SIGTERMs the subprocess as soon as the queue-level cancel
+        # fires. Without this, a "cancelled" image request would still
+        # burn its full generation budget in the background.
+        cancel_watcher: asyncio.Task[None] | None = None
+        cancelled = False
+
+        async def _watch_cancel() -> None:
+            nonlocal cancelled
+            assert cancel_event is not None
+            await cancel_event.wait()
+            cancelled = True
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate()
+            # If the child doesn't exit promptly, escalate to KILL.
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+
+        if cancel_event is not None:
+            cancel_watcher = asyncio.create_task(_watch_cancel())
+
         try:
             rc = await asyncio.wait_for(
                 proc.wait(), timeout=GENERATION_HARD_TIMEOUT_S,
@@ -397,7 +434,18 @@ class ImageTaskRunner:
             self._reset_runtime_state(failed=True)
             raise ImageError("image generation timed out")
         finally:
+            if cancel_watcher is not None:
+                cancel_watcher.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await cancel_watcher
             await asyncio.gather(drain_out, drain_err, return_exceptions=True)
+
+        if cancelled:
+            self._reset_runtime_state(failed=False)
+            self.db.log_event("image_generate_cancelled", {
+                "request_id": request_id, "engine": engine,
+            })
+            raise ImageError("cancelled")
 
         if rc != 0:
             self._reset_runtime_state(failed=True)

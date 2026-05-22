@@ -117,6 +117,7 @@ ENGINE_FAMILY: dict[str, str] = {
     "mlx":     "text",
     "hidream": "image",
     "flux2":   "image",
+    "z_image": "image",
 }
 
 # Text engines that are still managed by the existing HTTP-server path.
@@ -155,6 +156,28 @@ def _looks_like_flux2(d: Path) -> bool:
     return has_diffusion and has_vae
 
 
+def _looks_like_z_image(d: Path) -> bool:
+    """Z-Image / Z-Anime checkpoint directory shape: a Diffusers
+    ``model_index.json`` whose ``_class_name`` is ``ZImagePipeline``.
+    Both Tongyi-MAI/Z-Image and SeeSee21/Z-Anime ship this layout.
+
+    Reading the JSON is the *only* way to disambiguate Z-Image from
+    other Diffusers pipelines that share the same on-disk shape (FLUX,
+    SD3, etc.). The file is small (~500 bytes) so the read is cheap.
+    """
+    if not d.is_dir():
+        return False
+    mi = d / "model_index.json"
+    if not mi.is_file():
+        return False
+    try:
+        import json as _json
+        data = _json.loads(mi.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (data.get("_class_name") or "").strip() == "ZImagePipeline"
+
+
 def detect_engine_for_path(model_path: Path) -> str:
     """Return the engine name for a model on disk.
 
@@ -165,10 +188,17 @@ def detect_engine_for_path(model_path: Path) -> str:
     if model_path.is_file() and model_path.suffix.lower() == ".gguf":
         return "llama"
     if model_path.is_dir():
+        if _looks_like_z_image(model_path):
+            return "z_image"
         if _looks_like_hidream(model_path):
             return "hidream"
         if _looks_like_flux2(model_path):
             return "flux2"
+        # Z-Anime ships its Diffusers pipeline in a ``diffusers/``
+        # subfolder; check one level down too so the parent folder is
+        # surfaced as a Z-Image model.
+        if _looks_like_z_image(model_path / "diffusers"):
+            return "z_image"
         if (model_path / "config.json").exists():
             if any(model_path.glob("*.safetensors")) or any(model_path.glob("*.npz")):
                 return "mlx"
@@ -188,6 +218,7 @@ def detect_engine_for_id(model_id: str, models_dir: Path) -> str:
 # ---------------------------------------------------------------------------
 
 VALID_RAM_SPILL_POLICIES = ("default", "unlimited", "limited", "none")
+VALID_THINKING = ("", "on", "off")
 
 
 @dataclass
@@ -227,6 +258,10 @@ class Profile:
     # HiDream. Both can be overridden per-request.
     image_editing_scheduler: str = ""
     image_strength: float | None = None
+    # Chat reasoning default. "on" / "off" inject
+    # ``chat_template_kwargs.enable_thinking`` into the upstream body for
+    # /v1/chat/completions; "" leaves the model/template default alone.
+    thinking: str = ""
     args: dict[str, Any] = field(default_factory=dict)
 
 
@@ -288,9 +323,13 @@ class Config:
     # both stacks have hardware-pinned dependency chains documented in
     # docs/hidream.md and docs/flux2.md).
     hidream_python: str = ""         # path to the .venv-hidream Python
-    hidream_repo: str = ""           # path to the HiDream-O1-Image checkout
+    hidream_repo: str = ""           # path to the HiDream-O1-Image source folder
     flux2_sd_cli: str = ""           # path to sd-cli (or sd-cli.exe)
     flux2_device_index: int | None = None  # GGML_VK_VISIBLE_DEVICES value
+    # Z-Image only needs a Python interpreter — the runner script ships
+    # with llamanager (engines/_z_image_runner.py), so there's no
+    # separate source folder to clone.
+    z_image_python: str = ""
 
     # ---- coexistence policy ----
     # Default: when an image task arrives, snapshot the running text spec,
@@ -401,6 +440,9 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
     policy = str(body.get("ram_spill_policy", "default") or "default")
     if policy not in VALID_RAM_SPILL_POLICIES:
         policy = "default"
+    thinking = str(body.get("thinking", "") or "").strip().lower()
+    if thinking not in VALID_THINKING:
+        thinking = ""
     return Profile(
         name=name,
         mmproj=str(body.get("mmproj", "") or ""),
@@ -415,6 +457,7 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
         image_seed=_coerce_int(body.get("image_seed")),
         image_editing_scheduler=str(body.get("image_editing_scheduler", "") or ""),
         image_strength=_coerce_float(body.get("image_strength")),
+        thinking=thinking,
         args=dict(body.get("args") or {}),
     )
 
@@ -459,6 +502,7 @@ def load_config(path: Path | None = None) -> Config:
         hidream_repo=str(image_cfg.get("hidream_repo", "") or ""),
         flux2_sd_cli=str(image_cfg.get("flux2_sd_cli", "") or ""),
         flux2_device_index=_coerce_int(image_cfg.get("flux2_device_index")),
+        z_image_python=str(image_cfg.get("z_image_python", "") or ""),
         images_max_disk_gb=int(image_cfg.get("max_disk_gb", 10)),
         unload_text_on_arrival=bool(coex_cfg.get("unload_text_on_arrival", True)),
         restart_text_after_image=bool(coex_cfg.get("restart_text_after_image", True)),
@@ -692,6 +736,8 @@ def _profile_to_tomlkit(prof: Profile):
         tbl.add("image_editing_scheduler", prof.image_editing_scheduler)
     if prof.image_strength is not None:
         tbl.add("image_strength", prof.image_strength)
+    if prof.thinking:
+        tbl.add("thinking", prof.thinking)
     if prof.args:
         tbl.add("args", _dict_to_tomlkit(prof.args))
     return tbl
@@ -833,6 +879,7 @@ def update_image_config(cfg_path: Path, *,
                         flux2_sd_cli: str | None = None,
                         flux2_device_index: int | None = None,
                         clear_flux2_device_index: bool = False,
+                        z_image_python: str | None = None,
                         images_dir: str | None = None,
                         max_disk_gb: int | None = None) -> None:
     """Update the [image] section in config.toml. Each kwarg is persisted
@@ -854,6 +901,8 @@ def update_image_config(cfg_path: Path, *,
             del img["flux2_device_index"]
     elif flux2_device_index is not None:
         img["flux2_device_index"] = int(flux2_device_index)
+    if z_image_python is not None:
+        img["z_image_python"] = z_image_python
     if images_dir is not None:
         img["images_dir"] = images_dir
     if max_disk_gb is not None:
