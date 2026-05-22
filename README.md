@@ -1,3 +1,11 @@
+<!-- markdownlint-disable MD033 MD041 MD060 -->
+<!-- MD033: the banner below uses <picture>/<img> for theme-aware logos
+     and badge images, which Markdown can't express natively.
+     MD041: the file's first visible line is that banner, not an h1.
+     MD060: some tables mix narrow rows (short commands) with very wide
+     ones (long install URLs); aligning every pipe to the longest row
+     would force excessive padding for no readability gain. -->
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
@@ -12,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.1.6-green.svg" alt="Version 0.1.6">
+  <img src="https://img.shields.io/badge/version-0.1.7-green.svg" alt="Version 0.1.7">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -145,7 +153,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.1.6" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.1.7" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -198,7 +206,7 @@ llamanager serve                           # foreground, ctrl-c to stop
 
 The first launch prints a bootstrap admin key to stdout:
 
-```
+```text
 ==============================================================================
   llamanager BOOTSTRAP ADMIN KEY (shown ONCE — won't be displayed again)
   lm_2n8RkFf...
@@ -557,7 +565,7 @@ schtasks /Delete /TN llamanager /F
 
 Daemon and installer commands:
 
-```
+```text
 llamanager serve [--host ...] [--port ...] [--log-level info]
 llamanager init-config [--path PATH]
 llamanager status                    # prints last persisted runtime.json
@@ -586,7 +594,7 @@ Base URL resolution order:
 2. `$LLAMANAGER_URL`
 3. derived from config (`http://<bind>:<port>`, with `0.0.0.0` rewritten to `127.0.0.1` since the CLI usually runs on the same host)
 
-```
+```text
 llamanager server status                    # full daemon snapshot
 llamanager server start --profile P         # start llama-server
 llamanager server stop
@@ -680,6 +688,12 @@ thinking = "off"      # optional; "on" / "off" / omit. See "Reasoning / thinking
 args = { temp = 0.7 }
 ```
 
+The VRAM / RAM-spill knobs are basic fields that translate into a
+computed `--n-gpu-layers` value at launch time, based on the model's
+GGUF header (layer count + file size) plus a KV-cache budget derived
+from `ctx_size`. They're llama.cpp-only — MLX uses unified memory and
+ignores them.
+
 ## API
 
 | path        | purpose                                 | auth               |
@@ -693,7 +707,7 @@ Full endpoint list is in spec §5.
 
 ## Filesystem layout
 
-```
+```text
 ~/.llamanager/
 ├── config.toml             static config (you edit this)
 ├── state.db                sqlite: origins, requests, downloads, events, engine_installs
