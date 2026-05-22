@@ -231,15 +231,54 @@ async def _stream_with_keepalives(
 
         # Phase 2: proxy stream.
         url = f"{sm.upstream_base}{path}"
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("POST", url, json=body) as r:
-                async for chunk in r.aiter_bytes():
-                    if qr.cancel.is_set():
-                        cancelled_flag["value"] = True
+        try:
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream("POST", url, json=body) as r:
+                    if r.status_code >= 400:
+                        # Upstream returned an error before any tokens.
+                        # Surface it as a structured SSE event so the
+                        # client gets a usable message instead of raw
+                        # upstream bytes (which may not even be SSE).
+                        err_body = await r.aread()
+                        detail = (
+                            err_body.decode("utf-8", errors="replace").strip()
+                            or f"HTTP {r.status_code}"
+                        )
+                        payload = {"error": {
+                            "message": f"upstream returned {r.status_code}: {detail}",
+                            "type": "llamanager_upstream_error",
+                            "status": r.status_code,
+                        }}
+                        yield f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+                        yield b"data: [DONE]\n\n"
                         return
-                    if not chunk:
-                        continue
-                    yield chunk
+                    async for chunk in r.aiter_bytes():
+                        if qr.cancel.is_set():
+                            cancelled_flag["value"] = True
+                            return
+                        if not chunk:
+                            continue
+                        yield chunk
+        except httpx.RequestError as e:
+            # Connect / read / write failure talking to the upstream
+            # engine — most commonly: the engine crashed or exited between
+            # the readiness gate and the proxy POST. Emit a clean SSE
+            # error and [DONE] so the client closes the stream gracefully.
+            log.warning(
+                "upstream connect/transport error for %s at %s: %s",
+                qr.request_id, url, e,
+            )
+            payload = {"error": {
+                "message": (
+                    f"could not reach inference engine at {sm.upstream_base}: "
+                    f"{e}. The engine may have crashed or stopped — check "
+                    f"its status."
+                ),
+                "type": "llamanager_upstream_unreachable",
+            }}
+            yield f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+            yield b"data: [DONE]\n\n"
+            return
     finally:
         disconnect_task.cancel()
         # Bookkeeping happens in the wrapping handler.
@@ -329,6 +368,7 @@ async def _handle_inference(
                 log.exception("stream error for %s", qr.request_id)
                 payload = {"error": {"message": error, "type": "llamanager_error"}}
                 yield f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+                yield b"data: [DONE]\n\n"
             finally:
                 watch_task.cancel()
                 cancelled = bool(getattr(qr, "_stream_cancelled", False))
