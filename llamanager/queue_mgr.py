@@ -137,6 +137,17 @@ class QueueManager:
             model=model_required,
             priority=req.priority,
         )
+        # Surface the inbound request on the activity feed. The text
+        # family carries actual user prompts; the image family carries
+        # diffusion engine requests. Either way we want a "received" beat
+        # plus the matching "done" / "failed" beat from mark_in_flight_done.
+        self.db.log_event("request_received", {
+            "id": req.request_id,
+            "task_type": req.task_type,
+            "model": model_required,
+            "profile": profile_required,
+            "origin": origin.name,
+        })
         async with self._cv:
             heapq.heappush(self._heap, (req.heap_key(), req))
             self._by_id[req.request_id] = req
@@ -225,6 +236,7 @@ class QueueManager:
                             cancelled: bool, prompt_tokens: int | None,
                             completion_tokens: int | None) -> None:
         req.finished_at = time.time()
+        duration_s = req.finished_at - req.enqueued_at
         if cancelled or req.cancel.is_set():
             req.status = "cancelled"
             self.db.update_request_status(req.request_id, "cancelled",
@@ -242,6 +254,18 @@ class QueueManager:
                                           finished_at=req.finished_at,
                                           prompt_tokens=prompt_tokens,
                                           completion_tokens=completion_tokens)
+        # Mirror the terminal status onto the activity feed.
+        self.db.log_event("request_done", {
+            "id": req.request_id,
+            "task_type": req.task_type,
+            "model": req.model_required,
+            "origin": req.origin.name,
+            "status": req.status,
+            "duration_s": duration_s,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "error": error,
+        })
         # Family-aware capacity release. We only refund the slot when this
         # request was actually counted as in-flight; the early-abort
         # paths (ref-image decode failure, profile not found, etc.) call

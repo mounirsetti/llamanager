@@ -160,6 +160,8 @@ class LlamanagerService(win32serviceutil.ServiceFramework):
         db.close()
 
         app = create_app(print_bootstrap=False)
+        import os
+        verbose = bool(os.environ.get("LLAMANAGER_VERBOSE_LOGS"))
         config = uvicorn.Config(
             app,
             host=cfg.bind,
@@ -169,6 +171,10 @@ class LlamanagerService(win32serviceutil.ServiceFramework):
             # it falls back to setting `should_exit` from KeyboardInterrupt.
             # We trigger should_exit ourselves from SvcStop above.
             log_config=None,
+            # uvicorn's stdout access log would otherwise flood the
+            # service's captured-output file with per-poll lines.
+            # Re-enable with LLAMANAGER_VERBOSE_LOGS=1 for debugging.
+            access_log=verbose,
         )
         self._server = uvicorn.Server(config)
 

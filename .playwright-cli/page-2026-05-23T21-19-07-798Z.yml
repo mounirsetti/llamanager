@@ -1,0 +1,101 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - text: llamanager
+        - generic "llama-server idle" [ref=e6]
+      - link "Launch llama-server →" [ref=e7] [cursor=pointer]:
+        - /url: /ui/launch
+    - navigation "Primary" [ref=e8]:
+      - generic [ref=e9]: Operate
+      - link "Dashboard" [ref=e10] [cursor=pointer]:
+        - /url: /ui/
+      - link "Queue" [ref=e11] [cursor=pointer]:
+        - /url: /ui/queue
+      - link "LLM models" [ref=e12] [cursor=pointer]:
+        - /url: /ui/models
+      - link "Launch" [ref=e13] [cursor=pointer]:
+        - /url: /ui/launch
+      - link "Chat" [ref=e14] [cursor=pointer]:
+        - /url: /ui/chat
+      - link "Images" [ref=e15] [cursor=pointer]:
+        - /url: /ui/images
+      - generic [ref=e16]: Configure
+      - link "Origins" [ref=e17] [cursor=pointer]:
+        - /url: /ui/origins
+      - link "Logs" [ref=e18] [cursor=pointer]:
+        - /url: /ui/logs
+      - link "LLM engines" [ref=e19] [cursor=pointer]:
+        - /url: /ui/setup
+      - link "Diffusion engines" [ref=e20] [cursor=pointer]:
+        - /url: /ui/setup-diffusion
+      - link "About" [ref=e21] [cursor=pointer]:
+        - /url: /ui/about
+    - generic [ref=e22]:
+      - generic [ref=e23]:
+        - group "Theme" [ref=e24]:
+          - button "Dark" [ref=e25] [cursor=pointer]
+          - button "Light" [pressed] [ref=e26] [cursor=pointer]
+        - button "↻" [ref=e27] [cursor=pointer]
+      - button "Sign out" [ref=e29] [cursor=pointer]
+  - main [ref=e30]:
+    - generic [ref=e32]:
+      - generic [ref=e33]:
+        - generic "no LLM loaded" [ref=e34]: LLM
+        - combobox "Language model to load" [ref=e36] [cursor=pointer]:
+          - option "— pick model —" [disabled] [selected]
+          - option "Qwen3.6-35B-A3B-Uncensored.Q2_K_P.gguf"
+          - option "mmproj-Qwen3.6-35B-A3B-Uncensored.f16.gguf"
+          - option "Qwen3.5-9B-Q4_K_M.gguf"
+          - option "mmproj-Qwen3.5-9B-BF16.gguf"
+          - option "Qwen3.6-35B-A3B-Q4_K_M.gguf ★"
+          - option "mmproj-Qwen3.6-35B-A3B-BF16.gguf"
+          - option "Qwen3.5-4B-Q4_K_M.gguf"
+        - combobox "Profile — leave on default to use the model's preferred one" [ref=e38] [cursor=pointer]:
+          - option "default profile" [selected]
+        - generic [ref=e39]:
+          - button "Load" [ref=e40] [cursor=pointer]:
+            - img [ref=e41]
+            - text: Load
+          - button "Unload the currently loaded LLM" [ref=e43] [cursor=pointer]:
+            - img [ref=e44]
+          - button "Toggle default LLM" [ref=e46] [cursor=pointer]:
+            - img [ref=e47]
+      - generic [ref=e50]:
+        - generic "HiDream-O1-Image set as default" [ref=e51]: Diff
+        - combobox "Default diffusion model — used when image requests omit the model field" [ref=e53] [cursor=pointer]:
+          - option "— none —"
+          - option "HiDream-O1-Image ★" [selected]
+          - option "Z-Image"
+          - option "flux2-dev"
+        - combobox "Profile — leave on default to use the model's preferred one" [ref=e55] [cursor=pointer]:
+          - option "default · hidream-dev-fast"
+          - option "hidream-full" [selected]
+        - button "Toggle default diffusion model" [pressed] [ref=e57] [cursor=pointer]:
+          - img [ref=e58]
+    - generic [ref=e60]:
+      - generic [ref=e61]: Configure
+      - heading "Logs" [level=1] [ref=e62]
+      - paragraph [ref=e63]:
+        - text: The
+        - strong [ref=e64]: activity
+        - text: stream interleaves llamanager’s own lifecycle events with the meaningful lines from
+        - code [ref=e65]: llama-server
+        - text: ’s output — rewritten as natural language. Switch to a raw source if you need the unfiltered firehose.
+      - generic [ref=e67]:
+        - generic [ref=e68]:
+          - generic [ref=e69]: Source
+          - combobox "Source" [ref=e70]:
+            - option "activity (smart)" [selected]
+            - option "llama.cpp (raw)"
+            - option "llamanager (raw)"
+            - option "hidream (raw)"
+        - generic [ref=e71]:
+          - generic [ref=e72]: Tail lines
+          - spinbutton "Tail lines" [ref=e73]: "30"
+        - button "Reload" [ref=e74] [cursor=pointer]
+      - generic [ref=e75]:
+        - generic [ref=e76]:
+          - generic [ref=e77]: activity
+          - generic [ref=e78]: tail · 30 lines
+        - generic [ref=e79]: "00:16:53 [llama.cpp] Slot 3 (task 5432) timings: 2374 tokens in 4.35s (545.9 tok/s overall) 00:16:53 [llama.cpp] Slot 3: finished request (task 5432) — n_tokens = 24555, truncated = 0 00:16:59 [llama.cpp] Slot 3: started request (task 5886) 00:16:59 [llama.cpp] Slot context checkpoint restored from prompt cache 00:17:03 [llama.cpp] Slot 3 (task 5886) timings: 1401 tokens in 4.25s (329.8 tok/s overall) 00:17:03 [llama.cpp] Slot 3: finished request (task 5886) — n_tokens = 25501, truncated = 0 00:17:08 [llama.cpp] Slot 3: started request (task 6367) 00:17:08 [llama.cpp] Slot context checkpoint restored from prompt cache 00:17:14 [llama.cpp] Slot 3 (task 6367) timings: 1810 tokens in 5.31s (340.7 tok/s overall) 00:17:14 [llama.cpp] Slot 3: finished request (task 6367) — n_tokens = 26829, truncated = 0 00:17:19 [llama.cpp] Slot 3: started request (task 6964) 00:17:19 [llama.cpp] Slot context checkpoint restored from prompt cache 00:17:24 [llama.cpp] Slot 3 (task 6964) timings: 1637 tokens in 5.09s (321.6 tok/s overall) 00:17:24 [llama.cpp] Slot 3: finished request (task 6964) — n_tokens = 27868, truncated = 0 00:17:30 [llama.cpp] Slot 3: started request (task 7536) 00:17:30 [llama.cpp] Slot context checkpoint restored from prompt cache 00:17:33 [llama.cpp] Slot 3 (task 7536) timings: 2531 tokens in 3.52s (718.5 tok/s overall) 00:17:33 [llama.cpp] Slot 3: finished request (task 7536) — n_tokens = 29826, truncated = 0 00:17:39 [llama.cpp] Slot 3: started request (task 7840) 00:17:39 [llama.cpp] Slot context checkpoint restored from prompt cache 00:17:42 [llama.cpp] Slot 3 (task 7840) timings: 1186 tokens in 3.14s (377.3 tok/s overall) 00:17:42 [llama.cpp] Slot 3: finished request (task 7840) — n_tokens = 30707, truncated = 0 00:17:47 [llama.cpp] Slot 3: started request (task 8173) 00:17:47 [llama.cpp] Slot context checkpoint restored from prompt cache 00:18:00 [llamanager] llama-server stopped 00:18:49 [llamanager] chat: request from bootstrap for default model 00:18:49 [llamanager] Queued request needs a model swap to `?` 00:18:49 !! [llamanager] chat: failed — swap failed: port 7201 is busy on 127.0.0.1 00:19:03 [llama.cpp] Slot 3 (task 8173) timings: 10375 tokens in 75.93s (136.6 tok/s overall) 00:19:03 [llama.cpp] Slot 3: finished request (task 8173) — n_tokens = 40748, truncated = 0"

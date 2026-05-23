@@ -135,6 +135,41 @@ def _fmt_event(kind: str, payload: dict[str, Any]) -> tuple[str, str] | None:
             return ("info", with_model("Swap done for queued request —"))
         case "request_cancelled":
             return ("info", f"Request {p.get('id')} cancelled")
+        case "request_received":
+            task = p.get("task_type") or "text"
+            label = "chat" if task == "text" else task
+            origin_name = p.get("origin") or "?"
+            target = f"`{model}`" if model else (
+                p.get("task_type") == "image" and "image generation"
+                or "default model"
+            )
+            return ("info", f"{label}: request from {origin_name} for {target}")
+        case "request_done":
+            task = p.get("task_type") or "text"
+            label = "chat" if task == "text" else task
+            status = p.get("status") or "done"
+            secs = p.get("duration_s")
+            ptok = p.get("prompt_tokens")
+            ctok = p.get("completion_tokens")
+            err = p.get("error")
+            if status == "cancelled":
+                return ("info", f"{label}: cancelled after {secs:.1f}s"
+                        if isinstance(secs, (int, float))
+                        else f"{label}: cancelled")
+            if status == "failed":
+                return ("error", f"{label}: failed — {err or 'unknown'}")
+            # status == "done"
+            if ctok and isinstance(secs, (int, float)) and secs > 0:
+                tail = f" — {ctok} tokens in {secs:.1f}s ({ctok / secs:.1f} tok/s)"
+            elif ctok:
+                tail = f" — {ctok} tokens"
+            elif isinstance(secs, (int, float)):
+                tail = f" — completed in {secs:.1f}s"
+            elif ptok:
+                tail = f" — prompt {ptok} tokens"
+            else:
+                tail = ""
+            return ("info", f"{label}: response sent{tail}")
         case "image_generate_begin":
             eng = p.get("engine") or "image"
             return ("info", f"{eng}: generation started")

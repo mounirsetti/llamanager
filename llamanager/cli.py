@@ -12,14 +12,28 @@ from .config import expand, load_config, write_default_config
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
+    import os
     import uvicorn
     from .app import create_app
 
     cfg_path = Path(args.config) if args.config else None
     app = create_app(cfg_path)
     cfg = app.state.cfg
-    uvicorn.run(app, host=args.host or cfg.bind, port=args.port or cfg.port,
-                log_level=args.log_level)
+    # uvicorn's default LOGGING_CONFIG re-enables an INFO-level access
+    # log handler on stdout that drowns llamanager.log with per-poll
+    # "GET /ui/_partials/dashboard" lines. Skip it unless the operator
+    # explicitly asks for verbose logs. ``log_config=None`` keeps the
+    # uvicorn.* loggers attached only to whatever the root logger has
+    # (the rotating file handler set up in ``_setup_logging``).
+    verbose = bool(os.environ.get("LLAMANAGER_VERBOSE_LOGS"))
+    uvicorn.run(
+        app,
+        host=args.host or cfg.bind,
+        port=args.port or cfg.port,
+        log_level=args.log_level,
+        access_log=verbose,
+        log_config=None,
+    )
     return 0
 
 
