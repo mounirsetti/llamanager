@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.2.2-green.svg" alt="Version 0.2.2">
+  <img src="https://img.shields.io/badge/version-0.2.4-green.svg" alt="Version 0.2.4">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -50,6 +50,8 @@ The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silic
   - [Reference images (editing, composition, img2img)](#reference-images-editing-composition-img2img)
   - [Sharing the GPU with the text engine](#sharing-the-gpu-with-the-text-engine)
 - [Calling the API](#calling-the-api)
+  - [Anthropic-compatible API](#anthropic-compatible-api)
+  - [Reasoning / thinking control](#reasoning--thinking-control)
 - [Chat in the browser](#chat-in-the-browser)
 - [Auto-start at boot or login](#auto-start-at-boot-or-login)
 - [CLI](#cli)
@@ -68,7 +70,8 @@ The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silic
 
 What you get out of the box:
 
-- **OpenAI-compatible `/v1/*` proxy** for chat, completions, and image generations. Any existing client library works.
+- **OpenAI-compatible `/v1/*` proxy** for chat, completions, and image generations. Any existing OpenAI client library works.
+- **Anthropic-compatible `/anthropic/v1/*` proxy** for the Messages API, token counting, and model listing. Point the official `anthropic` SDK at llamanager via `base_url` and it just works — including streaming, tool use, and base64 image inputs.
 - **Per-engine install flow** in the web UI. Click `Install dependencies` for HiDream or Z-Image and llamanager creates a Python venv under `~/.llamanager/venvs/<engine>/` and pip-installs the right packages. The disk footprint and live install log are visible on the page.
 - **Model download manager** that pulls whole HF repos (or a single subfolder, useful for monster repos like SeeSee21/Z-Anime where only the `diffusers/` subtree is needed). Progress streams to the UI every 2 s.
 - **Per-origin priority queue** with cancellation that propagates all the way to the running subprocess. A long batch can't block your editor; cancelling a queued or in-flight image task actually stops the work.
@@ -153,7 +156,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.2.2" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.2.4" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -465,6 +468,57 @@ curl -N http://localhost:7200/v1/chat/completions \
 Each origin's `allowed_models` setting restricts which models it can request. Set to `*` for any model, `default` for the default only, or a comma-separated list of specific model IDs.
 
 While a request is queued or a model swap is happening, llamanager emits SSE comment lines (`: status=swapping_model`, `: keepalive`) every 10 seconds so client connections don't time out.
+
+### Anthropic-compatible API
+
+llamanager also speaks the Anthropic Messages API, mounted under `/anthropic/v1/` so it sits beside the OpenAI surface without colliding on the `/v1/models` envelope. The official `anthropic` SDK works out of the box — just point `base_url` at llamanager:
+
+```python
+from anthropic import Anthropic
+
+client = Anthropic(api_key="lm_...", base_url="http://localhost:7200/anthropic")
+msg = client.messages.create(
+    model="any",                     # any string; the loaded model is used
+    max_tokens=512,
+    messages=[{"role": "user", "content": "Hi!"}],
+)
+print(msg.content[0].text)
+```
+
+With `curl`:
+
+```bash
+curl http://localhost:7200/anthropic/v1/messages \
+  -H "x-api-key: $ORIGIN_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "content-type: application/json" \
+  -d '{
+    "model": "any",
+    "max_tokens": 512,
+    "messages": [{"role": "user", "content": "Hi!"}]
+  }'
+```
+
+Endpoints:
+
+| method | path                                | purpose                                                     |
+|--------|-------------------------------------|-------------------------------------------------------------|
+| POST   | `/anthropic/v1/messages`            | Messages API (non-streaming and SSE streaming).             |
+| POST   | `/anthropic/v1/messages/count_tokens` | Count input tokens via the loaded engine's tokenizer.       |
+| GET    | `/anthropic/v1/models`              | List visible models in Anthropic's envelope shape.          |
+
+Auth accepts either the Anthropic SDK's `x-api-key` header or the existing `Authorization: Bearer` header — your llamanager origin key works in both slots. The `anthropic-version` header is accepted but the value is ignored (llamanager has no version-gated behavior).
+
+Supported features:
+
+- **Streaming.** Full `message_start` / `content_block_start` / `content_block_delta` / `content_block_stop` / `message_delta` / `message_stop` event sequence. Tool-call arguments stream as `input_json_delta` partials.
+- **Tool use.** Anthropic `tools` definitions, `tool_choice` (`auto` / `any` / `none` / `tool`), assistant `tool_use` blocks, and user `tool_result` blocks all translate to and from OpenAI tool calls. Server-side tools (`web_search_20250305`, `computer_*`, etc.) are rejected with a 400 — bring your own.
+- **Vision.** `image` content blocks with `source.type` of `base64` or `url` are forwarded to the multimodal model.
+- **System prompts** as either a string or a list of `{"type":"text"}` blocks.
+- **Sampling controls** — `temperature`, `top_p`, `top_k`, `stop_sequences`, and the required `max_tokens`.
+- **Model selection** — the body's `model` field is informational (the response echoes it back); the actual served model is picked via `X-Llamanager-Model` / `X-Llamanager-Profile` headers, same as the OpenAI side. The `X-Llamanager-Thinking` header also works here.
+
+Not implemented: `document` content blocks (PDFs), Anthropic server-side tools, prompt caching markers, and the Batches API.
 
 ### Reasoning / thinking control
 

@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from .api_admin import router as admin_router
+from .api_anthropic import router as anthropic_router
 from .api_ui import SessionStore, router as ui_router
 from .api_v1 import router as v1_router
 from .auth import AuthManager, load_or_create_lookup_secret
@@ -251,6 +252,7 @@ def create_app(config_path: Path | None = None,
         return response
 
     app.include_router(v1_router)
+    app.include_router(anthropic_router)
     app.include_router(admin_router)
     app.include_router(ui_router)
 
