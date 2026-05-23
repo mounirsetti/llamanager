@@ -48,6 +48,14 @@ def _setup_logging(cfg: Config) -> None:
     root.addHandler(handler)
     root.setLevel(logging.INFO)
 
+    # Demote chatty loggers that otherwise drown the file in per-poll noise:
+    #   - uvicorn.access: every HTMX partial refresh prints a line
+    #   - httpx: every proxied request to llama-server prints "HTTP/1.1 200 OK"
+    # Set LLAMANAGER_VERBOSE_LOGS=1 to keep them at INFO for debugging.
+    if not os.environ.get("LLAMANAGER_VERBOSE_LOGS"):
+        for noisy in ("uvicorn.access", "httpx", "httpcore"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+
 
 def _load_or_create_session_secret(cfg: Config) -> str:
     p = cfg.session_secret_path

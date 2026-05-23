@@ -1,0 +1,19 @@
+- generic [ref=e2]:
+  - generic [ref=e3]: llamanager
+  - generic [ref=e4]:
+    - heading "Sign in with an admin key" [level=1] [ref=e5]:
+      - text: Sign in
+      - emphasis [ref=e6]: with an admin key
+    - paragraph [ref=e7]:
+      - text: Paste a bearer key from
+      - code [ref=e8]: ~/.llamanager
+      - text: or the bootstrap key printed on first launch.
+  - generic [ref=e9]:
+    - generic [ref=e10]:
+      - generic [ref=e11]: Admin API key
+      - textbox [active] [ref=e12]
+    - generic [ref=e13] [cursor=pointer]:
+      - checkbox "Remember me for 30 days" [ref=e14]
+      - text: Remember me for 30 days
+    - button "Sign in" [ref=e15] [cursor=pointer]
+  - generic [ref=e16]: Your session persists across server restarts when "Remember me" is checked.

@@ -1,0 +1,322 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - text: llamanager
+        - generic "llama-server idle" [ref=e6]
+      - link "Launch llama-server →" [ref=e7] [cursor=pointer]:
+        - /url: /ui/launch
+    - navigation "Primary" [ref=e8]:
+      - generic [ref=e9]: Operate
+      - link "Dashboard" [ref=e10] [cursor=pointer]:
+        - /url: /ui/
+      - link "Queue" [ref=e11] [cursor=pointer]:
+        - /url: /ui/queue
+      - link "LLM models" [ref=e12] [cursor=pointer]:
+        - /url: /ui/models
+      - link "Launch" [ref=e13] [cursor=pointer]:
+        - /url: /ui/launch
+      - link "Chat" [ref=e14] [cursor=pointer]:
+        - /url: /ui/chat
+      - link "Images" [ref=e15] [cursor=pointer]:
+        - /url: /ui/images
+      - generic [ref=e16]: Configure
+      - link "Origins" [ref=e17] [cursor=pointer]:
+        - /url: /ui/origins
+      - link "Logs" [ref=e18] [cursor=pointer]:
+        - /url: /ui/logs
+      - link "LLM engines" [ref=e19] [cursor=pointer]:
+        - /url: /ui/setup
+      - link "Diffusion engines" [ref=e20] [cursor=pointer]:
+        - /url: /ui/setup-diffusion
+      - link "About" [ref=e21] [cursor=pointer]:
+        - /url: /ui/about
+    - generic [ref=e22]:
+      - generic [ref=e23]:
+        - group "Theme" [ref=e24]:
+          - button "Dark" [ref=e25] [cursor=pointer]
+          - button "Light" [pressed] [ref=e26] [cursor=pointer]
+        - button "↻" [ref=e27] [cursor=pointer]
+      - button "Sign out" [ref=e29] [cursor=pointer]
+  - main [ref=e30]:
+    - generic [ref=e32]:
+      - generic [ref=e33]:
+        - generic "no LLM loaded" [ref=e34]: LLM
+        - combobox "Language model to load" [ref=e36] [cursor=pointer]:
+          - option "— pick model —" [disabled] [selected]
+          - option "Qwen3.6-35B-A3B-Uncensored.Q2_K_P.gguf"
+          - option "mmproj-Qwen3.6-35B-A3B-Uncensored.f16.gguf"
+          - option "Qwen3.5-9B-Q4_K_M.gguf"
+          - option "mmproj-Qwen3.5-9B-BF16.gguf"
+          - option "Qwen3.6-35B-A3B-Q4_K_M.gguf ★"
+          - option "mmproj-Qwen3.6-35B-A3B-BF16.gguf"
+          - option "Qwen3.5-4B-Q4_K_M.gguf"
+        - combobox "Profile — leave on default to use the model's preferred one" [ref=e38] [cursor=pointer]:
+          - option "default profile" [selected]
+        - generic [ref=e39]:
+          - button "Load" [ref=e40] [cursor=pointer]:
+            - img [ref=e41]
+            - text: Load
+          - button "Unload the currently loaded LLM" [ref=e43] [cursor=pointer]:
+            - img [ref=e44]
+          - button "Toggle default LLM" [ref=e46] [cursor=pointer]:
+            - img [ref=e47]
+      - generic [ref=e50]:
+        - generic "HiDream-O1-Image set as default" [ref=e51]: Diff
+        - combobox "Default diffusion model — used when image requests omit the model field" [ref=e53] [cursor=pointer]:
+          - option "— none —"
+          - option "HiDream-O1-Image ★" [selected]
+          - option "Z-Image"
+          - option "flux2-dev"
+        - combobox "Profile — leave on default to use the model's preferred one" [ref=e55] [cursor=pointer]:
+          - option "default · hidream-dev-fast"
+          - option "hidream-full" [selected]
+        - button "Toggle default diffusion model" [pressed] [ref=e57] [cursor=pointer]:
+          - img [ref=e58]
+    - generic [ref=e60]:
+      - generic [ref=e61]:
+        - generic [ref=e62]:
+          - generic [ref=e63]: Idle
+          - heading "No model loaded." [level=1] [ref=e64]:
+            - emphasis [ref=e65]: No model loaded.
+          - generic [ref=e66]:
+            - generic [ref=e68]: stopped
+            - generic [ref=e69]:
+              - generic [ref=e70]: uptime
+              - code [ref=e71]: 2h 27m
+        - generic [ref=e72]:
+          - generic [ref=e73]:
+            - generic [ref=e74]: System
+            - generic [ref=e75]: AMD64 · AMD (Vulkan/HIP)
+          - generic [ref=e76]:
+            - generic [ref=e77]:
+              - generic [ref=e78]: CPU
+              - generic [ref=e79]: Intel64 Family 6 Model 198 Stepping 2, GenuineIntel
+              - generic [ref=e80]: 20 cores · 20 threads
+            - generic [ref=e81]:
+              - generic [ref=e82]: Memory (RAM + VRAM)
+              - generic [ref=e83]: 95.3 GB total
+              - generic [ref=e84]: 72.0 GB available
+              - generic [ref=e85]: RAM 41.9 / 63.4 GB · VRAM 30.1 / 31.9 GB
+            - generic [ref=e88]:
+              - generic [ref=e89]: GPU
+              - generic [ref=e90]: AMD Radeon AI PRO R9700
+              - generic [ref=e91]: AMD (Vulkan/HIP)
+              - generic [ref=e92]: 30.1 / 31.9 GB VRAM free
+            - generic [ref=e93]:
+              - generic [ref=e94]: Disk (models)
+              - generic [ref=e95]: 302.6 GB free
+              - generic [ref=e96]: 799.2 GB total
+            - generic [ref=e99]:
+              - generic [ref=e100]: Swap
+              - generic [ref=e101]: 0.2 GB used
+              - generic [ref=e102]: 12.5 GB total
+            - generic [ref=e103]:
+              - generic [ref=e104]: Capacity estimate
+              - generic [ref=e105]: Very large models OK
+              - generic [ref=e106]: 70B+ Q4 fits in 72.0 GB RAM + VRAM
+            - generic [ref=e107]:
+              - generic [ref=e108]: Top RAM usage
+              - generic "PID 4540" [ref=e109]:
+                - generic [ref=e110]: MemCompression
+                - generic [ref=e111]: 2.2 GB
+              - generic "PID 11280" [ref=e112]:
+                - generic [ref=e113]: vmmemWSL
+                - generic [ref=e114]: 858 MB
+              - generic "PID 32900" [ref=e115]:
+                - generic [ref=e116]: Code.exe
+                - generic [ref=e117]: 686 MB
+              - generic "PID 7164" [ref=e118]:
+                - generic [ref=e119]: Code.exe
+                - generic [ref=e120]: 607 MB
+              - generic "PID 11056" [ref=e121]:
+                - generic [ref=e122]: Code.exe
+                - generic [ref=e123]: 578 MB
+            - generic [ref=e124]:
+              - generic [ref=e125]: Top VRAM usage
+              - generic "PID 2216" [ref=e126]:
+                - generic [ref=e127]: dwm.exe
+                - generic [ref=e128]: 802 MB
+              - generic "PID 25156" [ref=e129]:
+                - generic [ref=e130]: Code.exe
+                - generic [ref=e131]: 403 MB
+              - generic "PID 10792" [ref=e132]:
+                - generic [ref=e133]: brave.exe
+                - generic [ref=e134]: 336 MB
+              - generic "PID 22732" [ref=e135]:
+                - generic [ref=e136]: RadeonSoftware.exe
+                - generic [ref=e137]: 269 MB
+              - generic "PID 17524" [ref=e138]:
+                - generic [ref=e139]: TextInputHost.exe
+                - generic [ref=e140]: 73 MB
+        - generic [ref=e141]:
+          - generic [ref=e142]:
+            - generic [ref=e143]: Queue
+            - generic [ref=e144]: 0 pending
+          - paragraph [ref=e145]: Queue empty.
+        - generic [ref=e146]:
+          - generic [ref=e147]:
+            - generic [ref=e148]: Recent
+            - generic [ref=e149]: last 10 requests
+          - table [ref=e150]:
+            - rowgroup [ref=e151]:
+              - row "Id Origin Model Status Tokens in / out tok/s" [ref=e152]:
+                - columnheader "Id" [ref=e153]
+                - columnheader "Origin" [ref=e154]
+                - columnheader "Model" [ref=e155]
+                - columnheader "Status" [ref=e156]
+                - columnheader "Tokens in / out" [ref=e157]
+                - columnheader "tok/s" [ref=e158]
+            - rowgroup [ref=e159]:
+              - row "14750ec1 3 (loaded) done 1598 / 16384 144.6" [ref=e160]:
+                - cell "14750ec1" [ref=e161]:
+                  - code [ref=e162]: 14750ec1
+                - cell "3" [ref=e163]
+                - cell "(loaded)" [ref=e164]:
+                  - code [ref=e165]: (loaded)
+                - cell "done" [ref=e166]:
+                  - generic [ref=e167]: done
+                - cell "1598 / 16384" [ref=e168]
+                - cell "144.6" [ref=e169]
+              - row "0ecc2c90 3 (loaded) done - / - -" [ref=e170]:
+                - cell "0ecc2c90" [ref=e171]:
+                  - code [ref=e172]: 0ecc2c90
+                - cell "3" [ref=e173]
+                - cell "(loaded)" [ref=e174]:
+                  - code [ref=e175]: (loaded)
+                - cell "done" [ref=e176]:
+                  - generic [ref=e177]: done
+                - cell "- / -" [ref=e178]
+                - cell "-" [ref=e179]
+              - row "04b8c54c 3 (loaded) done 1598 / 1104 145.2" [ref=e180]:
+                - cell "04b8c54c" [ref=e181]:
+                  - code [ref=e182]: 04b8c54c
+                - cell "3" [ref=e183]
+                - cell "(loaded)" [ref=e184]:
+                  - code [ref=e185]: (loaded)
+                - cell "done" [ref=e186]:
+                  - generic [ref=e187]: done
+                - cell "1598 / 1104" [ref=e188]
+                - cell "145.2" [ref=e189]
+              - row "763c7abd 3 (loaded) done 1667 / 4096 148.3" [ref=e190]:
+                - cell "763c7abd" [ref=e191]:
+                  - code [ref=e192]: 763c7abd
+                - cell "3" [ref=e193]
+                - cell "(loaded)" [ref=e194]:
+                  - code [ref=e195]: (loaded)
+                - cell "done" [ref=e196]:
+                  - generic [ref=e197]: done
+                - cell "1667 / 4096" [ref=e198]
+                - cell "148.3" [ref=e199]
+              - row "a39169cc 3 (loaded) done 1657 / 4096 149.0" [ref=e200]:
+                - cell "a39169cc" [ref=e201]:
+                  - code [ref=e202]: a39169cc
+                - cell "3" [ref=e203]
+                - cell "(loaded)" [ref=e204]:
+                  - code [ref=e205]: (loaded)
+                - cell "done" [ref=e206]:
+                  - generic [ref=e207]: done
+                - cell "1657 / 4096" [ref=e208]
+                - cell "149.0" [ref=e209]
+              - row "ebad3c78 3 (loaded) done 1598 / 651 124.1" [ref=e210]:
+                - cell "ebad3c78" [ref=e211]:
+                  - code [ref=e212]: ebad3c78
+                - cell "3" [ref=e213]
+                - cell "(loaded)" [ref=e214]:
+                  - code [ref=e215]: (loaded)
+                - cell "done" [ref=e216]:
+                  - generic [ref=e217]: done
+                - cell "1598 / 651" [ref=e218]
+                - cell "124.1" [ref=e219]
+              - row "f4e7fca0 3 (loaded) done 2035 / 1 2.9" [ref=e220]:
+                - cell "f4e7fca0" [ref=e221]:
+                  - code [ref=e222]: f4e7fca0
+                - cell "3" [ref=e223]
+                - cell "(loaded)" [ref=e224]:
+                  - code [ref=e225]: (loaded)
+                - cell "done" [ref=e226]:
+                  - generic [ref=e227]: done
+                - cell "2035 / 1" [ref=e228]
+                - cell "2.9" [ref=e229]
+              - row "c432cdd8 3 (loaded) done 2035 / 1 3.0" [ref=e230]:
+                - cell "c432cdd8" [ref=e231]:
+                  - code [ref=e232]: c432cdd8
+                - cell "3" [ref=e233]
+                - cell "(loaded)" [ref=e234]:
+                  - code [ref=e235]: (loaded)
+                - cell "done" [ref=e236]:
+                  - generic [ref=e237]: done
+                - cell "2035 / 1" [ref=e238]
+                - cell "3.0" [ref=e239]
+              - row "c3d4ab38 3 (loaded) done 2035 / 1 3.1" [ref=e240]:
+                - cell "c3d4ab38" [ref=e241]:
+                  - code [ref=e242]: c3d4ab38
+                - cell "3" [ref=e243]
+                - cell "(loaded)" [ref=e244]:
+                  - code [ref=e245]: (loaded)
+                - cell "done" [ref=e246]:
+                  - generic [ref=e247]: done
+                - cell "2035 / 1" [ref=e248]
+                - cell "3.1" [ref=e249]
+              - row "5c71755b 3 (loaded) done 2035 / 1 3.0" [ref=e250]:
+                - cell "5c71755b" [ref=e251]:
+                  - code [ref=e252]: 5c71755b
+                - cell "3" [ref=e253]
+                - cell "(loaded)" [ref=e254]:
+                  - code [ref=e255]: (loaded)
+                - cell "done" [ref=e256]:
+                  - generic [ref=e257]: done
+                - cell "2035 / 1" [ref=e258]
+                - cell "3.0" [ref=e259]
+      - generic [ref=e260]:
+        - generic [ref=e261]:
+          - generic [ref=e262]: Try it
+          - generic [ref=e263]: in-browser playgrounds
+        - generic [ref=e264]:
+          - link "Chat → Direct chat playground Streaming chat against the loaded model — pick a profile, set a system prompt, save conversations." [ref=e265] [cursor=pointer]:
+            - /url: /ui/chat
+            - generic [ref=e266]: Chat →
+            - generic [ref=e267]: Direct chat playground
+            - generic [ref=e268]: Streaming chat against the loaded model — pick a profile, set a system prompt, save conversations.
+          - link "Images → Direct image generation Generate images with the configured diffusion engine (HiDream / Flux2). Browse the gallery and re-roll prompts." [ref=e269] [cursor=pointer]:
+            - /url: /ui/images
+            - generic [ref=e270]: Images →
+            - generic [ref=e271]: Direct image generation
+            - generic [ref=e272]: Generate images with the configured diffusion engine (HiDream / Flux2). Browse the gallery and re-roll prompts.
+      - generic [ref=e273]:
+        - generic [ref=e274]:
+          - generic [ref=e275]: Quick reference
+          - generic [ref=e276]: copy-paste examples
+        - generic [ref=e277]:
+          - generic [ref=e278]:
+            - generic [ref=e281]: Chat completion
+            - generic [ref=e282]: "curl http://127.0.0.1:7200/v1/chat/completions \\ -H \"Authorization: Bearer $KEY\" \\ -H \"Content-Type: application/json\" \\ -d '{ \"model\": \"any\", \"messages\": [ {\"role\": \"user\", \"content\": \"Hello!\"} ] }'"
+          - generic [ref=e283]:
+            - generic [ref=e286]: Streaming
+            - generic [ref=e287]: "curl -N http://127.0.0.1:7200/v1/chat/completions \\ -H \"Authorization: Bearer $KEY\" \\ -H \"Content-Type: application/json\" \\ -d '{ \"model\": \"any\", \"stream\": true, \"messages\": [ {\"role\": \"user\", \"content\": \"Hello!\"} ] }'"
+          - generic [ref=e288]:
+            - generic [ref=e291]: Text completion
+            - generic [ref=e292]: "curl http://127.0.0.1:7200/v1/completions \\ -H \"Authorization: Bearer $KEY\" \\ -H \"Content-Type: application/json\" \\ -d '{ \"model\": \"any\", \"prompt\": \"The meaning of life is\" }'"
+          - generic [ref=e293]:
+            - generic [ref=e296]: List models
+            - generic [ref=e297]: "curl http://127.0.0.1:7200/v1/models \\ -H \"Authorization: Bearer $KEY\""
+          - generic [ref=e298]:
+            - generic [ref=e301]: Specific model / profile
+            - generic [ref=e302]: "curl http://127.0.0.1:7200/v1/chat/completions \\ -H \"Authorization: Bearer $KEY\" \\ -H \"X-Llamanager-Model: org/repo-GGUF/Q4_K_M.gguf\" \\ -H \"X-Llamanager-Profile: fast\" \\ -H \"Content-Type: application/json\" \\ -d '{ \"model\": \"any\", \"messages\": [ {\"role\": \"user\", \"content\": \"Hello!\"} ] }'"
+          - generic [ref=e303]:
+            - generic [ref=e306]: Python · OpenAI SDK
+            - generic [ref=e307]: "from openai import OpenAI client = OpenAI( base_url=\"http://127.0.0.1:7200/v1\", api_key=\"$KEY\", ) r = client.chat.completions.create( model=\"any\", messages=[ {\"role\": \"user\", \"content\": \"Hello!\"} ], ) print(r.choices[0].message.content)"
+        - generic [ref=e308]:
+          - generic [ref=e309]:
+            - text: Replace
+            - code [ref=e310]: $KEY
+            - text: with your origin's API key from the
+            - link "Origins" [ref=e311] [cursor=pointer]:
+              - /url: /ui/origins
+            - text: page.
+          - generic [ref=e312]:
+            - text: The
+            - code [ref=e313]: "\"model\""
+            - text: field in the request body is required by the OpenAI format but llamanager ignores it. Use
+            - code [ref=e314]: X-Llamanager-Model
+            - text: to select a specific model or profile.

@@ -518,9 +518,10 @@ def main(argv: list[str] | None = None) -> int:
     sp = sub.add_parser("reload", help="reload config.toml in-place")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_reload)
 
-    sp = sub.add_parser("logs", help="tail llama-server or llamanager logs")
-    sp.add_argument("--source", default="llama-server",
-                    choices=["llama-server", "llamanager"])
+    sp = sub.add_parser("logs", help="tail the activity stream (default) or raw logs")
+    sp.add_argument("--source", default="activity",
+                    help="activity | llama-server | llamanager | <engine name> "
+                         "(any *.log file in logs_dir is acceptable)")
     sp.add_argument("--tail", type=int, default=200)
     _add_admin_flags(sp); sp.set_defaults(func=cmd_logs)
 

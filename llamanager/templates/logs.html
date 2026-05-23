@@ -4,15 +4,19 @@
 {% block content %}
 <div class="lm-eyebrow">Configure</div>
 <h1 class="lm-page-title">Logs</h1>
-<p class="lm-page-lede">Tail of the most recent log lines. Switch source between the daemon&rsquo;s own log and the captured <code>llama-server</code> stdout/stderr.</p>
+<p class="lm-page-lede">The <strong>activity</strong> stream interleaves llamanager&rsquo;s own lifecycle events with the meaningful lines from <code>llama-server</code>&rsquo;s output &mdash; rewritten as natural language. Switch to a raw source if you need the unfiltered firehose.</p>
 
 <form class="lm-form lm-form--wide" method="get" action="/ui/logs" style="margin-top: 24px;">
   <div class="lm-form-row">
     <div class="lm-field" style="max-width: 18rem;">
       <label class="lm-field-label" for="log-source">Source</label>
       <select id="log-source" class="lm-select" name="source">
-        <option value="llama-server" {% if source == 'llama-server' %}selected{% endif %}>llama-server</option>
-        <option value="llamanager" {% if source == 'llamanager' %}selected{% endif %}>llamanager</option>
+        <option value="activity" {% if source == 'activity' %}selected{% endif %}>activity (smart)</option>
+        <option value="llama-server" {% if source == 'llama-server' %}selected{% endif %}>llama.cpp (raw)</option>
+        <option value="llamanager" {% if source == 'llamanager' %}selected{% endif %}>llamanager (raw)</option>
+        {% for engine in engine_logs %}
+        <option value="{{ engine }}" {% if source == engine %}selected{% endif %}>{{ engine }} (raw)</option>
+        {% endfor %}
       </select>
     </div>
     <div class="lm-field" style="max-width: 9rem;">

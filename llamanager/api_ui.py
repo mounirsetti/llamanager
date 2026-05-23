@@ -418,6 +418,38 @@ def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
         except Exception:
             pass
 
+    # On Linux, platform.processor() is usually empty or just "x86_64".
+    # The marketing name lives in /proc/cpuinfo under "model name".
+    if platform.system() == "Linux":
+        try:
+            with open("/proc/cpuinfo", "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if line.startswith("model name"):
+                        _, _, val = line.partition(":")
+                        val = val.strip()
+                        if val:
+                            info["cpu"] = val
+                        break
+        except OSError:
+            pass
+
+    # On Windows, platform.processor() returns the bare family/model
+    # identifier ("Intel64 Family 6 Model 198 Stepping 2, GenuineIntel").
+    # The marketing name lives in the registry.
+    if platform.system() == "Windows":
+        try:
+            import winreg
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+            ) as key:
+                name, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+                name = (name or "").strip()
+                if name:
+                    info["cpu"] = name
+        except OSError:
+            pass
+
     # RAM
     mem = psutil.virtual_memory()
     info["ram_total_gb"] = round(mem.total / (1024**3), 1)
@@ -1718,35 +1750,54 @@ async def images_file_serve(request: Request, day: str, origin: str, name: str,
 # ---------- logs ----------
 
 @router.get("/logs", response_class=HTMLResponse)
-async def logs_view(request: Request, source: str = "llama-server",
+async def logs_view(request: Request, source: str = "activity",
                     tail: int = 200,
                     _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    from .activity import discover_engine_logs
     cfg = request.app.state.cfg
-    p = cfg.logs_dir / ("llama-server.log" if source == "llama-server"
-                        else "llamanager.log")
+    engine_logs = discover_engine_logs(cfg.logs_dir)
     text = ""
-    if p.exists():
-        try:
-            with open(p, "rb") as f:
-                f.seek(0, 2)
-                size = f.tell()
-                block = 8192
-                data = b""
-                while size > 0 and data.count(b"\n") <= tail:
-                    step = min(block, size)
-                    size -= step
-                    f.seek(size)
-                    data = f.read(step) + data
-                text = b"\n".join(data.splitlines()[-tail:]).decode("utf-8", errors="replace")
-        except OSError as e:
-            text = f"(error reading log: {e})"
+    if source == "activity":
+        from .activity import build_activity, render_activity
+        entries = build_activity(
+            request.app.state.db, cfg.logs_dir, tail=tail,
+        )
+        text = render_activity(entries)
+    else:
+        if source == "llama-server":
+            p = cfg.logs_dir / "llama-server.log"
+        elif source == "llamanager":
+            p = cfg.logs_dir / "llamanager.log"
+        else:
+            engines = {n: pth for n, pth in engine_logs}
+            if source not in engines:
+                text = f"(unknown log source: {source})"
+                p = None
+            else:
+                p = engines[source]
+        if p is not None and p.exists():
+            try:
+                with open(p, "rb") as f:
+                    f.seek(0, 2)
+                    size = f.tell()
+                    block = 8192
+                    data = b""
+                    while size > 0 and data.count(b"\n") <= tail:
+                        step = min(block, size)
+                        size -= step
+                        f.seek(size)
+                        data = f.read(step) + data
+                    text = b"\n".join(data.splitlines()[-tail:]).decode("utf-8", errors="replace")
+            except OSError as e:
+                text = f"(error reading log: {e})"
     return templates.TemplateResponse(request, "logs.html", _ctx(
         request, source=source, tail=tail, text=text,
+        engine_logs=[name for name, _p in engine_logs],
     ))
 
 
 @router.get("/_partials/logs", response_class=HTMLResponse)
-async def logs_partial(request: Request, source: str = "llama-server",
+async def logs_partial(request: Request, source: str = "activity",
                        tail: int = 200,
                        _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     return await logs_view(request, source=source, tail=tail, _=_)

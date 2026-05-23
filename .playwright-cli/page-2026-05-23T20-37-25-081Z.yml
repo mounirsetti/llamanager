@@ -1,0 +1,100 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - text: llamanager
+        - generic "llama-server idle" [ref=e6]
+      - link "Launch llama-server →" [ref=e7] [cursor=pointer]:
+        - /url: /ui/launch
+    - navigation "Primary" [ref=e8]:
+      - generic [ref=e9]: Operate
+      - link "Dashboard" [ref=e10] [cursor=pointer]:
+        - /url: /ui/
+      - link "Queue" [ref=e11] [cursor=pointer]:
+        - /url: /ui/queue
+      - link "LLM models" [ref=e12] [cursor=pointer]:
+        - /url: /ui/models
+      - link "Launch" [ref=e13] [cursor=pointer]:
+        - /url: /ui/launch
+      - link "Chat" [ref=e14] [cursor=pointer]:
+        - /url: /ui/chat
+      - link "Images" [ref=e15] [cursor=pointer]:
+        - /url: /ui/images
+      - generic [ref=e16]: Configure
+      - link "Origins" [ref=e17] [cursor=pointer]:
+        - /url: /ui/origins
+      - link "Logs" [ref=e18] [cursor=pointer]:
+        - /url: /ui/logs
+      - link "LLM engines" [ref=e19] [cursor=pointer]:
+        - /url: /ui/setup
+      - link "Diffusion engines" [ref=e20] [cursor=pointer]:
+        - /url: /ui/setup-diffusion
+      - link "About" [ref=e21] [cursor=pointer]:
+        - /url: /ui/about
+    - generic [ref=e22]:
+      - generic [ref=e23]:
+        - group "Theme" [ref=e24]:
+          - button "Dark" [ref=e25] [cursor=pointer]
+          - button "Light" [pressed] [ref=e26] [cursor=pointer]
+        - button "↻" [ref=e27] [cursor=pointer]
+      - button "Sign out" [ref=e29] [cursor=pointer]
+  - main [ref=e30]:
+    - generic [ref=e32]:
+      - generic [ref=e33]:
+        - generic "no LLM loaded" [ref=e34]: LLM
+        - combobox "Language model to load" [ref=e36] [cursor=pointer]:
+          - option "— pick model —" [disabled] [selected]
+          - option "Qwen3.6-35B-A3B-Uncensored.Q2_K_P.gguf"
+          - option "mmproj-Qwen3.6-35B-A3B-Uncensored.f16.gguf"
+          - option "Qwen3.5-9B-Q4_K_M.gguf"
+          - option "mmproj-Qwen3.5-9B-BF16.gguf"
+          - option "Qwen3.6-35B-A3B-Q4_K_M.gguf ★"
+          - option "mmproj-Qwen3.6-35B-A3B-BF16.gguf"
+          - option "Qwen3.5-4B-Q4_K_M.gguf"
+        - combobox "Profile — leave on default to use the model's preferred one" [ref=e38] [cursor=pointer]:
+          - option "default profile" [selected]
+        - generic [ref=e39]:
+          - button "Load" [ref=e40] [cursor=pointer]:
+            - img [ref=e41]
+            - text: Load
+          - button "Unload the currently loaded LLM" [ref=e43] [cursor=pointer]:
+            - img [ref=e44]
+          - button "Toggle default LLM" [ref=e46] [cursor=pointer]:
+            - img [ref=e47]
+      - generic [ref=e50]:
+        - generic "HiDream-O1-Image set as default" [ref=e51]: Diff
+        - combobox "Default diffusion model — used when image requests omit the model field" [ref=e53] [cursor=pointer]:
+          - option "— none —"
+          - option "HiDream-O1-Image ★" [selected]
+          - option "Z-Image"
+          - option "flux2-dev"
+        - combobox "Profile — leave on default to use the model's preferred one" [ref=e55] [cursor=pointer]:
+          - option "default · hidream-dev-fast"
+          - option "hidream-full" [selected]
+        - button "Toggle default diffusion model" [pressed] [ref=e57] [cursor=pointer]:
+          - img [ref=e58]
+    - generic [ref=e60]:
+      - generic [ref=e61]: Configure
+      - heading "Logs" [level=1] [ref=e62]
+      - paragraph [ref=e63]:
+        - text: The
+        - strong [ref=e64]: activity
+        - text: stream interleaves llamanager’s own lifecycle events with the meaningful lines from
+        - code [ref=e65]: llama-server
+        - text: ’s output — rewritten as natural language. Switch to a raw source if you need the unfiltered firehose.
+      - generic [ref=e67]:
+        - generic [ref=e68]:
+          - generic [ref=e69]: Source
+          - combobox "Source" [ref=e70]:
+            - option "activity (smart)" [selected]
+            - option "llama-server (raw)"
+            - option "llamanager (raw)"
+        - generic [ref=e71]:
+          - generic [ref=e72]: Tail lines
+          - spinbutton "Tail lines" [ref=e73]: "200"
+        - button "Reload" [ref=e74] [cursor=pointer]
+      - generic [ref=e75]:
+        - generic [ref=e76]:
+          - generic [ref=e77]: activity
+          - generic [ref=e78]: tail · 200 lines
+        - generic [ref=e79]: "21:30:36 [llm] Slot context checkpoint restored from prompt cache 21:30:36 [llm] Slot 3 (task 5616) timings: 53 tokens in 0.09s (611.7 tok/s overall) 21:30:36 [llm] Slot 3: finished request (task 5616) — n_tokens = 2035, truncated = 0 21:30:37 [llm] Slot 3: started request (task 5619) 21:30:37 [llm] Slot context checkpoint restored from prompt cache 21:30:37 [llm] Slot 3 (task 5619) timings: 53 tokens in 0.08s (635.3 tok/s overall) 21:30:37 [llm] Slot 3: finished request (task 5619) — n_tokens = 2035, truncated = 0 21:30:37 [llm] Slot 3: started request (task 5622) 21:30:37 [llm] Slot context checkpoint restored from prompt cache 21:30:38 [llm] Slot 3 (task 5622) timings: 53 tokens in 0.08s (631.3 tok/s overall) 21:30:38 [llm] Slot 3: finished request (task 5622) — n_tokens = 2035, truncated = 0 21:30:38 [llm] Slot 3: started request (task 5625) 21:30:38 [llm] Slot context checkpoint restored from prompt cache 21:30:38 [llm] Slot 3 (task 5625) timings: 53 tokens in 0.08s (627.7 tok/s overall) 21:30:38 [llm] Slot 3: finished request (task 5625) — n_tokens = 2035, truncated = 0 21:30:39 [llm] Slot 3: started request (task 5628) 21:30:39 [llm] Slot context checkpoint restored from prompt cache 21:30:39 [llm] Slot 3 (task 5628) timings: 53 tokens in 0.08s (638.9 tok/s overall) 21:30:39 [llm] Slot 3: finished request (task 5628) — n_tokens = 2035, truncated = 0 21:30:39 [llm] Slot 3: started request (task 5631) 21:30:39 [llm] Slot context checkpoint restored from prompt cache 21:30:39 [llm] Slot 3 (task 5631) timings: 53 tokens in 0.08s (640.6 tok/s overall) 21:30:39 [llm] Slot 3: finished request (task 5631) — n_tokens = 2035, truncated = 0 21:30:40 [llm] Slot 3: started request (task 5634) 21:30:40 [llm] Slot context checkpoint restored from prompt cache 21:30:40 [llm] Slot 3 (task 5634) timings: 53 tokens in 0.09s (580.5 tok/s overall) 21:30:40 [llm] Slot 3: finished request (task 5634) — n_tokens = 2035, truncated = 0 21:30:41 [llm] Slot 3: started request (task 5637) 21:30:41 [llm] Slot context checkpoint restored from prompt cache 21:30:41 [llm] Slot 3 (task 5637) timings: 53 tokens in 0.08s (635.2 tok/s overall) 21:30:41 [llm] Slot 3: finished request (task 5637) — n_tokens = 2035, truncated = 0 21:30:41 [llm] Slot 3: started request (task 5640) 21:30:41 [llm] Slot context checkpoint restored from prompt cache 21:30:41 [llm] Slot 3 (task 5640) timings: 53 tokens in 0.09s (606.0 tok/s overall) 21:30:41 [llm] Slot 3: finished request (task 5640) — n_tokens = 2035, truncated = 0 21:30:42 [llm] Slot 3: started request (task 5643) 21:30:42 [llm] Slot context checkpoint restored from prompt cache 21:30:42 [llm] Slot 3 (task 5643) timings: 53 tokens in 0.08s (638.6 tok/s overall) 21:30:42 [llm] Slot 3: finished request (task 5643) — n_tokens = 2035, truncated = 0 21:30:42 [llm] Slot 3: started request (task 5646) 21:30:42 [llm] Slot context checkpoint restored from prompt cache 21:30:43 [llm] Slot 3 (task 5646) timings: 53 tokens in 0.08s (637.6 tok/s overall) 21:30:43 [llm] Slot 3: finished request (task 5646) — n_tokens = 2035, truncated = 0 21:30:43 [llm] Slot 3: started request (task 5649) 21:30:43 [llm] Slot context checkpoint restored from prompt cache 21:30:43 [llm] Slot 3 (task 5649) timings: 53 tokens in 0.08s (641.0 tok/s overall) 21:30:43 [llm] Slot 3: finished request (task 5649) — n_tokens = 2035, truncated = 0 21:30:44 [llm] Slot 3: started request (task 5652) 21:30:44 [llm] Slot context checkpoint restored from prompt cache 21:30:44 [llm] Slot 3 (task 5652) timings: 53 tokens in 0.08s (637.7 tok/s overall) 21:30:44 [llm] Slot 3: finished request (task 5652) — n_tokens = 2035, truncated = 0 21:30:44 [llm] Slot 3: started request (task 5655) 21:30:44 [llm] Slot context checkpoint restored from prompt cache 21:30:44 [llm] Slot 3 (task 5655) timings: 53 tokens in 0.08s (643.2 tok/s overall) 21:30:44 [llm] Slot 3: finished request (task 5655) — n_tokens = 2035, truncated = 0 21:30:45 [llm] Slot 3: started request (task 5658) 21:30:45 [llm] Slot context checkpoint restored from prompt cache 21:30:45 [llm] Slot 3 (task 5658) timings: 53 tokens in 0.08s (636.0 tok/s overall) 21:30:45 [llm] Slot 3: finished request (task 5658) — n_tokens = 2035, truncated = 0 21:30:46 [llm] Slot 3: started request (task 5661) 21:30:46 [llm] Slot context checkpoint restored from prompt cache 21:30:46 [llm] Slot 3 (task 5661) timings: 53 tokens in 0.08s (626.0 tok/s overall) 21:30:46 [llm] Slot 3: finished request (task 5661) — n_tokens = 2035, truncated = 0 21:30:46 [llm] Slot 3: started request (task 5664) 21:30:46 [llm] Slot context checkpoint restored from prompt cache 21:30:46 [llm] Slot 3 (task 5664) timings: 53 tokens in 0.08s (642.8 tok/s overall) 21:30:46 [llm] Slot 3: finished request (task 5664) — n_tokens = 2035, truncated = 0 21:30:47 [llm] Slot 3: started request (task 5667) 21:30:47 [llm] Slot context checkpoint restored from prompt cache 21:30:47 [llm] Slot 3 (task 5667) timings: 53 tokens in 0.08s (638.6 tok/s overall) 21:30:47 [llm] Slot 3: finished request (task 5667) — n_tokens = 2035, truncated = 0 21:30:47 [llm] Slot 3: started request (task 5670) 21:30:47 [llm] Slot context checkpoint restored from prompt cache 21:30:48 [llm] Slot 3 (task 5670) timings: 53 tokens in 0.09s (618.8 tok/s overall) 21:30:48 [llm] Slot 3: finished request (task 5670) — n_tokens = 2035, truncated = 0 21:30:48 [llm] Slot 3: started request (task 5673) 21:30:48 [llm] Slot context checkpoint restored from prompt cache 21:30:48 [llm] Slot 3 (task 5673) timings: 53 tokens in 0.09s (614.1 tok/s overall) 21:30:48 [llm] Slot 3: finished request (task 5673) — n_tokens = 2035, truncated = 0 21:30:49 [llm] Slot 3: started request (task 5676) 21:30:49 [llm] Slot context checkpoint restored from prompt cache 21:30:49 [llm] Slot 3 (task 5676) timings: 53 tokens in 0.08s (634.5 tok/s overall) 21:30:49 [llm] Slot 3: finished request (task 5676) — n_tokens = 2035, truncated = 0 21:30:49 [llm] Slot 3: started request (task 5679) 21:30:49 [llm] Slot context checkpoint restored from prompt cache 21:30:49 [llm] Slot 3 (task 5679) timings: 53 tokens in 0.08s (635.0 tok/s overall) 21:30:49 [llm] Slot 3: finished request (task 5679) — n_tokens = 2035, truncated = 0 21:30:50 [llm] Slot 3: started request (task 5682) 21:30:50 [llm] Slot context checkpoint restored from prompt cache 21:30:50 [llm] Slot 3 (task 5682) timings: 53 tokens in 0.09s (603.6 tok/s overall) 21:30:50 [llm] Slot 3: finished request (task 5682) — n_tokens = 2035, truncated = 0 21:30:51 [llm] Slot 3: started request (task 5685) 21:30:51 [llm] Slot context checkpoint restored from prompt cache 21:30:51 [llm] Slot 3 (task 5685) timings: 53 tokens in 0.08s (626.6 tok/s overall) 21:30:51 [llm] Slot 3: finished request (task 5685) — n_tokens = 2035, truncated = 0 21:30:51 [llm] Slot 3: started request (task 5688) 21:30:51 [llm] Slot context checkpoint restored from prompt cache 21:30:51 [llm] Slot 3 (task 5688) timings: 53 tokens in 0.09s (611.0 tok/s overall) 21:30:51 [llm] Slot 3: finished request (task 5688) — n_tokens = 2035, truncated = 0 21:30:52 [llm] Slot 3: started request (task 5691) 21:30:52 [llm] Slot context checkpoint restored from prompt cache 21:30:52 [llm] Slot 3 (task 5691) timings: 53 tokens in 0.08s (638.2 tok/s overall) 21:30:52 [llm] Slot 3: finished request (task 5691) — n_tokens = 2035, truncated = 0 21:30:53 [llm] Slot 3: started request (task 5694) 21:30:53 [llm] Slot context checkpoint restored from prompt cache 21:30:53 [llm] Slot 3 (task 5694) timings: 53 tokens in 0.08s (637.0 tok/s overall) 21:30:53 [llm] Slot 3: finished request (task 5694) — n_tokens = 2035, truncated = 0 21:30:53 [llm] Slot 3: started request (task 5697) 21:30:53 [llm] Slot context checkpoint restored from prompt cache 21:30:53 [llm] Slot 3 (task 5697) timings: 53 tokens in 0.08s (642.1 tok/s overall) 21:30:53 [llm] Slot 3: finished request (task 5697) — n_tokens = 2035, truncated = 0 21:30:54 [llm] Slot 3: started request (task 5700) 21:30:54 [llm] Slot context checkpoint restored from prompt cache 21:30:54 [llm] Slot 3 (task 5700) timings: 53 tokens in 0.08s (632.8 tok/s overall) 21:30:54 [llm] Slot 3: finished request (task 5700) — n_tokens = 2035, truncated = 0 21:30:54 [llm] Slot 3: started request (task 5703) 21:30:54 [llm] Slot context checkpoint restored from prompt cache 21:30:55 [llm] Slot 3 (task 5703) timings: 53 tokens in 0.09s (613.9 tok/s overall) 21:30:55 [llm] Slot 3: finished request (task 5703) — n_tokens = 2035, truncated = 0 21:30:55 [llm] Slot 3: started request (task 5706) 21:30:55 [llm] Slot context checkpoint restored from prompt cache 21:30:55 [llm] Slot 3 (task 5706) timings: 53 tokens in 0.09s (613.9 tok/s overall) 21:30:55 [llm] Slot 3: finished request (task 5706) — n_tokens = 2035, truncated = 0 21:30:56 [llm] Slot 3: started request (task 5709) 21:30:56 [llm] Slot context checkpoint restored from prompt cache 21:30:56 [llm] Slot 3 (task 5709) timings: 53 tokens in 0.09s (584.8 tok/s overall) 21:30:56 [llm] Slot 3: finished request (task 5709) — n_tokens = 2035, truncated = 0 21:30:56 [llm] Slot 3: started request (task 5712) 21:30:56 [llm] Slot context checkpoint restored from prompt cache 21:30:56 [llm] Slot 3 (task 5712) timings: 53 tokens in 0.09s (597.9 tok/s overall) 21:30:56 [llm] Slot 3: finished request (task 5712) — n_tokens = 2035, truncated = 0 21:30:57 [llm] Slot 3: started request (task 5715) 21:30:57 [llm] Slot context checkpoint restored from prompt cache 21:30:57 [llm] Slot 3 (task 5715) timings: 53 tokens in 0.08s (639.9 tok/s overall) 21:30:57 [llm] Slot 3: finished request (task 5715) — n_tokens = 2035, truncated = 0 21:30:57 [llm] Slot 3: started request (task 5718) 21:30:57 [llm] Slot context checkpoint restored from prompt cache 21:30:58 [llm] Slot 3 (task 5718) timings: 53 tokens in 0.08s (634.8 tok/s overall) 21:30:58 [llm] Slot 3: finished request (task 5718) — n_tokens = 2035, truncated = 0 21:30:58 [llm] Slot 3: started request (task 5721) 21:30:58 [llm] Slot context checkpoint restored from prompt cache 21:30:58 [llm] Slot 3 (task 5721) timings: 53 tokens in 0.08s (630.3 tok/s overall) 21:30:58 [llm] Slot 3: finished request (task 5721) — n_tokens = 2035, truncated = 0 21:30:59 [llm] Slot 3: started request (task 5724) 21:30:59 [llm] Slot context checkpoint restored from prompt cache 21:30:59 [llm] Slot 3 (task 5724) timings: 53 tokens in 0.08s (635.6 tok/s overall) 21:30:59 [llm] Slot 3: finished request (task 5724) — n_tokens = 2035, truncated = 0 21:30:59 [llm] Slot 3: started request (task 5727) 21:30:59 [llm] Slot context checkpoint restored from prompt cache 21:30:59 [llm] Slot 3 (task 5727) timings: 53 tokens in 0.08s (636.7 tok/s overall) 21:30:59 [llm] Slot 3: finished request (task 5727) — n_tokens = 2035, truncated = 0 21:31:00 [llm] Slot 3: started request (task 5730) 21:31:00 [llm] Slot context checkpoint restored from prompt cache 21:31:00 [llm] Slot 3 (task 5730) timings: 53 tokens in 0.08s (635.5 tok/s overall) 21:31:00 [llm] Slot 3: finished request (task 5730) — n_tokens = 2035, truncated = 0 21:31:01 [llm] Slot 3: started request (task 5733) 21:31:01 [llm] Slot context checkpoint restored from prompt cache 21:31:01 [llm] Slot 3 (task 5733) timings: 53 tokens in 0.08s (639.3 tok/s overall) 21:31:01 [llm] Slot 3: finished request (task 5733) — n_tokens = 2035, truncated = 0 21:31:01 [llm] Slot 3: started request (task 5736) 21:31:01 [llm] Slot context checkpoint restored from prompt cache 21:31:01 [llm] Slot 3 (task 5736) timings: 53 tokens in 0.08s (641.2 tok/s overall) 21:31:01 [llm] Slot 3: finished request (task 5736) — n_tokens = 2035, truncated = 0 21:31:02 [llm] Slot 3: started request (task 5739) 21:31:02 [llm] Slot context checkpoint restored from prompt cache 21:31:02 [llm] Slot 3 (task 5739) timings: 53 tokens in 0.08s (637.5 tok/s overall) 21:31:02 [llm] Slot 3: finished request (task 5739) — n_tokens = 2035, truncated = 0 21:31:03 [llm] Slot 3: started request (task 5742) 21:31:03 [llm] Slot context checkpoint restored from prompt cache 21:31:03 [llm] Slot 3 (task 5742) timings: 53 tokens in 0.08s (636.5 tok/s overall) 21:31:03 [llm] Slot 3: finished request (task 5742) — n_tokens = 2035, truncated = 0 21:33:59 [llm] Slot 3: started request (task 5745) 21:33:59 [llm] Slot context checkpoint restored from prompt cache 21:33:59 [llm] Slot 3 (task 5745) timings: 53 tokens in 0.10s (556.0 tok/s overall) 21:33:59 [llm] Slot 3: finished request (task 5745) — n_tokens = 2035, truncated = 0 21:40:51 [llm] Slot 2: started request (task 5748) 21:40:56 [llm] Slot 2 (task 5748) timings: 2249 tokens in 4.89s (460.2 tok/s overall) 21:40:56 [llm] Slot 2: finished request (task 5748) — n_tokens = 2248, truncated = 0 21:40:57 [llm] Slot 2: started request (task 6402) 21:40:57 [llm] Slot context checkpoint restored from prompt cache 21:41:24 [llm] Slot 2 (task 6402) timings: 4159 tokens in 27.22s (152.8 tok/s overall) 21:41:24 [llm] Slot 2: finished request (task 6402) — n_tokens = 5752, truncated = 0 21:42:03 [llm] Slot 2: started request (task 10500) 21:42:03 [llm] Slot context checkpoint restored from prompt cache 21:42:31 [llm] Slot 2 (task 10500) timings: 4169 tokens in 27.29s (152.7 tok/s overall) 21:42:31 [llm] Slot 2: finished request (task 10500) — n_tokens = 5762, truncated = 0 21:50:06 [llm] Slot 2: started request (task 14598) 21:50:06 [llm] Slot context checkpoint restored from prompt cache 21:50:14 [llm] Slot 2 (task 14598) timings: 1108 tokens in 7.22s (153.4 tok/s overall) 21:50:14 [llm] Slot 2: finished request (task 14598) — n_tokens = 2701, truncated = 0 21:50:14 [llm] Slot 2: started request (task 15703) 21:50:14 [llm] Slot context checkpoint restored from prompt cache 21:53:12 [llm] Cancel requested for task 15703 21:53:12 [llm] Slot 2: finished request (task 15703) — n_tokens = 26872, truncated = 0 21:59:54 [llm] Slot 2: started request (task 40906) 21:59:54 [llm] Slot context checkpoint restored from prompt cache 22:01:47 [llm] Slot 2 (task 40906) timings: 16388 tokens in 112.84s (145.2 tok/s overall) 22:01:47 [llm] Slot 2: finished request (task 40906) — n_tokens = 17981, truncated = 0 22:35:30 [llm] llama-server shutting down 22:35:33 [lm ] llama-server stopped"

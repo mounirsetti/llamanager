@@ -325,16 +325,29 @@ async def origins_rotate(request: Request, origin_id: int,
 # ---------- logs / events ----------
 
 @router.get("/logs")
-async def logs(request: Request, tail: int = 200, source: str = "llama-server",
+async def logs(request: Request, tail: int = 200, source: str = "activity",
                _: Origin = Depends(admin_origin)) -> PlainTextResponse:
     cfg = request.app.state.cfg
+    if source == "activity":
+        from .activity import build_activity, render_activity
+        entries = build_activity(
+            request.app.state.db, cfg.logs_dir, tail=tail,
+        )
+        return PlainTextResponse(render_activity(entries))
     logfile: Path
     if source == "llama-server":
         logfile = cfg.logs_dir / "llama-server.log"
     elif source == "llamanager":
         logfile = cfg.logs_dir / "llamanager.log"
     else:
-        raise HTTPException(status_code=400, detail="unknown log source")
+        # Treat ``source`` as an engine name; the corresponding raw
+        # log file is logs_dir/<engine>.log. Only accept it if the file
+        # actually exists, to avoid arbitrary-path reads from the param.
+        from .activity import discover_engine_logs
+        candidate = {n: p for n, p in discover_engine_logs(cfg.logs_dir)}
+        if source not in candidate:
+            raise HTTPException(status_code=400, detail="unknown log source")
+        logfile = candidate[source]
     if not logfile.exists():
         return PlainTextResponse("")
     # Tail N lines.
