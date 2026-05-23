@@ -137,10 +137,11 @@ class QueueManager:
             model=model_required,
             priority=req.priority,
         )
-        # Surface the inbound request on the activity feed. The text
-        # family carries actual user prompts; the image family carries
-        # diffusion engine requests. Either way we want a "received" beat
-        # plus the matching "done" / "failed" beat from mark_in_flight_done.
+        # Surface the inbound request on the activity feed *and* in the
+        # raw log file. The text family carries actual user prompts; the
+        # image family carries diffusion engine requests. Either way we
+        # want a "received" beat plus the matching "done" / "failed" beat
+        # from mark_in_flight_done.
         self.db.log_event("request_received", {
             "id": req.request_id,
             "task_type": req.task_type,
@@ -148,6 +149,10 @@ class QueueManager:
             "profile": profile_required,
             "origin": origin.name,
         })
+        label = "chat" if req.task_type == "text" else req.task_type
+        target = f"`{model_required}`" if model_required else "default model"
+        log.info("%s: request from %s for %s (id=%s)",
+                 label, origin.name, target, req.request_id)
         async with self._cv:
             heapq.heappush(self._heap, (req.heap_key(), req))
             self._by_id[req.request_id] = req
@@ -266,6 +271,27 @@ class QueueManager:
             "completion_tokens": completion_tokens,
             "error": error,
         })
+        # Same beat, but written through Python logging so it lands in
+        # the raw llamanager.log file (which doesn't tail the DB events
+        # table). Activity-view rendering still happens from the DB row.
+        label = "chat" if req.task_type == "text" else req.task_type
+        if req.status == "done":
+            if completion_tokens and duration_s > 0:
+                log.info("%s: response sent — %d tokens in %.1fs (%.1f tok/s) [id=%s]",
+                         label, completion_tokens, duration_s,
+                         completion_tokens / duration_s, req.request_id)
+            elif completion_tokens:
+                log.info("%s: response sent — %d tokens [id=%s]",
+                         label, completion_tokens, req.request_id)
+            else:
+                log.info("%s: response sent in %.1fs [id=%s]",
+                         label, duration_s, req.request_id)
+        elif req.status == "cancelled":
+            log.info("%s: cancelled after %.1fs [id=%s]",
+                     label, duration_s, req.request_id)
+        else:  # failed
+            log.warning("%s: failed — %s [id=%s]",
+                        label, error or "unknown", req.request_id)
         # Family-aware capacity release. We only refund the slot when this
         # request was actually counted as in-flight; the early-abort
         # paths (ref-image decode failure, profile not found, etc.) call
