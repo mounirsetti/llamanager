@@ -2,6 +2,16 @@
 {% set active_downloads = active_downloads + (downloads | selectattr('status', 'equalto', 'pending') | list) %}
 {% set finished_downloads = downloads | selectattr('status', 'in', ['failed', 'cancelled']) | list %}
 
+{# Shared datalist of mmproj-looking GGUFs detected on disk. Both the
+   edit and create profile forms reference it via list="mmproj-options",
+   giving users a dropdown of known files while still allowing a custom
+   path (e.g. a cross-repo reference). #}
+{% if mmproj_options %}
+<datalist id="mmproj-options">
+  {% for opt in mmproj_options %}<option value="{{ opt }}"></option>{% endfor %}
+</datalist>
+{% endif %}
+
 {# Backwards-compat for callers that didn't pre-split the list. #}
 {% if text_models is not defined or image_models is not defined %}
   {% set _text = [] %}
@@ -80,9 +90,9 @@
         </div>
 
         {# ---- Profiles for this model ---- #}
-        <details class="lm-model__profiles">
+        <details class="lm-model__profiles" open>
           <summary class="lm-model__profiles-summary">
-            <span class="lm-eyebrow">Profiles</span>
+            <span class="lm-eyebrow">Profiles ({{ m.profiles | length }})</span>
             {% if m.default_profile %}
             <span style="font-size: 0.75rem; color: var(--fg-2);">
               default: <code style="color: var(--accent);">{{ m.default_profile }}</code>
@@ -179,8 +189,11 @@
                         <span class="lm-field-hint" style="white-space:nowrap;">/ {{ ram_total_gb }} GB</span>
                       </div>
 
-                      <label class="lm-field-label">mmproj (optional, GGUF multimodal)</label>
+                      <label class="lm-field-label">mmproj (optional, GGUF multimodal)
+                        {% if mmproj_options %}<span class="lm-field-hint">{{ mmproj_options|length }} detected on disk &mdash; click to pick</span>{% endif %}
+                      </label>
                       <input class="lm-input lm-input--mono" type="text" name="mmproj" value="{{ prof.mmproj or '' }}"
+                             list="mmproj-options"
                              placeholder="repo/mmproj.gguf"
                              {% if m.engine != 'llama' %}disabled{% endif %}>
 
@@ -249,9 +262,12 @@
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="model_id" value="{{ m.model_id }}">
 
-                <label class="lm-field-label">Profile name</label>
+                <label class="lm-field-label">Profile name
+                  <span class="lm-field-hint">lowercase letters, digits and hyphens; must start with a letter or digit (e.g. <code>fast</code>, <code>long-ctx</code>, <code>q4-balanced</code>)</span>
+                </label>
                 <input class="lm-input" type="text" name="name" required
                        pattern="[a-z0-9][a-z0-9\-]*"
+                       title="Lowercase letters, digits and hyphens only. Must start with a letter or digit. Examples: fast, long-ctx, q4-balanced."
                        placeholder="e.g. fast, balanced, creative">
 
                 <div class="lm-tabs" role="tablist">
@@ -315,8 +331,11 @@
                     <span class="lm-field-hint" style="white-space:nowrap;">/ {{ ram_total_gb }} GB</span>
                   </div>
 
-                  <label class="lm-field-label">mmproj (optional)</label>
+                  <label class="lm-field-label">mmproj (optional)
+                    {% if mmproj_options %}<span class="lm-field-hint">{{ mmproj_options|length }} detected on disk &mdash; click to pick</span>{% endif %}
+                  </label>
                   <input class="lm-input lm-input--mono" type="text" name="mmproj"
+                         list="mmproj-options"
                          placeholder="repo/mmproj.gguf"
                          {% if m.engine != 'llama' %}disabled{% endif %}>
 

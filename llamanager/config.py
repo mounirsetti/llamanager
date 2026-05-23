@@ -694,7 +694,10 @@ def _validate_profile_name(name: str) -> str:
     name = name.strip().lower()
     if not _PROFILE_NAME_RE.match(name):
         raise ValueError(
-            f"profile name must be lowercase alphanumeric with hyphens: {name!r}"
+            f"invalid profile name {name!r}: only lowercase letters, "
+            f"digits and hyphens are allowed, and the first character "
+            f"must be a letter or digit (e.g. 'fast', 'long-ctx', "
+            f"'q4-balanced')"
         )
     return name
 

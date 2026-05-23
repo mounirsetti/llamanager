@@ -5,6 +5,14 @@
 <div class="lm-eyebrow">Configure</div>
 <h1 class="lm-page-title">Profiles moved</h1>
 <p class="lm-page-lede">
-  Profile management now lives on the <a href="/ui/models" style="color: var(--accent);">Models page</a>. Each profile is a child of the model it configures, with an optional <em>global default profile</em> at the top for args-only fallbacks. <a href="/ui/models" style="color: var(--accent);">Go to Models &rarr;</a>
+  Profile management now lives on the <a href="/ui/models" style="color: var(--accent);">Models page</a>. To create or edit a profile:
+</p>
+<ol style="font-size: 0.9375rem; color: var(--fg-1); line-height: 1.75; max-width: 64ch; padding-left: 22px;">
+  <li>Open <a href="/ui/models" style="color: var(--accent);">Models</a>.</li>
+  <li>Click a model row to expand it.</li>
+  <li>Under the model actions you'll see <strong>Profiles</strong> listed &mdash; edit any, or click <code>+ Add profile</code>.</li>
+</ol>
+<p class="lm-page-lede" style="font-size: 0.875rem; color: var(--fg-2);">
+  Engine-keyed default args (applied to every model of a given engine when its profile doesn't override) live in the <em>Engine defaults</em> section at the top of the Models page. <a href="/ui/models" style="color: var(--accent);">Go to Models &rarr;</a>
 </p>
 {% endblock %}

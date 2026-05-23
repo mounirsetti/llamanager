@@ -982,6 +982,20 @@ def _models_ctx(request: Request) -> dict:
     # Combined list kept for any callers that still expect ``models``.
     all_models = text_models + image_models
 
+    # Detect mmproj-style GGUFs on disk so the profile editor can offer
+    # a pickable list instead of a free-text path. Same heuristic the
+    # registry uses internally when auto-seeding profiles (filename
+    # contains "mmproj"). Cross-repo references still work via custom
+    # input — the field is a <datalist>-backed text input, not a select.
+    mmproj_options: list[str] = []
+    if cfg.models_dir.exists():
+        for p in sorted(cfg.models_dir.rglob("*.gguf")):
+            if not p.is_file():
+                continue
+            if "mmproj" not in p.name.lower():
+                continue
+            mmproj_options.append(p.relative_to(cfg.models_dir).as_posix())
+
     return _ctx(
         request,
         models=all_models,
@@ -997,6 +1011,7 @@ def _models_ctx(request: Request) -> dict:
         ram_spill_policies=VALID_RAM_SPILL_POLICIES,
         ram_total_gb=round(ram_total_gb, 1),
         vram_total_gb=round(float(vram_total_gb), 1),
+        mmproj_options=mmproj_options,
     )
 
 
@@ -1490,8 +1505,7 @@ def _version_newer(remote: str, local: str) -> bool:
     return _parse_version(remote) > _parse_version(local)
 
 
-from importlib.metadata import version as _pkg_version
-LLAMANAGER_VERSION = _pkg_version("llamanager")
+from . import __version__ as LLAMANAGER_VERSION
 GITHUB_REPO = "mounirsetti/llamanager"
 
 

@@ -16,6 +16,68 @@
   {% include "_dashboard_partial.html" %}
 </div>
 
+{# ---- Try it (direct UI shortcuts) ---- #}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Try it</span>
+    <span class="lm-section-meta">in-browser playgrounds</span>
+  </header>
+
+  <div style="
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 2px;
+    background: var(--bg-3);
+    border: 1px solid var(--bg-3);
+  ">
+    <a href="/ui/chat" style="
+      background: var(--bg-0);
+      padding: 20px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      text-decoration: none;
+      color: inherit;
+      transition: background 120ms ease;
+    " onmouseover="this.style.background='var(--bg-1)'" onmouseout="this.style.background='var(--bg-0)'">
+      <span style="
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 0.625rem;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--accent);
+      ">Chat &rarr;</span>
+      <span style="font-family: 'Fraunces', serif; font-size: 1.0625rem; color: var(--fg-0);">Direct chat playground</span>
+      <span style="font-size: 0.8125rem; color: var(--fg-2);">
+        Streaming chat against the loaded model — pick a profile, set a system prompt, save conversations.
+      </span>
+    </a>
+
+    <a href="/ui/images" style="
+      background: var(--bg-0);
+      padding: 20px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      text-decoration: none;
+      color: inherit;
+      transition: background 120ms ease;
+    " onmouseover="this.style.background='var(--bg-1)'" onmouseout="this.style.background='var(--bg-0)'">
+      <span style="
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 0.625rem;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--accent);
+      ">Images &rarr;</span>
+      <span style="font-family: 'Fraunces', serif; font-size: 1.0625rem; color: var(--fg-0);">Direct image generation</span>
+      <span style="font-size: 0.8125rem; color: var(--fg-2);">
+        Generate images with the configured diffusion engine (HiDream / Flux2). Browse the gallery and re-roll prompts.
+      </span>
+    </a>
+  </div>
+</section>
+
 {# ---- Quick reference (static, outside the polled div) ---- #}
 <section class="lm-section">
   <header class="lm-section-head">
