@@ -1,0 +1,112 @@
+"""Curated catalog of supported diffusion models.
+
+Each entry says "this is a model we know how to run" — the on-disk
+``model_id`` it produces after a HF snapshot download, which engine it
+binds to, and the canonical HF repo / subfolder to pull from. The
+Diffusion-models page joins this catalog against what's actually on
+disk so it can show "Installed (activate / edit profiles)" or "Not
+installed (install on the Diffusion engines page)" for each row.
+
+Keeping the catalog in a single Python module (vs in config.toml) means
+we can ship updates with code releases — new model support lands as
+one new entry here, no operator action required.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class CatalogEntry:
+    """One known diffusion model.
+
+    ``canonical_id`` is the directory name produced by a default HF
+    snapshot download into ``models_dir``. The registry's model_id
+    matches it (except for sub-folder pulls, where the operator's
+    target name overrides this — see ``Z-Anime`` for the subfolder
+    case).
+
+    ``hf_repo`` and ``subfolder`` populate the existing download form
+    on the Diffusion engines page; the install link prefills both so
+    one click takes the operator from "I want this model" to
+    "downloading".
+    """
+    canonical_id: str
+    engine: str            # 'hidream' | 'z_image' | 'flux2'
+    label: str             # human-readable name
+    hf_repo: str           # 'org/name'
+    subfolder: str = ""    # optional HF subfolder
+    approx_size_gb: float = 0.0
+    description: str = ""  # 1-3 sentences for the catalog row
+    homepage: str = ""     # canonical model URL
+
+
+CATALOG: list[CatalogEntry] = [
+    CatalogEntry(
+        canonical_id="HiDream-O1-Image",
+        engine="hidream",
+        label="HiDream-O1-Image",
+        hf_repo="HiDream-ai/HiDream-O1-Image",
+        approx_size_gb=18.0,
+        description=(
+            "HiDream's flagship text-to-image model. Two recipes ship in "
+            "one checkpoint: a 28-step 'dev' path and a 50-step 'full' "
+            "path with classifier-free guidance. Native resolution buckets "
+            "from 2048x2048 up to 3104x1312."
+        ),
+        homepage="https://huggingface.co/HiDream-ai/HiDream-O1-Image",
+    ),
+    CatalogEntry(
+        canonical_id="Z-Image",
+        engine="z_image",
+        label="Z-Image (Tongyi-MAI)",
+        hf_repo="Tongyi-MAI/Z-Image",
+        approx_size_gb=20.0,
+        description=(
+            "Alibaba Tongyi-MAI's DiT-based text-to-image model. Diffusers "
+            "layout, runs via the bundled z_image runner. Solid all-rounder."
+        ),
+        homepage="https://huggingface.co/Tongyi-MAI/Z-Image",
+    ),
+    CatalogEntry(
+        canonical_id="Z-Anime",
+        engine="z_image",
+        label="Z-Anime (Z-Image fine-tune)",
+        hf_repo="SeeSee21/Z-Anime",
+        subfolder="diffusers",
+        approx_size_gb=15.0,
+        description=(
+            "Anime / stylised fine-tune of Z-Image. The full repo is 203 GB "
+            "(checkpoint variants for many pipelines); the 'diffusers/' "
+            "subfolder is the runnable variant for llamanager (~12-20 GB)."
+        ),
+        homepage="https://huggingface.co/SeeSee21/Z-Anime",
+    ),
+    CatalogEntry(
+        canonical_id="FLUX.2-dev",
+        engine="flux2",
+        label="FLUX 2 Dev",
+        hf_repo="black-forest-labs/FLUX.2-dev",
+        approx_size_gb=24.0,
+        description=(
+            "Black Forest Labs' second-generation flow-matching model. "
+            "Run via sd-cli (stable-diffusion.cpp); the HF repo holds the "
+            "canonical fp16 weights — for runnable GGUF quants, search for "
+            "a community re-host."
+        ),
+        homepage="https://huggingface.co/black-forest-labs/FLUX.2-dev",
+    ),
+]
+
+
+def for_engine(engine: str) -> list[CatalogEntry]:
+    """Catalog entries that target one engine."""
+    return [e for e in CATALOG if e.engine == engine]
+
+
+def by_canonical_id(model_id: str) -> CatalogEntry | None:
+    """Look up a catalog entry by its canonical on-disk model id."""
+    for e in CATALOG:
+        if e.canonical_id == model_id:
+            return e
+    return None

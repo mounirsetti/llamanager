@@ -86,6 +86,13 @@ SCHEMA_VERSIONS: list[str] = [
     );
     CREATE INDEX idx_engine_installs_engine ON engine_installs(engine);
     """,
+    # v4: opaque JSON blob for per-install options (e.g. patch_flash_attn
+    # for the hidream AMD path, target_rocm_release, etc.). NULL on legacy
+    # rows. Kept as TEXT rather than a wide column-per-flag so future
+    # installers can add their own without a schema bump.
+    """
+    ALTER TABLE engine_installs ADD COLUMN options_json TEXT;
+    """,
 ]
 
 

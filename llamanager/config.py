@@ -324,6 +324,13 @@ class Config:
     # docs/hidream.md and docs/flux2.md).
     hidream_python: str = ""         # path to the .venv-hidream Python
     hidream_repo: str = ""           # path to the HiDream-O1-Image source folder
+    # Pin the AMD ROCm release the hidream auto-installer targets. Empty
+    # string → engine_installer.AMD_ROCM_REL (curated default). Set to
+    # e.g. "rocm-rel-7.2.1" to override (matches a directory under
+    # https://repo.radeon.com/rocm/manylinux/). Operators on AMD who
+    # need stability over freshness can pin this; otherwise the
+    # scraper picks the newest paired set in the curated release.
+    hidream_target_rocm_release: str = ""
     flux2_sd_cli: str = ""           # path to sd-cli (or sd-cli.exe)
     flux2_device_index: int | None = None  # GGML_VK_VISIBLE_DEVICES value
     # Z-Image only needs a Python interpreter — the runner script ships
@@ -500,6 +507,8 @@ def load_config(path: Path | None = None) -> Config:
         queue_timeout_s=int(q.get("queue_timeout_s", 300)),
         hidream_python=str(image_cfg.get("hidream_python", "") or ""),
         hidream_repo=str(image_cfg.get("hidream_repo", "") or ""),
+        hidream_target_rocm_release=str(
+            image_cfg.get("hidream_target_rocm_release", "") or ""),
         flux2_sd_cli=str(image_cfg.get("flux2_sd_cli", "") or ""),
         flux2_device_index=_coerce_int(image_cfg.get("flux2_device_index")),
         z_image_python=str(image_cfg.get("z_image_python", "") or ""),
@@ -879,6 +888,7 @@ def update_defaults(cfg_path: Path, *,
 def update_image_config(cfg_path: Path, *,
                         hidream_python: str | None = None,
                         hidream_repo: str | None = None,
+                        hidream_target_rocm_release: str | None = None,
                         flux2_sd_cli: str | None = None,
                         flux2_device_index: int | None = None,
                         clear_flux2_device_index: bool = False,
@@ -897,6 +907,8 @@ def update_image_config(cfg_path: Path, *,
         img["hidream_python"] = hidream_python
     if hidream_repo is not None:
         img["hidream_repo"] = hidream_repo
+    if hidream_target_rocm_release is not None:
+        img["hidream_target_rocm_release"] = hidream_target_rocm_release
     if flux2_sd_cli is not None:
         img["flux2_sd_cli"] = flux2_sd_cli
     if clear_flux2_device_index:

@@ -1,0 +1,395 @@
+{% extends "base.html" %}
+{% set active = 'diffusion-models' %}
+{% block title %}Diffusion models - llamanager{% endblock %}
+{% block content %}
+
+<style>
+  /* ====== Diffusion models page ====== */
+  .lm-dm-engine {
+    display: flex; flex-direction: column; gap: 8px;
+    margin-bottom: 24px;
+  }
+  .lm-dm-engine__head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 8px; padding: 4px 0 8px;
+    border-bottom: 1px solid var(--bg-3);
+  }
+  .lm-dm-engine__title { font-size: 0.875rem; color: var(--fg-1); }
+  .lm-dm-engine__meta { font-size: 0.75rem; color: var(--fg-2); }
+
+  .lm-dm-model {
+    border: 1px solid var(--bg-3);
+    background: var(--bg-1);
+    padding: 12px 14px;
+  }
+  .lm-dm-model + .lm-dm-model { margin-top: 6px; }
+  .lm-dm-model__head {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    margin-bottom: 4px;
+  }
+  .lm-dm-model__name { font-size: 0.9375rem; color: var(--fg-0); margin: 0; }
+  .lm-dm-model__desc {
+    font-size: 0.8125rem; color: var(--fg-2);
+    max-width: 80ch; margin: 4px 0 12px;
+  }
+
+  .lm-dm-pill {
+    display: inline-block;
+    padding: 1px 7px;
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    border: 1px solid var(--bg-3);
+    color: var(--fg-2);
+    border-radius: 2px;
+  }
+  .lm-dm-pill--ok     { color: var(--ok); border-color: var(--ok); }
+  .lm-dm-pill--accent { color: var(--accent); border-color: var(--accent); }
+  .lm-dm-pill--muted  { color: var(--fg-3); border-color: var(--bg-3); }
+
+  .lm-dm-section { margin-top: 12px; }
+  .lm-dm-section__head {
+    display: flex; align-items: baseline; gap: 8px;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--fg-2);
+    margin-bottom: 6px;
+  }
+
+  .lm-dm-profile {
+    border: 1px solid var(--bg-3);
+    background: var(--bg-0);
+    margin-bottom: 4px;
+  }
+  .lm-dm-profile.is-default { border-color: var(--accent); }
+  .lm-dm-profile summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 6px 10px;
+    display: flex; align-items: center; gap: 10px;
+    font-size: 0.8125rem;
+  }
+  .lm-dm-profile summary::before {
+    content: "▸";
+    color: var(--fg-3);
+    transition: transform 120ms ease;
+  }
+  .lm-dm-profile[open] summary::before {
+    transform: rotate(90deg);
+  }
+  .lm-dm-profile__name { color: var(--fg-0); }
+  .lm-dm-profile__summary { color: var(--fg-2); font-size: 0.75rem; }
+  .lm-dm-profile__body {
+    padding: 10px 12px 12px;
+    border-top: 1px solid var(--bg-3);
+  }
+
+  .lm-dm-field {
+    display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px;
+  }
+  .lm-dm-field__label {
+    font-size: 0.75rem; color: var(--fg-2);
+    text-transform: uppercase; letter-spacing: 0.1em;
+  }
+  .lm-dm-field__help { font-size: 0.75rem; color: var(--fg-3); }
+
+  .lm-dm-actions {
+    display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px;
+  }
+  .lm-dm-actions form { display: inline; }
+
+  .lm-dm-empty {
+    color: var(--fg-3); font-size: 0.8125rem;
+    padding: 8px 0;
+  }
+
+  .lm-dm-default-block {
+    background: var(--bg-0);
+    border: 1px dashed var(--bg-3);
+    padding: 10px 12px;
+    margin-bottom: 8px;
+  }
+  .lm-dm-default-block code { color: var(--fg-1); }
+</style>
+
+{# ---------- Macros ---------- #}
+
+{% macro field_input(field, value, name_prefix="field_") %}
+  {% set fname = name_prefix ~ field.key %}
+  {% if field.kind == 'select' %}
+    <select class="lm-input lm-input--mono" name="{{ fname }}">
+      <option value="">— inherit —</option>
+      {% for opt in field.options %}
+      <option value="{{ opt }}" {% if value == opt %}selected{% endif %}>{{ opt }}</option>
+      {% endfor %}
+    </select>
+  {% elif field.kind == 'int' %}
+    <input class="lm-input lm-input--mono" type="number" step="1"
+           name="{{ fname }}" value="{{ value }}"
+           placeholder="{% if field.default is not none %}{{ field.default }}{% endif %}">
+  {% elif field.kind == 'float' %}
+    <input class="lm-input lm-input--mono" type="number" step="any"
+           name="{{ fname }}" value="{{ value }}"
+           placeholder="{% if field.default is not none %}{{ field.default }}{% endif %}">
+  {% else %}
+    <input class="lm-input lm-input--mono" type="text"
+           name="{{ fname }}" value="{{ value }}"
+           placeholder="{% if field.default is not none %}{{ field.default }}{% endif %}">
+  {% endif %}
+{% endmacro %}
+
+{% macro schema_fields(schema, profile=None) %}
+  {% for f in schema %}
+  <div class="lm-dm-field">
+    <label class="lm-dm-field__label" for="">{{ f.label }}</label>
+    {{ field_input(f, profile.fields[f.key] if profile else '') }}
+    {% if f.help %}<span class="lm-dm-field__help">{{ f.help }}</span>{% endif %}
+  </div>
+  {% endfor %}
+{% endmacro %}
+
+{% macro profile_summary(profile) %}
+{% set parts = [] %}
+{% for k, v in profile.fields.items() %}
+  {% if v %}{% set _ = parts.append(k + '=' + v) %}{% endif %}
+{% endfor %}
+{% if parts %}{{ parts|join(' · ') }}{% else %}(no overrides set){% endif %}
+{% endmacro %}
+
+
+{# ---------- Header ---------- #}
+
+<header class="lm-section-head" style="margin-bottom: 16px;">
+  <span class="lm-section-marker">Diffusion models</span>
+  <span class="lm-section-meta">
+    catalog of supported image models, plus profile management for what's installed
+  </span>
+</header>
+
+<p style="font-size: 0.875rem; color: var(--fg-1); max-width: 80ch; margin-bottom: 24px;">
+  This page lists the diffusion models llamanager knows about. Each row shows
+  whether the model is already downloaded under <code>{{ models_dir if models_dir else '~/.llamanager/models' }}</code>;
+  if it isn't, follow the link to the <a href="{{ setup_diffusion_link }}">Diffusion engines</a>
+  page to install dependencies and pull the model. For installed models you can
+  activate one as the dashboard / API default and edit per-model profiles.
+</p>
+
+
+{# ---------- One section per engine ---------- #}
+
+{% for eng in engines %}
+<section class="lm-dm-engine">
+  <div class="lm-dm-engine__head">
+    <span class="lm-dm-engine__title">{{ eng.label }}
+      <span class="lm-dm-engine__meta">· engine <code>{{ eng.id }}</code></span>
+    </span>
+    <span class="lm-dm-engine__meta">
+      {% if eng.configured %}engine paths configured{% else %}<a href="{{ setup_diffusion_link }}">configure paths →</a>{% endif %}
+    </span>
+  </div>
+
+  {% if not eng.configured %}
+  <p style="font-size: 0.8125rem; color: var(--fg-2);">
+    The <code>{{ eng.id }}</code> engine isn't fully configured. You can still
+    edit profiles below, but generation requests will fail until the engine's
+    Python / binary path is set on the
+    <a href="{{ setup_diffusion_link }}">Diffusion engines</a> page.
+  </p>
+  {% endif %}
+
+  {% if not eng.rows %}
+  <p class="lm-dm-empty">No catalog entries for this engine yet, and nothing on disk.</p>
+  {% endif %}
+
+  {% for row in eng.rows %}
+  <article class="lm-dm-model">
+    <div class="lm-dm-model__head">
+      <h3 class="lm-dm-model__name">
+        {% if row.catalog %}{{ row.catalog.label }}{% else %}{{ row.model_id }}{% endif %}
+      </h3>
+      {% if row.installed %}
+      <span class="lm-dm-pill lm-dm-pill--ok">Installed</span>
+      {% else %}
+      <span class="lm-dm-pill lm-dm-pill--muted">Not installed</span>
+      {% endif %}
+      {% if row.is_active_default %}
+      <span class="lm-dm-pill lm-dm-pill--accent">Default</span>
+      {% endif %}
+      {% if row.installed and row.size_bytes %}
+      <span class="lm-dm-engine__meta">{{ '%.1f GB' % (row.size_bytes / (1024**3)) }}</span>
+      {% endif %}
+      {% if row.catalog and not row.installed %}
+      <span class="lm-dm-engine__meta">≈ {{ row.catalog.approx_size_gb }} GB</span>
+      {% endif %}
+    </div>
+
+    {% if row.catalog %}
+      <p class="lm-dm-model__desc">
+        {{ row.catalog.description }}
+        {% if row.catalog.homepage %}
+        <a href="{{ row.catalog.homepage }}" target="_blank" rel="noopener" style="color: var(--fg-2);">model card →</a>
+        {% endif %}
+      </p>
+    {% endif %}
+
+    {% if not row.installed %}
+      <p style="font-size: 0.8125rem; color: var(--fg-2);">
+        Not on disk yet. To install:
+        <a href="{{ setup_diffusion_link }}">Diffusion engines</a> →
+        <em>Models</em> section of the {{ eng.label }} card →
+        paste <code>{{ row.catalog.hf_repo if row.catalog else '<repo>' }}</code>{% if row.catalog and row.catalog.subfolder %}
+        with subfolder <code>{{ row.catalog.subfolder }}</code>{% endif %} → Download.
+      </p>
+    {% else %}
+      {# ---- Activate ---- #}
+      {% if not row.is_active_default %}
+      <form method="post" action="/ui/diffusion-models/activate" style="display: inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="model_id" value="{{ row.model_id }}">
+        <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Set as default image model</button>
+      </form>
+      {% endif %}
+
+      {# ---- Per-model default-profile picker ---- #}
+      <form method="post" action="/ui/diffusion-models/profiles/set-model-default"
+            class="lm-form" style="display: inline-block; margin-left: 6px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="model_id" value="{{ row.model_id }}">
+        <label class="lm-dm-engine__meta">Default profile:</label>
+        <select class="lm-input lm-input--mono" name="profile_name" onchange="this.form.submit()">
+          <option value="" {% if not row.default_profile %}selected{% endif %}>— none —</option>
+          {% for p in row.profiles %}
+          <option value="{{ p.name }}" {% if row.default_profile == p.name %}selected{% endif %}>{{ p.name }}</option>
+          {% endfor %}
+        </select>
+        <noscript><button type="submit" class="lm-btn lm-btn--xs">Save</button></noscript>
+      </form>
+
+      {# ---- Existing profiles ---- #}
+      <div class="lm-dm-section">
+        <div class="lm-dm-section__head">
+          <span>Profiles</span>
+          <span class="lm-dm-engine__meta">{{ row.profiles|length }} saved</span>
+        </div>
+
+        {% if row.profiles %}
+          {% for prof in row.profiles %}
+          <details class="lm-dm-profile {% if row.default_profile == prof.name %}is-default{% endif %}">
+            <summary>
+              <strong class="lm-dm-profile__name">{{ prof.name }}</strong>
+              {% if row.default_profile == prof.name %}
+              <span class="lm-dm-pill lm-dm-pill--accent">default</span>
+              {% endif %}
+              <span class="lm-dm-profile__summary">{{ profile_summary(prof) }}</span>
+            </summary>
+            <div class="lm-dm-profile__body">
+              <form method="post"
+                    action="/ui/diffusion-models/profiles/{{ prof.name }}/update"
+                    class="lm-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="model_id" value="{{ row.model_id }}">
+                <input type="hidden" name="engine" value="{{ eng.id }}">
+
+                <div class="lm-dm-field">
+                  <label class="lm-dm-field__label">Profile name</label>
+                  <input class="lm-input lm-input--mono" type="text"
+                         name="new_name" value="{{ prof.name }}"
+                         pattern="[a-z0-9._-]+" required>
+                  <span class="lm-dm-field__help">Lowercase letters, digits, hyphens, dots, underscores.</span>
+                </div>
+
+                {{ schema_fields(eng.schema, prof) }}
+
+                <div class="lm-dm-actions">
+                  <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Save changes</button>
+                </div>
+              </form>
+
+              <div class="lm-dm-actions" style="margin-top: 12px;">
+                {# Clone #}
+                <form method="post" action="/ui/diffusion-models/profiles/{{ prof.name }}/clone">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="model_id" value="{{ row.model_id }}">
+                  <input class="lm-input lm-input--mono" type="text" name="new_name"
+                         placeholder="new-profile-name"
+                         pattern="[a-z0-9._-]+" required
+                         style="display: inline-block; width: 220px;">
+                  <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Clone</button>
+                </form>
+
+                {# Delete #}
+                <form method="post" action="/ui/diffusion-models/profiles/{{ prof.name }}/delete">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="model_id" value="{{ row.model_id }}">
+                  <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs"
+                          data-confirm="Delete profile '{{ prof.name }}' from {{ row.model_id }}? This cannot be undone.">Delete</button>
+                </form>
+              </div>
+            </div>
+          </details>
+          {% endfor %}
+        {% elif eng.default_profiles %}
+          {# Show built-in defaults read-only with a Materialize button. #}
+          <div class="lm-dm-default-block">
+            <p style="font-size: 0.8125rem; color: var(--fg-2); margin: 0 0 8px;">
+              No saved profiles. The <code>{{ eng.id }}</code> engine ships
+              {{ eng.default_profiles|length }} built-in default{% if eng.default_profiles|length != 1 %}s{% endif %}:
+            </p>
+            <ul style="margin: 0 0 10px; font-size: 0.8125rem;">
+              {% for d in eng.default_profiles %}
+              <li>
+                <strong>{{ d.name }}</strong>:
+                {% set parts = [] %}
+                {% for k, v in d.fields.items() %}{% set _ = parts.append(k + '=' + v|string) %}{% endfor %}
+                <span class="lm-dm-profile__summary">{{ parts|join(' · ') }}</span>
+              </li>
+              {% endfor %}
+            </ul>
+            <form method="post" action="/ui/diffusion-models/profiles/materialize-defaults">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="model_id" value="{{ row.model_id }}">
+              <input type="hidden" name="engine" value="{{ eng.id }}">
+              <button type="submit" class="lm-btn lm-btn--ghost lm-btn--sm"
+                      data-confirm="Write the {{ eng.default_profiles|length }} built-in default profile(s) to config.toml so they become editable?">
+                Materialize defaults as editable
+              </button>
+            </form>
+          </div>
+        {% else %}
+          <p class="lm-dm-empty">No profiles saved and the engine has no built-in defaults to materialize.</p>
+        {% endif %}
+
+        {# ---- Add a new profile ---- #}
+        <details style="margin-top: 10px;">
+          <summary class="lm-dm-section__head" style="cursor: pointer;">
+            <span>+ Add profile</span>
+          </summary>
+          <div style="border: 1px dashed var(--bg-3); padding: 12px; margin-top: 4px;">
+            <form method="post" action="/ui/diffusion-models/profiles/create" class="lm-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="model_id" value="{{ row.model_id }}">
+              <input type="hidden" name="engine" value="{{ eng.id }}">
+              <div class="lm-dm-field">
+                <label class="lm-dm-field__label">Profile name</label>
+                <input class="lm-input lm-input--mono" type="text" name="name"
+                       pattern="[a-z0-9._-]+" required
+                       placeholder="e.g. hd-portrait">
+              </div>
+              {{ schema_fields(eng.schema) }}
+              <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8125rem; margin: 6px 0;">
+                <input type="checkbox" name="make_default" value="on">
+                <span>Make this the default profile for {{ row.model_id }}</span>
+              </label>
+              <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Create profile</button>
+            </form>
+          </div>
+        </details>
+      </div>
+    {% endif %}
+  </article>
+  {% endfor %}
+</section>
+{% endfor %}
+
+{% endblock %}

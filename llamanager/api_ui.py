@@ -38,6 +38,8 @@ from .config import (
     save_profile, set_default_args, set_model_default_profile,
     update_coexistence_policy, update_defaults, update_image_config,
 )
+from . import engines as image_engines
+from . import diffusion_catalog
 from .llama_installer import (
     BACKENDS,
     SOURCES,
@@ -1824,7 +1826,8 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
     """
     cfg = request.app.state.cfg
     installer = request.app.state.engine_installer
-    from .engine_installer import ENGINE_PLANS, venv_python
+    from .engine_installer import ENGINE_PLANS, resolve_plan, venv_python
+    from .gpu_detect import detect_gpu, render_group_ok
 
     ctx = _models_ctx(request)
     ctx["image_cfg"] = {
@@ -1840,6 +1843,16 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
         "allow_concurrent": cfg.allow_concurrent,
     }
 
+    # Surface detected GPU so the engine cards can render the right
+    # pre-install options (e.g. pre-check the flash-attn patch on AMD).
+    gpu = detect_gpu()
+    ctx["gpu"] = {
+        "kind": gpu.kind,
+        "rocm_arch": gpu.rocm_arch,
+        "needs_render_group": gpu.needs_render_group,
+        "render_group_ok": render_group_ok(gpu),
+    }
+
     # Per-engine install state — surface the most-relevant row so the
     # card can show "running 42%", "done", or "click to install".
     engines = ("z_image", "hidream", "flux2")
@@ -1852,17 +1865,38 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
             recent = installer.list_for_engine(eng, limit=1)
             install_state[eng] = recent[0] if recent else None
     ctx["engine_installs"] = install_state
-    ctx["engine_plans"] = {
-        e: {
-            "engine": p.engine,
-            "label": p.label,
-            "packages": p.packages,
-            "space_mb": p.space_mb,
-            "notes": p.notes,
-            "has_plan": True,
-        }
-        for e, p in ENGINE_PLANS.items()
-    }
+    # Render the GPU-resolved plan (which on AMD swaps in the ROCm wheels
+    # and notes) when one exists; otherwise fall back to the generic
+    # baseline so the card still has packages/notes to show.
+    plans: dict[str, dict[str, Any]] = {}
+    for e, base in ENGINE_PLANS.items():
+        resolved = resolve_plan(e, gpu, emit=None, cfg=cfg)
+        if resolved is not None:
+            wheel_basenames = [u.rsplit("/", 1)[-1] for u in resolved.wheel_urls]
+            plans[e] = {
+                "engine": e,
+                "label": resolved.label,
+                "packages": resolved.packages,
+                "wheel_urls": wheel_basenames,
+                "space_mb": resolved.space_mb,
+                "notes": resolved.notes,
+                "target": resolved.target,
+                "supports_flash_attn_patch": resolved.supports_flash_attn_patch,
+                "has_plan": True,
+            }
+        else:
+            plans[e] = {
+                "engine": e,
+                "label": base.label,
+                "packages": base.packages,
+                "wheel_urls": [],
+                "space_mb": base.space_mb,
+                "notes": base.notes,
+                "target": gpu.kind,
+                "supports_flash_attn_patch": False,
+                "has_plan": True,
+            }
+    ctx["engine_plans"] = plans
     # Predicted venv interpreter path so the UI can show where pip will
     # plant things (or where it already lives).
     ctx["engine_venv_python"] = {
@@ -1977,11 +2011,16 @@ async def setup_coexistence(request: Request,
 @router.post("/setup-diffusion/engine/{engine}/install-deps",
              response_class=HTMLResponse)
 async def install_engine_deps(request: Request, engine: str,
+                              patch_flash_attn: str = Form(""),
                               _: None = Depends(require_csrf)) -> Response:
     """Kick off an opinionated venv + pip install for one engine."""
     installer = request.app.state.engine_installer
+    options: dict[str, Any] = {}
+    # Checkbox values arrive as "on" when checked, "" when not.
+    if patch_flash_attn:
+        options["patch_flash_attn"] = True
     try:
-        installer.start(engine)
+        installer.start(engine, options=options)
     except (ValueError, RuntimeError) as e:
         return _error_html(f"install failed: {e}", status_code=400)
     return RedirectResponse("/ui/setup-diffusion", status_code=303)
@@ -2776,4 +2815,423 @@ async def topbar_image_set_default(request: Request,
     )
     _reload_config(request)
     return _topbar_redirect(request)
+
+
+# ---------- Diffusion models page ------------------------------------------
+#
+# CRUD for per-image-model profiles. Driven by each engine's
+# ``profile_schema()`` so adding a new engine surfaces here with no
+# template changes. The catalog (``diffusion_catalog.CATALOG``) drives the
+# "not installed yet" rows that link to the Diffusion engines page.
+
+def _serialize_profile_field(field) -> dict[str, Any]:
+    """Marshal an engines._base.ProfileField for template iteration."""
+    return {
+        "key": field.key,
+        "label": field.label,
+        "kind": field.kind,
+        "default": field.default,
+        "options": list(field.options or []),
+        "help": field.help,
+    }
+
+
+def _profile_field_value(prof: Profile | None, key: str) -> str:
+    """Read a Profile attribute by key for form pre-fill. Empty string for
+    None / missing attrs so HTML inputs render cleanly."""
+    if prof is None:
+        return ""
+    v = getattr(prof, key, None)
+    if v is None or v == "":
+        return ""
+    return str(v)
+
+
+def _build_image_profile_from_form(name: str, engine_module,
+                                   form: dict[str, str]) -> Profile:
+    """Walk the engine's ``profile_schema()`` and assemble a Profile.
+
+    Field values arrive as ``field_<key>`` form entries. Unset/empty fields
+    leave the corresponding Profile attribute at its dataclass default
+    (empty string / None), which the engine's adapter then resolves at
+    request time against any built-in baseline.
+    """
+    schema = engine_module.profile_schema()
+    kwargs: dict[str, Any] = {"name": name}
+    for f in schema:
+        raw = (form.get(f"field_{f.key}", "") or "").strip()
+        if not raw:
+            continue
+        try:
+            if f.kind == "int":
+                kwargs[f.key] = int(raw)
+            elif f.kind == "float":
+                kwargs[f.key] = float(raw)
+            elif f.kind == "select":
+                if f.options and raw not in f.options:
+                    raise ValueError(
+                        f"invalid value for {f.label}: {raw!r}; "
+                        f"must be one of {f.options}"
+                    )
+                kwargs[f.key] = raw
+            else:  # 'text'
+                kwargs[f.key] = raw
+        except ValueError as e:
+            # Re-raise with field context so the error helper surfaces
+            # something a human can act on.
+            raise ValueError(f"{f.label}: {e}") from None
+    return Profile(**kwargs)
+
+
+def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
+    """Build the per-engine catalog + installed + profile context.
+
+    Returns a structure shaped for direct template iteration:
+
+      engines = [
+        {
+          'id': 'hidream',
+          'label': 'HiDream-O1-Image',
+          'configured': True/False,  # paths set in [image] config
+          'setup_link': '/ui/setup-diffusion',
+          'schema': [serialized ProfileField, ...],
+          'default_profiles': [{'name': ..., 'fields': {...}}, ...],
+          'rows': [
+            {
+              'catalog': <CatalogEntry or None>,
+              'installed': True/False,
+              'model_id': 'HiDream-O1-Image',
+              'is_active_default': True/False,
+              'profiles': [...],
+              'default_profile': '',
+            },
+            ...
+          ],
+        },
+        ...
+      ]
+    """
+    cfg = request.app.state.cfg
+    reg: Registry = request.app.state.registry
+
+    # 1) Index on-disk image models by canonical model_id.
+    on_disk: dict[str, dict[str, Any]] = {}
+    for entry in reg.list():
+        engine = detect_engine_for_id(entry.model_id, cfg.models_dir)
+        if ENGINE_FAMILY.get(engine, "text") != "image":
+            continue
+        on_disk[entry.model_id] = {
+            "model_id": entry.model_id,
+            "engine": engine,
+            "size_bytes": entry.size,
+            "path": str(entry.path),
+        }
+
+    # 2) For each image engine in declaration order, build:
+    #    - catalog rows (from diffusion_catalog) joined with on-disk state
+    #    - any *extra* on-disk models the catalog doesn't know about
+    engines_view: list[dict[str, Any]] = []
+    for eng_id, eng_mod in image_engines.ADAPTERS.items():
+        # Configured = engine has the path it needs set in [image] config.
+        configured = {
+            "hidream": bool(cfg.hidream_python and cfg.hidream_repo),
+            "z_image": bool(cfg.z_image_python),
+            "flux2":   bool(cfg.flux2_sd_cli),
+        }.get(eng_id, False)
+
+        # Pretty label for the engine section heading.
+        label = {
+            "hidream": "HiDream-O1-Image",
+            "z_image": "Z-Image (Tongyi-MAI / Z-Anime)",
+            "flux2":   "FLUX 2 Dev",
+        }.get(eng_id, eng_id)
+
+        schema = [_serialize_profile_field(f) for f in eng_mod.profile_schema()]
+        try:
+            default_profiles_dict = eng_mod.default_profiles()
+        except Exception:
+            default_profiles_dict = {}
+        default_profiles_view = [
+            {"name": n, "fields": d}
+            for n, d in default_profiles_dict.items()
+        ]
+
+        # Helper to build a row for one model_id (catalog entry or on-disk).
+        def _row_for(catalog_entry, model_id: str | None) -> dict[str, Any]:
+            mid = model_id or (catalog_entry.canonical_id if catalog_entry else "")
+            installed = mid in on_disk
+            model_cfg = cfg.get_model(mid) if mid else None
+            profs: list[dict[str, Any]] = []
+            if model_cfg:
+                for p in sorted(model_cfg.profiles.values(),
+                                key=lambda x: x.name):
+                    profs.append({
+                        "name": p.name,
+                        "fields": {
+                            s["key"]: _profile_field_value(p, s["key"])
+                            for s in schema
+                        },
+                    })
+            return {
+                "catalog": catalog_entry,
+                "installed": installed,
+                "model_id": mid,
+                "size_bytes": on_disk.get(mid, {}).get("size_bytes", 0),
+                "is_active_default": (mid == cfg.default_image_model),
+                "profiles": profs,
+                "default_profile": (model_cfg.default_profile if model_cfg
+                                    else ""),
+            }
+
+        # Start with catalog rows for this engine.
+        rows: list[dict[str, Any]] = []
+        catalog_ids: set[str] = set()
+        for cat in diffusion_catalog.for_engine(eng_id):
+            rows.append(_row_for(cat, cat.canonical_id))
+            catalog_ids.add(cat.canonical_id)
+        # Append any on-disk models that aren't in the catalog (operator
+        # downloaded a non-canonical name, or we don't track this one yet).
+        for mid, meta in on_disk.items():
+            if meta["engine"] != eng_id or mid in catalog_ids:
+                continue
+            rows.append(_row_for(None, mid))
+
+        engines_view.append({
+            "id": eng_id,
+            "label": label,
+            "configured": configured,
+            "schema": schema,
+            "default_profiles": default_profiles_view,
+            "rows": rows,
+        })
+
+    ctx = _ctx(
+        request,
+        active="diffusion-models",
+        engines=engines_view,
+        default_image_model=cfg.default_image_model or "",
+        default_image_profile=cfg.default_image_profile or "",
+        setup_diffusion_link="/ui/setup-diffusion",
+    )
+    return ctx
+
+
+@router.get("/diffusion-models", response_class=HTMLResponse)
+async def diffusion_models_view(request: Request,
+                                _: Origin = Depends(require_admin_ui)
+                                ) -> HTMLResponse:
+    """List supported diffusion models, show which are installed, and
+    expose CRUD for per-model profiles."""
+    return templates.TemplateResponse(
+        request, "diffusion_models.html", _diffusion_models_ctx(request),
+    )
+
+
+@router.post("/diffusion-models/activate", response_class=HTMLResponse)
+async def diffusion_models_activate(request: Request,
+                                    model_id: str = Form(...),
+                                    _: None = Depends(require_csrf)) -> Response:
+    """Set this image model as the dashboard / API default."""
+    cfg = request.app.state.cfg
+    mid = model_id.strip()
+    if not mid:
+        return _error_html("model_id required", status_code=400)
+    update_defaults(cfg.config_path, default_image_model=mid)
+    _reload_config(request)
+    return RedirectResponse("/ui/diffusion-models", status_code=303)
+
+
+def _engine_module_or_400(engine: str):
+    try:
+        return image_engines.get(engine)
+    except KeyError:
+        return None
+
+
+@router.post("/diffusion-models/profiles/create", response_class=HTMLResponse)
+async def diffusion_profile_create(request: Request,
+                                   _: None = Depends(require_csrf)) -> Response:
+    form = await request.form()
+    cfg = request.app.state.cfg
+    model_id = (form.get("model_id", "") or "").strip()
+    engine = (form.get("engine", "") or "").strip()
+    name = (form.get("name", "") or "").strip().lower()
+    make_default = (form.get("make_default", "") or "") == "on"
+    if not model_id or not engine or not name:
+        return _error_html("model_id, engine, and name are required",
+                           status_code=400)
+    eng_mod = _engine_module_or_400(engine)
+    if eng_mod is None:
+        return _error_html(f"unknown engine {engine!r}", status_code=400)
+    existing = cfg.get_model(model_id)
+    if existing and name in existing.profiles:
+        return _error_html(
+            f"profile {name!r} already exists for model {model_id!r}",
+            status_code=409,
+        )
+    try:
+        prof = _build_image_profile_from_form(name, eng_mod, form)
+        save_profile(cfg.config_path, model_id, name, prof)
+    except ValueError as e:
+        return _error_html(str(e), status_code=400)
+    if make_default:
+        set_model_default_profile(cfg.config_path, model_id, name)
+    _reload_config(request)
+    return RedirectResponse("/ui/diffusion-models", status_code=303)
+
+
+@router.post("/diffusion-models/profiles/{profile_name}/update",
+             response_class=HTMLResponse)
+async def diffusion_profile_update(request: Request, profile_name: str,
+                                   _: None = Depends(require_csrf)) -> Response:
+    form = await request.form()
+    cfg = request.app.state.cfg
+    model_id = (form.get("model_id", "") or "").strip()
+    engine = (form.get("engine", "") or "").strip()
+    new_name = (form.get("new_name", "") or "").strip().lower()
+    if not model_id or not engine:
+        return _error_html("model_id and engine are required",
+                           status_code=400)
+    eng_mod = _engine_module_or_400(engine)
+    if eng_mod is None:
+        return _error_html(f"unknown engine {engine!r}", status_code=400)
+    m = cfg.get_model(model_id)
+    if not m or profile_name not in m.profiles:
+        return _error_html(
+            f"profile {profile_name!r} not found for model {model_id!r}",
+            status_code=404,
+        )
+    target = new_name or profile_name
+    try:
+        prof = _build_image_profile_from_form(target, eng_mod, form)
+    except ValueError as e:
+        return _error_html(str(e), status_code=400)
+    if target != profile_name:
+        if target in m.profiles:
+            return _error_html(
+                f"profile {target!r} already exists for model {model_id!r}",
+                status_code=409,
+            )
+        try:
+            rename_profile(cfg.config_path, model_id, profile_name, target)
+        except ValueError as e:
+            return _error_html(str(e), status_code=400)
+    try:
+        save_profile(cfg.config_path, model_id, target, prof)
+    except ValueError as e:
+        return _error_html(str(e), status_code=400)
+    _reload_config(request)
+    return RedirectResponse("/ui/diffusion-models", status_code=303)
+
+
+@router.post("/diffusion-models/profiles/{profile_name}/delete",
+             response_class=HTMLResponse)
+async def diffusion_profile_delete(request: Request, profile_name: str,
+                                   model_id: str = Form(...),
+                                   _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    delete_profile(cfg.config_path, model_id.strip(), profile_name)
+    _reload_config(request)
+    return RedirectResponse("/ui/diffusion-models", status_code=303)
+
+
+@router.post("/diffusion-models/profiles/{profile_name}/clone",
+             response_class=HTMLResponse)
+async def diffusion_profile_clone(request: Request, profile_name: str,
+                                  model_id: str = Form(...),
+                                  new_name: str = Form(...),
+                                  _: None = Depends(require_csrf)) -> Response:
+    """Duplicate a profile under a new name. Field values copy verbatim;
+    the per-model default pointer is not touched."""
+    cfg = request.app.state.cfg
+    mid = model_id.strip()
+    new = new_name.strip().lower()
+    if not new:
+        return _error_html("new_name required", status_code=400)
+    m = cfg.get_model(mid)
+    if not m or profile_name not in m.profiles:
+        return _error_html(
+            f"profile {profile_name!r} not found for model {mid!r}",
+            status_code=404,
+        )
+    if new in m.profiles:
+        return _error_html(
+            f"profile {new!r} already exists for model {mid!r}",
+            status_code=409,
+        )
+    src = m.profiles[profile_name]
+    # Copy every Profile field except ``name``.
+    from dataclasses import fields as _fields
+    clone_kwargs: dict[str, Any] = {"name": new}
+    for f in _fields(src):
+        if f.name == "name":
+            continue
+        clone_kwargs[f.name] = getattr(src, f.name)
+    try:
+        save_profile(cfg.config_path, mid, new, Profile(**clone_kwargs))
+    except ValueError as e:
+        return _error_html(str(e), status_code=400)
+    _reload_config(request)
+    return RedirectResponse("/ui/diffusion-models", status_code=303)
+
+
+@router.post("/diffusion-models/profiles/set-model-default",
+             response_class=HTMLResponse)
+async def diffusion_profiles_set_model_default(
+        request: Request,
+        model_id: str = Form(...),
+        profile_name: str = Form(""),
+        _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    mid = model_id.strip()
+    pname = profile_name.strip()
+    if not mid:
+        return _error_html("model_id required", status_code=400)
+    if pname and cfg.get_profile(mid, pname) is None:
+        return _error_html(
+            f"unknown profile {pname!r} for model {mid!r}",
+            status_code=400,
+        )
+    set_model_default_profile(cfg.config_path, mid, pname)
+    _reload_config(request)
+    return RedirectResponse("/ui/diffusion-models", status_code=303)
+
+
+@router.post("/diffusion-models/profiles/materialize-defaults",
+             response_class=HTMLResponse)
+async def diffusion_profiles_materialize_defaults(
+        request: Request,
+        model_id: str = Form(...),
+        engine: str = Form(...),
+        _: None = Depends(require_csrf)) -> Response:
+    """Persist the engine's built-in default profiles into config.toml
+    so the operator can edit them. Skips any whose name already exists."""
+    cfg = request.app.state.cfg
+    mid = model_id.strip()
+    eng_mod = _engine_module_or_400(engine)
+    if eng_mod is None or not mid:
+        return _error_html("model_id and a known engine are required",
+                           status_code=400)
+    try:
+        builtins = eng_mod.default_profiles()
+    except Exception as e:
+        return _error_html(f"engine {engine!r} has no default profiles: {e}",
+                           status_code=400)
+    existing = cfg.get_model(mid)
+    existing_names = set(existing.profiles.keys()) if existing else set()
+    materialized: list[str] = []
+    for prof_name, field_dict in builtins.items():
+        if prof_name in existing_names:
+            continue
+        try:
+            prof = Profile(name=prof_name, **field_dict)
+            save_profile(cfg.config_path, mid, prof_name, prof)
+            materialized.append(prof_name)
+        except (TypeError, ValueError) as e:
+            return _error_html(
+                f"failed to materialize {prof_name!r}: {e}",
+                status_code=400,
+            )
+    _reload_config(request)
+    return RedirectResponse("/ui/diffusion-models", status_code=303)
 

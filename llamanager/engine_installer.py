@@ -6,12 +6,14 @@ are needed. This module creates a per-engine virtual environment under
 installed, the engine's "Python executable" field is auto-populated with
 the venv's interpreter path.
 
-Note on opinionation: each engine's dependency list is the minimum that
-gets a known-good baseline running on a reasonably mainstream box (CUDA
-or CPU). For ROCm or specialised hardware setups, the operator should
-build the venv themselves and point llamanager at it — the auto-install
-path will install a generic torch wheel that may not match their GPU.
-The setup card surfaces this caveat in plain language.
+GPU-aware resolution: ``resolve_plan(engine, gpu)`` returns a per-engine
+plan tailored to the detected accelerator. For AMD/ROCm hosts the
+hidream plan installs the official AMD wheels (torch / torchvision /
+triton from ``repo.radeon.com``) and known-compatible pins for the
+HuggingFace stack, then optionally applies the ``use_flash_attn=False``
+patch to hidream-source/models/pipeline.py — because the upstream
+pipeline hardcodes flash-attn which isn't available on the AMD wheel.
+On CUDA/CPU/Apple it falls back to the previous generic plan.
 
 The installer streams stdout/stderr lines from ``python -m venv`` and
 ``pip install`` into the ``engine_installs.log`` column so the UI can
@@ -21,35 +23,90 @@ than parsing pip's bar (which is unreliable across pip versions).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import re
 import secrets
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from .config import Config
 from .db import DB
+from .gpu_detect import GpuProfile, detect_gpu, render_group_ok
 
 log = logging.getLogger(__name__)
 
 MAX_LOG_BYTES = 200_000  # cap stored log size so the DB doesn't bloat
 
+# AMD ROCm wheel index. Single curated release we test against; the
+# scraper picks the latest paired (torch, torchvision, triton) under
+# this prefix matching the current Python ABI.
+AMD_ROCM_REL = "rocm-rel-7.2.1"
+AMD_ROCM_INDEX = f"https://repo.radeon.com/rocm/manylinux/{AMD_ROCM_REL}/"
+
+# Hard-pinned fallback wheels per Python ABI. Used when the index
+# scrape fails (network down, AMD changed page layout, etc.). Bump
+# these by hand when AMD ships a new ROCm release we want to track.
+AMD_FALLBACK_WHEELS: dict[str, list[str]] = {
+    "cp312": [
+        AMD_ROCM_INDEX
+        + "triton-3.5.1%2Brocm7.2.1.gita272dfa8-cp312-cp312-linux_x86_64.whl",
+        AMD_ROCM_INDEX
+        + "torch-2.9.1%2Brocm7.2.1.lw.gitff65f5bc-cp312-cp312-linux_x86_64.whl",
+        AMD_ROCM_INDEX
+        + "torchvision-0.24.0%2Brocm7.2.1.gitb919bd0c-cp312-cp312-linux_x86_64.whl",
+    ],
+}
+
 
 @dataclass(frozen=True)
 class EnginePackages:
-    """Pip install plan for one diffusion engine."""
+    """Generic pip install plan (backwards-compatible shape).
+
+    Used as the baseline for engines without a GPU-aware override and as
+    the public surface for the setup page (``engine_plans`` context).
+    """
     engine: str
     label: str
-    packages: list[str]   # what pip-install actually receives
+    packages: list[str]
     extra_index_url: str | None = None
-    space_mb: int = 0     # rough disk footprint estimate of the installed venv
-    notes: str = ""       # surfaced in the UI under the install button
+    space_mb: int = 0
+    notes: str = ""
 
 
-# Per-engine install plans. Kept declarative so the setup page can render
-# the same info as a checklist before the user clicks Install.
+@dataclass(frozen=True)
+class ResolvedPlan:
+    """A per-install plan after GPU detection has run.
+
+    ``wheel_urls`` are installed first with ``--no-deps`` because pip's
+    resolver can't pin across local-version tags like ``+rocm7.2.1``
+    (AMD's wheels declare deps via the same tag and pip refuses to
+    bridge them). ``packages`` is the regular pypi step.
+    """
+    engine: str
+    label: str
+    notes: str
+    space_mb: int
+    target: str
+    packages: list[str] = field(default_factory=list)
+    wheel_urls: list[str] = field(default_factory=list)
+    extra_index_url: str | None = None
+    # The hidream-source pipeline.py defaults use_flash_attn=True. On
+    # AMD (no flash_attn wheel) we need to flip it. The installer only
+    # applies this when ``options['patch_flash_attn']`` is set AND
+    # ``cfg.hidream_repo`` is configured.
+    supports_flash_attn_patch: bool = False
+
+
+# Generic baselines. The resolver consults ENGINE_PLANS only for engines
+# it doesn't have a GPU-specific override for; the setup page also reads
+# this dict to render the package list before any install runs.
 ENGINE_PLANS: dict[str, EnginePackages] = {
     "z_image": EnginePackages(
         engine="z_image",
@@ -71,23 +128,226 @@ ENGINE_PLANS: dict[str, EnginePackages] = {
     "hidream": EnginePackages(
         engine="hidream",
         label="HiDream-O1-Image",
-        # Minimum to run upstream inference.py — these are the packages
-        # the HiDream README pins. Operators on ROCm should use the
-        # vendor wheels directly instead of this auto-install.
         packages=[
-            "torch", "transformers", "accelerate", "diffusers",
-            "huggingface_hub", "safetensors", "Pillow",
-            "einops", "sentencepiece",
+            "torch", "transformers==4.57.1", "accelerate==1.13.0",
+            "diffusers==0.38.0", "huggingface_hub", "safetensors",
+            "Pillow", "einops", "sentencepiece",
         ],
         space_mb=7500,
         notes=(
-            "Installs a generic torch wheel. HiDream is verified on "
-            "ROCm 7.2+/gfx1201 with the official AMD wheels — if you "
-            "want that, follow docs/hidream.md and skip this button."
+            "Auto-detects the GPU family. On AMD/ROCm 7.2+ this installs "
+            "the official AMD wheels (torch + torchvision + triton from "
+            "repo.radeon.com) and offers to patch hidream-source's "
+            "pipeline.py to disable flash-attn. On NVIDIA, installs the "
+            "generic CUDA torch wheel."
         ),
     ),
 }
 
+
+# ---------- GPU-aware plan resolution ----------------------------------
+
+def _python_abi() -> str:
+    """Return the cpython ABI tag of the *llamanager* interpreter.
+
+    The per-engine venv is created with ``[sys.executable, '-m', 'venv']``
+    so it inherits the same Python version. Wheels must match this tag.
+    """
+    v = sys.version_info
+    return f"cp{v.major}{v.minor}"
+
+
+@dataclass(frozen=True)
+class _AmdWheel:
+    url: str
+    pkg: str          # 'torch' | 'torchvision' | 'triton'
+    version: tuple[int, ...]
+    date: str         # raw '28-Mar-2026 03:12' string from the directory listing
+
+
+_AMD_LINE_RE = re.compile(
+    r'<a\s+href="(?P<href>'
+    r'(?P<pkg>torch|torchvision|triton)-'
+    r'(?P<ver>\d+\.\d+\.\d+)'
+    r'%2B[^"]+?'
+    r'-(?P<abi>cp\d+)-(?P=abi)-linux_x86_64\.whl)">'
+    r'[^<]*</a>\s+'
+    r'(?P<date>\d{2}-[A-Za-z]{3}-\d{4}\s+\d{2}:\d{2})'
+)
+
+
+def _parse_amd_index(html: str, abi: str,
+                     base_url: str = AMD_ROCM_INDEX) -> list[_AmdWheel]:
+    """Pull torch/torchvision/triton wheel rows for the given Python ABI."""
+    out: list[_AmdWheel] = []
+    for m in _AMD_LINE_RE.finditer(html):
+        if m.group("abi") != abi:
+            continue
+        ver = tuple(int(p) for p in m.group("ver").split("."))
+        out.append(_AmdWheel(
+            url=base_url + m.group("href"),
+            pkg=m.group("pkg"),
+            version=ver,
+            date=m.group("date"),
+        ))
+    return out
+
+
+def _select_amd_wheels(wheels: list[_AmdWheel]) -> list[str]:
+    """Pick the latest paired (torch, torchvision, triton) set.
+
+    AMD ships paired builds — torch, torchvision and triton with the
+    same build date are guaranteed-compatible. We pick the highest-semver
+    torch, then find torchvision + triton entries from the same date.
+    If a pair can't be assembled, return [] (caller falls back).
+    """
+    torch_rows = sorted(
+        (w for w in wheels if w.pkg == "torch"),
+        key=lambda w: w.version, reverse=True,
+    )
+    if not torch_rows:
+        return []
+    torch_pick = torch_rows[0]
+    paired: dict[str, _AmdWheel] = {"torch": torch_pick}
+    for needed in ("torchvision", "triton"):
+        same_date = [
+            w for w in wheels
+            if w.pkg == needed and w.date == torch_pick.date
+        ]
+        if not same_date:
+            return []
+        # Multiple builds on one date can happen; take the highest version.
+        paired[needed] = max(same_date, key=lambda w: w.version)
+    # Order matters for pip: install triton first so torch picks it up
+    # at install time. (Pip processes the list in order with --no-deps.)
+    return [paired["triton"].url, paired["torch"].url,
+            paired["torchvision"].url]
+
+
+def _amd_rocm_index(target_release: str = "") -> str:
+    """URL of the AMD wheel directory to scrape.
+
+    Honours an explicit ``target_release`` (e.g. ``"rocm-rel-7.2.1"``)
+    when set; otherwise uses the curated default ``AMD_ROCM_REL``. The
+    fallback wheel list is only valid for ``AMD_ROCM_REL`` — a custom
+    target_release falls through to "no wheels" on scrape failure
+    rather than installing the wrong ROCm version.
+    """
+    rel = (target_release or AMD_ROCM_REL).strip()
+    return f"https://repo.radeon.com/rocm/manylinux/{rel}/"
+
+
+def _resolve_amd_wheel_set(abi: str, emit, target_release: str = "") -> list[str]:
+    """Try scrape, fall back to hard-pinned curated set.
+
+    ``emit`` is the installer's log emitter — we surface which path was
+    taken so the operator can see why a specific wheel was chosen.
+    ``target_release`` overrides the curated default; the curated
+    fallback is only used when the override matches ``AMD_ROCM_REL``.
+    """
+    index_url = _amd_rocm_index(target_release)
+    is_custom = bool(target_release and target_release != AMD_ROCM_REL)
+    try:
+        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+            r = client.get(index_url)
+            r.raise_for_status()
+        wheels = _parse_amd_index(r.text, abi, base_url=index_url)
+        urls = _select_amd_wheels(wheels)
+        if urls:
+            emit(f"[amd] using scraped wheel set from {index_url}")
+            for u in urls:
+                emit(f"[amd]   {u.rsplit('/', 1)[-1]}")
+            return urls
+        emit(f"[amd] scrape returned no paired set for {abi}; "
+             f"falling back to curated wheels")
+    except Exception as e:
+        emit(f"[amd] scrape of {index_url} failed ({e}); "
+             f"falling back to curated wheels")
+    if is_custom:
+        emit(f"[amd] custom target_release {target_release!r} doesn't have "
+             f"a curated fallback; pip will resolve generic torch")
+        return []
+    fallback = AMD_FALLBACK_WHEELS.get(abi)
+    if not fallback:
+        emit(f"[amd] no fallback wheels for ABI {abi}; "
+             f"will let pip resolve generic torch")
+        return []
+    for u in fallback:
+        emit(f"[amd]   {u.rsplit('/', 1)[-1]}")
+    return fallback
+
+
+def resolve_plan(engine: str, gpu: GpuProfile, emit=None,
+                 cfg: Config | None = None) -> ResolvedPlan | None:
+    """Tailor the install plan to the detected GPU.
+
+    Returns None if the engine has no plan at all (callers treat that as
+    "no auto-install path for this engine"). ``emit`` is the install
+    log line emitter; when None, fall back to a no-op so resolve_plan
+    can be called from the UI for pre-install previews too. ``cfg``
+    enables operator overrides like ``hidream_target_rocm_release``;
+    omit it for pure-detection previews.
+    """
+    if emit is None:
+        emit = lambda _line: None  # noqa: E731
+
+    base = ENGINE_PLANS.get(engine)
+    if base is None:
+        return None
+
+    abi = _python_abi()
+
+    if engine == "hidream" and gpu.kind == "amd":
+        target_release = ""
+        if cfg is not None:
+            target_release = getattr(cfg, "hidream_target_rocm_release", "") or ""
+        rel = (target_release or AMD_ROCM_REL).strip()
+        wheels = _resolve_amd_wheel_set(abi, emit, target_release)
+        pkgs = [
+            "transformers==4.57.1",
+            "accelerate==1.13.0",
+            "diffusers==0.38.0",
+            "huggingface_hub", "safetensors", "Pillow",
+            "einops", "sentencepiece",
+        ]
+        arch_caption = f", arch {gpu.rocm_arch}" if gpu.rocm_arch else ""
+        override_caption = (
+            " (operator override)" if target_release
+            and target_release != AMD_ROCM_REL else ""
+        )
+        return ResolvedPlan(
+            engine=engine,
+            label=base.label,
+            notes=(
+                f"AMD ROCm path (target {rel}{override_caption}{arch_caption}). "
+                "Installs official AMD torch/torchvision/triton wheels "
+                "from repo.radeon.com, then pins the HuggingFace stack "
+                "to a known-compatible set. Recommend enabling the "
+                "pipeline.py flash-attn patch below."
+            ),
+            space_mb=9000,
+            target=f"amd-{rel.replace('-', '')}",
+            packages=pkgs,
+            wheel_urls=wheels,
+            supports_flash_attn_patch=True,
+        )
+
+    # NVIDIA / Apple / CPU — preserve the original generic plan, just
+    # in the new shape.
+    return ResolvedPlan(
+        engine=engine,
+        label=base.label,
+        notes=base.notes,
+        space_mb=base.space_mb,
+        target=gpu.kind,
+        packages=list(base.packages),
+        wheel_urls=[],
+        extra_index_url=base.extra_index_url,
+        supports_flash_attn_patch=(engine == "hidream"),
+    )
+
+
+# ---------- venv path helpers (unchanged) ------------------------------
 
 def venv_root(cfg: Config) -> Path:
     """Where per-engine venvs live."""
@@ -103,6 +363,8 @@ def venv_python(cfg: Config, engine: str) -> Path:
     return root / "bin" / "python"
 
 
+# ---------- installer ---------------------------------------------------
+
 class EngineInstaller:
     """Owns the background installer tasks for diffusion engines."""
 
@@ -113,11 +375,9 @@ class EngineInstaller:
         self._cancel_flags: dict[str, asyncio.Event] = {}
 
     # ---- public surface ----
-    def start(self, engine: str) -> str:
-        plan = ENGINE_PLANS.get(engine)
-        if plan is None:
+    def start(self, engine: str, *, options: dict[str, Any] | None = None) -> str:
+        if engine not in ENGINE_PLANS:
             raise ValueError(f"no install plan for engine {engine!r}")
-        # Reject if one is already running for this engine.
         active = self.active_for_engine(engine)
         if active:
             raise RuntimeError(
@@ -125,17 +385,22 @@ class EngineInstaller:
                 f"(id={active['id']})"
             )
         install_id = secrets.token_urlsafe(8)
+        opts_json = json.dumps(options or {}, sort_keys=True)
         self.db.execute(
             "INSERT INTO engine_installs(id, engine, kind, status, "
-            "message, started_at) VALUES (?, ?, 'pip', 'pending', ?, ?)",
-            (install_id, engine, "queued", time.time()),
+            "message, started_at, options_json) "
+            "VALUES (?, ?, 'pip', 'pending', ?, ?, ?)",
+            (install_id, engine, "queued", time.time(), opts_json),
         )
         cancel = asyncio.Event()
         self._cancel_flags[install_id] = cancel
-        task = asyncio.create_task(self._run(install_id, plan, cancel))
+        task = asyncio.create_task(
+            self._run(install_id, engine, options or {}, cancel),
+        )
         self._tasks[install_id] = task
         self.db.log_event("install_started",
-                          {"id": install_id, "engine": engine})
+                          {"id": install_id, "engine": engine,
+                           "options": options or {}})
         return install_id
 
     def cancel(self, install_id: str) -> bool:
@@ -170,7 +435,8 @@ class EngineInstaller:
         return _row_to_dict(row) if row else None
 
     # ---- internals ----
-    async def _run(self, install_id: str, plan: EnginePackages,
+    async def _run(self, install_id: str, engine: str,
+                   options: dict[str, Any],
                    cancel: asyncio.Event) -> None:
         log_buf: list[str] = []
 
@@ -178,7 +444,6 @@ class EngineInstaller:
             log_buf.append(line)
             joined = "\n".join(log_buf)
             if len(joined) > MAX_LOG_BYTES:
-                # Keep the tail when log overflows the budget.
                 joined = joined[-MAX_LOG_BYTES:]
                 log_buf[:] = joined.splitlines()
             self._set(install_id, log=joined)
@@ -189,12 +454,35 @@ class EngineInstaller:
 
         try:
             self._set(install_id, status="running",
-                      message="Creating virtual environment")
-            set_progress(5, f"Creating venv at {venv_root(self.cfg) / plan.engine}")
+                      message="Detecting GPU and resolving plan")
+            set_progress(2, "Detecting GPU")
+            gpu = detect_gpu()
+            emit(f"[gpu] kind={gpu.kind}"
+                 + (f" arch={gpu.rocm_arch}" if gpu.rocm_arch else "")
+                 + (f" render_gid={gpu.render_gid}" if gpu.render_gid is not None else ""))
 
-            venv_dir = venv_root(self.cfg) / plan.engine
+            plan = resolve_plan(engine, gpu, emit, cfg=self.cfg)
+            if plan is None:
+                raise RuntimeError(f"no resolvable plan for engine {engine!r}")
+            emit(f"[plan] target={plan.target}, "
+                 f"wheel_urls={len(plan.wheel_urls)}, "
+                 f"packages={len(plan.packages)}")
+
+            # Render-group preflight (warn + continue).
+            if gpu.is_amd and not render_group_ok(gpu):
+                emit(
+                    "[warn] this daemon is not a member of the 'render' "
+                    "group, so HIP will report no devices at runtime "
+                    "until that is fixed. Recipe: "
+                    "`sudo usermod -aG render <user>` then log out and "
+                    "back in, or `sudo systemctl restart "
+                    "user@<uid>.service`. The install will continue."
+                )
+
+            set_progress(5, f"Creating venv at {venv_root(self.cfg) / engine}")
+            venv_dir = venv_root(self.cfg) / engine
             venv_dir.parent.mkdir(parents=True, exist_ok=True)
-            python_path = venv_python(self.cfg, plan.engine)
+            python_path = venv_python(self.cfg, engine)
 
             if not python_path.exists():
                 rc = await self._run_subprocess(
@@ -219,7 +507,28 @@ class EngineInstaller:
             if rc != 0:
                 raise RuntimeError(f"pip self-upgrade failed (exit {rc})")
 
-            set_progress(25, f"Installing {len(plan.packages)} packages")
+            # Step A: wheel URLs (AMD ROCm path).
+            if plan.wheel_urls:
+                set_progress(
+                    25,
+                    f"Installing {len(plan.wheel_urls)} GPU wheels ({plan.target})",
+                )
+                argv = [
+                    str(python_path), "-m", "pip", "install", "--upgrade",
+                    "--no-deps", "--progress-bar", "off",
+                    *plan.wheel_urls,
+                ]
+                rc = await self._run_subprocess(argv, cancel, emit)
+                if cancel.is_set():
+                    raise asyncio.CancelledError()
+                if rc != 0:
+                    raise RuntimeError(f"GPU wheel install failed (exit {rc})")
+
+            # Step B: regular pypi packages.
+            set_progress(
+                60,
+                f"Installing {len(plan.packages)} python packages",
+            )
             argv = [
                 str(python_path), "-m", "pip", "install", "--upgrade",
                 "--progress-bar", "off",
@@ -234,9 +543,12 @@ class EngineInstaller:
             if rc != 0:
                 raise RuntimeError(f"pip install failed (exit {rc})")
 
-            set_progress(95, "Verifying torch imports")
+            set_progress(90, "Verifying torch imports")
             rc = await self._run_subprocess(
-                [str(python_path), "-c", "import torch; print(torch.__version__)"],
+                [str(python_path), "-c",
+                 "import torch; print('torch', torch.__version__, "
+                 "'hip', getattr(torch.version, 'hip', None), "
+                 "'cuda_available', torch.cuda.is_available())"],
                 cancel, emit,
             )
             if rc != 0:
@@ -245,13 +557,21 @@ class EngineInstaller:
                      "engine at the new venv anyway.")
 
             # Persist the new venv path into the engine's config field.
-            self._persist_engine_python(plan.engine, str(python_path))
+            self._persist_engine_python(engine, str(python_path))
+
+            # Optional: patch hidream-source/models/pipeline.py to flip
+            # use_flash_attn True → False. Only fires when the option
+            # is set, the plan supports it, and the repo path is known.
+            if plan.supports_flash_attn_patch and options.get("patch_flash_attn"):
+                set_progress(95, "Patching pipeline.py (use_flash_attn=False)")
+                self._apply_flash_attn_patch(engine, emit)
 
             set_progress(100, f"Installed at {python_path}")
             self._set(install_id, status="done", finished_at=time.time())
             self.db.log_event("install_done", {
-                "id": install_id, "engine": plan.engine,
+                "id": install_id, "engine": engine,
                 "python": str(python_path),
+                "target": plan.target,
             })
         except asyncio.CancelledError:
             emit("[cancelled] install stopped")
@@ -306,6 +626,57 @@ class EngineInstaller:
             await reader_task
         return proc.returncode if proc.returncode is not None else -1
 
+    def _apply_flash_attn_patch(self, engine: str, emit) -> None:
+        """Flip ``use_flash_attn: True`` to ``False`` in pipeline.py.
+
+        Only meaningful for hidream right now. The upstream pipeline
+        hardcodes the flag at module level, and there's no flash_attn
+        wheel for AMD ROCm. Skipped (with a note) when the repo path
+        isn't configured yet — the operator can re-run after setting it.
+        """
+        if engine != "hidream":
+            return
+        repo = getattr(self.cfg, "hidream_repo", None)
+        if not repo:
+            emit("[warn] skipping flash-attn patch: hidream_repo not set "
+                 "in config. After you point 'Source folder' at your "
+                 "HiDream-O1-Image checkout, re-run install (or sed it "
+                 "yourself: \"use_flash_attn\": True → False in "
+                 "models/pipeline.py).")
+            return
+        pipeline = Path(repo).expanduser() / "models" / "pipeline.py"
+        if not pipeline.is_file():
+            emit(f"[warn] skipping flash-attn patch: {pipeline} not found")
+            return
+        try:
+            text = pipeline.read_text(encoding="utf-8")
+        except OSError as e:
+            emit(f"[warn] skipping flash-attn patch: cannot read {pipeline}: {e}")
+            return
+
+        needle_true = '"use_flash_attn": True,'
+        needle_false = '"use_flash_attn": False,'
+        if needle_true not in text:
+            if needle_false in text:
+                emit(f"[ok] flash-attn patch already applied to {pipeline}")
+            else:
+                emit(f"[warn] flash-attn patch needle not found in {pipeline}; "
+                     "upstream may have changed. Skipped.")
+            return
+
+        # Keep a one-shot backup the first time we touch this file.
+        bak = pipeline.with_suffix(pipeline.suffix + ".bak")
+        try:
+            if not bak.exists():
+                bak.write_text(text, encoding="utf-8")
+            pipeline.write_text(
+                text.replace(needle_true, needle_false), encoding="utf-8",
+            )
+            emit(f"[ok] patched {pipeline}: \"use_flash_attn\": True → False "
+                 f"(backup at {bak.name})")
+        except OSError as e:
+            emit(f"[warn] flash-attn patch failed to write {pipeline}: {e}")
+
     def _set(self, install_id: str, **fields: Any) -> None:
         if not fields:
             return
@@ -346,4 +717,6 @@ def _row_to_dict(row) -> dict[str, Any]:
         "started_at": row["started_at"],
         "finished_at": row["finished_at"],
         "error": row["error"],
+        "options_json": (row["options_json"] if "options_json" in row.keys()
+                         else None),
     }

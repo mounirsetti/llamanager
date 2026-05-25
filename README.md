@@ -301,14 +301,16 @@ Each engine card on the Diffusion engines page has an `Install dependencies` but
 | engine | what gets installed | rough size |
 |--------|---------------------|------------|
 | Z-Image | torch, transformers, accelerate, huggingface_hub, safetensors, Pillow, sentencepiece, `git+https://github.com/huggingface/diffusers` | ~8.5 GB |
-| HiDream | torch, transformers, accelerate, diffusers, huggingface_hub, safetensors, Pillow, einops, sentencepiece | ~7.5 GB |
+| HiDream | GPU-aware. On AMD: official ROCm wheels (torch+rocm7.2.1, torchvision, triton) from `repo.radeon.com` + pinned `transformers==4.57.1`, `accelerate==1.13.0`, `diffusers==0.38.0`, etc. On NVIDIA/CPU: generic CUDA/CPU torch + the same HF pins. | ~7.5–9 GB |
 | FLUX 2 | (no auto-install — see below) | — |
 
 The installer streams pip's stdout into the page, so you can watch it work and cancel mid-flight. Failures surface inline with the last 200 KB of log.
 
 FLUX 2 uses the `sd-cli` binary from [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp), which ships per-backend builds (Vulkan, CUDA, ROCm) that are too platform-specific to auto-install reliably. Download the matching release zip, extract, and point the `sd-cli executable` field on the engine card at the binary.
 
-The auto-installer also picks a generic `torch` wheel. On AMD ROCm or Apple Silicon you should build the venv yourself with the right vendor wheels and point the engine at it. The card calls this out in plain language.
+HiDream auto-detects the GPU family (probes `/dev/kfd` for AMD ROCm, `nvidia-smi` for NVIDIA) and installs the matching wheel set. On AMD the card also offers a one-checkbox patch that flips `use_flash_attn: True` to `False` in `<hidream_repo>/models/pipeline.py` — required because the upstream pipeline hardcodes flash-attn, which isn't available on AMD ROCm. The patch keeps a `.bak`. If `<hidream_repo>` isn't set when you click install, the patch step is skipped with a note; set the path and re-run. On AMD, the installer also surfaces a warning if the llamanager process isn't a member of the `render` group, since HIP needs `/dev/kfd` access.
+
+Z-Image's auto-install still picks a generic `torch` wheel — on AMD ROCm or Apple Silicon you should build that venv yourself with the right vendor wheels and point the engine at it.
 
 ### Download models
 
@@ -801,7 +803,11 @@ On Windows, `~` resolves to `%USERPROFILE%`, e.g. `C:\Users\<you>\.llamanager`.
 
 **Crash loop, `state: crashed` and 503s.** The 3-in-5 restart policy gave up. Check `~/.llamanager/logs/llama-server.log` (or `hidream.log` / `flux2.log` / `z_image.log` for the image engines), fix the cause, then `POST /admin/server/start` (or use the UI).
 
-**Z-Image `Install dependencies` finishes but `pipe(...)` fails at runtime.** The auto-install picks a generic torch wheel. For AMD ROCm, Apple Silicon, or specific CUDA versions, build the venv yourself with the vendor wheels and point the engine at it, then skip the install button.
+**Z-Image `Install dependencies` finishes but `pipe(...)` fails at runtime.** The Z-Image auto-install picks a generic torch wheel. For AMD ROCm, Apple Silicon, or specific CUDA versions, build the venv yourself with the vendor wheels and point the engine at it, then skip the install button. (HiDream's auto-installer does this for you on AMD — that path is generic only for Z-Image and FLUX 2 today.)
+
+**HiDream errors with `AssertionError: CUDA is required for inference.` on AMD.** PyTorch keeps the `torch.cuda.*` namespace even when built against ROCm/HIP; the assertion really means "no HIP device visible." Usually this is the `render` group — the llamanager process needs gid `render` to open `/dev/kfd`. Add the user (`sudo usermod -aG render <user>`) and log out / in. The Diffusion engines page surfaces this as a warning on the HiDream card when it's wrong.
+
+**HiDream errors with `AssertionError: Flash attention is not available.` on AMD.** The upstream hidream-source pipeline hardcodes flash-attn, which isn't shipped for AMD. The HiDream install card has a checkbox that patches `<hidream_repo>/models/pipeline.py` (`"use_flash_attn": True` → `False`); it's pre-checked on AMD hosts. The non-flash path uses a 4D attention mask — somewhat slower at large image sizes, but functional.
 
 **"No compatible GPU detected" on Windows with an AMD card.** Older builds required `rocm-smi`. Update llamanager: the new path reads the adapter name and VRAM total from the driver registry and live VRAM usage from the Windows GPU performance counters, without any vendor CLI.
 

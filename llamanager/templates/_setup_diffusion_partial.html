@@ -34,24 +34,49 @@
     <span>Dependencies</span>
     {% if plan %}
     <span class="lm-engine-section__meta">
-      {{ plan.packages|length }} package{% if plan.packages|length != 1 %}s{% endif %}
+      {% if plan.wheel_urls %}{{ plan.wheel_urls|length }} GPU wheel{% if plan.wheel_urls|length != 1 %}s{% endif %} +
+      {% endif %}{{ plan.packages|length }} package{% if plan.packages|length != 1 %}s{% endif %}
       · ~{% if plan.space_mb >= 1024 %}{{ '%.1f GB' % (plan.space_mb / 1024) }}{% else %}{{ plan.space_mb }} MB{% endif %} on disk
+      {% if plan.target %}· target <code>{{ plan.target }}</code>{% endif %}
     </span>
     {% endif %}
   </div>
   {% if plan %}
     {% if plan.notes %}<p class="lm-engine-section__note">{{ plan.notes }}</p>{% endif %}
+    {% if gpu.kind == 'amd' and gpu.needs_render_group and not gpu.render_group_ok %}
+    <p class="lm-engine-section__note" style="color: var(--bad);">
+      ⚠ This daemon is not in the <code>render</code> group, so HIP will
+      report no GPU at runtime. Fix before generating images:
+      <code>sudo usermod -aG render &lt;user&gt;</code> then log out / in.
+      The install can proceed regardless.
+    </p>
+    {% endif %}
     <ul class="lm-pkg-list">
+      {% for w in plan.wheel_urls %}<li><code>{{ w }}</code></li>{% endfor %}
       {% for pkg in plan.packages %}<li>{{ pkg }}</li>{% endfor %}
     </ul>
     {% if install and install.status in ('pending', 'running') %}
       {{ install_progress(engine, install) }}
     {% else %}
       <form method="post" action="/ui/setup-diffusion/engine/{{ engine }}/install-deps"
-            style="display: inline;">
+            style="display: inline-block;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {% if plan.supports_flash_attn_patch %}
+        <label style="display: flex; align-items: flex-start; gap: 8px;
+                      margin: 6px 0 10px; font-size: 0.8125rem; max-width: 60ch;">
+          <input type="checkbox" name="patch_flash_attn" value="on"
+                 {% if gpu.kind == 'amd' %}checked{% endif %}>
+          <span>
+            Patch <code>&lt;hidream_repo&gt;/models/pipeline.py</code> to
+            disable flash-attn
+            <span style="display: block; color: var(--fg-2); font-size: 0.75rem;">
+              {% if gpu.kind == 'amd' %}Recommended on AMD ({% if gpu.rocm_arch %}{{ gpu.rocm_arch }}{% else %}ROCm{% endif %}) — flash_attn isn't available on the AMD wheel.{% else %}Off by default on NVIDIA/CPU. Tick if you don't want flash_attn.{% endif %}
+            </span>
+          </span>
+        </label>
+        {% endif %}
         <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm"
-                data-confirm="Create a Python venv and install {{ plan.packages|length }} packages? This will take several minutes and ~{% if plan.space_mb >= 1024 %}{{ '%.1f GB' % (plan.space_mb / 1024) }}{% else %}{{ plan.space_mb }} MB{% endif %} of disk.">
+                data-confirm="Create a Python venv and install dependencies? This will take several minutes and ~{% if plan.space_mb >= 1024 %}{{ '%.1f GB' % (plan.space_mb / 1024) }}{% else %}{{ plan.space_mb }} MB{% endif %} of disk.">
           {% if install and install.status == 'done' %}Reinstall dependencies{% else %}Install dependencies{% endif %}
         </button>
       </form>
@@ -224,7 +249,13 @@
 <div class="lm-engine-card" data-engine="hidream">
   <div class="lm-engine-card__head">
     <h2 class="lm-engine-card__name">HiDream-O1-Image</h2>
-    <span class="lm-engine-card__tag">Linux · ROCm 7.2+ · gfx1201 verified</span>
+    <span class="lm-engine-card__tag">
+      Auto-installs for
+      {% if gpu.kind == 'amd' %}AMD ROCm{% if gpu.rocm_arch %} ({{ gpu.rocm_arch }}){% endif %}
+      {% elif gpu.kind == 'nvidia' %}NVIDIA CUDA
+      {% elif gpu.kind == 'apple' %}Apple Silicon
+      {% else %}CPU{% endif %}
+    </span>
   </div>
   <div class="lm-engine-card__status" data-state="{{ hd_state }}">
     {% if image_cfg.hidream_python and image_cfg.hidream_repo %}
