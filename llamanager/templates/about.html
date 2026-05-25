@@ -76,27 +76,80 @@
     llamanager is built on top of excellent open-source projects.
   </p>
 
-  <div style="display: grid; grid-template-columns: max-content 1fr; gap: 6px 24px; font-size: 0.875rem; color: var(--fg-1); max-width: 520px;">
-    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Inference</span>
-    <a href="https://github.com/ggerganov/llama.cpp" style="color: var(--accent);">llama.cpp / llama-server</a>
+  {# The label / value rows share a style; macro-ish via a Jinja set keeps the
+     markup readable at this length. #}
+  {% set lbl = 'font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;' %}
+  {% set lnk = 'color: var(--accent);' %}
+  <div style="display: grid; grid-template-columns: max-content 1fr; gap: 6px 24px; font-size: 0.875rem; color: var(--fg-1); max-width: 720px;">
+    <span style="{{ lbl }}">LLM inference</span>
+    <span>
+      <a href="https://github.com/ggerganov/llama.cpp" style="{{ lnk }}">llama.cpp / llama-server</a>,
+      <a href="https://github.com/ml-explore/mlx-lm" style="{{ lnk }}">mlx-lm</a> (Apple Silicon)
+    </span>
 
-    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Alt. engine</span>
-    <a href="https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant" style="color: var(--accent);">Atomic TurboQuant</a>
+    <span style="{{ lbl }}">Alt. LLM engine</span>
+    <a href="https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant" style="{{ lnk }}">Atomic TurboQuant</a>
 
-    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Web framework</span>
-    <a href="https://fastapi.tiangolo.com" style="color: var(--accent);">FastAPI</a>
+    <span style="{{ lbl }}">HiDream</span>
+    <a href="https://huggingface.co/HiDream-ai/HiDream-O1-Image" style="{{ lnk }}">HiDream-O1-Image</a>
 
-    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Templates</span>
-    <a href="https://jinja.palletsprojects.com" style="color: var(--accent);">Jinja2</a>
+    <span style="{{ lbl }}">Z-Image</span>
+    <span>
+      <a href="https://huggingface.co/Tongyi-MAI/Z-Image" style="{{ lnk }}">Tongyi-MAI / Z-Image</a>,
+      <a href="https://huggingface.co/SeeSee21/Z-Anime" style="{{ lnk }}">SeeSee21 / Z-Anime</a>
+    </span>
 
-    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Interactivity</span>
-    <a href="https://htmx.org" style="color: var(--accent);">HTMX</a>
+    <span style="{{ lbl }}">FLUX 2</span>
+    <span>
+      <a href="https://huggingface.co/black-forest-labs/FLUX.2-dev" style="{{ lnk }}">Black Forest Labs / FLUX 2</a>
+      via <a href="https://github.com/leejet/stable-diffusion.cpp" style="{{ lnk }}">stable-diffusion.cpp</a>
+    </span>
 
-    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Model hub</span>
-    <a href="https://huggingface.co" style="color: var(--accent);">Hugging Face (huggingface_hub)</a>
+    <span style="{{ lbl }}">ML runtime</span>
+    <span>
+      <a href="https://pytorch.org" style="{{ lnk }}">PyTorch</a>,
+      <a href="https://github.com/huggingface/transformers" style="{{ lnk }}">Transformers</a>,
+      <a href="https://github.com/huggingface/diffusers" style="{{ lnk }}">Diffusers</a>,
+      <a href="https://github.com/huggingface/accelerate" style="{{ lnk }}">Accelerate</a>
+    </span>
 
-    <span style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); align-self: center;">Typography</span>
-    <span><a href="https://fonts.google.com/specimen/Fraunces" style="color: var(--accent);">Fraunces</a>, <a href="https://fonts.google.com/specimen/Inter" style="color: var(--accent);">Inter</a>, <a href="https://fonts.google.com/specimen/JetBrains+Mono" style="color: var(--accent);">JetBrains Mono</a></span>
+    <span style="{{ lbl }}">Web framework</span>
+    <span>
+      <a href="https://fastapi.tiangolo.com" style="{{ lnk }}">FastAPI</a>
+      on <a href="https://www.uvicorn.org" style="{{ lnk }}">Uvicorn</a>
+    </span>
+
+    <span style="{{ lbl }}">Templates</span>
+    <a href="https://jinja.palletsprojects.com" style="{{ lnk }}">Jinja2</a>
+
+    <span style="{{ lbl }}">Interactivity</span>
+    <span>
+      <a href="https://htmx.org" style="{{ lnk }}">HTMX</a>
+      + <a href="https://github.com/bigskysoftware/idiomorph" style="{{ lnk }}">idiomorph</a>
+    </span>
+
+    <span style="{{ lbl }}">Model hub</span>
+    <a href="https://huggingface.co" style="{{ lnk }}">Hugging Face Hub (huggingface_hub)</a>
+
+    <span style="{{ lbl }}">Storage</span>
+    <span>
+      <a href="https://www.sqlite.org" style="{{ lnk }}">SQLite</a>
+      (via <a href="https://github.com/omnilib/aiosqlite" style="{{ lnk }}">aiosqlite</a>),
+      <a href="https://github.com/python-poetry/tomlkit" style="{{ lnk }}">tomlkit</a> for config writes
+    </span>
+
+    <span style="{{ lbl }}">Auth + crypto</span>
+    <span>
+      <a href="https://github.com/hynek/argon2-cffi" style="{{ lnk }}">argon2-cffi</a>,
+      <a href="https://itsdangerous.palletsprojects.com" style="{{ lnk }}">itsdangerous</a>
+    </span>
+
+    <span style="{{ lbl }}">Typography</span>
+    <span>
+      <a href="https://fonts.google.com/specimen/Fraunces" style="{{ lnk }}">Fraunces</a>,
+      <a href="https://fonts.google.com/specimen/Inter" style="{{ lnk }}">Inter</a>,
+      <a href="https://fonts.google.com/specimen/JetBrains+Mono" style="{{ lnk }}">JetBrains Mono</a>
+    </span>
   </div>
 </section>
 

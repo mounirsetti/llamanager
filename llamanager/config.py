@@ -49,6 +49,16 @@ llama_server_binary = "llama-server"
 llama_server_port = 7201
 data_dir = "~/.llamanager"
 
+# Exclusive mode: when llamanager is running, prevent foreign
+# llama-server / image-engine workers from competing for the GPU.
+#   off        — disabled
+#   warn       — scan + log, kill nothing
+#   exclusive  — kill llama-server binaries and orphaned image workers
+#   aggressive — also kill foreign ML runtimes (ComfyUI, vLLM, Ollama, ...)
+exclusive_mode = "off"
+exclusive_grace_seconds = 5
+exclusive_heartbeat_seconds = 120
+
 
 [defaults]
 model = ""
@@ -219,6 +229,7 @@ def detect_engine_for_id(model_id: str, models_dir: Path) -> str:
 
 VALID_RAM_SPILL_POLICIES = ("default", "unlimited", "limited", "none")
 VALID_THINKING = ("", "on", "off")
+VALID_EXCLUSIVE_MODES = ("off", "warn", "exclusive", "aggressive")
 
 
 @dataclass
@@ -350,6 +361,13 @@ class Config:
     # Where image outputs land. None → data_dir/images/.
     images_dir_override: Path | None = None
     images_max_disk_gb: int = 10
+
+    # ---- exclusive mode ----
+    # See [server] section in DEFAULT_CONFIG_TOML for the mode catalog.
+    # Persisted under [server] so the surface stays small.
+    exclusive_mode: str = "off"
+    exclusive_grace_seconds: float = 5.0
+    exclusive_heartbeat_seconds: int = 120
 
     raw: dict[str, Any] = field(default_factory=dict)
     path: Path | None = None
@@ -516,6 +534,13 @@ def load_config(path: Path | None = None) -> Config:
         unload_text_on_arrival=bool(coex_cfg.get("unload_text_on_arrival", True)),
         restart_text_after_image=bool(coex_cfg.get("restart_text_after_image", True)),
         allow_concurrent=bool(coex_cfg.get("allow_concurrent", False)),
+        exclusive_mode=(
+            str(server.get("exclusive_mode", "off") or "off").strip().lower()
+            if str(server.get("exclusive_mode", "off") or "off").strip().lower()
+            in VALID_EXCLUSIVE_MODES else "off"
+        ),
+        exclusive_grace_seconds=float(server.get("exclusive_grace_seconds", 5.0) or 5.0),
+        exclusive_heartbeat_seconds=int(server.get("exclusive_heartbeat_seconds", 120) or 120),
         raw=raw,
         path=cfg_path,
     )
@@ -922,6 +947,33 @@ def update_image_config(cfg_path: Path, *,
         img["images_dir"] = images_dir
     if max_disk_gb is not None:
         img["max_disk_gb"] = int(max_disk_gb)
+    _save_tomlkit(cfg_path, doc)
+
+
+def update_exclusive_mode(cfg_path: Path, *,
+                          mode: str | None = None,
+                          grace_seconds: float | None = None,
+                          heartbeat_seconds: int | None = None) -> None:
+    """Update the exclusive-mode knobs under [server] in config.toml."""
+    import tomlkit
+    if mode is not None:
+        m = mode.strip().lower()
+        if m not in VALID_EXCLUSIVE_MODES:
+            raise ValueError(
+                f"invalid exclusive_mode {mode!r}; "
+                f"must be one of {VALID_EXCLUSIVE_MODES}"
+            )
+        mode = m
+    doc = _load_tomlkit(cfg_path)
+    if "server" not in doc:
+        doc.add("server", tomlkit.table())
+    srv = doc["server"]
+    if mode is not None:
+        srv["exclusive_mode"] = mode
+    if grace_seconds is not None:
+        srv["exclusive_grace_seconds"] = float(grace_seconds)
+    if heartbeat_seconds is not None:
+        srv["exclusive_heartbeat_seconds"] = int(heartbeat_seconds)
     _save_tomlkit(cfg_path, doc)
 
 

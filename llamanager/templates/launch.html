@@ -138,6 +138,81 @@
   </div>
 </section>
 
+{# ---- Exclusive mode (process isolation) ---- #}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Exclusive mode</span>
+    <span class="lm-section-meta">claim the GPU for llamanager</span>
+  </header>
+
+  <div style="padding: 18px 20px; border: 1px solid var(--bg-3); background: var(--bg-1); max-width: 72ch;">
+    <p style="margin: 0 0 14px; font-size: 0.875rem; color: var(--fg-1); line-height: 1.6;">
+      When on, llamanager kills foreign <code>llama-server</code> and engine workers
+      (and, in aggressive mode, ComfyUI / vLLM / Ollama / SD WebUI / kohya / etc.)
+      so the model llamanager is loading isn't fighting another process for VRAM.
+      Triggered on daemon start, before every model load and image yield, and every
+      <code>{{ exclusive_heartbeat }} s</code> in the background.
+    </p>
+
+    <form method="post" action="/ui/launch/exclusive" style="margin-bottom: 14px;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label style="display: flex; gap: 12px; align-items: center; font-size: 0.875rem; color: var(--fg-1);">
+        <span style="min-width: 5rem; color: var(--fg-2);">Mode</span>
+        <select name="mode" onchange="this.form.submit()"
+                style="background: var(--bg-2); color: var(--fg-0); border: 1px solid var(--bg-3); padding: 6px 10px; font-size: 0.875rem;">
+          {% for m in exclusive_modes %}
+          <option value="{{ m }}" {% if m == exclusive_mode %}selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+        </select>
+        <span style="color: var(--fg-2); font-size: 0.8125rem;">
+          {% if exclusive_mode == 'off' %}disabled
+          {% elif exclusive_mode == 'warn' %}scan + log only, no kills
+          {% elif exclusive_mode == 'exclusive' %}kill our binaries + orphaned workers
+          {% elif exclusive_mode == 'aggressive' %}also kill foreign ML runtimes
+          {% endif %}
+        </span>
+      </label>
+    </form>
+
+    <form method="post" action="/ui/launch/exclusive-sweep" style="margin-bottom: 14px;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="lm-btn"
+              title="Run one sweep now (warn-scan preview if mode is off)">
+        Sweep now
+      </button>
+    </form>
+
+    {% if exclusive_last %}
+    <details style="margin-top: 10px;">
+      <summary style="cursor: pointer; font-size: 0.8125rem; color: var(--fg-2); user-select: none;">
+        Last sweep —
+        mode <code>{{ exclusive_last.mode }}</code>,
+        scanned {{ exclusive_last.scanned }} procs,
+        {% if exclusive_last.victims %}{{ exclusive_last.victims | length }} match{% if exclusive_last.victims | length != 1 %}es{% endif %}{% else %}no matches{% endif %},
+        {% if exclusive_last.killed %}{{ exclusive_last.killed | length }} SIGKILL'd{% elif exclusive_last.terminated %}{{ exclusive_last.terminated | length }} SIGTERM'd{% endif %}
+      </summary>
+      {% if exclusive_last.victims %}
+      <table class="lm-table" style="margin-top: 10px; font-size: 0.8125rem;">
+        <thead><tr><th>PID</th><th>Kind</th><th>Exe</th><th>Cmdline</th></tr></thead>
+        <tbody>
+        {% for v in exclusive_last.victims %}
+        <tr>
+          <td><code>{{ v.pid }}</code></td>
+          <td><code>{{ v.kind }}</code></td>
+          <td><code>{{ v.exe }}</code></td>
+          <td><code style="word-break: break-all;">{{ v.cmdline }}</code></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p style="margin: 10px 0 0; font-size: 0.8125rem; color: var(--fg-2);">No foreign processes found.</p>
+      {% endif %}
+    </details>
+    {% endif %}
+  </div>
+</section>
+
 {# ---- Section 2: API headers ---- #}
 <section class="lm-section">
   <header class="lm-section-head">

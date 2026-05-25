@@ -1,8 +1,14 @@
 {% if status.state in ('starting', 'swapping') or (status.state == 'stopped' and launching) %}
+{# Polling skips when the user has a text selection anywhere on the
+   page so copy-pasting from the log isn't ripped out from under them
+   on every tick. The morph swap is a safety net for the times the
+   poll does fire while the user is just reading — idiomorph reuses
+   in-place DOM nodes where possible, preserving scroll within the
+   <pre>. #}
 <div id="server-status"
      hx-get="/ui/launch/_server_status"
-     hx-trigger="every 1s"
-     hx-swap="outerHTML">
+     hx-trigger="every 1s [!window.getSelection || !window.getSelection().toString()]"
+     hx-swap="morph">
   <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 14px;">
     <span class="lm-pill lm-pill--starting">{{ status.state if status.state != 'stopped' else 'starting' }}</span>
     {% if status.current_model %}
@@ -39,8 +45,8 @@
 {% elif status.state == 'crashed' or status.state == 'degraded' %}
 <div id="server-status"
      hx-get="/ui/launch/_server_status"
-     hx-trigger="every 3s"
-     hx-swap="outerHTML">
+     hx-trigger="every 3s [!window.getSelection || !window.getSelection().toString()]"
+     hx-swap="morph">
   <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 14px;">
     <span class="lm-pill lm-pill--crashed">{{ status.state }}</span>
   </div>

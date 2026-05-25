@@ -157,21 +157,21 @@
     {# Settings bar #}
     <div class="chat-settings-bar" style="display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--bg-2); flex-wrap: wrap;">
       <div style="display: flex; align-items: center; gap: 6px;">
-        <label style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2);">Profile</label>
-        <select id="chat-profile" class="lm-select" style="font-size: 0.8125rem; padding: 4px 8px; min-width: 140px;">
-          <option value="">— model default —</option>
-          {% for p in profiles %}
-          <option value="{{ p.name }}" data-model="{{ p.model }}">{{ p.name }} ({{ p.model }})</option>
-          {% endfor %}
-        </select>
-      </div>
-      <div style="display: flex; align-items: center; gap: 6px;">
         <label style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2);">Model</label>
         <select id="chat-model" class="lm-select" style="font-size: 0.8125rem; padding: 4px 8px; min-width: 140px;">
           <option value="">current (no swap)</option>
           {% for mid in model_ids %}
           <option value="{{ mid }}">{{ mid }}</option>
           {% endfor %}
+        </select>
+      </div>
+      <div style="display: flex; align-items: center; gap: 6px;">
+        <label style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2);">Profile</label>
+        {# Populated by JS based on the selected model; the JSON in
+           ``profiles_json`` carries every profile + its bound model so
+           the dropdown can filter without a round-trip. #}
+        <select id="chat-profile" class="lm-select" style="font-size: 0.8125rem; padding: 4px 8px; min-width: 140px;">
+          <option value="">— model default —</option>
         </select>
       </div>
       <div style="display: flex; align-items: center; gap: 6px;">
@@ -394,9 +394,31 @@
     renderMessages();
   });
 
-  // ---- Profile/Model mutual exclusion ----
-  profileEl.addEventListener('change', function () { if (profileEl.value) modelSelectEl.value = ''; });
-  modelSelectEl.addEventListener('change', function () { if (modelSelectEl.value) profileEl.value = ''; });
+  // ---- Model → Profile cascade ----
+  // Pick model first, then the profile dropdown narrows to profiles
+  // bound to that model. With no model selected, all LLM-bound profiles
+  // are listed so the user can also pick a profile that pins its own
+  // model (the bound model gets used as the X-Llamanager-Model header
+  // at send time).
+  function rebuildChatProfiles() {
+    while (profileEl.options.length > 1) profileEl.remove(1);
+    var chosenModel = modelSelectEl.value;
+    PROFILES_VISION.forEach(function (p) {
+      if (chosenModel && p.model !== chosenModel) return;
+      var o = document.createElement('option');
+      o.value = p.name;
+      o.dataset.model = p.model || '';
+      // Suffix with bound model when no model is pre-selected so the
+      // operator can tell the bindings apart at a glance.
+      o.textContent = chosenModel ? p.name : (p.name + ' (' + p.model + ')');
+      profileEl.appendChild(o);
+    });
+  }
+  modelSelectEl.addEventListener('change', function () {
+    rebuildChatProfiles();
+    refreshAttachButton();
+  });
+  rebuildChatProfiles();
 
   // ---- Scroll management ----
   messagesEl.addEventListener('scroll', function () {

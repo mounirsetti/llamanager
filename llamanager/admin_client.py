@@ -148,6 +148,26 @@ class AdminClient:
                           params={"source": source, "tail": tail})
         return r.text
 
+    # ---- exclusive mode ----
+
+    def exclusive_status(self) -> dict[str, Any]:
+        return self._get("/admin/exclusive")
+
+    def exclusive_set(self, *, mode: str | None = None,
+                      grace_seconds: float | None = None,
+                      heartbeat_seconds: int | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {}
+        if mode is not None:
+            body["mode"] = mode
+        if grace_seconds is not None:
+            body["grace_seconds"] = grace_seconds
+        if heartbeat_seconds is not None:
+            body["heartbeat_seconds"] = heartbeat_seconds
+        return self._post("/admin/exclusive", body)
+
+    def exclusive_sweep(self) -> dict[str, Any]:
+        return self._post("/admin/exclusive/sweep")
+
     # ---- server lifecycle ----
 
     def server_start(self, *, profile: str | None = None,

@@ -246,7 +246,7 @@
         <span style="color: var(--fg-2);">from</span>
         <strong style="color: var(--fg-0); font-weight: 500;">{{ r.origin }}</strong>
         <span style="color: var(--fg-2);">·</span>
-        <code>{{ r.model_required or '(loaded)' }}</code>
+        <code>{{ r.model_required or 'any' }}</code>
         <span class="lm-pill lm-pill--{{ r.status }}">{{ r.status }}</span>
       </div>
       {% endfor %}
@@ -266,7 +266,7 @@
         <td data-label="Id"><code>{{ r.id[:8] }}</code></td>
         <td data-label="Origin">{{ r.origin }}</td>
         <td data-label="Prio" class="num">{{ r.priority }}</td>
-        <td data-label="Model"><code>{{ r.model_required or '(loaded)' }}</code></td>
+        <td data-label="Model"><code>{{ r.model_required or 'any' }}</code></td>
         <td data-label="Status"><span class="lm-pill lm-pill--{{ r.status }}">{{ r.status }}</span></td>
       </tr>
     {% endfor %}
@@ -292,8 +292,8 @@
     {% for r in recent %}
     <tr>
       <td data-label="Id"><code>{{ r.id[:8] }}</code></td>
-      <td data-label="Origin">{{ r.origin_id }}</td>
-      <td data-label="Model"><code>{{ r.model or '(loaded)' }}</code></td>
+      <td data-label="Origin">{{ r.origin_name or ('#%s' % r.origin_id if r.origin_id else '—') }}</td>
+      <td data-label="Model"><code>{{ r.model or '—' }}</code></td>
       <td data-label="Status"><span class="lm-pill lm-pill--{{ r.status }}">{{ r.status }}</span></td>
       <td data-label="Tokens" class="num">{% if r.prompt_tokens is not none %}{{ r.prompt_tokens }}{% else %}-{% endif %} / {% if r.completion_tokens is not none %}{{ r.completion_tokens }}{% else %}-{% endif %}</td>
       <td data-label="tok/s" class="num">{% if r.completion_tokens and r.started_at and r.finished_at and r.finished_at > r.started_at %}{{ '%.1f' % (r.completion_tokens / (r.finished_at - r.started_at)) }}{% else %}-{% endif %}</td>

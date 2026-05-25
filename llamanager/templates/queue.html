@@ -5,7 +5,59 @@
 <div class="lm-eyebrow">Operate</div>
 <h1 class="lm-page-title">Queue</h1>
 
-<div hx-get="/ui/_partials/queue" hx-trigger="every 2s" hx-swap="innerHTML">
+{# Filter form. Submits GET so the URL is shareable; HTMX polling
+   below uses hx-include to forward the same params on each refresh,
+   so filters survive across polls without us having to manage state. #}
+<form id="queue-filters" method="get" action="/ui/queue"
+      class="lm-form" hx-boost="false"
+      style="display: grid; grid-template-columns: 1.2fr 1fr 1fr 100px auto;
+             gap: 8px; align-items: end; margin-bottom: 20px; max-width: 1000px;">
+  <div class="lm-field" style="margin: 0;">
+    <label class="lm-field-label" for="f_model">Model contains</label>
+    <input id="f_model" class="lm-input lm-input--mono" type="text"
+           name="f_model" value="{{ f_model }}" list="f_model_options"
+           placeholder="any">
+    <datalist id="f_model_options">
+      {% for m in history_models %}<option value="{{ m }}"></option>{% endfor %}
+    </datalist>
+  </div>
+
+  <div class="lm-field" style="margin: 0;">
+    <label class="lm-field-label" for="f_origin">Origin name contains</label>
+    <input id="f_origin" class="lm-input lm-input--mono" type="text"
+           name="f_origin" value="{{ f_origin }}" list="f_origin_options"
+           placeholder="any">
+    <datalist id="f_origin_options">
+      {% for o in origins %}<option value="{{ o.name }}"></option>{% endfor %}
+    </datalist>
+  </div>
+
+  <div class="lm-field" style="margin: 0;">
+    <label class="lm-field-label" for="f_status">Status</label>
+    <select id="f_status" class="lm-input" name="f_status">
+      <option value="">any</option>
+      {% for s in valid_statuses %}
+      <option value="{{ s }}" {% if f_status == s %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="lm-field" style="margin: 0;">
+    <label class="lm-field-label" for="f_limit">Limit</label>
+    <input id="f_limit" class="lm-input lm-input--mono" type="number"
+           name="f_limit" value="{{ f_limit }}" min="10" max="500" step="10">
+  </div>
+
+  <div style="display: flex; gap: 6px;">
+    <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Apply</button>
+    <a href="/ui/queue" class="lm-btn lm-btn--ghost lm-btn--sm">Reset</a>
+  </div>
+</form>
+
+<div hx-get="/ui/_partials/queue"
+     hx-trigger="every 2s"
+     hx-swap="innerHTML"
+     hx-include="#queue-filters">
   {% include "_queue_partial.html" %}
 </div>
 {% endblock %}

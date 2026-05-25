@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import engines, runtime_state as rt
+from . import engines, exclusive as _exclusive, runtime_state as rt
 from .config import Config, Profile, ENGINE_FAMILY, detect_engine_for_path
 from .db import DB
 from .engines._base import ImageRequest, ProgressEvent
@@ -344,6 +344,21 @@ class ImageTaskRunner:
             "request_id": request_id, "engine": engine,
             "model": model_id, "profile": profile_name,
         })
+
+        # Defence in depth: if exclusive mode is on, sweep one more time
+        # right before we spawn the engine worker. ServerManager.start
+        # and yield_to_image already swept, but this catches workers that
+        # appeared in the gap (a heartbeat tick that just fired, etc.).
+        mode = (getattr(self.cfg, "exclusive_mode", "off") or "off").lower()
+        if mode not in ("off", ""):
+            try:
+                await _exclusive.sweep_and_record(
+                    mode,
+                    grace_seconds=float(getattr(
+                        self.cfg, "exclusive_grace_seconds", 5.0) or 5.0),
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("exclusive: pre-image-spawn sweep failed")
 
         full_env = {**os.environ, **env}
         log.info("launching %s engine: %s", engine,

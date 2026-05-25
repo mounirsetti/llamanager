@@ -389,6 +389,87 @@ async def reload_config(request: Request, _: Origin = Depends(admin_origin)) -> 
     return JSONResponse({"ok": True})
 
 
+# ---------- exclusive mode ----------
+
+class ExclusiveModeBody(BaseModel):
+    mode: str | None = None
+    grace_seconds: float | None = None
+    heartbeat_seconds: int | None = None
+
+
+@router.get("/exclusive")
+async def exclusive_status(request: Request,
+                           _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from . import exclusive as _exclusive
+    cfg = request.app.state.cfg
+    last = _exclusive.last_result()
+    return JSONResponse({
+        "mode": getattr(cfg, "exclusive_mode", "off"),
+        "grace_seconds": getattr(cfg, "exclusive_grace_seconds", 5.0),
+        "heartbeat_seconds": getattr(cfg, "exclusive_heartbeat_seconds", 120),
+        "valid_modes": list(_exclusive.VALID_MODES),
+        "last_sweep": last.to_dict() if last else None,
+    })
+
+
+@router.post("/exclusive")
+async def exclusive_set(request: Request, body: ExclusiveModeBody,
+                        _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from . import exclusive as _exclusive
+    from .config import (VALID_EXCLUSIVE_MODES, load_config,
+                         update_exclusive_mode)
+    cfg = request.app.state.cfg
+    if body.mode is not None:
+        m = body.mode.strip().lower()
+        if m not in VALID_EXCLUSIVE_MODES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"invalid mode {body.mode!r}; "
+                       f"must be one of {VALID_EXCLUSIVE_MODES}",
+            )
+    try:
+        update_exclusive_mode(
+            cfg.path,
+            mode=body.mode,
+            grace_seconds=body.grace_seconds,
+            heartbeat_seconds=body.heartbeat_seconds,
+        )
+    except (ValueError, OSError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # Hot-reload so the new mode applies immediately.
+    new_cfg = load_config(cfg.path)
+    new_cfg.bind = cfg.bind
+    new_cfg.port = cfg.port
+    request.app.state.cfg = new_cfg
+    return JSONResponse({
+        "mode": new_cfg.exclusive_mode,
+        "grace_seconds": new_cfg.exclusive_grace_seconds,
+        "heartbeat_seconds": new_cfg.exclusive_heartbeat_seconds,
+    })
+
+
+@router.post("/exclusive/sweep")
+async def exclusive_sweep_now(request: Request,
+                              _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from . import exclusive as _exclusive
+    cfg = request.app.state.cfg
+    mode = getattr(cfg, "exclusive_mode", "off") or "off"
+    if mode == "off":
+        # Allow a one-shot scan even when disabled so operators can see
+        # what *would* be killed before flipping the switch.
+        scan_result = _exclusive.scan_and_record("warn")
+        return JSONResponse({
+            "ran": False,
+            "reason": "exclusive_mode is off — returned a warn-mode scan instead",
+            "result": scan_result.to_dict(),
+        })
+    result = await _exclusive.sweep_and_record(
+        mode,
+        grace_seconds=float(getattr(cfg, "exclusive_grace_seconds", 5.0)),
+    )
+    return JSONResponse({"ran": True, "result": result.to_dict()})
+
+
 # ---------- disk ----------
 
 @router.get("/disk")

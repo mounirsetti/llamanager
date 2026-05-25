@@ -1276,11 +1276,11 @@
   <div class="lm-shell">
     <aside class="lm-rail">
       <div style="display:flex;flex-direction:column;gap:6px;">
-        <div class="lm-brand" style="position:relative;">
+        <a href="/ui/" class="lm-brand" style="position:relative; text-decoration:none; color:inherit;">
           llamanager
           {# Override the ::after dot with a status-coloured one #}
           <span class="lm-status-dot lm-status-dot--{{ dot_status }}" aria-label="llama-server {{ dot_status }}"></span>
-        </div>
+        </a>
         {% if dot_status == 'running' %}
         <div class="lm-meta">local inference, supervised</div>
         {% elif dot_status == 'missing' %}

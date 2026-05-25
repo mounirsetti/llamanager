@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.2.8-green.svg" alt="Version 0.2.8">
+  <img src="https://img.shields.io/badge/version-0.2.9-green.svg" alt="Version 0.2.9">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -156,7 +156,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.2.7" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.2.9" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -930,13 +930,18 @@ llamanager builds on excellent open-source projects:
 
 | component | project |
 |-----------|---------|
-| LLM inference | [llama.cpp / llama-server](https://github.com/ggerganov/llama.cpp), [mlx-lm](https://github.com/ml-explore/mlx-examples/tree/main/llms) |
+| LLM inference | [llama.cpp / llama-server](https://github.com/ggerganov/llama.cpp), [mlx-lm](https://github.com/ml-explore/mlx-lm) (Apple Silicon) |
 | Alternative LLM engine | [Atomic TurboQuant](https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant) |
-| Diffusion | [HiDream-O1-Image](https://huggingface.co/HiDream-ai/HiDream-O1-Image), [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp), [Tongyi-MAI/Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image), [SeeSee21/Z-Anime](https://huggingface.co/SeeSee21/Z-Anime), [Hugging Face Diffusers](https://github.com/huggingface/diffusers) |
-| Web framework | [FastAPI](https://fastapi.tiangolo.com) |
+| HiDream | [HiDream-O1-Image](https://huggingface.co/HiDream-ai/HiDream-O1-Image) |
+| Z-Image | [Tongyi-MAI/Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image), [SeeSee21/Z-Anime](https://huggingface.co/SeeSee21/Z-Anime) |
+| FLUX 2 | [Black Forest Labs / FLUX 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) via [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) |
+| ML runtime | [PyTorch](https://pytorch.org), [Transformers](https://github.com/huggingface/transformers), [Diffusers](https://github.com/huggingface/diffusers), [Accelerate](https://github.com/huggingface/accelerate) |
+| Web framework | [FastAPI](https://fastapi.tiangolo.com) on [Uvicorn](https://www.uvicorn.org) |
 | Templates | [Jinja2](https://jinja.palletsprojects.com) |
-| Interactivity | [HTMX](https://htmx.org) |
-| Model hub | [Hugging Face](https://huggingface.co) (`huggingface_hub`) |
+| Interactivity | [HTMX](https://htmx.org) + [idiomorph](https://github.com/bigskysoftware/idiomorph) |
+| Model hub | [Hugging Face Hub](https://huggingface.co) (`huggingface_hub`) |
+| Storage | [SQLite](https://www.sqlite.org) (via [aiosqlite](https://github.com/omnilib/aiosqlite)), [tomlkit](https://github.com/python-poetry/tomlkit) |
+| Auth + crypto | [argon2-cffi](https://github.com/hynek/argon2-cffi), [itsdangerous](https://itsdangerous.palletsprojects.com) |
 | Typography | [Fraunces](https://fonts.google.com/specimen/Fraunces), [Inter](https://fonts.google.com/specimen/Inter), [JetBrains Mono](https://fonts.google.com/specimen/JetBrains+Mono) |
 
 ## License

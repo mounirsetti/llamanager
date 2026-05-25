@@ -21,6 +21,7 @@ from .api_v1 import router as v1_router
 from .auth import AuthManager, load_or_create_lookup_secret
 from .config import Config, load_config
 from .db import DB
+from . import exclusive as _exclusive
 from .image_runner import ImageTaskRunner
 from .queue_mgr import QueueManager
 from .registry import Registry
@@ -174,6 +175,34 @@ def create_app(config_path: Path | None = None,
 
         prune_task = asyncio.create_task(_periodic_prune())
 
+        # Exclusive-mode heartbeat: re-sweep every N seconds (config knob).
+        # Always running; it's the read of cfg.exclusive_mode on each tick
+        # that decides whether to actually do anything, so toggling the
+        # mode via UI/CLI takes effect on the next interval without a
+        # daemon restart.
+        async def _exclusive_boot_sweep() -> None:
+            try:
+                cur_cfg = app.state.cfg
+                if (getattr(cur_cfg, "exclusive_mode", "off") or "off") != "off":
+                    await _exclusive.sweep_and_record(
+                        cur_cfg.exclusive_mode,
+                        grace_seconds=float(getattr(cur_cfg, "exclusive_grace_seconds", 5.0)),
+                    )
+            except Exception:  # noqa: BLE001 — boot sweep must never crash startup
+                log.exception("exclusive: boot sweep failed")
+
+        boot_sweep_task = asyncio.create_task(_exclusive_boot_sweep())
+
+        excl_stop = asyncio.Event()
+        excl_task = asyncio.create_task(
+            _exclusive.heartbeat(
+                get_mode=lambda: getattr(app.state.cfg, "exclusive_mode", "off"),
+                get_grace=lambda: getattr(app.state.cfg, "exclusive_grace_seconds", 5.0),
+                get_interval=lambda: getattr(app.state.cfg, "exclusive_heartbeat_seconds", 120),
+                stop_event=excl_stop,
+            )
+        )
+
         # SIGHUP -> reload config (POSIX only)
         loop = None
         try:
@@ -194,6 +223,9 @@ def create_app(config_path: Path | None = None,
             yield
         finally:
             prune_task.cancel()
+            boot_sweep_task.cancel()
+            excl_stop.set()
+            excl_task.cancel()
             await queue.stop()
             await supervisor.stop()
             await sm.stop()
@@ -352,20 +384,30 @@ def create_app(config_path: Path | None = None,
         from fastapi.templating import Jinja2Templates
         from pathlib import Path as _Path
         import json as _json
+        from .config import ENGINE_FAMILY, detect_engine_for_id
+
         _templates = Jinja2Templates(directory=str(_Path(__file__).parent / "templates"))
-        # Profile triples: (name, bound_model, vision_capable). The page
-        # uses ``vision`` to enable an image-attach button on the chat
-        # composer. Vision capability == the profile has an mmproj set.
-        # Per-bearer gating (allowed_models) is applied client-side after
-        # the user logs in, since the page is anonymous until then.
+        # LLM-family only; image-family models live on /images.
+        llm_models: list[str] = []
+        for m in registry.list():
+            engine = detect_engine_for_id(m.model_id, cfg.models_dir)
+            if ENGINE_FAMILY.get(engine, "text") == "text":
+                llm_models.append(m.model_id)
+        llm_set = set(llm_models)
+        # Profile triples: (name, bound_model, vision_capable). Only
+        # profiles bound to LLM models are surfaced; ``vision`` is True
+        # iff the profile has an mmproj set, which the chat UI uses to
+        # enable the image-attach button. Per-bearer gating
+        # (allowed_models) is applied client-side after login.
         profile_triples = [
-            [p.name, mid, bool(p.mmproj)] for mid, p in cfg.iter_profiles()
+            [p.name, mid, bool(p.mmproj)]
+            for mid, p in cfg.iter_profiles()
+            if mid in llm_set
         ]
-        model_ids = [m.model_id for m in registry.list()]
         return _templates.TemplateResponse(request, "chat_public.html", {
             "request": request,
             "profiles_json": _json.dumps(profile_triples),
-            "models_json": _json.dumps(model_ids),
+            "models_json": _json.dumps(llm_models),
         })
 
     @app.get("/images")

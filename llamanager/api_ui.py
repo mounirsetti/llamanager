@@ -875,10 +875,15 @@ async def dashboard(request: Request, _: Origin = Depends(require_admin_ui)) -> 
     qm: QueueManager = request.app.state.queue
     cfg = request.app.state.cfg
     db = request.app.state.db
+    # JOIN origins so the Recent table can show the readable origin
+    # name instead of a bare numeric id. LEFT JOIN keeps requests
+    # whose origin was deleted (origin_id no longer resolvable).
     recent = db.query(
-        "SELECT id, origin_id, model, status, enqueued_at, started_at,"
-        " finished_at, prompt_tokens, completion_tokens"
-        " FROM requests ORDER BY enqueued_at DESC LIMIT 10"
+        "SELECT r.id, r.origin_id, o.name AS origin_name, r.model,"
+        " r.status, r.enqueued_at, r.started_at, r.finished_at,"
+        " r.prompt_tokens, r.completion_tokens"
+        " FROM requests r LEFT JOIN origins o ON r.origin_id = o.id"
+        " ORDER BY r.enqueued_at DESC LIMIT 10"
     )
     # Build the base URL for cheat sheet examples
     host = request.headers.get("host", f"{cfg.bind}:{cfg.port}")
@@ -923,20 +928,87 @@ async def dashboard_partial(request: Request, _: Origin = Depends(require_admin_
 
 # ---------- queue ----------
 
+VALID_QUEUE_STATUSES = (
+    "queued", "swapping_model", "running", "done", "failed", "cancelled",
+)
+
+
+def _queue_ctx(request: Request) -> dict[str, Any]:
+    """Shared context for the Queue page + its polled partial.
+
+    Layers the live snapshot (in-flight + pending from QueueManager)
+    with a DB-backed history view that supports filtering by model,
+    origin name, and status. Filters arrive as query params so the
+    polled partial sees them via ``hx-include``.
+    """
+    qm: QueueManager = request.app.state.queue
+    db = request.app.state.db
+    qp = request.query_params
+
+    f_model = (qp.get("f_model") or "").strip()
+    f_origin = (qp.get("f_origin") or "").strip()
+    f_status = (qp.get("f_status") or "").strip()
+    try:
+        f_limit = max(10, min(500, int(qp.get("f_limit") or 50)))
+    except ValueError:
+        f_limit = 50
+
+    where: list[str] = []
+    args: list[Any] = []
+    if f_model:
+        where.append("r.model LIKE ?")
+        args.append(f"%{f_model}%")
+    if f_origin:
+        where.append("o.name LIKE ?")
+        args.append(f"%{f_origin}%")
+    if f_status and f_status in VALID_QUEUE_STATUSES:
+        where.append("r.status = ?")
+        args.append(f_status)
+    sql = (
+        "SELECT r.id, r.origin_id, o.name AS origin_name, r.model,"
+        " r.status, r.enqueued_at, r.started_at, r.finished_at,"
+        " r.prompt_tokens, r.completion_tokens, r.error"
+        " FROM requests r LEFT JOIN origins o ON r.origin_id = o.id"
+    )
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY r.enqueued_at DESC LIMIT ?"
+    args.append(f_limit)
+    history = [dict(row) for row in db.query(sql, tuple(args))]
+
+    # Distinct values for the filter dropdowns. Cheap LIMIT 50 covers
+    # the realistic operator scenarios (a few origins, a few models).
+    origins = [dict(row) for row in db.query(
+        "SELECT id, name FROM origins ORDER BY name LIMIT 100"
+    )]
+    models_in_history = sorted({
+        h["model"] for h in history if h.get("model")
+    })
+
+    return _ctx(
+        request,
+        queue=qm.snapshot(),
+        history=history,
+        f_model=f_model,
+        f_origin=f_origin,
+        f_status=f_status,
+        f_limit=f_limit,
+        origins=origins,
+        valid_statuses=VALID_QUEUE_STATUSES,
+        history_models=models_in_history,
+    )
+
+
 @router.get("/queue", response_class=HTMLResponse)
 async def queue_view(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    qm: QueueManager = request.app.state.queue
-    return templates.TemplateResponse(request, "queue.html", _ctx(
-        request, queue=qm.snapshot(),
-    ))
+    return templates.TemplateResponse(request, "queue.html",
+                                      _queue_ctx(request))
 
 
 @router.get("/_partials/queue", response_class=HTMLResponse)
 async def queue_partial(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    qm: QueueManager = request.app.state.queue
-    return templates.TemplateResponse(request, "_queue_partial.html", _ctx(
-        request, queue=qm.snapshot(),
-    ))
+    return templates.TemplateResponse(request, "_queue_partial.html",
+                                      _queue_ctx(request))
 
 
 @router.post("/queue/{request_id}/cancel", response_class=HTMLResponse)
@@ -944,9 +1016,8 @@ async def queue_cancel_ui(request: Request, request_id: str,
                           _: None = Depends(require_csrf)) -> HTMLResponse:
     qm: QueueManager = request.app.state.queue
     qm.cancel(request_id)
-    return templates.TemplateResponse(request, "_queue_partial.html", _ctx(
-        request, queue=qm.snapshot(),
-    ))
+    return templates.TemplateResponse(request, "_queue_partial.html",
+                                      _queue_ctx(request))
 
 
 # ---------- models ----------
@@ -1825,21 +1896,29 @@ async def chat_view(request: Request, _: Origin = Depends(require_admin_ui)) -> 
     sm: ServerManager = request.app.state.sm
     reg: Registry = request.app.state.registry
     sess = _current_session(request)
-    # Each profile carries its bound model id so the JS can route the
-    # right model+profile header pair. ``vision`` is True iff the
-    # profile has an ``mmproj`` set, which is the equivalence the
-    # chat UI uses to decide whether to surface an image-upload button.
+    # Filter to LLM-family (text engines only). Image-family models
+    # don't belong in the chat picker even though they show up in the
+    # registry — confirms via ENGINE_FAMILY.
+    llm_models: list[str] = []
+    for m in reg.list():
+        engine = detect_engine_for_id(m.model_id, cfg.models_dir)
+        if ENGINE_FAMILY.get(engine, "text") == "text":
+            llm_models.append(m.model_id)
+    llm_model_set = set(llm_models)
+    # Only profiles bound to LLM models are surfaced. ``vision`` is
+    # True iff the profile has an ``mmproj`` set, which the chat UI
+    # uses to decide whether to surface the image-upload button.
     profiles = [
         {"name": p.name, "model": mid, "vision": bool(p.mmproj)}
         for mid, p in cfg.iter_profiles()
+        if mid in llm_model_set
     ]
-    model_ids = [m.model_id for m in reg.list()]
     return templates.TemplateResponse(request, "chat.html", _ctx(
         request,
         status=sm.status(),
         profiles=profiles,
         profiles_json=json.dumps(profiles),
-        model_ids=model_ids,
+        model_ids=llm_models,
         api_key=sess["key"] if sess else "",
     ))
 
@@ -2706,6 +2785,8 @@ def _launch_ctx(request: Request) -> dict:
         if m.default_profile:
             model_default_profiles[mid] = m.default_profile
 
+    from . import exclusive as _exclusive
+    last_sweep = _exclusive.last_result()
     return _ctx(
         request,
         status=sm.status(),
@@ -2719,6 +2800,11 @@ def _launch_ctx(request: Request) -> dict:
         autolaunch=cfg.autolaunch,
         max_restarts=cfg.max_restarts_in_window,
         log_tail=_read_log_tail(cfg),
+        exclusive_mode=getattr(cfg, "exclusive_mode", "off"),
+        exclusive_grace=getattr(cfg, "exclusive_grace_seconds", 5.0),
+        exclusive_heartbeat=getattr(cfg, "exclusive_heartbeat_seconds", 120),
+        exclusive_last=(last_sweep.to_dict() if last_sweep else None),
+        exclusive_modes=list(_exclusive.VALID_MODES),
     )
 
 
@@ -2782,6 +2868,43 @@ async def launch_autorestart(request: Request,
                              enabled: str = Form("off"),
                              _: None = Depends(require_csrf)) -> Response:
     request.app.state.supervisor.enabled = (enabled == "on")
+    return RedirectResponse("/ui/launch", status_code=303)
+
+
+@router.post("/launch/exclusive", response_class=HTMLResponse)
+async def launch_exclusive(request: Request,
+                           mode: str = Form("off"),
+                           _: None = Depends(require_csrf)) -> Response:
+    from .config import VALID_EXCLUSIVE_MODES, load_config, update_exclusive_mode
+    cfg = request.app.state.cfg
+    m = (mode or "off").strip().lower()
+    if m not in VALID_EXCLUSIVE_MODES:
+        m = "off"
+    try:
+        update_exclusive_mode(cfg.path, mode=m)
+    except (ValueError, OSError) as e:
+        return _error_html(str(e), status_code=400)
+    new_cfg = load_config(cfg.path)
+    new_cfg.bind = cfg.bind
+    new_cfg.port = cfg.port
+    request.app.state.cfg = new_cfg
+    return RedirectResponse("/ui/launch", status_code=303)
+
+
+@router.post("/launch/exclusive-sweep", response_class=HTMLResponse)
+async def launch_exclusive_sweep(request: Request,
+                                 _: None = Depends(require_csrf)) -> Response:
+    from . import exclusive as _exclusive
+    cfg = request.app.state.cfg
+    mode = (getattr(cfg, "exclusive_mode", "off") or "off").strip().lower()
+    if mode == "off":
+        # Show the operator what *would* be killed without doing anything.
+        _exclusive.scan_and_record("warn")
+    else:
+        await _exclusive.sweep_and_record(
+            mode,
+            grace_seconds=float(getattr(cfg, "exclusive_grace_seconds", 5.0)),
+        )
     return RedirectResponse("/ui/launch", status_code=303)
 
 

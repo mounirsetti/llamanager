@@ -53,7 +53,12 @@ class Supervisor:
 
     async def _handle_exit(self, rc: int) -> None:
         if not self.enabled:
-            log.debug("supervisor: auto-restart disabled, skipping restart (rc=%d)", rc)
+            # info-level so operators investigating "why isn't the
+            # server coming back up after I unloaded it" can find this
+            # in llamanager.log without re-running in debug mode.
+            log.info("supervisor: auto-restart disabled, skipping restart "
+                     "(rc=%d). Toggle on with `llamanager setup autorestart on`.",
+                     rc)
             return
 
         now = time.time()

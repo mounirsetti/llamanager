@@ -53,7 +53,7 @@
       <td data-label="Id"><code>{{ r.id[:12] }}</code></td>
       <td data-label="Origin">{{ r.origin }}</td>
       <td data-label="Prio" class="num">{{ r.priority }}</td>
-      <td data-label="Model"><code>{{ r.model_required or '(loaded)' }}</code></td>
+      <td data-label="Model"><code>{{ r.model_required or 'any' }}</code></td>
       <td data-label="Status"><span class="lm-pill lm-pill--{{ r.status }}">{{ r.status }}</span></td>
       <td class="actions" data-label="">
         <form hx-post="/ui/queue/{{ r.id }}/cancel"
@@ -68,5 +68,62 @@
   </table>
   {% else %}
   <p class="lm-empty">Nothing pending.</p>
+  {% endif %}
+</div>
+
+{# ---- History (DB-backed, filtered by the form on /ui/queue) ---- #}
+<div class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">History</span>
+    <span class="lm-section-meta">
+      last {{ history|length }} request{{ '' if history|length == 1 else 's' }}
+      {% if f_model or f_origin or f_status %}· filtered{% endif %}
+    </span>
+  </header>
+
+  {% if history %}
+  <table class="lm-table">
+    <thead>
+      <tr>
+        <th>Id</th>
+        <th>Origin</th>
+        <th>Model</th>
+        <th>Status</th>
+        <th>Tokens in / out</th>
+        <th>tok/s</th>
+        <th>Enqueued</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in history %}
+      <tr>
+        <td data-label="Id"><code>{{ r.id[:12] }}</code></td>
+        <td data-label="Origin">{{ r.origin_name or ('#%s' % r.origin_id if r.origin_id else '—') }}</td>
+        <td data-label="Model"><code>{{ r.model or '—' }}</code></td>
+        <td data-label="Status">
+          <span class="lm-pill lm-pill--{{ r.status }}">{{ r.status }}</span>
+          {% if r.error %}<span title="{{ r.error }}" style="color: var(--bad); font-size: 0.6875rem; margin-left: 6px;">error</span>{% endif %}
+        </td>
+        <td data-label="Tokens" class="num">
+          {% if r.prompt_tokens is not none %}{{ r.prompt_tokens }}{% else %}-{% endif %}
+          /
+          {% if r.completion_tokens is not none %}{{ r.completion_tokens }}{% else %}-{% endif %}
+        </td>
+        <td data-label="tok/s" class="num">
+          {% if r.completion_tokens and r.started_at and r.finished_at and r.finished_at > r.started_at %}
+            {{ '%.1f' % (r.completion_tokens / (r.finished_at - r.started_at)) }}
+          {% else %}-{% endif %}
+        </td>
+        <td data-label="Enqueued" style="white-space: nowrap; color: var(--fg-2); font-size: 0.8125rem;">
+          {% if r.enqueued_at %}{{ r.enqueued_at | int | string }}{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="lm-empty">
+    {% if f_model or f_origin or f_status %}No requests match these filters.{% else %}No request history yet.{% endif %}
+  </p>
   {% endif %}
 </div>

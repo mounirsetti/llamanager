@@ -364,6 +364,34 @@ def cmd_logs(args):
     return _run_admin(lambda: c.logs(source=args.source, tail=args.tail))
 
 
+# ---- exclusive mode ----
+
+def cmd_exclusive_status(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.exclusive_status())
+
+
+def cmd_exclusive_set(args):
+    c = _make_admin_client(args)
+    kwargs: dict[str, Any] = {}
+    if args.mode is not None:
+        kwargs["mode"] = args.mode
+    if args.grace is not None:
+        kwargs["grace_seconds"] = args.grace
+    if args.heartbeat is not None:
+        kwargs["heartbeat_seconds"] = args.heartbeat
+    if not kwargs:
+        print("error: nothing to update — pass --mode, --grace, or --heartbeat",
+              file=sys.stderr)
+        return 2
+    return _run_admin(lambda: c.exclusive_set(**kwargs))
+
+
+def cmd_exclusive_sweep(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.exclusive_sweep())
+
+
 # ---- diffusion ----
 #
 # Talk to /admin/diffusion/* so the CLI can do what the
@@ -1133,6 +1161,36 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--check", action="store_true",
                     help="only check for a newer release, don't update")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_update)
+
+    # exclusive — host-wide process isolation toggle.
+    esp = sub.add_parser(
+        "exclusive",
+        help=(
+            "manage exclusive mode (kill foreign llama-server / "
+            "image-engine workers so llamanager owns the GPU)"
+        ),
+    ).add_subparsers(dest="exclusive_cmd", required=True)
+
+    sp = esp.add_parser("status",
+                        help="current mode + last sweep result")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_exclusive_status)
+
+    sp = esp.add_parser("set",
+                        help="set the mode and/or grace/heartbeat seconds")
+    sp.add_argument("--mode", choices=["off", "warn", "exclusive", "aggressive"],
+                    default=None,
+                    help="off=disabled, warn=scan-only, "
+                         "exclusive=kill llama-server + workers, "
+                         "aggressive=also kill ComfyUI/vLLM/Ollama/etc.")
+    sp.add_argument("--grace", type=float, default=None,
+                    help="SIGTERM → SIGKILL grace window in seconds (default 5)")
+    sp.add_argument("--heartbeat", type=int, default=None,
+                    help="background re-sweep interval in seconds (default 120)")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_exclusive_set)
+
+    sp = esp.add_parser("sweep",
+                        help="run one sweep now (warn-scan if mode is off)")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_exclusive_sweep)
 
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO,

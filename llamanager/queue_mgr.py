@@ -480,8 +480,13 @@ class QueueManager:
             self._in_flight[req.request_id] = req
             req.status = "running"
             req.started_at = time.time()
+            # Record the resolved model_id on the request row even when the
+            # client didn't pin one — otherwise the dashboard's "Recent"
+            # table renders "(loaded)" forever instead of the actual model.
+            resolved_model = req.model_required or self.sm.runtime.current_model
             self.db.update_request_status(req.request_id, "running",
-                                          started_at=req.started_at)
+                                          started_at=req.started_at,
+                                          model=resolved_model)
             req.ready.set()
             return
 
@@ -524,12 +529,22 @@ class QueueManager:
                                "to": target_spec.model_id,
                                "duration_s": round(time.time() - t0, 2)})
 
-        # Mark in-flight and signal handler.
+        # Mark in-flight and signal handler. The ``model`` column is
+        # snapshotted to the resolved model id (either what the client
+        # asked for, or the now-loaded one after any swap) so the
+        # dashboard's Recent table can attribute each request to the
+        # real model that served it.
         self._in_flight[req.request_id] = req
         req.status = "running"
         req.started_at = time.time()
+        resolved_model = (
+            (target_spec.model_id if target_spec else None)
+            or req.model_required
+            or self.sm.runtime.current_model
+        )
         self.db.update_request_status(req.request_id, "running",
-                                      started_at=req.started_at)
+                                      started_at=req.started_at,
+                                      model=resolved_model)
         req.ready.set()
 
 

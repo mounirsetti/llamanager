@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from . import runtime_state as rt
+from . import exclusive as _exclusive
 from .config import Config, Profile, detect_engine_for_path
 from .db import DB
 from .gguf_meta import GgufMeta, compute_n_gpu_layers, read_gguf_meta
@@ -306,6 +307,18 @@ class ServerManager:
                 raise ServerError(f"model not found: {spec.model_path}")
             if spec.mmproj_path and not spec.mmproj_path.exists():
                 raise ServerError(f"mmproj file not found: {spec.mmproj_path}")
+            # If exclusive mode is on, evict any foreign llama-server /
+                # engine workers before we try to claim the port + VRAM.
+            mode = (getattr(self.cfg, "exclusive_mode", "off") or "off").lower()
+            if mode not in ("off", ""):
+                try:
+                    await _exclusive.sweep_and_record(
+                        mode,
+                        grace_seconds=float(getattr(
+                            self.cfg, "exclusive_grace_seconds", 5.0) or 5.0),
+                    )
+                except Exception:  # noqa: BLE001 — sweep must never block start
+                    log.exception("exclusive: pre-start sweep failed")
             port = self.cfg.llama_server_port
             if not _port_free(port):
                 raise ServerError(f"port {port} is busy on 127.0.0.1")
@@ -463,6 +476,21 @@ class ServerManager:
             raise
 
     # ---- crash detection ----
+    def _notify_exit_listeners(self, rc: int) -> None:
+        """Push an exit code to every registered listener queue.
+
+        Extracted so paths that aren't a real ``proc.wait()`` — like a
+        failed restore after an image-yield — can still trigger the
+        supervisor's restart/backoff cycle. Without this, a
+        yield-to-image whose restore raised would leave the daemon in
+        a non-running state with no recovery plan.
+        """
+        for q in list(self._exit_listeners):
+            try:
+                q.put_nowait(rc)
+            except asyncio.QueueFull:
+                pass
+
     async def _watch_proc(self) -> int:
         proc = self.proc
         assert proc
@@ -476,11 +504,7 @@ class ServerManager:
         self.runtime.pid = None
         self.runtime.last_event_at = time.time()
         rt.save(self.cfg.runtime_path, self.runtime)
-        for q in list(self._exit_listeners):
-            try:
-                q.put_nowait(rc)
-            except asyncio.QueueFull:
-                pass
+        self._notify_exit_listeners(rc)
         return rc
 
     # ---- diagnostics ----
@@ -554,6 +578,18 @@ class ServerManager:
             "model": saved_spec.model_id, "reason": reason,
         })
         await self.stop()
+        # Exclusive sweep before the image worker takes the slot — kills
+        # any straggler llama-server / ComfyUI / etc. holding VRAM.
+        mode = (getattr(self.cfg, "exclusive_mode", "off") or "off").lower()
+        if mode not in ("off", ""):
+            try:
+                await _exclusive.sweep_and_record(
+                    mode,
+                    grace_seconds=float(getattr(
+                        self.cfg, "exclusive_grace_seconds", 5.0) or 5.0),
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("exclusive: pre-image-yield sweep failed")
         try:
             yield
         finally:
@@ -568,6 +604,21 @@ class ServerManager:
                     self.db.log_event("text_yield_to_image_restore_failed", {
                         "model": saved_spec.model_id, "error": str(e),
                     })
+                    # Hand the failure to the supervisor so its
+                    # backoff/cooldown logic kicks in. Without this,
+                    # a single transient start() failure (port still
+                    # held, VRAM not yet released, binary path moved,
+                    # etc.) would leave the daemon parked with no
+                    # llama-server running and no plan to restart.
+                    # The spec we want is saved_spec, so re-set it
+                    # before notifying — start() cleared it on failure.
+                    if self.spec is None:
+                        self.spec = saved_spec
+                    self.runtime.state = "crashed"
+                    self.runtime.pid = None
+                    self.runtime.last_event_at = time.time()
+                    rt.save(self.cfg.runtime_path, self.runtime)
+                    self._notify_exit_listeners(-1)
             else:
                 self.db.log_event("text_yield_to_image_kept_unloaded", {
                     "prior_model": saved_spec.model_id,
