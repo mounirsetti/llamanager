@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.2.6-green.svg" alt="Version 0.2.6">
+  <img src="https://img.shields.io/badge/version-0.2.7-green.svg" alt="Version 0.2.7">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -156,7 +156,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.2.6" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.2.7" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -837,6 +837,10 @@ On Windows, `~` resolves to `%USERPROFILE%`, e.g. `C:\Users\<you>\.llamanager`.
 **"No compatible GPU detected" on Windows with an AMD card.** Older builds required `rocm-smi`. Update llamanager: the new path reads the adapter name and VRAM total from the driver registry and live VRAM usage from the Windows GPU performance counters, without any vendor CLI.
 
 **Windows: argon2-cffi fails to install.** Python 3.11+ ships prebuilt wheels for argon2-cffi on Windows. If you hit a build error, upgrade pip (`python -m pip install -U pip`) and retry. As a last resort, install Microsoft's [Build Tools for Visual Studio](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
+
+**Update fails with `fatal: detected dubious ownership in repository`.** The llamanager checkout is owned by a different UID than the daemon process — most commonly because someone ran `sudo git clone` originally, leaving the `.git/` owned by root while the daemon runs as a regular user. Git refuses to operate in that state by default (CVE-2022-24765 mitigation). Recent llamanager builds pass `-c safe.directory=<project_dir>` on the update path so this Just Works; if you're on an older build, either re-clone the repo as the user that runs the daemon, run `sudo chown -R <user>:<user> <project_dir>`, or add an exception with `sudo -u <user> git config --global --add safe.directory <project_dir>`.
+
+**Update fails with `git: command not found`.** The update flow shells out to `git pull` against the llamanager checkout, so `git` is a hard dependency for that path only — the daemon itself runs without it. Install git (`apt install git`, `brew install git`, or [Git for Windows](https://gitforwindows.org/)) and retry. The pre-flight in newer builds surfaces this as an actionable error instead of an opaque exit code.
 
 ## Releasing a new version
 

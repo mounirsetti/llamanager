@@ -1663,13 +1663,30 @@ def _run_self_update(project_dir: Path) -> dict[str, Any]:
     Kept synchronous (uses ``subprocess.run``) because both callers are
     happy to block — the UI handler awaits it via ``run_in_executor``,
     and the admin JSON handler does the same.
+
+    The git invocation passes ``-c safe.directory=<project_dir>`` so the
+    pull works regardless of which UID owns the checkout. Without this,
+    repos cloned by root (e.g. via ``sudo git clone``) but driven by a
+    daemon running as another user trip git's CVE-2022-24765 guard with
+    "fatal: detected dubious ownership". The override is scoped to this
+    single invocation — we don't mutate the operator's global git config.
     """
     import subprocess as _sp
     import sys as _sys
+    import shutil as _shutil
     log_lines: list[str] = []
     try:
+        if _shutil.which("git") is None:
+            raise RuntimeError(
+                "git is not on PATH; install git (e.g. `apt install git`, "
+                "`brew install git`, or the Git-for-Windows installer) and "
+                "retry. The update flow runs `git pull` + `pip install -e .` "
+                "against the llamanager checkout, so git is a hard dependency "
+                "for this path only — the daemon itself doesn't need it."
+            )
         result = _sp.run(
-            ["git", "pull", "--ff-only"],
+            ["git", "-c", f"safe.directory={project_dir}",
+             "pull", "--ff-only"],
             cwd=str(project_dir),
             capture_output=True, text=True, timeout=60,
         )
