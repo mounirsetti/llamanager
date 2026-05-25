@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.2.9-green.svg" alt="Version 0.2.9">
+  <img src="https://img.shields.io/badge/version-0.3.0-green.svg" alt="Version 0.3.0">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -156,7 +156,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.2.9" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.3.0" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 

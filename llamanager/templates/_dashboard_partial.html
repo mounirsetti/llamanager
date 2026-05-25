@@ -211,7 +211,8 @@
     </div>
     {% endif %}
 
-    {# Top VRAM consumers — Windows-only for now (uses PDH per-process counters). #}
+    {# Top VRAM consumers. Windows: PDH per-process GPU counters.
+       Linux: nvidia-smi --query-compute-apps, then rocm-smi --showpids. #}
     {% if sysinfo.top_vram_procs %}
     <div style="background: var(--bg-0); padding: 16px 18px;">
       <div style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 8px;">Top VRAM usage</div>

@@ -417,6 +417,129 @@ def _windows_vram_usage_bytes() -> int | None:
     return used
 
 
+def _linux_per_process_vram() -> dict[int, int]:
+    """Return ``{pid: vram_bytes}`` for processes using the GPU on Linux.
+
+    Tries ``nvidia-smi --query-compute-apps`` first, then ``rocm-smi
+    --showpids --json``, then a CSV/text fallback. Empty dict if no
+    vendor CLI is available or no compute processes are running.
+    """
+    out: dict[int, int] = {}
+
+    # --- NVIDIA path ------------------------------------------------------
+    try:
+        nv = subprocess.check_output(
+            ["nvidia-smi",
+             "--query-compute-apps=pid,used_memory",
+             "--format=csv,noheader,nounits"],
+            text=True, timeout=5,
+        )
+        for line in nv.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 2:
+                continue
+            try:
+                pid = int(parts[0])
+                mib = int(parts[1])  # used_memory is reported in MiB
+            except ValueError:
+                continue
+            if pid > 0 and mib > 0:
+                out[pid] = mib * 1024 * 1024
+        if out:
+            return out
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        pass
+
+    # --- AMD ROCm path (JSON) --------------------------------------------
+    # `rocm-smi --showpids --json` prints either a single dict keyed by
+    # PID strings, or {"WARNING": "No JSON data to report"} when idle.
+    try:
+        rj = subprocess.check_output(
+            ["rocm-smi", "--showpids", "--json"],
+            text=True, timeout=5,
+        ).strip()
+        if rj and not rj.startswith("WARNING"):
+            try:
+                data = json.loads(rj)
+            except json.JSONDecodeError:
+                data = None
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    if not isinstance(v, dict):
+                        continue
+                    try:
+                        pid = int(k)
+                    except (TypeError, ValueError):
+                        continue
+                    # Header names differ across versions: try a few.
+                    raw = None
+                    for key in ("VRAM USED",
+                                "VRAM used",
+                                "VRAM Used (B)",
+                                "VRAM USED (B)",
+                                "VRAM used (B)"):
+                        if key in v:
+                            raw = v[key]
+                            break
+                    if raw is None:
+                        continue
+                    try:
+                        used = int(str(raw).strip())
+                    except (TypeError, ValueError):
+                        continue
+                    if used > 0:
+                        out[pid] = used
+                if out:
+                    return out
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        pass
+
+    # --- AMD ROCm path (CSV fallback) ------------------------------------
+    try:
+        rc = subprocess.check_output(
+            ["rocm-smi", "--showpids", "--csv"],
+            text=True, timeout=5,
+        ).strip()
+        if rc and not rc.startswith("WARNING"):
+            lines = rc.splitlines()
+            if len(lines) >= 2:
+                header = [h.strip().lower() for h in lines[0].split(",")]
+                pid_idx = next(
+                    (i for i, h in enumerate(header) if h == "pid"),
+                    None,
+                )
+                vram_idx = next(
+                    (i for i, h in enumerate(header)
+                     if "vram" in h and "used" in h),
+                    None,
+                )
+                for line in lines[1:]:
+                    parts = [p.strip() for p in line.split(",")]
+                    if pid_idx is None or vram_idx is None:
+                        break
+                    if max(pid_idx, vram_idx) >= len(parts):
+                        continue
+                    try:
+                        pid = int(parts[pid_idx])
+                        used = int(parts[vram_idx])
+                    except ValueError:
+                        continue
+                    if pid > 0 and used > 0:
+                        out[pid] = used
+                if out:
+                    return out
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        pass
+
+    # Older rocm-smi versions (pre-5.x) only emit the human-readable
+    # table without --json/--csv. We don't try to parse that — the
+    # multi-word column headers ("VRAM USED") don't align with
+    # whitespace-split data tokens, which makes the fallback fragile
+    # and gives wrong numbers. If both JSON and CSV come back empty
+    # on those rare hosts, the dashboard simply omits the panel.
+    return out
+
+
 def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
     """Gather hardware info relevant to llama-server inference."""
     import psutil
@@ -512,34 +635,40 @@ def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
     # Back-compat alias for any external template that still reads this.
     info["top_mem_procs"] = info["top_ram_procs"]
 
-    # Per-process VRAM (Windows only — Linux/Mac would need nvidia-smi
-    # pmon or sysctl iokit, which we don't wire up here).
+    # Per-process VRAM. Windows uses PDH GPU perfcounters; Linux tries
+    # nvidia-smi compute-apps then rocm-smi --showpids. macOS doesn't
+    # expose per-process VRAM through any first-party tool we trust.
     vram_procs: list[dict[str, Any]] = []
-    if platform.system() == "Windows":
-        try:
+    try:
+        sys_name = platform.system()
+        if sys_name == "Windows":
             by_pid = _windows_per_process_vram()
-            rows = []
-            for pid, used_bytes in by_pid.items():
-                if used_bytes <= 0:
-                    continue
-                name = pid_names.get(pid)
-                if not name:
-                    # Process may have started after our psutil sweep, or
-                    # we don't have permission to read its name.
-                    try:
-                        name = psutil.Process(pid).name()
-                    except (psutil.NoSuchProcess, psutil.AccessDenied,
-                            psutil.ZombieProcess):
-                        name = f"pid {pid}"
-                rows.append({
-                    "name": name,
-                    "pid": pid,
-                    "mem_mb": round(used_bytes / (1024**2), 1),
-                })
-            rows.sort(key=lambda x: x["mem_mb"], reverse=True)
-            vram_procs = rows[:5]
-        except Exception:
-            vram_procs = []
+        elif sys_name == "Linux":
+            by_pid = _linux_per_process_vram()
+        else:
+            by_pid = {}
+        rows = []
+        for pid, used_bytes in by_pid.items():
+            if used_bytes <= 0:
+                continue
+            name = pid_names.get(pid)
+            if not name:
+                # Process may have started after our psutil sweep, or
+                # we don't have permission to read its name.
+                try:
+                    name = psutil.Process(pid).name()
+                except (psutil.NoSuchProcess, psutil.AccessDenied,
+                        psutil.ZombieProcess):
+                    name = f"pid {pid}"
+            rows.append({
+                "name": name,
+                "pid": pid,
+                "mem_mb": round(used_bytes / (1024**2), 1),
+            })
+        rows.sort(key=lambda x: x["mem_mb"], reverse=True)
+        vram_procs = rows[:5]
+    except Exception:
+        vram_procs = []
     info["top_vram_procs"] = vram_procs
 
     info["llama_mem_gb"] = round(llama_mem_bytes / (1024**3), 1)
@@ -594,15 +723,41 @@ def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
                     ["rocm-smi", "--showmeminfo", "vram", "--csv"],
                     text=True, timeout=5,
                 ).strip()
-                # CSV format: GPU, VRAM Total Used (B), VRAM Total (B)
-                for line in rocm.splitlines()[1:]:
-                    parts = [p.strip() for p in line.split(",")]
-                    if len(parts) >= 3:
-                        total_b = int(parts[2])
-                        used_b = int(parts[1])
+                # rocm-smi CSV column order has flipped across versions
+                # (older: "VRAM Total Used, VRAM Total"; newer 6.x/7.x:
+                # "VRAM Total Memory, VRAM Total Used Memory"). Match
+                # by header substring so we don't silently mis-label.
+                lines = rocm.splitlines()
+                if len(lines) >= 2:
+                    header = [h.strip().lower() for h in lines[0].split(",")]
+                    total_idx = next(
+                        (i for i, h in enumerate(header)
+                         if "total" in h and "used" not in h),
+                        None,
+                    )
+                    used_idx = next(
+                        (i for i, h in enumerate(header) if "used" in h),
+                        None,
+                    )
+                    for line in lines[1:]:
+                        parts = [p.strip() for p in line.split(",")]
+                        if total_idx is None or used_idx is None:
+                            break
+                        if max(total_idx, used_idx) >= len(parts):
+                            continue
+                        try:
+                            total_b = int(parts[total_idx])
+                            used_b = int(parts[used_idx])
+                        except ValueError:
+                            continue
+                        if total_b <= 0:
+                            continue
                         info["gpu_type"] = "ROCm"
                         info["gpu_vram_total_gb"] = round(total_b / (1024**3), 1)
-                        info["gpu_vram_free_gb"] = round((total_b - used_b) / (1024**3), 1)
+                        # Clamp free ≥ 0 as a backstop against future
+                        # header drift or transient used > total reads.
+                        info["gpu_vram_free_gb"] = round(
+                            max(0, total_b - used_b) / (1024**3), 1)
                         break
                 # Get GPU name
                 try:
@@ -1675,8 +1830,8 @@ def _detect_install_mode() -> dict[str, Any]:
     Reads ``direct_url.json`` (PEP 610) which pip writes alongside every
     package install. The file's ``dir_info.editable: true`` flag is the
     canonical marker for editable installs (``pip install -e .``); when
-    it's absent we assume a regular PyPI/wheel install which can be
-    upgraded in place with ``pip install --upgrade llamanager``.
+    it's absent we assume a regular wheel install which can be upgraded
+    in place with ``pip install --upgrade git+https://github.com/<repo>``.
 
     Returns ``{mode, location, source}``:
       - ``mode`` is ``"editable"`` | ``"pypi"`` | ``"unknown"``.
@@ -1786,45 +1941,46 @@ async def about_check_update(request: Request,
 
 
 def _run_self_update(project_dir: Path | None = None) -> dict[str, Any]:
-    """Upgrade llamanager in-place via pip.
+    """Upgrade llamanager in-place via ``pip install --upgrade`` from GitHub.
 
-    The old git-pull + pip-install-e flow turned out to be brittle: it
-    requires git on PATH, the daemon UID to own the .git directory, and
-    a clean working tree, none of which hold for typical PyPI installs.
-    The new flow is a single ``pip install --upgrade llamanager`` in the
-    same venv as the running daemon (sys.executable), which is an
-    idempotent state replacement and works for every install pattern we
-    support except editable mode.
+    llamanager isn't published to PyPI — the canonical distribution is
+    the GitHub repo (see ``GITHUB_REPO``). Pip installs git URLs
+    natively (needs ``git`` on PATH), so the same command works for
+    every install pattern:
 
-    Editable installs (``pip install -e .``) are explicitly refused:
-    the operator owns the checkout and should ``git pull`` themselves.
-    The result includes ``mode`` so the caller can tell apart a clean
-    error ("you're in editable mode, here's what to do") from a pip
-    failure ("something went wrong, here's the log").
+    - Regular install: pip replaces the snapshot with the latest tag.
+    - Editable install: pip replaces the editable link with a regular
+      install. The daemon picks up the new code on supervisor restart.
+      If the developer wants editable back afterwards, ``pip install -e
+      <their checkout>`` restores it. We do not block the update on
+      install mode; the operator owns that choice.
 
-    The ``project_dir`` arg is kept for back-compat with the previous
-    signature but is no longer consulted — pip uses sys.executable's
-    venv automatically. Returns ``{ok, log, mode}``.
+    Pins to the latest GitHub release tag when reachable (so the action
+    matches the "Update to vX.Y.Z" the UI advertises); falls back to
+    the default branch if the tag lookup fails.
+
+    The ``project_dir`` arg is kept for back-compat and ignored; pip
+    uses ``sys.executable``'s venv automatically. Returns ``{ok, log,
+    mode}``.
     """
     import subprocess as _sp
     import sys as _sys
     log_lines: list[str] = []
     install = _detect_install_mode()
-    if install["mode"] == "editable":
-        msg = (
-            "llamanager is installed in editable mode (pip install -e .) at\n"
-            f"  {install['location']}\n"
-            "Auto-update is not safe here — your checkout is the source of "
-            "truth. Update by running, in that directory:\n"
-            "  git pull\n"
-            "  pip install -e .\n"
-            "Then restart the daemon (your supervisor will pick it up)."
-        )
-        return {"ok": False, "log": msg, "error": "editable install",
-                "mode": "editable"}
+    # Pin to the latest tag when reachable; fall back to the default
+    # branch if GitHub is unreachable. Either way the request goes to
+    # the canonical source, not PyPI.
+    ref = "main"
+    try:
+        info = _check_latest_release()
+        if info.get("latest"):
+            ref = f"v{info['latest']}"
+    except Exception:
+        pass
+    url = f"git+https://github.com/{GITHUB_REPO}.git@{ref}"
     try:
         argv = [_sys.executable, "-m", "pip", "install", "--upgrade",
-                "--no-input", "llamanager"]
+                "--no-input", url]
         log_lines.append("$ " + " ".join(argv))
         result = _sp.run(
             argv, capture_output=True, text=True, timeout=600,
@@ -1838,12 +1994,13 @@ def _run_self_update(project_dir: Path | None = None) -> dict[str, Any]:
             log_lines.extend(l for l in err_lines if "WARNING" not in l)
         if result.returncode != 0:
             raise RuntimeError(
-                f"pip install --upgrade llamanager failed "
-                f"(exit {result.returncode}). Common causes: the venv "
-                f"is read-only, the host has no network access to PyPI, "
-                f"or pip itself needs upgrading."
+                f"pip install --upgrade {url} failed "
+                f"(exit {result.returncode}). Common causes: ``git`` is "
+                f"missing on PATH, the venv is read-only, the host has "
+                f"no network access to GitHub, or pip itself needs "
+                f"upgrading."
             )
-        return {"ok": True, "log": "\n".join(log_lines), "mode": "pypi"}
+        return {"ok": True, "log": "\n".join(log_lines), "mode": install["mode"]}
     except Exception as e:
         log_lines.append(f"\nError: {e}")
         return {"ok": False, "log": "\n".join(log_lines),

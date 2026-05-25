@@ -515,9 +515,8 @@ def cmd_update(args):
     except AdminClientError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    # Print whichever the daemon returned. For success: pip's tail
-    # output. For editable refusal: the multi-line manual-update
-    # instructions. Either way the operator gets actionable text.
+    # Print whichever the daemon returned: pip's tail output on
+    # success, or the error log if the update failed.
     log = res.get("log") or json.dumps(res, indent=2, default=str)
     if res.get("ok"):
         print(log)
