@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.2.7-green.svg" alt="Version 0.2.7">
+  <img src="https://img.shields.io/badge/version-0.2.8-green.svg" alt="Version 0.2.8">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -687,6 +687,37 @@ llamanager disk
 llamanager reload
 llamanager logs [--source llama-server|llamanager] [--tail 200]
 
+llamanager models set-default <model_id>                  # configured default LLM
+llamanager models add-existing <path/to/file.gguf>        # symlink or copy into models_dir
+llamanager models set-dir <path>                          # change models_dir + persist
+
+llamanager queue cancel-all                               # cancel every queued + in-flight request
+llamanager origins update <id> [--priority N] [--allowed M ...] [--admin on|off]
+
+llamanager profiles list <model_id>                       # LLM profiles for a model
+llamanager profiles create <model_id> <name>              # see flags below
+        [--mmproj PATH] [--ctx-size N] [--vram-limit-gb X | --vram-unlimited]
+        [--ram-spill-policy default|ram_only|limited] [--ram-spill-limit-gb X]
+        [--thinking on|off] [--arg KEY=VALUE ...] [--make-default]
+llamanager profiles update <model_id> <name> [...same flags...] [--rename NEW]
+llamanager profiles delete <model_id> <name>
+llamanager profiles clone <model_id> <name> <new_name>
+llamanager profiles set-default <model_id> [--profile NAME]
+
+llamanager setup llama-binary <path>                      # llama-server binary path
+llamanager setup hidream [--python PATH] [--repo PATH]
+llamanager setup z-image <python_path>
+llamanager setup flux2 [--sd-cli PATH] [--device-index N | --clear-device-index]
+llamanager setup coexistence [--unload-text-on-arrival on|off]
+                              [--restart-text-after-image on|off]
+                              [--allow-concurrent on|off]
+llamanager setup default-args <llama|mlx> --arg KEY=VALUE ...
+llamanager setup autolaunch on|off                        # default LLM on daemon startup
+llamanager setup autorestart on|off                       # supervisor crash auto-restart
+llamanager setup install-llama-server [--source ...] [--backend ...]
+llamanager setup install-llama-server-status <variant_id>
+llamanager setup switch-variant <variant_id>
+
 llamanager diffusion engines                              # per-engine install state + GPU detection
 llamanager diffusion install <engine> [--patch-flash-attn]
 llamanager diffusion cancel-install <engine>
@@ -700,10 +731,10 @@ llamanager diffusion profiles clone <model_id> <name> <new_name>
 llamanager diffusion profiles set-default <model_id> [--profile NAME]
 llamanager diffusion profiles materialize-defaults <model_id> <engine>
 
-llamanager update [--check]                               # pull + reinstall + restart (same as the /ui/about button)
+llamanager update [--check]                               # pip install --upgrade + restart (same as the /ui/about button)
 ```
 
-`llamanager diffusion` is the CLI counterpart of the Diffusion engines + Diffusion models pages. `install` kicks the same auto-installer the UI button uses (with `--patch-flash-attn` to flip `use_flash_attn=True → False` in hidream-source's `pipeline.py` on AMD); `profiles ...` is full CRUD against per-image-model profiles. `update` runs `git pull --ff-only && pip install -e .` against the project dir then restarts the daemon — exactly what the `/ui/about` Update button does. `--check` reports the latest GitHub tag without doing anything.
+The CLI mirrors the web UI feature-for-feature: every page that lets you click something has a `llamanager` verb that does the same thing against `/admin/*`. `llamanager profiles` covers the LLM-profile editor on `/ui/models`, `llamanager diffusion` covers the Diffusion engines + Diffusion models pages, `llamanager setup` covers paths/coexistence/autolaunch and the llama-server installer, `llamanager models {set-default,add-existing,set-dir}` covers the LLM-model housekeeping rows, and `llamanager queue cancel-all` + `llamanager origins update` round out the existing groups. `update` runs `pip install --upgrade llamanager` against the daemon's venv and SIGTERMs so the supervisor restarts it — exactly what the `/ui/about` Update button does. `--check` reports the latest GitHub tag plus the detected install mode without doing anything. If the daemon was installed in editable / developer mode (`pip install -e .` from a git checkout), the auto-update refuses with instructions to run `git pull && pip install -e .` in the checkout yourself — the operator's checkout is the source of truth in that case.
 
 Example, an agent that wants to swap models before a long batch and revert after:
 
@@ -838,9 +869,11 @@ On Windows, `~` resolves to `%USERPROFILE%`, e.g. `C:\Users\<you>\.llamanager`.
 
 **Windows: argon2-cffi fails to install.** Python 3.11+ ships prebuilt wheels for argon2-cffi on Windows. If you hit a build error, upgrade pip (`python -m pip install -U pip`) and retry. As a last resort, install Microsoft's [Build Tools for Visual Studio](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
 
-**Update fails with `fatal: detected dubious ownership in repository`.** The llamanager checkout is owned by a different UID than the daemon process — most commonly because someone ran `sudo git clone` originally, leaving the `.git/` owned by root while the daemon runs as a regular user. Git refuses to operate in that state by default (CVE-2022-24765 mitigation). Recent llamanager builds pass `-c safe.directory=<project_dir>` on the update path so this Just Works; if you're on an older build, either re-clone the repo as the user that runs the daemon, run `sudo chown -R <user>:<user> <project_dir>`, or add an exception with `sudo -u <user> git config --global --add safe.directory <project_dir>`.
+**Update fails with `fatal: detected dubious ownership` or `would be overwritten by merge`.** These are git's safeguards firing against the *old* git-pull-based updater that shipped before 0.2.7. The current updater calls `pip install --upgrade llamanager` and doesn't touch your checkout at all — upgrade past 0.2.7 once (using whichever path works for your install: `pip install --upgrade llamanager` against the daemon's venv, or `git pull && pip install -e .` if you cloned the repo) and these failure modes go away.
 
-**Update fails with `git: command not found`.** The update flow shells out to `git pull` against the llamanager checkout, so `git` is a hard dependency for that path only — the daemon itself runs without it. Install git (`apt install git`, `brew install git`, or [Git for Windows](https://gitforwindows.org/)) and retry. The pre-flight in newer builds surfaces this as an actionable error instead of an opaque exit code.
+**`llamanager update` refuses with "editable install detected".** You ran `pip install -e .` from a clone, so the daemon is running directly out of your checkout. The auto-updater treats the checkout as the source of truth and won't touch it — update by running `git pull && pip install -e .` in that directory, then restart the daemon (your supervisor will pick the new code up). The About page surfaces the same instructions instead of an Update button.
+
+**`pip install --upgrade llamanager` fails with "externally-managed-environment".** PEP 668 distros (newer Debian/Ubuntu, Homebrew) refuse to mutate the system Python. The daemon should be running in a venv anyway — re-install into one (`python -m venv ~/.venvs/llamanager && ~/.venvs/llamanager/bin/pip install llamanager`), update your `llamanager.service` / launch agent to point at that venv's `llamanager` binary, and the updater will work against that venv from then on.
 
 ## Releasing a new version
 

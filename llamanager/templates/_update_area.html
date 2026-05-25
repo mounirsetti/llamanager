@@ -1,5 +1,17 @@
-{# Update area partial — swapped in-place by HTMX #}
-<div id="update-area" style="display: flex; flex-direction: column; gap: 14px; max-width: 520px;">
+{# Update area partial — swapped in-place by HTMX.
+
+   Three render shapes driven by ``install_mode`` (set by the
+   /about/check-update handler):
+
+   - ``pypi``: the canonical case. Show the "Update to vX.Y.Z" button;
+     clicking it runs ``pip install --upgrade llamanager`` against the
+     daemon's venv and restarts.
+   - ``editable``: developer install (``pip install -e .`` from a git
+     checkout). Auto-update is not safe — the operator's checkout is
+     the source of truth. Render instructions instead of a button.
+   - ``unknown`` / missing: fall back to the pypi shape; the update
+     attempt will surface a clean error if pip can't do its thing. #}
+<div id="update-area" style="display: flex; flex-direction: column; gap: 14px; max-width: 640px;">
   <div style="display: flex; gap: 10px; align-items: center;">
     <button type="button" class="lm-btn lm-btn--ghost"
             hx-post="/ui/about/check-update"
@@ -8,12 +20,12 @@
             hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
       Check for updates
     </button>
-    {% if update_available %}
+    {% if update_available and install_mode != 'editable' %}
     {# Update triggers a self-restart; opt out of hx-boost so the
        browser does a full page nav and doesn't try to swap a partial
        from a daemon that's mid-shutdown. #}
     <form method="post" action="/ui/about/update" hx-boost="false"
-          data-confirm="Update llamanager to {{ latest_version }}? This will pull the latest code, reinstall, and restart the server."
+          data-confirm="Run `pip install --upgrade llamanager` against the daemon's venv and restart? You'll be signed out until the supervisor brings the daemon back."
           style="margin: 0;">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="lm-btn lm-btn--primary">Update to {{ latest_version }}</button>
@@ -24,16 +36,44 @@
   {% if update_check_error %}
   <div class="lm-error">{{ update_check_error }}</div>
   {% elif update_available == true %}
-  <div style="padding: 12px 16px; background: oklch(from var(--accent) l c h / 0.08); border: 1px solid var(--accent); font-size: 0.875rem; color: var(--fg-1);">
-    <strong style="color: var(--accent);">{{ latest_version }}</strong> is available (you have {{ version }}).
-  </div>
+    {% if install_mode == 'editable' %}
+    <div style="padding: 12px 16px; background: oklch(from var(--accent) l c h / 0.08); border: 1px solid var(--accent); font-size: 0.875rem; color: var(--fg-1);">
+      <strong style="color: var(--accent);">{{ latest_version }}</strong> is available (you have {{ version }}).
+      <div style="margin-top: 10px; color: var(--fg-2); font-size: 0.8125rem;">
+        This is a developer (editable) install from a git checkout, so
+        the in-UI updater is disabled — your checkout is the source of
+        truth. Update by running, in
+        {% if install_location %}<code>{{ install_location }}</code>{% else %}your checkout directory{% endif %}:
+      </div>
+      <pre class="lm-log" style="margin: 6px 0 0; padding: 8px 10px; font-size: 0.75rem;">git pull
+pip install -e .</pre>
+      <div style="margin-top: 8px; color: var(--fg-2); font-size: 0.8125rem;">
+        Then restart the daemon — your supervisor (systemd / launchd /
+        Windows service / docker) will pick the new code up. If you ran
+        <code>llamanager serve</code> by hand, just re-run it.
+      </div>
+    </div>
+    {% else %}
+    <div style="padding: 12px 16px; background: oklch(from var(--accent) l c h / 0.08); border: 1px solid var(--accent); font-size: 0.875rem; color: var(--fg-1);">
+      <strong style="color: var(--accent);">{{ latest_version }}</strong> is available (you have {{ version }}).
+      <div style="margin-top: 6px; color: var(--fg-2); font-size: 0.8125rem;">
+        Clicking <em>Update to {{ latest_version }}</em> runs
+        <code>pip install --upgrade llamanager</code> in the daemon's
+        venv and restarts the process via SIGTERM. Your supervisor
+        brings it back up.
+      </div>
+    </div>
+    {% endif %}
   {% elif update_available == false and latest_version %}
   <div style="padding: 12px 16px; background: oklch(from var(--ok) l c h / 0.08); border: 1px solid var(--ok); font-size: 0.875rem; color: var(--fg-1);">
     You are up to date.
+    {% if install_mode == 'editable' %}
+    <span style="color: var(--fg-3);">(developer install at <code>{{ install_location }}</code>)</span>
+    {% endif %}
   </div>
   {% endif %}
 
   {% if update_log %}
-  <pre class="lm-log" style="max-height: 200px; font-size: 0.75rem;">{{ update_log }}</pre>
+  <pre class="lm-log" style="max-height: 200px; font-size: 0.75rem; white-space: pre-wrap;">{{ update_log }}</pre>
   {% endif %}
 </div>

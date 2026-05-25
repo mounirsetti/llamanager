@@ -481,7 +481,197 @@ def cmd_update(args):
     if args.check:
         return cmd_update_check(args)
     c = _make_admin_client(args)
-    return _run_admin(lambda: c.self_update())
+    from .admin_client import AdminClientError
+    try:
+        res = c.self_update()
+    except AdminClientError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    # Print whichever the daemon returned. For success: pip's tail
+    # output. For editable refusal: the multi-line manual-update
+    # instructions. Either way the operator gets actionable text.
+    log = res.get("log") or json.dumps(res, indent=2, default=str)
+    if res.get("ok"):
+        print(log)
+        if res.get("restarting"):
+            print("\nDaemon SIGTERM scheduled. Your supervisor will restart it.")
+        return 0
+    print(log, file=sys.stderr)
+    return 1
+
+
+# ---- LLM profiles ----
+
+def _on_off_or_none(v: str | None) -> bool | None:
+    """Parse an ``on|off`` string flag into bool, or None when absent."""
+    if v is None:
+        return None
+    v = v.strip().lower()
+    if v in ("on", "true", "yes", "1"):
+        return True
+    if v in ("off", "false", "no", "0"):
+        return False
+    raise SystemExit(f"error: expected 'on' or 'off', got {v!r}")
+
+
+def cmd_profiles_list(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.profiles_list(args.model_id))
+
+
+def cmd_profile_create(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.profile_create(
+        args.model_id, args.name,
+        mmproj=args.mmproj or "",
+        ctx_size=args.ctx_size,
+        vram_limit_gb=(None if args.vram_unlimited
+                       else args.vram_limit_gb),
+        ram_spill_policy=args.ram_spill_policy or "default",
+        ram_spill_limit_gb=args.ram_spill_limit_gb,
+        thinking=args.thinking or "",
+        args=_parse_kv_args(args.arg),
+        make_default=args.make_default,
+    ))
+
+
+def cmd_profile_update(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.profile_update(
+        args.name, args.model_id,
+        mmproj=args.mmproj,
+        ctx_size=args.ctx_size,
+        vram_limit_gb=(None if args.vram_unlimited
+                       else args.vram_limit_gb),
+        ram_spill_policy=args.ram_spill_policy,
+        ram_spill_limit_gb=args.ram_spill_limit_gb,
+        thinking=args.thinking,
+        args=(_parse_kv_args(args.arg) if args.arg is not None else None),
+        new_name=args.rename,
+    ))
+
+
+def cmd_profile_delete(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.profile_delete(args.name, args.model_id))
+
+
+def cmd_profile_clone(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.profile_clone(
+        args.name, args.model_id, args.new_name))
+
+
+def cmd_profile_set_model_default(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.profile_set_model_default(
+        args.model_id, profile_name=(args.profile or "")))
+
+
+# ---- models housekeeping ----
+
+def cmd_models_set_default(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.model_set_default(args.model_id))
+
+
+def cmd_models_add_existing(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.model_add_existing(args.file_path))
+
+
+def cmd_models_set_dir(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.models_set_dir(args.models_dir))
+
+
+# ---- queue extras ----
+
+def cmd_queue_cancel_all(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c._post("/admin/queue/cancel-all"))
+
+
+# ---- origins extras ----
+
+def cmd_origins_update(args):
+    c = _make_admin_client(args)
+    is_admin_flag = _on_off_or_none(args.admin)
+    return _run_admin(lambda: c.origin_update(
+        args.origin_id,
+        priority=args.priority,
+        allowed_models=args.allowed,
+        is_admin=is_admin_flag,
+    ))
+
+
+# ---- setup / config ----
+
+def cmd_setup_llama_binary(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.setup_llama_binary(args.path))
+
+
+def cmd_setup_hidream(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.setup_hidream(
+        python=args.python, repo=args.repo))
+
+
+def cmd_setup_z_image(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.setup_z_image(args.python))
+
+
+def cmd_setup_flux2(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.setup_flux2(
+        sd_cli=args.sd_cli,
+        device_index=args.device_index,
+        clear_device_index=args.clear_device_index,
+    ))
+
+
+def cmd_setup_coexistence(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.setup_coexistence(
+        unload_text_on_arrival=_on_off_or_none(args.unload_text_on_arrival),
+        restart_text_after_image=_on_off_or_none(args.restart_text_after_image),
+        allow_concurrent=_on_off_or_none(args.allow_concurrent),
+    ))
+
+
+def cmd_setup_default_args(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.setup_default_args(
+        args.engine, _parse_kv_args(args.arg)))
+
+
+def cmd_setup_autolaunch(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.setup_autolaunch(args.enabled == "on"))
+
+
+def cmd_setup_autorestart(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.setup_autorestart(args.enabled == "on"))
+
+
+def cmd_setup_install_llama_server(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.setup_install_llama_server(
+        source=args.source, backend=args.backend))
+
+
+def cmd_setup_install_llama_server_status(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda:
+                      c.setup_install_llama_server_status(args.variant))
+
+
+def cmd_setup_switch_variant(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.setup_switch_variant(args.variant))
 
 
 def _add_admin_flags(p: argparse.ArgumentParser) -> None:
@@ -730,6 +920,211 @@ def main(argv: list[str] | None = None) -> int:
                         help="copy the engine's built-in defaults into config.toml")
     sp.add_argument("model_id"); sp.add_argument("engine")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_materialize_defaults)
+
+    # profiles (LLM-side, mirror of `diffusion profiles`)
+    pfp = sub.add_parser("profiles",
+                         help="manage per-LLM-model profiles "
+                              "(mmproj, ctx_size, vram, ram-spill, thinking, args)"
+                         ).add_subparsers(dest="profiles_cmd", required=True)
+
+    def _add_llm_profile_fields(parser: argparse.ArgumentParser, *,
+                                require_make_default: bool) -> None:
+        parser.add_argument("--mmproj", default=None,
+                            help="path to mmproj .gguf for vision models")
+        parser.add_argument("--ctx-size", type=int, default=None,
+                            dest="ctx_size",
+                            help="context length the engine launches with")
+        parser.add_argument("--vram-limit-gb", type=float, default=None,
+                            dest="vram_limit_gb",
+                            help="cap on VRAM usage (GB); omit for unlimited")
+        parser.add_argument("--vram-unlimited", action="store_true",
+                            dest="vram_unlimited",
+                            help="explicitly mark VRAM unlimited (overrides --vram-limit-gb)")
+        parser.add_argument("--ram-spill-policy", default=None,
+                            dest="ram_spill_policy",
+                            choices=["default", "ram_only", "limited"],
+                            help="RAM-spill behaviour when VRAM is full")
+        parser.add_argument("--ram-spill-limit-gb", type=float, default=None,
+                            dest="ram_spill_limit_gb",
+                            help="cap on RAM-spill GB (only with policy=limited)")
+        parser.add_argument("--thinking", default=None,
+                            choices=["on", "off", ""],
+                            help="force thinking on/off (overrides template)")
+        parser.add_argument("--arg", action="append", default=None,
+                            metavar="KEY=VALUE",
+                            help="extra llama-server arg (repeatable). "
+                                 "Replaces the whole args bucket on update.")
+        if require_make_default:
+            parser.add_argument("--make-default", action="store_true",
+                                help="also set the new profile as this model's default")
+
+    sp = pfp.add_parser("list", help="show LLM profiles for a model")
+    sp.add_argument("model_id")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_profiles_list)
+
+    sp = pfp.add_parser("create", help="create a new LLM profile")
+    sp.add_argument("model_id"); sp.add_argument("name")
+    _add_llm_profile_fields(sp, require_make_default=True)
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_profile_create)
+
+    sp = pfp.add_parser("update", help="patch fields on an existing LLM profile")
+    sp.add_argument("model_id"); sp.add_argument("name")
+    _add_llm_profile_fields(sp, require_make_default=False)
+    sp.add_argument("--rename", default=None,
+                    help="optionally rename the profile in the same call")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_profile_update)
+
+    sp = pfp.add_parser("delete", help="delete an LLM profile")
+    sp.add_argument("model_id"); sp.add_argument("name")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_profile_delete)
+
+    sp = pfp.add_parser("clone", help="duplicate an LLM profile under a new name")
+    sp.add_argument("model_id"); sp.add_argument("name"); sp.add_argument("new_name")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_profile_clone)
+
+    sp = pfp.add_parser("set-default",
+                        help="set the per-model default LLM profile (empty to clear)")
+    sp.add_argument("model_id"); sp.add_argument("--profile", default="")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_profile_set_model_default)
+
+    # New verbs are added to the existing `models` / `queue` / `origins`
+    # subparser groups by reaching into their already-built parser via
+    # ``sub.choices[name]``. argparse doesn't expose the inner
+    # _SubParsersAction except via _actions, so the helper below walks
+    # it. ``sub`` itself is a _SubParsersAction whose .choices maps
+    # top-level subcommand names to their ArgumentParser instances.
+    def _inner_subparsers(parser_name: str) -> argparse._SubParsersAction | None:
+        parser = sub.choices.get(parser_name)
+        if parser is None:
+            return None
+        return next(
+            (a for a in parser._actions
+             if isinstance(a, argparse._SubParsersAction)),
+            None,
+        )
+
+    models_sub = _inner_subparsers("models")
+    if models_sub is not None:
+        sp = models_sub.add_parser("set-default",
+                                   help="set the configured default LLM model")
+        sp.add_argument("model_id")
+        _add_admin_flags(sp); sp.set_defaults(func=cmd_models_set_default)
+
+        sp = models_sub.add_parser("add-existing",
+                                   help="register an existing .gguf file "
+                                        "(symlinks/copies it into models_dir)")
+        sp.add_argument("file_path")
+        _add_admin_flags(sp); sp.set_defaults(func=cmd_models_add_existing)
+
+        sp = models_sub.add_parser("set-dir",
+                                   help="change models_dir at runtime (and persist)")
+        sp.add_argument("models_dir")
+        _add_admin_flags(sp); sp.set_defaults(func=cmd_models_set_dir)
+
+    queue_sub = _inner_subparsers("queue")
+    if queue_sub is not None:
+        sp = queue_sub.add_parser("cancel-all",
+                                  help="cancel every queued + in-flight request")
+        _add_admin_flags(sp); sp.set_defaults(func=cmd_queue_cancel_all)
+
+    origins_sub = _inner_subparsers("origins")
+    if origins_sub is not None:
+        sp = origins_sub.add_parser("update",
+                                    help="patch priority / allowed_models / "
+                                         "admin scope on an existing origin")
+        sp.add_argument("origin_id", type=int)
+        sp.add_argument("--priority", type=int, default=None)
+        sp.add_argument("--allowed", action="append", default=None,
+                        help="allowed model id (repeatable; pass once "
+                             "with '*' for all)")
+        sp.add_argument("--admin", default=None, choices=["on", "off"],
+                        help="grant or revoke admin scope")
+        _add_admin_flags(sp); sp.set_defaults(func=cmd_origins_update)
+
+    # setup / config (paths, coexistence, default-args, autolaunch,
+    # autorestart, llama-server installer + variant switch).
+    setup = sub.add_parser("setup",
+                           help="manage daemon paths, coexistence, autolaunch, "
+                                "and the llama-server installer"
+                           ).add_subparsers(dest="setup_cmd", required=True)
+
+    sp = setup.add_parser("llama-binary",
+                          help="set the llama-server binary path")
+    sp.add_argument("path")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_llama_binary)
+
+    sp = setup.add_parser("hidream",
+                          help="set hidream Python and/or source folder")
+    sp.add_argument("--python", default=None,
+                    help="path to the hidream venv's python interpreter")
+    sp.add_argument("--repo", default=None,
+                    help="path to the HiDream-O1-Image source folder")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_hidream)
+
+    sp = setup.add_parser("z-image", help="set z_image Python interpreter")
+    sp.add_argument("python")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_z_image)
+
+    sp = setup.add_parser("flux2",
+                          help="set flux2 sd-cli path and/or device index")
+    sp.add_argument("--sd-cli", default=None, dest="sd_cli")
+    sp.add_argument("--device-index", type=int, default=None,
+                    dest="device_index")
+    sp.add_argument("--clear-device-index", action="store_true",
+                    dest="clear_device_index",
+                    help="remove the device_index setting (let sd-cli auto-pick)")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_flux2)
+
+    sp = setup.add_parser("coexistence",
+                          help="toggle text<->image coexistence policy flags")
+    sp.add_argument("--unload-text-on-arrival", choices=["on", "off"],
+                    default=None, dest="unload_text_on_arrival")
+    sp.add_argument("--restart-text-after-image", choices=["on", "off"],
+                    default=None, dest="restart_text_after_image")
+    sp.add_argument("--allow-concurrent", choices=["on", "off"],
+                    default=None, dest="allow_concurrent")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_coexistence)
+
+    sp = setup.add_parser("default-args",
+                          help="replace [default_args.<engine>] in config.toml")
+    sp.add_argument("engine", choices=["llama", "mlx"])
+    sp.add_argument("--arg", action="append", default=None,
+                    metavar="KEY=VALUE", required=True,
+                    help="default arg (repeatable). Pass with no --arg "
+                         "to clear via an empty list isn't supported here "
+                         "— edit config.toml directly to wipe the bucket.")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_default_args)
+
+    sp = setup.add_parser("autolaunch",
+                          help="enable/disable autolaunch of the default LLM "
+                               "on daemon startup")
+    sp.add_argument("enabled", choices=["on", "off"])
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_autolaunch)
+
+    sp = setup.add_parser("autorestart",
+                          help="enable/disable the crash supervisor's "
+                               "auto-restart (in-memory only)")
+    sp.add_argument("enabled", choices=["on", "off"])
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_autorestart)
+
+    sp = setup.add_parser("install-llama-server",
+                          help="kick the llama-server variant installer "
+                               "(asynchronous; poll status separately)")
+    sp.add_argument("--source", default="llama.cpp")
+    sp.add_argument("--backend", default="",
+                    help="backend variant; leave empty to auto-pick "
+                         "(e.g. cuda, vulkan, metal, cpu)")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_install_llama_server)
+
+    sp = setup.add_parser("install-llama-server-status",
+                          help="poll an in-flight or completed llama-server install")
+    sp.add_argument("variant", help="variant id from install-llama-server")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_install_llama_server_status)
+
+    sp = setup.add_parser("switch-variant",
+                          help="switch the active llama-server to a previously-installed variant")
+    sp.add_argument("variant")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_switch_variant)
 
     # self-update — same code path as the /ui/about Update button.
     sp = sub.add_parser("update",

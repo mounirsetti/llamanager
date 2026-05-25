@@ -1598,12 +1598,65 @@ async def about_view(request: Request, _: Origin = Depends(require_admin_ui)) ->
     return templates.TemplateResponse(request, "about.html", _about_ctx(request))
 
 
+def _detect_install_mode() -> dict[str, Any]:
+    """Figure out how llamanager was installed.
+
+    Reads ``direct_url.json`` (PEP 610) which pip writes alongside every
+    package install. The file's ``dir_info.editable: true`` flag is the
+    canonical marker for editable installs (``pip install -e .``); when
+    it's absent we assume a regular PyPI/wheel install which can be
+    upgraded in place with ``pip install --upgrade llamanager``.
+
+    Returns ``{mode, location, source}``:
+      - ``mode`` is ``"editable"`` | ``"pypi"`` | ``"unknown"``.
+      - ``location`` is the local path the package resolves to (the
+        checkout dir for editable, the site-packages dir otherwise).
+      - ``source`` is the direct_url ``url`` if present (useful for
+        editable installs to point the operator at the right checkout).
+    """
+    import importlib.metadata as _im
+    import json as _json
+    try:
+        dist = _im.distribution("llamanager")
+    except _im.PackageNotFoundError:
+        return {"mode": "unknown", "location": "", "source": ""}
+
+    # ``locate_file`` resolves the canonical path of an installed file.
+    # We use it to get the package location without dragging in
+    # pip-internal APIs.
+    try:
+        location = str(dist.locate_file("llamanager")).rsplit("/llamanager", 1)[0]
+    except Exception:
+        location = ""
+
+    raw = None
+    try:
+        raw = dist.read_text("direct_url.json")
+    except Exception:
+        raw = None
+
+    mode = "pypi"
+    source = ""
+    if raw:
+        try:
+            info = _json.loads(raw)
+        except _json.JSONDecodeError:
+            info = {}
+        if info.get("dir_info", {}).get("editable"):
+            mode = "editable"
+        source = info.get("url", "") or ""
+    return {"mode": mode, "location": location, "source": source}
+
+
 def _check_latest_release() -> dict[str, Any]:
     """Resolve the newest tag on the GitHub repo, releases first then tags.
 
     Pure-stdlib (urllib) so this function works from the CLI/admin
-    paths that don't carry httpx. Returns ``{latest, is_newer, current}``
-    or raises if neither releases nor tags are available.
+    paths that don't carry httpx. Returns ``{latest, current, is_newer,
+    install_mode}`` or raises if neither releases nor tags are
+    available. ``install_mode`` is carried in the result so the UI /
+    CLI can render the right call-to-action: PyPI installs get an
+    Update button; editable installs get an instructions block.
     """
     import urllib.request as _ur
     import urllib.error as _ue
@@ -1631,10 +1684,13 @@ def _check_latest_release() -> dict[str, Any]:
             break
     if not latest:
         raise ValueError("no releases or tags found on GitHub")
+    install = _detect_install_mode()
     return {
         "latest": latest,
         "current": LLAMANAGER_VERSION,
         "is_newer": _version_newer(latest, LLAMANAGER_VERSION),
+        "install_mode": install["mode"],
+        "install_location": install["location"],
     }
 
 
@@ -1647,72 +1703,80 @@ async def about_check_update(request: Request,
             request,
             update_available=info["is_newer"],
             latest_version=info["latest"],
+            install_mode=info["install_mode"],
+            install_location=info["install_location"],
         ))
     except Exception as e:
         return templates.TemplateResponse(request, "_update_area.html", _about_ctx(
             request,
             update_check_error=f"Could not check for updates: {e}",
+            install_mode=_detect_install_mode()["mode"],
         ))
 
 
-def _run_self_update(project_dir: Path) -> dict[str, Any]:
-    """Run the git-pull + pip-reinstall flow used by both the UI and
-    the /admin/update endpoint. Returns ``{ok, log}``; on failure the
-    log still includes whatever ran.
+def _run_self_update(project_dir: Path | None = None) -> dict[str, Any]:
+    """Upgrade llamanager in-place via pip.
 
-    Kept synchronous (uses ``subprocess.run``) because both callers are
-    happy to block — the UI handler awaits it via ``run_in_executor``,
-    and the admin JSON handler does the same.
+    The old git-pull + pip-install-e flow turned out to be brittle: it
+    requires git on PATH, the daemon UID to own the .git directory, and
+    a clean working tree, none of which hold for typical PyPI installs.
+    The new flow is a single ``pip install --upgrade llamanager`` in the
+    same venv as the running daemon (sys.executable), which is an
+    idempotent state replacement and works for every install pattern we
+    support except editable mode.
 
-    The git invocation passes ``-c safe.directory=<project_dir>`` so the
-    pull works regardless of which UID owns the checkout. Without this,
-    repos cloned by root (e.g. via ``sudo git clone``) but driven by a
-    daemon running as another user trip git's CVE-2022-24765 guard with
-    "fatal: detected dubious ownership". The override is scoped to this
-    single invocation — we don't mutate the operator's global git config.
+    Editable installs (``pip install -e .``) are explicitly refused:
+    the operator owns the checkout and should ``git pull`` themselves.
+    The result includes ``mode`` so the caller can tell apart a clean
+    error ("you're in editable mode, here's what to do") from a pip
+    failure ("something went wrong, here's the log").
+
+    The ``project_dir`` arg is kept for back-compat with the previous
+    signature but is no longer consulted — pip uses sys.executable's
+    venv automatically. Returns ``{ok, log, mode}``.
     """
     import subprocess as _sp
     import sys as _sys
-    import shutil as _shutil
     log_lines: list[str] = []
+    install = _detect_install_mode()
+    if install["mode"] == "editable":
+        msg = (
+            "llamanager is installed in editable mode (pip install -e .) at\n"
+            f"  {install['location']}\n"
+            "Auto-update is not safe here — your checkout is the source of "
+            "truth. Update by running, in that directory:\n"
+            "  git pull\n"
+            "  pip install -e .\n"
+            "Then restart the daemon (your supervisor will pick it up)."
+        )
+        return {"ok": False, "log": msg, "error": "editable install",
+                "mode": "editable"}
     try:
-        if _shutil.which("git") is None:
-            raise RuntimeError(
-                "git is not on PATH; install git (e.g. `apt install git`, "
-                "`brew install git`, or the Git-for-Windows installer) and "
-                "retry. The update flow runs `git pull` + `pip install -e .` "
-                "against the llamanager checkout, so git is a hard dependency "
-                "for this path only — the daemon itself doesn't need it."
-            )
+        argv = [_sys.executable, "-m", "pip", "install", "--upgrade",
+                "--no-input", "llamanager"]
+        log_lines.append("$ " + " ".join(argv))
         result = _sp.run(
-            ["git", "-c", f"safe.directory={project_dir}",
-             "pull", "--ff-only"],
-            cwd=str(project_dir),
-            capture_output=True, text=True, timeout=60,
+            argv, capture_output=True, text=True, timeout=600,
         )
-        log_lines.append("$ git pull --ff-only")
-        if result.stdout.strip(): log_lines.append(result.stdout.strip())
-        if result.stderr.strip(): log_lines.append(result.stderr.strip())
-        if result.returncode != 0:
-            raise RuntimeError(f"git pull failed (exit {result.returncode})")
-
-        result = _sp.run(
-            [_sys.executable, "-m", "pip", "install", "-e", "."],
-            cwd=str(project_dir),
-            capture_output=True, text=True, timeout=120,
-        )
-        log_lines.append("\n$ pip install -e .")
-        pip_lines = result.stdout.strip().splitlines()
-        log_lines.extend(pip_lines[-5:])
+        if result.stdout.strip():
+            # Keep the tail — pip's output can be very long with deps.
+            tail = result.stdout.strip().splitlines()[-30:]
+            log_lines.extend(tail)
         if result.stderr.strip():
             err_lines = result.stderr.strip().splitlines()
             log_lines.extend(l for l in err_lines if "WARNING" not in l)
         if result.returncode != 0:
-            raise RuntimeError(f"pip install failed (exit {result.returncode})")
-        return {"ok": True, "log": "\n".join(log_lines)}
+            raise RuntimeError(
+                f"pip install --upgrade llamanager failed "
+                f"(exit {result.returncode}). Common causes: the venv "
+                f"is read-only, the host has no network access to PyPI, "
+                f"or pip itself needs upgrading."
+            )
+        return {"ok": True, "log": "\n".join(log_lines), "mode": "pypi"}
     except Exception as e:
         log_lines.append(f"\nError: {e}")
-        return {"ok": False, "log": "\n".join(log_lines), "error": str(e)}
+        return {"ok": False, "log": "\n".join(log_lines),
+                "error": str(e), "mode": install["mode"]}
 
 
 async def _schedule_self_restart() -> None:
@@ -1730,14 +1794,15 @@ async def _schedule_self_restart() -> None:
 @router.post("/about/update", response_class=HTMLResponse)
 async def about_update(request: Request,
                        _: None = Depends(require_csrf)) -> Response:
-    project_dir = Path(__file__).parent.parent
     loop = asyncio.get_running_loop()
-    res = await loop.run_in_executor(None, _run_self_update, project_dir)
+    res = await loop.run_in_executor(None, _run_self_update)
+    install_mode = res.get("mode", "unknown")
     if not res["ok"]:
         return templates.TemplateResponse(request, "about.html", _about_ctx(
             request,
             update_check_error=res.get("error", "update failed"),
             update_log=res["log"],
+            install_mode=install_mode,
         ))
     # Stop llama-server and schedule a self-restart so the new code loads.
     sm: ServerManager = request.app.state.sm
@@ -2757,6 +2822,53 @@ def _parse_optional_int(s: str) -> int | None:
         raise ValueError(f"expected an integer, got {s!r}")
 
 
+def _build_llm_profile_from_values(
+    name: str,
+    *,
+    mmproj: str = "",
+    ctx_size: int | None = None,
+    vram_limit_gb: float | None = None,
+    ram_spill_policy: str = "default",
+    ram_spill_limit_gb: float | None = None,
+    thinking: str = "",
+    args: dict[str, Any] | None = None,
+) -> Profile:
+    """Validate already-typed values and assemble an LLM ``Profile``.
+
+    Shared by the UI form parser (which coerces strings first) and the
+    admin JSON endpoints (which post typed values directly). Keeps a
+    single source of truth for ram-spill / thinking validation so the
+    CLI and the web UI reject the same junk.
+    """
+    policy = (ram_spill_policy or "default").strip().lower()
+    if policy not in VALID_RAM_SPILL_POLICIES:
+        raise ValueError(
+            f"invalid ram_spill_policy {policy!r}; "
+            f"must be one of {VALID_RAM_SPILL_POLICIES}"
+        )
+    if policy != "limited":
+        ram_spill_limit_gb = None
+    thinking_val = (thinking or "").strip().lower()
+    if thinking_val not in VALID_THINKING:
+        raise ValueError(
+            f"invalid thinking {thinking_val!r}; must be '', 'on', or 'off'"
+        )
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        raise ValueError("args must be a JSON object / dict")
+    return Profile(
+        name=name,
+        mmproj=(mmproj or "").strip(),
+        ctx_size=ctx_size,
+        vram_limit_gb=vram_limit_gb,
+        ram_spill_policy=policy,
+        ram_spill_limit_gb=ram_spill_limit_gb,
+        thinking=thinking_val,
+        args=args,
+    )
+
+
 def _build_profile_from_form(
     name: str,
     *,
@@ -2769,6 +2881,10 @@ def _build_profile_from_form(
     thinking: str,
     args_json: str,
 ) -> Profile:
+    """String → typed wrapper around ``_build_llm_profile_from_values``.
+
+    Used by the form-encoded UI endpoints (`/ui/models/profiles/*`).
+    """
     try:
         ctx_size_val = _parse_optional_int(ctx_size)
         vram_val = (None if vram_unlimited == "on"
@@ -2776,33 +2892,18 @@ def _build_profile_from_form(
         ram_limit_val = _parse_optional_float(ram_spill_limit_gb)
     except ValueError as e:
         raise ValueError(str(e))
-    policy = (ram_spill_policy or "default").strip()
-    if policy not in VALID_RAM_SPILL_POLICIES:
-        raise ValueError(
-            f"invalid ram_spill_policy {policy!r}; "
-            f"must be one of {VALID_RAM_SPILL_POLICIES}"
-        )
-    if policy != "limited":
-        ram_limit_val = None
-    thinking_val = (thinking or "").strip().lower()
-    if thinking_val not in VALID_THINKING:
-        raise ValueError(
-            f"invalid thinking {thinking_val!r}; must be '', 'on', or 'off'"
-        )
     try:
         args = json.loads(args_json.strip() or "{}")
     except json.JSONDecodeError as e:
         raise ValueError(f"invalid JSON in args: {e}")
-    if not isinstance(args, dict):
-        raise ValueError("args must be a JSON object")
-    return Profile(
-        name=name,
-        mmproj=mmproj.strip(),
+    return _build_llm_profile_from_values(
+        name,
+        mmproj=mmproj,
         ctx_size=ctx_size_val,
         vram_limit_gb=vram_val,
-        ram_spill_policy=policy,
+        ram_spill_policy=ram_spill_policy,
         ram_spill_limit_gb=ram_limit_val,
-        thinking=thinking_val,
+        thinking=thinking,
         args=args,
     )
 

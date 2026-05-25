@@ -427,25 +427,32 @@ async def update_check(request: Request,
 @router.post("/update")
 async def update_self(request: Request,
                       _: Origin = Depends(admin_origin)) -> JSONResponse:
-    """Pull + reinstall + restart. Same flow as the Update button in
-    /ui/about. Blocks until the reinstall finishes; the restart fires
-    via a deferred task so this response can complete first."""
+    """Upgrade llamanager + restart. Same flow as the Update button in
+    /ui/about: runs ``pip install --upgrade llamanager`` against the
+    daemon's own venv, then SIGTERMs so the supervisor reloads the new
+    code. Editable installs are refused with a 409 so the CLI / button
+    can render the manual-update instructions instead."""
     import asyncio as _asyncio
     from .api_ui import _run_self_update, _schedule_self_restart
-    project_dir = Path(__file__).parent.parent
     loop = _asyncio.get_running_loop()
-    res = await loop.run_in_executor(None, _run_self_update, project_dir)
+    res = await loop.run_in_executor(None, _run_self_update)
     if not res["ok"]:
+        # 409 (Conflict) for editable mode — the install state itself
+        # blocks the operation. 500 for everything else (pip failure,
+        # network, etc.).
+        status = 409 if res.get("mode") == "editable" else 500
         return JSONResponse(
             {"ok": False, "log": res["log"],
-             "error": res.get("error", "update failed")},
-            status_code=500,
+             "error": res.get("error", "update failed"),
+             "mode": res.get("mode", "unknown")},
+            status_code=status,
         )
     sm: ServerManager = request.app.state.sm
     if sm.is_running:
         await sm.stop()
     await _schedule_self_restart()
     return JSONResponse({"ok": True, "log": res["log"],
+                         "mode": res.get("mode", "pypi"),
                          "restarting": True})
 
 
@@ -807,3 +814,562 @@ async def diffusion_materialize_defaults(request: Request,
         except (ValueError, TypeError) as e:
             raise HTTPException(status_code=400, detail=str(e))
     return JSONResponse({"ok": True, "materialized": written})
+
+
+# ---------- LLM profiles ----------
+#
+# Mirrors `/ui/models/profiles/*` over JSON so the CLI can manage LLM
+# profiles (mmproj, ctx_size, vram_limit_gb, ram-spill policy, thinking,
+# args) without going through the browser. Uses the shared validator in
+# api_ui so UI and CLI reject the same junk.
+
+@router.get("/profiles")
+async def llm_profiles_list(request: Request,
+                            model: str = "",
+                            _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """List LLM profiles attached to a model, plus the model's default."""
+    from .config import detect_engine_for_id, ENGINE_FAMILY
+    cfg = request.app.state.cfg
+    if not model:
+        raise HTTPException(status_code=400, detail="model is required")
+    m = cfg.get_model(model)
+    profiles: list[dict[str, Any]] = []
+    if m:
+        for p in sorted(m.profiles.values(), key=lambda x: x.name):
+            profiles.append({
+                "name": p.name,
+                "mmproj": p.mmproj or "",
+                "ctx_size": p.ctx_size,
+                "vram_limit_gb": p.vram_limit_gb,
+                "ram_spill_policy": p.ram_spill_policy or "default",
+                "ram_spill_limit_gb": p.ram_spill_limit_gb,
+                "thinking": p.thinking or "",
+                "args": p.args or {},
+            })
+    engine = detect_engine_for_id(model, cfg.models_dir)
+    return JSONResponse({
+        "model": model, "engine": engine,
+        "family": ENGINE_FAMILY.get(engine, "text"),
+        "default_profile": (m.default_profile if m else ""),
+        "profiles": profiles,
+    })
+
+
+class LlmProfileBody(BaseModel):
+    """Shape posted by AdminClient / CLI for LLM profile create/update.
+
+    Mirrors the fields the UI form takes but in JSON-native types — no
+    ``vram_unlimited`` checkbox (the JSON caller passes ``vram_limit_gb:
+    null`` for unlimited)."""
+    model_id: str
+    name: str
+    mmproj: str = ""
+    ctx_size: int | None = None
+    vram_limit_gb: float | None = None
+    ram_spill_policy: str = "default"
+    ram_spill_limit_gb: float | None = None
+    thinking: str = ""
+    args: dict[str, Any] = Field(default_factory=dict)
+    make_default: bool = False
+
+
+@router.post("/profiles")
+async def llm_profile_create(request: Request,
+                             body: LlmProfileBody,
+                             _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .api_ui import _build_llm_profile_from_values
+    from .config import save_profile, set_model_default_profile
+    cfg = request.app.state.cfg
+    if not body.model_id or not body.name:
+        raise HTTPException(status_code=400,
+                            detail="model_id and name are required")
+    name = body.name.strip().lower()
+    existing = cfg.get_model(body.model_id)
+    if existing and name in existing.profiles:
+        raise HTTPException(status_code=409,
+                            detail=f"profile {name!r} already exists")
+    try:
+        prof = _build_llm_profile_from_values(
+            name, mmproj=body.mmproj, ctx_size=body.ctx_size,
+            vram_limit_gb=body.vram_limit_gb,
+            ram_spill_policy=body.ram_spill_policy,
+            ram_spill_limit_gb=body.ram_spill_limit_gb,
+            thinking=body.thinking, args=body.args,
+        )
+        save_profile(cfg.config_path, body.model_id, name, prof)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if body.make_default:
+        set_model_default_profile(cfg.config_path, body.model_id, name)
+    return JSONResponse({"ok": True, "name": name})
+
+
+class LlmProfileUpdateBody(BaseModel):
+    """Update body. Every field is optional — only non-None values are
+    persisted to the new profile. ``new_name`` (optional) renames in the
+    same call. Pass ``args = {}`` to wipe the args bucket explicitly;
+    omit ``args`` (None default) to leave them as they are.
+    """
+    model_id: str
+    mmproj: str | None = None
+    ctx_size: int | None = None
+    vram_limit_gb: float | None = None
+    ram_spill_policy: str | None = None
+    ram_spill_limit_gb: float | None = None
+    thinking: str | None = None
+    args: dict[str, Any] | None = None
+    new_name: str | None = None
+
+
+@router.patch("/profiles/{name}")
+async def llm_profile_update(request: Request, name: str,
+                             body: LlmProfileUpdateBody,
+                             _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .api_ui import _build_llm_profile_from_values
+    from .config import save_profile, rename_profile
+    cfg = request.app.state.cfg
+    m = cfg.get_model(body.model_id)
+    if not m or name not in m.profiles:
+        raise HTTPException(status_code=404,
+                            detail=f"profile {name!r} not found")
+    target = (body.new_name or name).strip().lower()
+    if target != name:
+        if target in m.profiles:
+            raise HTTPException(status_code=409,
+                                detail=f"profile {target!r} already exists")
+        try:
+            rename_profile(cfg.config_path, body.model_id, name, target)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    src = m.profiles[name]
+    try:
+        prof = _build_llm_profile_from_values(
+            target,
+            mmproj=(body.mmproj if body.mmproj is not None else src.mmproj),
+            ctx_size=(body.ctx_size if body.ctx_size is not None
+                      else src.ctx_size),
+            vram_limit_gb=(body.vram_limit_gb if body.vram_limit_gb is not None
+                           else src.vram_limit_gb),
+            ram_spill_policy=(body.ram_spill_policy
+                              if body.ram_spill_policy is not None
+                              else src.ram_spill_policy),
+            ram_spill_limit_gb=(body.ram_spill_limit_gb
+                                if body.ram_spill_limit_gb is not None
+                                else src.ram_spill_limit_gb),
+            thinking=(body.thinking if body.thinking is not None
+                      else src.thinking),
+            args=(body.args if body.args is not None else src.args),
+        )
+        save_profile(cfg.config_path, body.model_id, target, prof)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse({"ok": True, "name": target})
+
+
+@router.delete("/profiles/{name}")
+async def llm_profile_delete(request: Request, name: str,
+                             model_id: str = "",
+                             _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .config import delete_profile
+    if not model_id:
+        raise HTTPException(status_code=400, detail="model_id required")
+    delete_profile(request.app.state.cfg.config_path, model_id, name)
+    return JSONResponse({"ok": True})
+
+
+class LlmProfileCloneBody(BaseModel):
+    model_id: str
+    new_name: str
+
+
+@router.post("/profiles/{name}/clone")
+async def llm_profile_clone(request: Request, name: str,
+                            body: LlmProfileCloneBody,
+                            _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from dataclasses import fields as _fields
+    from .config import Profile as _Profile, save_profile
+    cfg = request.app.state.cfg
+    new = body.new_name.strip().lower()
+    if not new:
+        raise HTTPException(status_code=400, detail="new_name required")
+    m = cfg.get_model(body.model_id)
+    if not m or name not in m.profiles:
+        raise HTTPException(status_code=404,
+                            detail=f"profile {name!r} not found")
+    if new in m.profiles:
+        raise HTTPException(status_code=409,
+                            detail=f"profile {new!r} already exists")
+    src = m.profiles[name]
+    kwargs: dict[str, Any] = {"name": new}
+    for f in _fields(src):
+        if f.name == "name":
+            continue
+        kwargs[f.name] = getattr(src, f.name)
+    try:
+        save_profile(cfg.config_path, body.model_id, new, _Profile(**kwargs))
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse({"ok": True, "name": new})
+
+
+class LlmSetModelDefaultBody(BaseModel):
+    model_id: str
+    profile_name: str = ""
+
+
+@router.post("/profiles/set-model-default")
+async def llm_set_model_default(request: Request,
+                                body: LlmSetModelDefaultBody,
+                                _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .config import set_model_default_profile
+    cfg = request.app.state.cfg
+    if not body.model_id:
+        raise HTTPException(status_code=400, detail="model_id required")
+    if body.profile_name and cfg.get_profile(body.model_id,
+                                             body.profile_name) is None:
+        raise HTTPException(status_code=400, detail="unknown profile")
+    set_model_default_profile(cfg.config_path, body.model_id,
+                              body.profile_name)
+    return JSONResponse({"ok": True})
+
+
+# ---------- models housekeeping ----------
+
+class SetDefaultModelBody(BaseModel):
+    model_id: str = ""  # empty clears it
+
+
+@router.post("/models/set-default")
+async def set_default_text_model(request: Request,
+                                 body: SetDefaultModelBody,
+                                 _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Persist the configured default text model (used by /v1/chat/completions
+    when the request omits ``model``)."""
+    from .config import update_defaults, load_config
+    cfg = request.app.state.cfg
+    update_defaults(cfg.config_path, default_model=body.model_id.strip())
+    new = load_config(cfg.path)
+    new.bind = cfg.bind; new.port = cfg.port
+    request.app.state.cfg = new
+    return JSONResponse({"ok": True, "default_model": new.default_model})
+
+
+class AddExistingModelBody(BaseModel):
+    file_path: str
+
+
+@router.post("/models/add-existing")
+async def add_existing_model(request: Request,
+                             body: AddExistingModelBody,
+                             _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Register a pre-downloaded GGUF by symlinking (or copying) it into
+    the configured ``models_dir``. The registry picks it up on next scan."""
+    cfg = request.app.state.cfg
+    src = Path(body.file_path.strip()).expanduser().resolve()
+    if not src.exists() or not src.is_file():
+        raise HTTPException(status_code=400, detail=f"not a file: {src}")
+    if not src.name.lower().endswith(".gguf"):
+        raise HTTPException(status_code=400,
+                            detail="only .gguf files are supported")
+    dest = cfg.models_dir / src.name
+    if dest.exists():
+        raise HTTPException(status_code=409,
+                            detail=f"a model named {src.name} already exists")
+    try:
+        dest.symlink_to(src)
+    except OSError:
+        import shutil as _shutil
+        _shutil.copy2(src, dest)
+    return JSONResponse({"ok": True, "added": str(dest)})
+
+
+class SetModelsDirBody(BaseModel):
+    models_dir: str
+
+
+@router.post("/models/set-dir")
+async def set_models_dir(request: Request,
+                         body: SetModelsDirBody,
+                         _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Change ``models_dir`` at runtime + persist it to config.toml."""
+    import re as _re
+    import json as _json
+    cfg = request.app.state.cfg
+    new_dir = Path(body.models_dir.strip()).expanduser().resolve()
+    new_dir.mkdir(parents=True, exist_ok=True)
+    cfg.models_dir_override = new_dir
+    request.app.state.registry.models_dir = new_dir
+    config_path = cfg.config_path
+    text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    new_line = f'models_dir = {_json.dumps(str(new_dir))}'
+    text, n = _re.subn(r'^models_dir\s*=\s*.*$', new_line, text,
+                       flags=_re.MULTILINE)
+    if n == 0:
+        server_match = _re.search(r'^\[server\]', text, flags=_re.MULTILINE)
+        if server_match:
+            text = (text[:server_match.end()] + f"\n{new_line}"
+                    + text[server_match.end():])
+        else:
+            text = text.rstrip("\n") + f"\n\n[server]\n{new_line}\n"
+    config_path.write_text(text, encoding="utf-8")
+    return JSONResponse({"ok": True, "models_dir": str(new_dir)})
+
+
+# ---------- setup / config ----------
+
+class SetupBinaryBody(BaseModel):
+    binary_path: str
+
+
+@router.post("/setup/llama-binary")
+async def setup_llama_binary(request: Request,
+                             body: SetupBinaryBody,
+                             _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Set the llama-server binary path the daemon uses."""
+    from .llama_installer import patch_config_binary
+    cfg = request.app.state.cfg
+    cfg.llama_server_binary = body.binary_path.strip()
+    patch_config_binary(cfg.config_path, cfg.llama_server_binary)
+    return JSONResponse({"ok": True,
+                         "llama_server_binary": cfg.llama_server_binary})
+
+
+class SetupHidreamBody(BaseModel):
+    hidream_python: str | None = None
+    hidream_repo: str | None = None
+
+
+@router.post("/setup/hidream")
+async def setup_hidream_paths(request: Request,
+                              body: SetupHidreamBody,
+                              _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Set hidream_python / hidream_repo. Omitted fields are left alone."""
+    from .config import update_image_config
+    cfg = request.app.state.cfg
+    if body.hidream_python is not None:
+        cfg.hidream_python = body.hidream_python.strip()
+    if body.hidream_repo is not None:
+        cfg.hidream_repo = body.hidream_repo.strip()
+    update_image_config(cfg.config_path,
+                        hidream_python=cfg.hidream_python,
+                        hidream_repo=cfg.hidream_repo)
+    return JSONResponse({"ok": True,
+                         "hidream_python": cfg.hidream_python,
+                         "hidream_repo": cfg.hidream_repo})
+
+
+class SetupZImageBody(BaseModel):
+    z_image_python: str
+
+
+@router.post("/setup/z-image")
+async def setup_z_image_paths(request: Request,
+                              body: SetupZImageBody,
+                              _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .config import update_image_config
+    cfg = request.app.state.cfg
+    cfg.z_image_python = body.z_image_python.strip()
+    update_image_config(cfg.config_path, z_image_python=cfg.z_image_python)
+    return JSONResponse({"ok": True, "z_image_python": cfg.z_image_python})
+
+
+class SetupFlux2Body(BaseModel):
+    flux2_sd_cli: str | None = None
+    flux2_device_index: int | None = None
+    clear_device_index: bool = False
+
+
+@router.post("/setup/flux2")
+async def setup_flux2_paths(request: Request,
+                            body: SetupFlux2Body,
+                            _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .config import update_image_config
+    cfg = request.app.state.cfg
+    if body.flux2_sd_cli is not None:
+        cfg.flux2_sd_cli = body.flux2_sd_cli.strip()
+    if body.clear_device_index:
+        cfg.flux2_device_index = None
+    elif body.flux2_device_index is not None:
+        cfg.flux2_device_index = body.flux2_device_index
+    update_image_config(
+        cfg.config_path,
+        flux2_sd_cli=cfg.flux2_sd_cli if body.flux2_sd_cli is not None else None,
+        flux2_device_index=cfg.flux2_device_index,
+        clear_flux2_device_index=body.clear_device_index,
+    )
+    return JSONResponse({
+        "ok": True,
+        "flux2_sd_cli": cfg.flux2_sd_cli,
+        "flux2_device_index": cfg.flux2_device_index,
+    })
+
+
+class CoexistenceBody(BaseModel):
+    unload_text_on_arrival: bool | None = None
+    restart_text_after_image: bool | None = None
+    allow_concurrent: bool | None = None
+
+
+@router.post("/setup/coexistence")
+async def setup_coexistence_admin(request: Request,
+                                  body: CoexistenceBody,
+                                  _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .config import update_coexistence_policy
+    cfg = request.app.state.cfg
+    if body.unload_text_on_arrival is not None:
+        cfg.unload_text_on_arrival = body.unload_text_on_arrival
+    if body.restart_text_after_image is not None:
+        cfg.restart_text_after_image = body.restart_text_after_image
+    if body.allow_concurrent is not None:
+        cfg.allow_concurrent = body.allow_concurrent
+    update_coexistence_policy(
+        cfg.config_path,
+        unload_text_on_arrival=cfg.unload_text_on_arrival,
+        restart_text_after_image=cfg.restart_text_after_image,
+        allow_concurrent=cfg.allow_concurrent,
+    )
+    return JSONResponse({
+        "ok": True,
+        "unload_text_on_arrival": cfg.unload_text_on_arrival,
+        "restart_text_after_image": cfg.restart_text_after_image,
+        "allow_concurrent": cfg.allow_concurrent,
+    })
+
+
+class DefaultArgsBody(BaseModel):
+    engine: str
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/setup/default-args")
+async def setup_default_args(request: Request,
+                             body: DefaultArgsBody,
+                             _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Replace the engine-keyed default-args bucket (``[default_args.<engine>]``
+    in config.toml). Affects llama / mlx."""
+    from .config import set_default_args, load_config
+    cfg = request.app.state.cfg
+    eng = body.engine.strip().lower()
+    if eng not in ("llama", "mlx"):
+        raise HTTPException(status_code=400,
+                            detail=f"unknown engine: {eng}")
+    set_default_args(cfg.config_path, eng, body.args)
+    new = load_config(cfg.path)
+    new.bind = cfg.bind; new.port = cfg.port
+    request.app.state.cfg = new
+    return JSONResponse({"ok": True, "engine": eng, "args": body.args})
+
+
+class ToggleBody(BaseModel):
+    enabled: bool
+
+
+@router.post("/setup/autolaunch")
+async def setup_autolaunch(request: Request,
+                           body: ToggleBody,
+                           _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Toggle whether the daemon auto-starts the configured default LLM
+    on its own startup. Persisted to [defaults].autolaunch."""
+    from .config import update_defaults
+    cfg = request.app.state.cfg
+    cfg.autolaunch = body.enabled
+    update_defaults(cfg.config_path, autolaunch=body.enabled)
+    return JSONResponse({"ok": True, "autolaunch": cfg.autolaunch})
+
+
+@router.post("/setup/autorestart")
+async def setup_autorestart(request: Request,
+                            body: ToggleBody,
+                            _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Toggle the supervisor's crash auto-restart. In-memory only — the
+    setting resets when the daemon restarts (matches the UI behaviour)."""
+    request.app.state.supervisor.enabled = body.enabled
+    return JSONResponse({"ok": True,
+                         "autorestart": request.app.state.supervisor.enabled})
+
+
+# ---- llama-server installer (text-side engine) ----
+
+class InstallLlamaBody(BaseModel):
+    source: str = "llama.cpp"
+    backend: str = ""
+
+
+@router.post("/setup/install-llama-server")
+async def install_llama_server(request: Request,
+                               body: InstallLlamaBody,
+                               _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Kick off the llama-server variant install in the background.
+
+    Returns the variant id immediately; poll
+    ``GET /admin/setup/install-llama-server/status?variant=<id>`` to
+    watch progress."""
+    import asyncio as _asyncio
+    from .llama_installer import (
+        InstallState, install_variant, variant_id,
+    )
+    from .api_ui import _resolve_variant
+    source, backend = _resolve_variant(body.source, body.backend)
+    vid = variant_id(source, backend)
+    states: dict[str, InstallState] = request.app.state.install_states
+    state = states.setdefault(vid, InstallState())
+    if state.status == "running":
+        return JSONResponse({"id": vid, "status": "running",
+                             "note": "install already in progress"})
+    state.status = "running"
+    state.lines = []
+    state.error = None
+    state.installed_path = None
+    _asyncio.create_task(install_variant(state, source, backend))
+    return JSONResponse({"id": vid, "status": "running",
+                         "source": source, "backend": backend})
+
+
+@router.get("/setup/install-llama-server/status")
+async def install_llama_server_status(
+        request: Request,
+        variant: str,
+        _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .llama_installer import InstallState
+    states: dict[str, InstallState] = request.app.state.install_states
+    state = states.get(variant)
+    if state is None:
+        raise HTTPException(status_code=404,
+                            detail=f"no install for {variant!r}")
+    return JSONResponse({"id": variant, **state.to_dict()})
+
+
+class SwitchVariantBody(BaseModel):
+    variant: str
+
+
+@router.post("/setup/switch-variant")
+async def switch_variant(request: Request,
+                         body: SwitchVariantBody,
+                         _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Switch the active text engine to a previously-installed variant.
+
+    Equivalent of clicking a different variant card on /ui/setup."""
+    from .llama_installer import (
+        engine_type_for, parse_variant_id, patch_config_binary,
+        variant_install_path,
+    )
+    cfg = request.app.state.cfg
+    parsed = parse_variant_id(body.variant)
+    if parsed is None:
+        raise HTTPException(status_code=400,
+                            detail=f"invalid variant id: {body.variant!r}")
+    source, backend = parsed
+    path = variant_install_path(source, backend)
+    if not path.exists():
+        raise HTTPException(status_code=400,
+                            detail=f"variant not installed at {path}")
+    engine = engine_type_for(source)
+    cfg.llama_server_binary = str(path)
+    cfg.llama_server_engine = engine
+    patch_config_binary(cfg.config_path, str(path), engine=engine)
+    return JSONResponse({
+        "ok": True,
+        "llama_server_binary": cfg.llama_server_binary,
+        "llama_server_engine": cfg.llama_server_engine,
+    })

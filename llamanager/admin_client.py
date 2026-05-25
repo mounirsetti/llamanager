@@ -236,6 +236,157 @@ class AdminClient:
     def origin_rotate_key(self, origin_id: int) -> dict[str, Any]:
         return self._post(f"/admin/origins/{origin_id}/rotate-key")
 
+    def origin_update(self, origin_id: int, *,
+                      priority: int | None = None,
+                      allowed_models: list[str] | None = None,
+                      is_admin: bool | None = None) -> dict[str, Any]:
+        """Patch one or more fields on an existing origin. Pass None to
+        leave a field alone — the server treats omitted fields as
+        no-ops."""
+        body: dict[str, Any] = {}
+        if priority is not None: body["priority"] = priority
+        if allowed_models is not None: body["allowed_models"] = allowed_models
+        if is_admin is not None: body["is_admin"] = is_admin
+        return self._request("PATCH", f"/admin/origins/{origin_id}",
+                             json_body=body).json()
+
+    # ---- queue ----
+
+    def queue_cancel_all(self) -> dict[str, Any]:
+        """Cancel every queued + in-flight request in one call."""
+        return self._post("/admin/queue/cancel-all")
+
+    # ---- LLM profiles ----
+
+    def profiles_list(self, model_id: str) -> dict[str, Any]:
+        return self._get("/admin/profiles", model=model_id)
+
+    def profile_create(self, model_id: str, name: str, *,
+                       mmproj: str = "",
+                       ctx_size: int | None = None,
+                       vram_limit_gb: float | None = None,
+                       ram_spill_policy: str = "default",
+                       ram_spill_limit_gb: float | None = None,
+                       thinking: str = "",
+                       args: dict[str, Any] | None = None,
+                       make_default: bool = False) -> dict[str, Any]:
+        return self._post("/admin/profiles", {
+            "model_id": model_id, "name": name,
+            "mmproj": mmproj, "ctx_size": ctx_size,
+            "vram_limit_gb": vram_limit_gb,
+            "ram_spill_policy": ram_spill_policy,
+            "ram_spill_limit_gb": ram_spill_limit_gb,
+            "thinking": thinking, "args": args or {},
+            "make_default": make_default,
+        })
+
+    def profile_update(self, name: str, model_id: str, *,
+                       mmproj: str | None = None,
+                       ctx_size: int | None = None,
+                       vram_limit_gb: float | None = None,
+                       ram_spill_policy: str | None = None,
+                       ram_spill_limit_gb: float | None = None,
+                       thinking: str | None = None,
+                       args: dict[str, Any] | None = None,
+                       new_name: str | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {"model_id": model_id}
+        if mmproj is not None: body["mmproj"] = mmproj
+        if ctx_size is not None: body["ctx_size"] = ctx_size
+        if vram_limit_gb is not None: body["vram_limit_gb"] = vram_limit_gb
+        if ram_spill_policy is not None: body["ram_spill_policy"] = ram_spill_policy
+        if ram_spill_limit_gb is not None: body["ram_spill_limit_gb"] = ram_spill_limit_gb
+        if thinking is not None: body["thinking"] = thinking
+        if args is not None: body["args"] = args
+        if new_name is not None: body["new_name"] = new_name
+        return self._request("PATCH", f"/admin/profiles/{name}",
+                             json_body=body).json()
+
+    def profile_delete(self, name: str, model_id: str) -> dict[str, Any]:
+        return self._delete(f"/admin/profiles/{name}", model_id=model_id)
+
+    def profile_clone(self, name: str, model_id: str,
+                      new_name: str) -> dict[str, Any]:
+        return self._post(f"/admin/profiles/{name}/clone",
+                          {"model_id": model_id, "new_name": new_name})
+
+    def profile_set_model_default(self, model_id: str,
+                                  profile_name: str = "") -> dict[str, Any]:
+        return self._post("/admin/profiles/set-model-default",
+                          {"model_id": model_id,
+                           "profile_name": profile_name})
+
+    # ---- models housekeeping ----
+
+    def model_set_default(self, model_id: str) -> dict[str, Any]:
+        return self._post("/admin/models/set-default", {"model_id": model_id})
+
+    def model_add_existing(self, file_path: str) -> dict[str, Any]:
+        return self._post("/admin/models/add-existing",
+                          {"file_path": file_path})
+
+    def models_set_dir(self, models_dir: str) -> dict[str, Any]:
+        return self._post("/admin/models/set-dir", {"models_dir": models_dir})
+
+    # ---- setup / config ----
+
+    def setup_llama_binary(self, binary_path: str) -> dict[str, Any]:
+        return self._post("/admin/setup/llama-binary",
+                          {"binary_path": binary_path})
+
+    def setup_hidream(self, *, python: str | None = None,
+                      repo: str | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {}
+        if python is not None: body["hidream_python"] = python
+        if repo is not None: body["hidream_repo"] = repo
+        return self._post("/admin/setup/hidream", body)
+
+    def setup_z_image(self, python: str) -> dict[str, Any]:
+        return self._post("/admin/setup/z-image", {"z_image_python": python})
+
+    def setup_flux2(self, *, sd_cli: str | None = None,
+                    device_index: int | None = None,
+                    clear_device_index: bool = False) -> dict[str, Any]:
+        body: dict[str, Any] = {"clear_device_index": clear_device_index}
+        if sd_cli is not None: body["flux2_sd_cli"] = sd_cli
+        if device_index is not None: body["flux2_device_index"] = device_index
+        return self._post("/admin/setup/flux2", body)
+
+    def setup_coexistence(self, *,
+                          unload_text_on_arrival: bool | None = None,
+                          restart_text_after_image: bool | None = None,
+                          allow_concurrent: bool | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {}
+        if unload_text_on_arrival is not None:
+            body["unload_text_on_arrival"] = unload_text_on_arrival
+        if restart_text_after_image is not None:
+            body["restart_text_after_image"] = restart_text_after_image
+        if allow_concurrent is not None:
+            body["allow_concurrent"] = allow_concurrent
+        return self._post("/admin/setup/coexistence", body)
+
+    def setup_default_args(self, engine: str,
+                           args: dict[str, Any]) -> dict[str, Any]:
+        return self._post("/admin/setup/default-args",
+                          {"engine": engine, "args": args})
+
+    def setup_autolaunch(self, enabled: bool) -> dict[str, Any]:
+        return self._post("/admin/setup/autolaunch", {"enabled": enabled})
+
+    def setup_autorestart(self, enabled: bool) -> dict[str, Any]:
+        return self._post("/admin/setup/autorestart", {"enabled": enabled})
+
+    def setup_install_llama_server(self, *, source: str = "llama.cpp",
+                                   backend: str = "") -> dict[str, Any]:
+        return self._post("/admin/setup/install-llama-server",
+                          {"source": source, "backend": backend})
+
+    def setup_install_llama_server_status(self, variant: str) -> dict[str, Any]:
+        return self._get("/admin/setup/install-llama-server/status",
+                         variant=variant)
+
+    def setup_switch_variant(self, variant: str) -> dict[str, Any]:
+        return self._post("/admin/setup/switch-variant", {"variant": variant})
+
     # ---- diffusion ----
     #
     # Mirrors the /ui/diffusion-models page over JSON so the CLI can
@@ -309,4 +460,40 @@ class AdminClient:
         return self._get("/admin/update/check")
 
     def self_update(self) -> dict[str, Any]:
-        return self._post("/admin/update")
+        """Trigger ``pip install --upgrade llamanager`` on the daemon side
+        and restart. Returns ``{ok, log, mode, ...}``.
+
+        Editable installs return ``ok=False, mode='editable'`` *without*
+        raising — the caller is expected to render the manual-update
+        instructions from ``log``. Genuine failures (pip error, network)
+        still raise via ``AdminClientError``.
+        """
+        url = f"{self.base_url}/admin/update"
+        headers = {"Authorization": f"Bearer {self.admin_key}"}
+        try:
+            if self.client is not None:
+                r = self.client.request("POST", url, headers=headers)
+            else:
+                r = httpx.request("POST", url, headers=headers,
+                                  timeout=self.timeout)
+        except httpx.HTTPError as e:
+            raise AdminClientError(
+                f"could not reach llamanager at {self.base_url}: {e}"
+            ) from e
+        try:
+            body = r.json()
+        except (ValueError, json.JSONDecodeError):
+            body = {"ok": False, "log": r.text,
+                    "error": f"HTTP {r.status_code}",
+                    "mode": "unknown"}
+        # Editable-install refusal is a soft failure — pass it through
+        # so the CLI can render the operator-facing instructions instead
+        # of a generic "request failed".
+        if r.status_code == 409 and body.get("mode") == "editable":
+            return body
+        if r.status_code >= 400:
+            raise AdminClientError(
+                f"POST /admin/update -> {r.status_code}: "
+                f"{body.get('error') or body.get('detail') or r.text}"
+            )
+        return body
