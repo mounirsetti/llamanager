@@ -177,6 +177,22 @@ def _read_session(request: Request) -> dict[str, Any] | None:
     return _session_store(request).get(sid)
 
 
+def _current_session(request: Request) -> dict[str, Any] | None:
+    """Return the admin session resolved by ``require_admin_ui``.
+
+    Always prefer this over ``_read_session`` from inside a handler that
+    depends on ``require_admin_ui`` — on the remember-me restore path the
+    new session cookie hasn't been delivered to the client yet, so
+    ``_read_session`` would return ``None`` and the template's
+    ``api_key`` would render empty. ``require_admin_ui`` stashes the
+    resolved session on ``request.state.session`` for us.
+    """
+    cached = getattr(request.state, "session", None)
+    if cached is not None:
+        return cached
+    return _read_session(request)
+
+
 async def require_admin_ui(request: Request) -> Origin:
     sess = _read_session(request)
 
@@ -192,6 +208,10 @@ async def require_admin_ui(request: Request) -> Origin:
                 # Stash the new session id so the response middleware can set the cookie
                 request.state._new_session_sid = sid
                 request.state.csrf_token = csrf
+                # Stash the freshly-built session so handlers calling
+                # ``_current_session`` get the right api_key on this same
+                # request (before the new cookie has been delivered).
+                request.state.session = _session_store(request).get(sid)
                 return origin
 
     if not sess:
@@ -202,6 +222,7 @@ async def require_admin_ui(request: Request) -> Origin:
         _session_store(request).delete(request.cookies.get(COOKIE_NAME))
         raise HTTPException(status_code=302, headers={"Location": "/ui/login"})
     request.state.csrf_token = sess["csrf"]
+    request.state.session = sess
     return origin
 
 
@@ -258,7 +279,7 @@ async def require_csrf(request: Request,
 
     Must be added to every state-changing UI route.
     """
-    sess = _read_session(request)
+    sess = _current_session(request)
     if not sess:
         raise HTTPException(status_code=403, detail="missing session")
     if not _same_origin(request):
@@ -1062,6 +1083,20 @@ async def models_list_partial(request: Request,
     )
 
 
+@router.get("/models/_downloads_strip", response_class=HTMLResponse)
+async def models_downloads_strip(request: Request,
+                                 _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """Tiny partial that only contains the active-downloads table.
+
+    Polled every 2 s while a download is running. Splitting this out
+    from ``_models_list_partial`` is what lets open profile editors
+    survive the poll — the model cards (and their inline forms) live
+    in a sibling div that this endpoint never touches."""
+    return templates.TemplateResponse(
+        request, "_models_downloads_strip.html", _models_ctx(request),
+    )
+
+
 @router.post("/models/load", response_class=HTMLResponse)
 async def models_load_ui(request: Request, model_id: str = Form(...),
                          _: None = Depends(require_csrf)) -> Response:
@@ -1563,45 +1598,55 @@ async def about_view(request: Request, _: Origin = Depends(require_admin_ui)) ->
     return templates.TemplateResponse(request, "about.html", _about_ctx(request))
 
 
+def _check_latest_release() -> dict[str, Any]:
+    """Resolve the newest tag on the GitHub repo, releases first then tags.
+
+    Pure-stdlib (urllib) so this function works from the CLI/admin
+    paths that don't carry httpx. Returns ``{latest, is_newer, current}``
+    or raises if neither releases nor tags are available.
+    """
+    import urllib.request as _ur
+    import urllib.error as _ue
+    import json as _json
+    latest: str | None = None
+    for api_path in ("releases/latest", "tags"):
+        req = _ur.Request(
+            f"https://api.github.com/repos/{GITHUB_REPO}/{api_path}",
+            headers={"User-Agent": "llamanager",
+                     "Accept": "application/vnd.github+json"},
+        )
+        try:
+            with _ur.urlopen(req, timeout=10) as r:
+                data = _json.loads(r.read())
+        except _ue.HTTPError as he:
+            if he.code == 404 and api_path == "releases/latest":
+                continue
+            raise
+        if api_path == "releases/latest":
+            latest = data.get("tag_name", "").lstrip("v") or None
+        else:
+            if isinstance(data, list) and data:
+                latest = data[0].get("name", "").lstrip("v") or None
+        if latest:
+            break
+    if not latest:
+        raise ValueError("no releases or tags found on GitHub")
+    return {
+        "latest": latest,
+        "current": LLAMANAGER_VERSION,
+        "is_newer": _version_newer(latest, LLAMANAGER_VERSION),
+    }
+
+
 @router.post("/about/check-update", response_class=HTMLResponse)
 async def about_check_update(request: Request,
                              _: None = Depends(require_csrf)) -> HTMLResponse:
-    import urllib.request
     try:
-        latest: str | None = None
-
-        # Try releases first, then fall back to tags
-        for api_path in ("releases/latest", "tags"):
-            req = urllib.request.Request(
-                f"https://api.github.com/repos/{GITHUB_REPO}/{api_path}",
-                headers={"User-Agent": "llamanager",
-                         "Accept": "application/vnd.github+json"},
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=10) as r:
-                    import json as _json
-                    data = _json.loads(r.read())
-            except urllib.error.HTTPError as he:
-                if he.code == 404 and api_path == "releases/latest":
-                    continue  # no releases yet — try tags
-                raise
-
-            if api_path == "releases/latest":
-                latest = data.get("tag_name", "").lstrip("v") or None
-            else:
-                # tags endpoint returns a list
-                if isinstance(data, list) and data:
-                    latest = data[0].get("name", "").lstrip("v") or None
-            if latest:
-                break
-
-        if not latest:
-            raise ValueError("no releases or tags found on GitHub")
-        is_newer = _version_newer(latest, LLAMANAGER_VERSION)
+        info = _check_latest_release()
         return templates.TemplateResponse(request, "_update_area.html", _about_ctx(
             request,
-            update_available=is_newer,
-            latest_version=latest,
+            update_available=info["is_newer"],
+            latest_version=info["latest"],
         ))
     except Exception as e:
         return templates.TemplateResponse(request, "_update_area.html", _about_ctx(
@@ -1610,36 +1655,36 @@ async def about_check_update(request: Request,
         ))
 
 
-@router.post("/about/update", response_class=HTMLResponse)
-async def about_update(request: Request,
-                       _: None = Depends(require_csrf)) -> Response:
-    import subprocess, sys, os, signal
+def _run_self_update(project_dir: Path) -> dict[str, Any]:
+    """Run the git-pull + pip-reinstall flow used by both the UI and
+    the /admin/update endpoint. Returns ``{ok, log}``; on failure the
+    log still includes whatever ran.
 
-    project_dir = Path(__file__).parent.parent
+    Kept synchronous (uses ``subprocess.run``) because both callers are
+    happy to block — the UI handler awaits it via ``run_in_executor``,
+    and the admin JSON handler does the same.
+    """
+    import subprocess as _sp
+    import sys as _sys
     log_lines: list[str] = []
-
     try:
-        # Step 1: git pull
-        result = subprocess.run(
+        result = _sp.run(
             ["git", "pull", "--ff-only"],
             cwd=str(project_dir),
             capture_output=True, text=True, timeout=60,
         )
         log_lines.append("$ git pull --ff-only")
-        log_lines.append(result.stdout.strip())
-        if result.stderr.strip():
-            log_lines.append(result.stderr.strip())
+        if result.stdout.strip(): log_lines.append(result.stdout.strip())
+        if result.stderr.strip(): log_lines.append(result.stderr.strip())
         if result.returncode != 0:
             raise RuntimeError(f"git pull failed (exit {result.returncode})")
 
-        # Step 2: pip install
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-e", "."],
+        result = _sp.run(
+            [_sys.executable, "-m", "pip", "install", "-e", "."],
             cwd=str(project_dir),
             capture_output=True, text=True, timeout=120,
         )
         log_lines.append("\n$ pip install -e .")
-        # Only show last few lines of pip output
         pip_lines = result.stdout.strip().splitlines()
         log_lines.extend(pip_lines[-5:])
         if result.stderr.strip():
@@ -1647,34 +1692,47 @@ async def about_update(request: Request,
             log_lines.extend(l for l in err_lines if "WARNING" not in l)
         if result.returncode != 0:
             raise RuntimeError(f"pip install failed (exit {result.returncode})")
-
-        log_lines.append("\nUpdate complete. Restarting...")
-
-        # Step 3: stop llama-server and restart
-        sm: ServerManager = request.app.state.sm
-        if sm.is_running:
-            await sm.stop()
-
-        # Send SIGTERM after a brief delay to let the response reach the browser
-        async def _delayed_restart():
-            await asyncio.sleep(1)
-            os.kill(os.getpid(), signal.SIGTERM)
-        asyncio.create_task(_delayed_restart())
-
-        return templates.TemplateResponse(request, "about.html", _about_ctx(
-            request,
-            update_log="\n".join(log_lines),
-            update_available=False,
-            latest_version="restarting",
-        ))
-
+        return {"ok": True, "log": "\n".join(log_lines)}
     except Exception as e:
         log_lines.append(f"\nError: {e}")
+        return {"ok": False, "log": "\n".join(log_lines), "error": str(e)}
+
+
+async def _schedule_self_restart() -> None:
+    """SIGTERM ourselves after a brief delay so the HTTP response reaches
+    the caller before the daemon dies. Whatever process supervisor we
+    run under (systemd / launchd / pm2) restarts us."""
+    import os as _os
+    import signal as _signal
+    async def _delayed():
+        await asyncio.sleep(1)
+        _os.kill(_os.getpid(), _signal.SIGTERM)
+    asyncio.create_task(_delayed())
+
+
+@router.post("/about/update", response_class=HTMLResponse)
+async def about_update(request: Request,
+                       _: None = Depends(require_csrf)) -> Response:
+    project_dir = Path(__file__).parent.parent
+    loop = asyncio.get_running_loop()
+    res = await loop.run_in_executor(None, _run_self_update, project_dir)
+    if not res["ok"]:
         return templates.TemplateResponse(request, "about.html", _about_ctx(
             request,
-            update_check_error=str(e),
-            update_log="\n".join(log_lines),
+            update_check_error=res.get("error", "update failed"),
+            update_log=res["log"],
         ))
+    # Stop llama-server and schedule a self-restart so the new code loads.
+    sm: ServerManager = request.app.state.sm
+    if sm.is_running:
+        await sm.stop()
+    await _schedule_self_restart()
+    return templates.TemplateResponse(request, "about.html", _about_ctx(
+        request,
+        update_log=res["log"] + "\n\nUpdate complete. Restarting…",
+        update_available=False,
+        latest_version="restarting",
+    ))
 
 
 # ---------- chat ----------
@@ -1684,15 +1742,21 @@ async def chat_view(request: Request, _: Origin = Depends(require_admin_ui)) -> 
     cfg = request.app.state.cfg
     sm: ServerManager = request.app.state.sm
     reg: Registry = request.app.state.registry
-    sess = _read_session(request)
+    sess = _current_session(request)
     # Each profile carries its bound model id so the JS can route the
-    # right model+profile header pair.
-    profiles = [{"name": p.name, "model": mid} for mid, p in cfg.iter_profiles()]
+    # right model+profile header pair. ``vision`` is True iff the
+    # profile has an ``mmproj`` set, which is the equivalence the
+    # chat UI uses to decide whether to surface an image-upload button.
+    profiles = [
+        {"name": p.name, "model": mid, "vision": bool(p.mmproj)}
+        for mid, p in cfg.iter_profiles()
+    ]
     model_ids = [m.model_id for m in reg.list()]
     return templates.TemplateResponse(request, "chat.html", _ctx(
         request,
         status=sm.status(),
         profiles=profiles,
+        profiles_json=json.dumps(profiles),
         model_ids=model_ids,
         api_key=sess["key"] if sess else "",
     ))
@@ -1700,30 +1764,180 @@ async def chat_view(request: Request, _: Origin = Depends(require_admin_ui)) -> 
 
 # ---------- images ----------
 
+def _build_image_page_context(cfg, reg) -> dict[str, Any]:
+    """Shared context for the admin + public image-gen pages.
+
+    Walks each image engine's ``profile_schema()`` so the composer can
+    auto-render the right inputs per kind. Also flattens profile field
+    values so the page can pre-fill the override inputs from whatever
+    the currently-selected profile already sets.
+    """
+    image_models: list[dict[str, str]] = []
+    engines_in_use: set[str] = set()
+    for m in reg.list():
+        engine = detect_engine_for_id(m.model_id, cfg.models_dir)
+        if ENGINE_FAMILY.get(engine, "text") == "image":
+            image_models.append({"model_id": m.model_id, "engine": engine})
+            engines_in_use.add(engine)
+
+    # Per-engine schema, shape matches what diffusion_models.html consumes.
+    engines_schema: dict[str, list[dict[str, Any]]] = {}
+    for eng in engines_in_use:
+        try:
+            mod = image_engines.get(eng)
+        except KeyError:
+            continue
+        engines_schema[eng] = [
+            _serialize_profile_field(f) for f in mod.profile_schema()
+        ]
+
+    image_model_ids = {m["model_id"] for m in image_models}
+    profiles_with_fields: list[dict[str, Any]] = []
+    for mid, p in cfg.iter_profiles():
+        if mid not in image_model_ids:
+            continue
+        fields: dict[str, Any] = {}
+        eng = next((m["engine"] for m in image_models if m["model_id"] == mid),
+                   None)
+        if eng and eng in engines_schema:
+            for s in engines_schema[eng]:
+                v = getattr(p, s["key"], None)
+                if v is None or v == "":
+                    continue
+                fields[s["key"]] = str(v)
+        profiles_with_fields.append({
+            "name": p.name, "model": mid, "fields": fields,
+        })
+
+    return {
+        "image_models": image_models,
+        "image_models_json": json.dumps(image_models),
+        "profiles_json": json.dumps(profiles_with_fields),
+        "engines_schema_json": json.dumps(engines_schema),
+    }
+
+
 @router.get("/images", response_class=HTMLResponse)
 async def images_view(request: Request,
                       _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     cfg = request.app.state.cfg
     reg: Registry = request.app.state.registry
-    sess = _read_session(request)
-    image_models: list[dict[str, str]] = []
-    for m in reg.list():
-        engine = detect_engine_for_id(m.model_id, cfg.models_dir)
-        if ENGINE_FAMILY.get(engine, "text") == "image":
-            image_models.append({"model_id": m.model_id, "engine": engine})
-    # Profiles bound to image-family models; UI filters by selected model.
-    profiles: list[dict[str, str]] = []
-    image_model_ids = {m["model_id"] for m in image_models}
-    for mid, p in cfg.iter_profiles():
-        if mid in image_model_ids:
-            profiles.append({"name": p.name, "model": mid})
+    sess = _current_session(request)
+    ctx = _build_image_page_context(cfg, reg)
     return templates.TemplateResponse(request, "images.html", _ctx(
         request,
-        image_models=image_models,
-        image_models_json=json.dumps(image_models),
-        profiles_json=json.dumps(profiles),
         api_key=sess["key"] if sess else "",
+        **ctx,
     ))
+
+
+def _safe_path_components(*parts: str) -> None:
+    """Reject path components that contain separators / traversal / nulls."""
+    for seg in parts:
+        if "/" in seg or "\\" in seg or ".." in seg or "\x00" in seg:
+            raise HTTPException(status_code=400, detail="invalid path component")
+
+
+def _list_gallery(images_dir: Path, *, origin_filter: str | None = None,
+                  limit: int = 200,
+                  before: float | None = None) -> dict[str, Any]:
+    """Walk ``images_dir`` newest-first and return a JSON-ready gallery page.
+
+    Layout on disk is ``<images_dir>/<day>/<origin>/<name>.png`` (written by
+    ``image_runner._gallery_dir``). For each PNG we attempt to read its
+    ``*.png.json`` sidecar (written at ``image_runner.py:461-465``) — when
+    the sidecar is absent or unreadable we still surface the file with
+    minimal metadata so the gallery remains usable for legacy items.
+
+    ``origin_filter`` scopes the listing to one origin name (already
+    sanitised by the caller); ``before`` paginates via mtime cursor.
+    """
+    if not images_dir.exists():
+        return {"items": [], "next_before": None}
+    items: list[dict[str, Any]] = []
+    # Walk the dated subdirs newest-first. We rely on the YYYY-MM-DD
+    # naming used by _gallery_dir, but fall back to mtime sort for any
+    # directory that doesn't follow the convention.
+    try:
+        day_dirs = sorted(
+            (p for p in images_dir.iterdir() if p.is_dir()),
+            key=lambda p: p.name,
+            reverse=True,
+        )
+    except OSError:
+        return {"items": [], "next_found": None}
+    for day_dir in day_dirs:
+        day = day_dir.name
+        try:
+            origin_dirs = [p for p in day_dir.iterdir() if p.is_dir()]
+        except OSError:
+            continue
+        if origin_filter:
+            origin_dirs = [p for p in origin_dirs if p.name == origin_filter]
+        for origin_dir in origin_dirs:
+            try:
+                files = list(origin_dir.iterdir())
+            except OSError:
+                continue
+            for f in files:
+                if not f.is_file() or f.suffix.lower() != ".png":
+                    continue
+                try:
+                    st = f.stat()
+                except OSError:
+                    continue
+                items.append({
+                    "_mtime": st.st_mtime,
+                    "_path": f,
+                    "day": day,
+                    "origin": origin_dir.name,
+                    "name": f.name,
+                    "size": st.st_size,
+                })
+    items.sort(key=lambda x: x["_mtime"], reverse=True)
+    if before is not None:
+        items = [it for it in items if it["_mtime"] < before]
+    page = items[:limit]
+    next_before = page[-1]["_mtime"] if len(items) > limit else None
+    out: list[dict[str, Any]] = []
+    for it in page:
+        sidecar: dict[str, Any] = {}
+        sc = it["_path"].with_suffix(it["_path"].suffix + ".json")
+        if sc.is_file():
+            try:
+                sidecar = json.loads(sc.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                sidecar = {}
+        out.append({
+            "day": it["day"],
+            "origin": it["origin"],
+            "name": it["name"],
+            "mtime": it["_mtime"],
+            "size": it["size"],
+            "url": f"/ui/images/file/{it['day']}/{it['origin']}/{it['name']}",
+            "sidecar": sidecar,
+        })
+    return {"items": out, "next_before": next_before}
+
+
+@router.get("/images/gallery")
+async def images_gallery(request: Request,
+                         limit: int = 60,
+                         before: float | None = None,
+                         _: Origin = Depends(require_admin_ui)) -> Response:
+    """JSON listing of every image on disk, newest first.
+
+    Pagination uses an mtime cursor (``before=<float>``) so the client can
+    request the next page once the previous page's last image has been
+    rendered. The admin endpoint sees every origin's gallery; the public
+    variant in ``app.py`` scopes by the bearer's origin name.
+    """
+    from fastapi.responses import JSONResponse as _JSONResponse
+    cfg = request.app.state.cfg
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be 1..500")
+    payload = _list_gallery(cfg.images_dir, limit=limit, before=before)
+    return _JSONResponse(payload)
 
 
 @router.get("/images/file/{day}/{origin}/{name}")

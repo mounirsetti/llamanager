@@ -364,6 +364,126 @@ def cmd_logs(args):
     return _run_admin(lambda: c.logs(source=args.source, tail=args.tail))
 
 
+# ---- diffusion ----
+#
+# Talk to /admin/diffusion/* so the CLI can do what the
+# /ui/diffusion-models page does without a browser.
+
+def cmd_diffusion_engines(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.diffusion_engines())
+
+
+def cmd_diffusion_install(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.diffusion_install(
+        args.engine, patch_flash_attn=args.patch_flash_attn))
+
+
+def cmd_diffusion_cancel_install(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.diffusion_cancel_install(args.engine))
+
+
+def cmd_diffusion_models(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.diffusion_models())
+
+
+def cmd_diffusion_activate(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.diffusion_activate(args.model_id))
+
+
+def _parse_field_kv(arg_list: list[str] | None) -> dict[str, Any]:
+    """Parse repeated ``--field key=value`` flags into a dict.
+
+    Values are passed through verbatim; the server validates against the
+    engine's profile_schema and rejects unknown / mistyped fields.
+    """
+    out: dict[str, Any] = {}
+    for entry in (arg_list or []):
+        if "=" not in entry:
+            raise SystemExit(f"--field expects key=value, got {entry!r}")
+        k, _, v = entry.partition("=")
+        out[k.strip()] = _coerce_field_value(v.strip())
+    return out
+
+
+def _coerce_field_value(v: str) -> Any:
+    """Best-effort coercion: int → float → keep as string. The server's
+    schema-driven validation will reject anything the chosen kind
+    doesn't accept."""
+    if v == "":
+        return ""
+    try:
+        if v.isdigit() or (v.startswith("-") and v[1:].isdigit()):
+            return int(v)
+    except Exception:
+        pass
+    try:
+        return float(v)
+    except ValueError:
+        return v
+
+
+def cmd_diffusion_profiles_list(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.diffusion_profiles(args.model_id))
+
+
+def cmd_diffusion_profile_create(args):
+    c = _make_admin_client(args)
+    fields = _parse_field_kv(args.field)
+    return _run_admin(lambda: c.diffusion_profile_create(
+        args.model_id, args.name, fields=fields,
+        make_default=args.make_default))
+
+
+def cmd_diffusion_profile_update(args):
+    c = _make_admin_client(args)
+    fields = _parse_field_kv(args.field)
+    return _run_admin(lambda: c.diffusion_profile_update(
+        args.name, args.model_id, fields=fields, new_name=args.rename))
+
+
+def cmd_diffusion_profile_delete(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.diffusion_profile_delete(args.name, args.model_id))
+
+
+def cmd_diffusion_profile_clone(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.diffusion_profile_clone(
+        args.name, args.model_id, args.new_name))
+
+
+def cmd_diffusion_set_model_default(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.diffusion_set_model_default_profile(
+        args.model_id, profile_name=(args.profile or "")))
+
+
+def cmd_diffusion_materialize_defaults(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.diffusion_materialize_defaults(
+        args.model_id, args.engine))
+
+
+# ---- self-update ----
+
+def cmd_update_check(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.check_update())
+
+
+def cmd_update(args):
+    if args.check:
+        return cmd_update_check(args)
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.self_update())
+
+
 def _add_admin_flags(p: argparse.ArgumentParser) -> None:
     """Flags shared by every admin verb."""
     p.add_argument("--url", default=None,
@@ -538,6 +658,86 @@ def main(argv: list[str] | None = None) -> int:
                          "(any *.log file in logs_dir is acceptable)")
     sp.add_argument("--tail", type=int, default=200)
     _add_admin_flags(sp); sp.set_defaults(func=cmd_logs)
+
+    # diffusion
+    dfp = sub.add_parser("diffusion",
+                         help="manage diffusion engines + image models + profiles"
+                         ).add_subparsers(dest="diffusion_cmd", required=True)
+
+    sp = dfp.add_parser("engines", help="per-engine install state + GPU detection")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_engines)
+
+    sp = dfp.add_parser("install", help="kick the auto-installer for an engine")
+    sp.add_argument("engine", help="hidream | z_image | flux2")
+    sp.add_argument("--patch-flash-attn", action="store_true",
+                    help="apply the use_flash_attn=False patch to "
+                         "hidream-source/pipeline.py (recommended on AMD)")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_install)
+
+    sp = dfp.add_parser("cancel-install", help="cancel an in-progress install")
+    sp.add_argument("engine")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_cancel_install)
+
+    sp = dfp.add_parser("models",
+                        help="list installed image models + catalog of installable ones")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_models)
+
+    sp = dfp.add_parser("activate",
+                        help="set this image model as the dashboard/API default")
+    sp.add_argument("model_id")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_activate)
+
+    # diffusion profiles (nested under diffusion to keep verbs short)
+    pfp = dfp.add_parser("profiles", help="manage per-model diffusion profiles"
+                         ).add_subparsers(dest="profiles_cmd", required=True)
+
+    sp = pfp.add_parser("list", help="show profiles + built-in defaults for a model")
+    sp.add_argument("model_id")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_profiles_list)
+
+    sp = pfp.add_parser("create", help="create a new profile")
+    sp.add_argument("model_id"); sp.add_argument("name")
+    sp.add_argument("--field", action="append", default=None,
+                    metavar="KEY=VALUE",
+                    help="schema field value (repeatable, e.g. --field image_steps=50)")
+    sp.add_argument("--make-default", action="store_true",
+                    help="also set the new profile as this model's default")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_profile_create)
+
+    sp = pfp.add_parser("update", help="patch fields on an existing profile")
+    sp.add_argument("model_id"); sp.add_argument("name")
+    sp.add_argument("--field", action="append", default=None,
+                    metavar="KEY=VALUE")
+    sp.add_argument("--rename", default=None,
+                    help="optionally rename the profile in the same call")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_profile_update)
+
+    sp = pfp.add_parser("delete", help="delete a profile")
+    sp.add_argument("model_id"); sp.add_argument("name")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_profile_delete)
+
+    sp = pfp.add_parser("clone", help="duplicate a profile under a new name")
+    sp.add_argument("model_id"); sp.add_argument("name"); sp.add_argument("new_name")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_profile_clone)
+
+    sp = pfp.add_parser("set-default",
+                        help="set the per-model default profile (blank to clear)")
+    sp.add_argument("model_id")
+    sp.add_argument("--profile", default="")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_set_model_default)
+
+    sp = pfp.add_parser("materialize-defaults",
+                        help="copy the engine's built-in defaults into config.toml")
+    sp.add_argument("model_id"); sp.add_argument("engine")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_materialize_defaults)
+
+    # self-update — same code path as the /ui/about Update button.
+    sp = sub.add_parser("update",
+                        help="pull + reinstall llamanager + restart "
+                             "(same as the /ui/about Update button)")
+    sp.add_argument("--check", action="store_true",
+                    help="only check for a newer release, don't update")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_update)
 
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO,

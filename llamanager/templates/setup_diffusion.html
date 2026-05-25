@@ -162,7 +162,11 @@
 <p class="lm-page-lede">Install Python dependencies, download model weights, tune how text and image engines share the GPU. Each engine card walks you through the setup end-to-end.</p>
 
 {# Poll the page wrapper while any install or download is in flight so
-   progress bars update without a manual refresh. #}
+   progress bars update without a manual refresh. The swap mode is
+   ``morph`` (idiomorph, loaded at the body level) so the partial gets
+   reconciled in place — open <details>, form values, and focus all
+   survive each tick. Without morph, every poll wiped the inline
+   engine-paths and download forms. #}
 {% set _any_install_busy = (engine_installs.z_image and engine_installs.z_image.status in ('pending','running'))
                        or (engine_installs.hidream and engine_installs.hidream.status in ('pending','running')) %}
 {% set _any_download_busy = (downloads | selectattr('status', 'equalto', 'running') | list)
@@ -172,7 +176,7 @@
      {% if _any_install_busy or _any_download_busy %}
      hx-get="/ui/setup-diffusion/_partial"
      hx-trigger="every 2s"
-     hx-swap="outerHTML"
+     hx-swap="morph"
      {% endif %}>
 
   {% include "_setup_diffusion_partial.html" %}

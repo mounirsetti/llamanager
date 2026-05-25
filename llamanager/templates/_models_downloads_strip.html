@@ -1,0 +1,48 @@
+{# Active downloads strip. Polled every 2s while there are downloads,
+   stops polling once the list is empty (the wrapper disappears from
+   the DOM so HTMX stops triggering). #}
+<div id="models-downloads-strip"
+     {% if active_downloads %}
+     hx-get="/ui/models/_downloads_strip"
+     hx-trigger="every 2s"
+     hx-swap="morph"
+     {% endif %}>
+{% if active_downloads %}
+<table class="lm-table" style="margin-bottom: 18px;">
+  <tbody>
+  {% for d in active_downloads %}
+  <tr>
+    <td data-label="Model">
+      <code style="color: var(--fg-2);">{{ d.source }}</code>
+      <span class="lm-pill lm-pill--swapping" style="margin-left: 8px;">downloading</span>
+    </td>
+    <td data-label="Progress" class="num">
+      {% if d.bytes_total %}
+      <div style="display: flex; flex-direction: column; gap: 4px; min-width: 140px;">
+        <div style="height: 4px; background: var(--bg-3); border-radius: 2px;">
+          <div style="height: 4px; background: var(--ok); border-radius: 2px; width: {{ '%.0f' % (100 * d.bytes_done / d.bytes_total) }}%; transition: width 0.3s ease;"></div>
+        </div>
+        <span style="font-size: 0.75rem; color: var(--fg-2);">
+          {{ '%.1f' % (d.bytes_done / (1024**3)) }} / {{ '%.1f' % (d.bytes_total / (1024**3)) }} GB
+          ({{ '%.0f' % (100 * d.bytes_done / d.bytes_total) }}%)
+        </span>
+      </div>
+      {% elif d.bytes_done %}
+      <span style="font-size: 0.8125rem; color: var(--fg-2);">{{ '%.2f GB' % (d.bytes_done / (1024**3)) }}&hellip;</span>
+      {% else %}
+      <span style="font-size: 0.8125rem; color: var(--fg-2);">starting&hellip;</span>
+      {% endif %}
+    </td>
+    <td class="actions" data-label="">
+      <form method="post" action="/ui/downloads/{{ d.id }}/cancel"
+            data-confirm="Cancel this download and remove partial files?">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Cancel</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+</div>

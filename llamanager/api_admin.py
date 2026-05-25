@@ -402,3 +402,408 @@ async def disk(request: Request, _: Origin = Depends(admin_origin)) -> JSONRespo
         "total_gb": round(usage.total / (1024 ** 3), 2),
         "max_disk_gb": cfg.max_disk_gb,
     })
+
+
+# ---------- self-update ----------
+#
+# JSON wrappers around the UI's update flow so the CLI can call the
+# same code path (factored helpers live in api_ui.py to keep the UI
+# button and the CLI behaviour byte-identical).
+
+@router.get("/update/check")
+async def update_check(request: Request,
+                       _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Report whether a newer release exists on GitHub. Same source of
+    truth as the Check-for-updates button in /ui/about."""
+    from .api_ui import _check_latest_release
+    try:
+        info = _check_latest_release()
+    except Exception as e:
+        raise HTTPException(status_code=502,
+                            detail=f"update check failed: {e}")
+    return JSONResponse(info)
+
+
+@router.post("/update")
+async def update_self(request: Request,
+                      _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Pull + reinstall + restart. Same flow as the Update button in
+    /ui/about. Blocks until the reinstall finishes; the restart fires
+    via a deferred task so this response can complete first."""
+    import asyncio as _asyncio
+    from .api_ui import _run_self_update, _schedule_self_restart
+    project_dir = Path(__file__).parent.parent
+    loop = _asyncio.get_running_loop()
+    res = await loop.run_in_executor(None, _run_self_update, project_dir)
+    if not res["ok"]:
+        return JSONResponse(
+            {"ok": False, "log": res["log"],
+             "error": res.get("error", "update failed")},
+            status_code=500,
+        )
+    sm: ServerManager = request.app.state.sm
+    if sm.is_running:
+        await sm.stop()
+    await _schedule_self_restart()
+    return JSONResponse({"ok": True, "log": res["log"],
+                         "restarting": True})
+
+
+# ---------- diffusion ----------
+#
+# Mirror the UI's diffusion-models page over JSON so the CLI can list
+# catalog + installed models, kick installs, and edit profiles without
+# scraping HTML. Heavy lifting (catalog join, schema serialisation,
+# profile assembly) lives in api_ui helpers — these endpoints are thin
+# pass-throughs that return JSON.
+
+@router.get("/diffusion/engines")
+async def diffusion_engines(request: Request,
+                            _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Per-engine state: configured paths, install status, target GPU,
+    plus the most recent install row."""
+    from . import engines as _engines
+    from .engine_installer import resolve_plan
+    from .gpu_detect import detect_gpu, render_group_ok
+    cfg = request.app.state.cfg
+    installer = request.app.state.engine_installer
+    gpu = detect_gpu()
+    out: list[dict[str, Any]] = []
+    for eng_id in _engines.ADAPTERS.keys():
+        configured = {
+            "hidream": bool(cfg.hidream_python and cfg.hidream_repo),
+            "z_image": bool(cfg.z_image_python),
+            "flux2":   bool(cfg.flux2_sd_cli),
+        }.get(eng_id, False)
+        plan = resolve_plan(eng_id, gpu, emit=None, cfg=cfg)
+        active = installer.active_for_engine(eng_id)
+        if active:
+            last = active
+        else:
+            recent = installer.list_for_engine(eng_id, limit=1)
+            last = recent[0] if recent else None
+        out.append({
+            "engine": eng_id,
+            "configured": configured,
+            "target": plan.target if plan else None,
+            "packages": (plan.packages if plan else []),
+            "wheel_urls": (plan.wheel_urls if plan else []),
+            "supports_flash_attn_patch": (
+                plan.supports_flash_attn_patch if plan else False),
+            "last_install": last,
+        })
+    return JSONResponse({
+        "engines": out,
+        "gpu": {
+            "kind": gpu.kind,
+            "rocm_arch": gpu.rocm_arch,
+            "needs_render_group": gpu.needs_render_group,
+            "render_group_ok": render_group_ok(gpu),
+        },
+    })
+
+
+class DiffusionInstallBody(BaseModel):
+    patch_flash_attn: bool = False
+
+
+@router.post("/diffusion/engines/{engine}/install")
+async def diffusion_install(request: Request, engine: str,
+                            body: DiffusionInstallBody = DiffusionInstallBody(),
+                            _: Origin = Depends(admin_origin)) -> JSONResponse:
+    installer = request.app.state.engine_installer
+    options: dict[str, Any] = {}
+    if body.patch_flash_attn:
+        options["patch_flash_attn"] = True
+    try:
+        install_id = installer.start(engine, options=options)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse({"id": install_id})
+
+
+@router.post("/diffusion/engines/{engine}/cancel-install")
+async def diffusion_cancel_install(request: Request, engine: str,
+                                   _: Origin = Depends(admin_origin)) -> JSONResponse:
+    installer = request.app.state.engine_installer
+    active = installer.active_for_engine(engine)
+    if not active:
+        return JSONResponse({"ok": True, "cancelled": False})
+    installer.cancel(active["id"])
+    return JSONResponse({"ok": True, "cancelled": True})
+
+
+@router.get("/diffusion/models")
+async def diffusion_models(request: Request,
+                           _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Installed image-family models + the catalog of installable ones."""
+    from .config import ENGINE_FAMILY, detect_engine_for_id
+    from . import diffusion_catalog
+    cfg = request.app.state.cfg
+    reg: Registry = request.app.state.registry
+    on_disk: list[dict[str, Any]] = []
+    for entry in reg.list():
+        engine = detect_engine_for_id(entry.model_id, cfg.models_dir)
+        if ENGINE_FAMILY.get(engine, "text") != "image":
+            continue
+        on_disk.append({
+            "model_id": entry.model_id, "engine": engine,
+            "size_bytes": entry.size, "path": str(entry.path),
+            "is_default": entry.model_id == cfg.default_image_model,
+        })
+    catalog = [
+        {"canonical_id": e.canonical_id, "engine": e.engine,
+         "label": e.label, "hf_repo": e.hf_repo, "subfolder": e.subfolder,
+         "approx_size_gb": e.approx_size_gb,
+         "description": e.description, "homepage": e.homepage}
+        for e in diffusion_catalog.CATALOG
+    ]
+    return JSONResponse({"installed": on_disk, "catalog": catalog,
+                         "default_image_model": cfg.default_image_model or ""})
+
+
+class DiffusionActivateBody(BaseModel):
+    model_id: str
+
+
+@router.post("/diffusion/models/activate")
+async def diffusion_activate(request: Request,
+                             body: DiffusionActivateBody,
+                             _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .config import update_defaults, load_config
+    cfg = request.app.state.cfg
+    update_defaults(cfg.config_path, default_image_model=body.model_id.strip())
+    new = load_config(cfg.path)
+    new.bind = cfg.bind; new.port = cfg.port
+    request.app.state.cfg = new
+    return JSONResponse({"ok": True, "default_image_model": new.default_image_model})
+
+
+@router.get("/diffusion/profiles")
+async def diffusion_profiles_list(request: Request,
+                                  model: str = "",
+                                  _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Profiles attached to an image model, plus the engine's built-in
+    defaults so callers can see what they'd materialise."""
+    from . import engines as _engines
+    from .config import detect_engine_for_id
+    cfg = request.app.state.cfg
+    if not model:
+        raise HTTPException(status_code=400, detail="model is required")
+    m = cfg.get_model(model)
+    profiles: list[dict[str, Any]] = []
+    if m:
+        for p in sorted(m.profiles.values(), key=lambda x: x.name):
+            fields = {
+                k: getattr(p, k) for k in (
+                    "image_model_type", "image_size", "image_steps",
+                    "image_guidance", "image_seed", "image_editing_scheduler",
+                ) if getattr(p, k) not in ("", None)
+            }
+            profiles.append({"name": p.name, "fields": fields})
+    engine = detect_engine_for_id(model, cfg.models_dir)
+    builtins: dict[str, Any] = {}
+    try:
+        builtins = _engines.get(engine).default_profiles()
+    except Exception:
+        builtins = {}
+    return JSONResponse({
+        "model": model, "engine": engine,
+        "default_profile": (m.default_profile if m else ""),
+        "profiles": profiles,
+        "builtin_defaults": builtins,
+    })
+
+
+class DiffusionProfileBody(BaseModel):
+    model_id: str
+    name: str
+    fields: dict[str, Any] = Field(default_factory=dict)
+    make_default: bool = False
+
+
+@router.post("/diffusion/profiles")
+async def diffusion_profile_create(request: Request,
+                                   body: DiffusionProfileBody,
+                                   _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .config import Profile, save_profile, set_model_default_profile, detect_engine_for_id
+    from . import engines as _engines
+    cfg = request.app.state.cfg
+    if not body.model_id or not body.name:
+        raise HTTPException(status_code=400, detail="model_id and name are required")
+    existing = cfg.get_model(body.model_id)
+    name = body.name.strip().lower()
+    if existing and name in existing.profiles:
+        raise HTTPException(status_code=409,
+                            detail=f"profile {name!r} already exists")
+    engine = detect_engine_for_id(body.model_id, cfg.models_dir)
+    try:
+        adapter = _engines.get(engine)
+    except KeyError:
+        raise HTTPException(status_code=400,
+                            detail=f"unknown engine for model {body.model_id!r}")
+    kwargs: dict[str, Any] = {"name": name}
+    schema_keys = {f.key for f in adapter.profile_schema()}
+    for k, v in body.fields.items():
+        if k not in schema_keys:
+            continue
+        if v in ("", None):
+            continue
+        kwargs[k] = v
+    try:
+        save_profile(cfg.config_path, body.model_id, name, Profile(**kwargs))
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if body.make_default:
+        set_model_default_profile(cfg.config_path, body.model_id, name)
+    return JSONResponse({"ok": True, "name": name})
+
+
+class DiffusionProfileUpdateBody(BaseModel):
+    model_id: str
+    fields: dict[str, Any] = Field(default_factory=dict)
+    new_name: str | None = None
+
+
+@router.patch("/diffusion/profiles/{name}")
+async def diffusion_profile_update(request: Request, name: str,
+                                   body: DiffusionProfileUpdateBody,
+                                   _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .config import (Profile, save_profile, rename_profile,
+                         detect_engine_for_id)
+    from . import engines as _engines
+    cfg = request.app.state.cfg
+    m = cfg.get_model(body.model_id)
+    if not m or name not in m.profiles:
+        raise HTTPException(status_code=404,
+                            detail=f"profile {name!r} not found")
+    target = (body.new_name or name).strip().lower()
+    engine = detect_engine_for_id(body.model_id, cfg.models_dir)
+    try:
+        adapter = _engines.get(engine)
+    except KeyError:
+        raise HTTPException(status_code=400,
+                            detail=f"unknown engine for model {body.model_id!r}")
+    if target != name:
+        if target in m.profiles:
+            raise HTTPException(status_code=409,
+                                detail=f"profile {target!r} already exists")
+        try:
+            rename_profile(cfg.config_path, body.model_id, name, target)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    kwargs: dict[str, Any] = {"name": target}
+    schema_keys = {f.key for f in adapter.profile_schema()}
+    for k, v in body.fields.items():
+        if k not in schema_keys:
+            continue
+        if v in ("", None):
+            continue
+        kwargs[k] = v
+    try:
+        save_profile(cfg.config_path, body.model_id, target, Profile(**kwargs))
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse({"ok": True, "name": target})
+
+
+@router.delete("/diffusion/profiles/{name}")
+async def diffusion_profile_delete(request: Request, name: str,
+                                   model_id: str = "",
+                                   _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .config import delete_profile
+    cfg = request.app.state.cfg
+    if not model_id:
+        raise HTTPException(status_code=400, detail="model_id required")
+    delete_profile(cfg.config_path, model_id, name)
+    return JSONResponse({"ok": True})
+
+
+class DiffusionProfileCloneBody(BaseModel):
+    model_id: str
+    new_name: str
+
+
+@router.post("/diffusion/profiles/{name}/clone")
+async def diffusion_profile_clone(request: Request, name: str,
+                                  body: DiffusionProfileCloneBody,
+                                  _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from dataclasses import fields as _fields
+    from .config import Profile, save_profile
+    cfg = request.app.state.cfg
+    new = body.new_name.strip().lower()
+    if not new:
+        raise HTTPException(status_code=400, detail="new_name required")
+    m = cfg.get_model(body.model_id)
+    if not m or name not in m.profiles:
+        raise HTTPException(status_code=404,
+                            detail=f"profile {name!r} not found")
+    if new in m.profiles:
+        raise HTTPException(status_code=409,
+                            detail=f"profile {new!r} already exists")
+    src = m.profiles[name]
+    kwargs: dict[str, Any] = {"name": new}
+    for f in _fields(src):
+        if f.name == "name":
+            continue
+        kwargs[f.name] = getattr(src, f.name)
+    try:
+        save_profile(cfg.config_path, body.model_id, new, Profile(**kwargs))
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse({"ok": True, "name": new})
+
+
+class DiffusionSetDefaultBody(BaseModel):
+    model_id: str
+    profile_name: str = ""
+
+
+@router.post("/diffusion/profiles/set-model-default")
+async def diffusion_set_model_default(request: Request,
+                                      body: DiffusionSetDefaultBody,
+                                      _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .config import set_model_default_profile
+    cfg = request.app.state.cfg
+    if not body.model_id:
+        raise HTTPException(status_code=400, detail="model_id required")
+    if body.profile_name and cfg.get_profile(body.model_id, body.profile_name) is None:
+        raise HTTPException(status_code=400, detail="unknown profile")
+    set_model_default_profile(cfg.config_path, body.model_id, body.profile_name)
+    return JSONResponse({"ok": True})
+
+
+class DiffusionMaterializeBody(BaseModel):
+    model_id: str
+    engine: str
+
+
+@router.post("/diffusion/profiles/materialize-defaults")
+async def diffusion_materialize_defaults(request: Request,
+                                         body: DiffusionMaterializeBody,
+                                         _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .config import Profile, save_profile
+    from . import engines as _engines
+    cfg = request.app.state.cfg
+    try:
+        adapter = _engines.get(body.engine)
+    except KeyError:
+        raise HTTPException(status_code=400, detail="unknown engine")
+    try:
+        builtins = adapter.default_profiles()
+    except Exception as e:
+        raise HTTPException(status_code=400,
+                            detail=f"engine has no default profiles: {e}")
+    existing = cfg.get_model(body.model_id)
+    existing_names = set(existing.profiles.keys()) if existing else set()
+    written: list[str] = []
+    for prof_name, fields in builtins.items():
+        if prof_name in existing_names:
+            continue
+        try:
+            save_profile(cfg.config_path, body.model_id, prof_name,
+                         Profile(name=prof_name, **fields))
+            written.append(prof_name)
+        except (ValueError, TypeError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse({"ok": True, "materialized": written})

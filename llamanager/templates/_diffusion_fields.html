@@ -1,0 +1,55 @@
+{# Schema-driven diffusion-profile field renderer.
+
+   Used by both /ui/diffusion-models (profile editor) and /ui/images
+   (per-request override composer). The macros read the per-engine
+   ProfileField list and emit the right input per kind ("text", "int",
+   "float", "select"). Keep this file the single source of truth for
+   how a profile field looks in the UI; templates should just call
+   ``schema_fields(...)`` and not re-implement the per-kind switch.
+
+   Each input is named ``{name_prefix}{field.key}`` so the parent form
+   can post all of them at once and the server can demultiplex by
+   stripping the prefix. Defaults render as the input's ``placeholder``
+   so an unset value shows the engine baseline but still POSTs as
+   empty (the server treats empty as "inherit").
+#}
+
+{% macro field_input(field, value, name_prefix="field_") %}
+  {% set fname = name_prefix ~ field.key %}
+  {% if field.kind == 'select' %}
+    <select class="lm-input lm-input--mono" name="{{ fname }}">
+      <option value="">— inherit —</option>
+      {% for opt in field.options %}
+      <option value="{{ opt }}" {% if value == opt %}selected{% endif %}>{{ opt }}</option>
+      {% endfor %}
+    </select>
+  {% elif field.kind == 'int' %}
+    <input class="lm-input lm-input--mono" type="number" step="1"
+           name="{{ fname }}" value="{{ value }}"
+           placeholder="{% if field.default is not none %}{{ field.default }}{% endif %}">
+  {% elif field.kind == 'float' %}
+    <input class="lm-input lm-input--mono" type="number" step="any"
+           name="{{ fname }}" value="{{ value }}"
+           placeholder="{% if field.default is not none %}{{ field.default }}{% endif %}">
+  {% else %}
+    <input class="lm-input lm-input--mono" type="text"
+           name="{{ fname }}" value="{{ value }}"
+           placeholder="{% if field.default is not none %}{{ field.default }}{% endif %}">
+  {% endif %}
+{% endmacro %}
+
+
+{# Render a full block of fields. ``profile`` is the optional pre-fill
+   source: a dict with .fields, as produced by ``_diffusion_models_ctx``.
+   ``name_prefix`` lets callers namespace fields (e.g. the image
+   composer uses "override_" so the server can tell composer overrides
+   apart from a profile-edit save). #}
+{% macro schema_fields(schema, profile=None, name_prefix="field_") %}
+  {% for f in schema %}
+  <div class="lm-dm-field">
+    <label class="lm-dm-field__label" for="">{{ f.label }}</label>
+    {{ field_input(f, (profile.fields[f.key] if profile and f.key in profile.fields else ''), name_prefix=name_prefix) }}
+    {% if f.help %}<span class="lm-dm-field__help">{{ f.help }}</span>{% endif %}
+  </div>
+  {% endfor %}
+{% endmacro %}

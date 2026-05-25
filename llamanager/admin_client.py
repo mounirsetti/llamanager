@@ -235,3 +235,78 @@ class AdminClient:
 
     def origin_rotate_key(self, origin_id: int) -> dict[str, Any]:
         return self._post(f"/admin/origins/{origin_id}/rotate-key")
+
+    # ---- diffusion ----
+    #
+    # Mirrors the /ui/diffusion-models page over JSON so the CLI can
+    # list catalogs, kick installs, and manage profiles for image
+    # engines. Server-side handlers live in api_admin.py.
+
+    def diffusion_engines(self) -> dict[str, Any]:
+        return self._get("/admin/diffusion/engines")
+
+    def diffusion_install(self, engine: str, *,
+                          patch_flash_attn: bool = False) -> dict[str, Any]:
+        return self._post(f"/admin/diffusion/engines/{engine}/install",
+                          {"patch_flash_attn": patch_flash_attn})
+
+    def diffusion_cancel_install(self, engine: str) -> dict[str, Any]:
+        return self._post(f"/admin/diffusion/engines/{engine}/cancel-install")
+
+    def diffusion_models(self) -> dict[str, Any]:
+        return self._get("/admin/diffusion/models")
+
+    def diffusion_activate(self, model_id: str) -> dict[str, Any]:
+        return self._post("/admin/diffusion/models/activate",
+                          {"model_id": model_id})
+
+    def diffusion_profiles(self, model_id: str) -> dict[str, Any]:
+        return self._get("/admin/diffusion/profiles", model=model_id)
+
+    def diffusion_profile_create(self, model_id: str, name: str,
+                                  fields: dict[str, Any] | None = None,
+                                  *,
+                                  make_default: bool = False) -> dict[str, Any]:
+        return self._post("/admin/diffusion/profiles", {
+            "model_id": model_id, "name": name,
+            "fields": fields or {}, "make_default": make_default,
+        })
+
+    def diffusion_profile_update(self, name: str, model_id: str,
+                                  fields: dict[str, Any] | None = None,
+                                  *, new_name: str | None = None) -> dict[str, Any]:
+        return self._request("PATCH", f"/admin/diffusion/profiles/{name}",
+                              json_body={
+                                  "model_id": model_id,
+                                  "fields": fields or {},
+                                  "new_name": new_name,
+                              }).json()
+
+    def diffusion_profile_delete(self, name: str,
+                                  model_id: str) -> dict[str, Any]:
+        return self._delete(f"/admin/diffusion/profiles/{name}",
+                             model_id=model_id)
+
+    def diffusion_profile_clone(self, name: str, model_id: str,
+                                 new_name: str) -> dict[str, Any]:
+        return self._post(f"/admin/diffusion/profiles/{name}/clone",
+                           {"model_id": model_id, "new_name": new_name})
+
+    def diffusion_set_model_default_profile(self, model_id: str,
+                                             profile_name: str = "") -> dict[str, Any]:
+        return self._post("/admin/diffusion/profiles/set-model-default",
+                           {"model_id": model_id,
+                            "profile_name": profile_name})
+
+    def diffusion_materialize_defaults(self, model_id: str,
+                                        engine: str) -> dict[str, Any]:
+        return self._post("/admin/diffusion/profiles/materialize-defaults",
+                           {"model_id": model_id, "engine": engine})
+
+    # ---- self-update ----
+
+    def check_update(self) -> dict[str, Any]:
+        return self._get("/admin/update/check")
+
+    def self_update(self) -> dict[str, Any]:
+        return self._post("/admin/update")

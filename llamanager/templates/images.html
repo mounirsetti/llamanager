@@ -2,491 +2,652 @@
 {% set active = 'images' %}
 {% block title %}Images - llamanager{% endblock %}
 {% block content %}
+
+{# Three-pane image generation workspace:
+   - Left rail: on-disk gallery (every image we've ever generated, newest
+     first, served by /ui/images/gallery). Clicking selects the image.
+   - Center: large viewer + per-image metadata pulled from the sidecar.
+   - Right rail: composer (model, profile, schema-driven overrides,
+     prompt, seed, batch, submit). Streams progress via SSE from
+     /v1/images/generations and inserts the new image at the top of
+     the gallery on completion.
+#}
+
 <style>
-  #img-app {
+  .lm-img-shell {
+    display: grid;
+    grid-template-columns: 260px 1fr 360px;
+    gap: 12px;
+    height: calc(100vh - 140px);
+    min-height: 540px;
+  }
+  @media (max-width: 1100px) {
+    .lm-img-shell { grid-template-columns: 1fr; height: auto; }
+  }
+
+  .lm-img-pane {
+    border: 1px solid var(--bg-3);
+    background: var(--bg-1);
     display: flex;
-    height: calc(100vh - 80px);
-    min-height: 520px;
-    border: 1px solid var(--bg-2);
-    background: var(--bg-1);
+    flex-direction: column;
+    min-width: 0;
   }
-  .img-rail {
-    width: 220px; flex-shrink: 0; border-right: 1px solid var(--bg-2);
-    display: flex; flex-direction: column; overflow: hidden;
+  .lm-img-pane__head {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--bg-3);
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--fg-2);
+    display: flex; justify-content: space-between; align-items: center;
   }
-  .img-rail-head {
-    padding: 10px 14px; border-bottom: 1px solid var(--bg-2);
-    font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2);
-  }
-  .img-history { flex: 1; overflow-y: auto; padding: 6px 0; }
-  .img-history-item {
-    display: flex; align-items: center; gap: 6px; padding: 6px 14px;
-    cursor: pointer; font-size: 0.8125rem; color: var(--fg-1);
-    border: 0; background: transparent; width: 100%; text-align: left;
-    transition: color 120ms ease, background 120ms ease;
-  }
-  .img-history-item:hover { color: var(--fg-0); background: var(--bg-2); }
-  .img-history-item--active { color: var(--fg-0); background: var(--bg-2); }
-  .img-history-thumb {
-    width: 24px; height: 24px; flex-shrink: 0; object-fit: cover;
-    border: 1px solid var(--bg-3); background: var(--bg-0);
-  }
-  .img-history-label {
-    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    font-size: 0.75rem;
-  }
-  .img-history-del {
-    flex-shrink: 0; background: transparent; border: 0; color: var(--fg-3);
-    font-size: 0.6875rem; cursor: pointer; padding: 0 4px; display: none;
-  }
-  .img-history-item:hover .img-history-del { display: inline; }
-  .img-history-del:hover { color: var(--bad); }
-
-  .img-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-
-  .img-settings-bar {
-    padding: 10px 16px; border-bottom: 1px solid var(--bg-2);
-    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-    font-size: 0.8125rem; color: var(--fg-2);
-    background: var(--bg-1);
-  }
-  .img-settings-bar label { font-size: 0.6875rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-2); }
-  .img-settings-bar select, .img-settings-bar input[type="number"] {
-    background: var(--bg-0); border: 0; border-bottom: 1px solid var(--bg-3);
-    color: var(--fg-0); padding: 4px 6px; font-size: 0.8125rem;
-    font-family: inherit; min-width: 80px;
-  }
-  .img-settings-bar select:focus, .img-settings-bar input:focus {
-    outline: none; border-bottom-color: var(--accent);
+  .lm-img-pane__body {
+    flex: 1; overflow-y: auto; padding: 8px 12px;
   }
 
-  .img-gallery {
-    flex: 1; overflow-y: auto; padding: 20px 22px;
-    display: grid; grid-template-columns: 1fr; gap: 20px;
-    align-content: start;
+  /* Gallery (left) */
+  .lm-img-gallery {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
   }
-  @media (min-width: 720px) {
-    .img-gallery { grid-template-columns: 2fr 1fr 1fr; grid-auto-rows: minmax(0, auto); }
-    .img-gallery .img-tile:first-child {
-      grid-column: 1 / 2; grid-row: span 2;
-    }
+  .lm-img-gallery__tile {
+    aspect-ratio: 1;
+    background: var(--bg-0);
+    border: 1px solid var(--bg-3);
+    cursor: pointer;
+    overflow: hidden;
+    position: relative;
+    transition: border-color 120ms ease;
   }
-  .img-tile {
-    border: 1px solid var(--bg-3); background: var(--bg-0);
-    display: flex; flex-direction: column; overflow: hidden;
+  .lm-img-gallery__tile:hover { border-color: var(--fg-2); }
+  .lm-img-gallery__tile.is-active { border-color: var(--accent); }
+  .lm-img-gallery__tile img {
+    width: 100%; height: 100%; object-fit: cover; display: block;
   }
-  .img-tile img {
-    width: 100%; height: auto; display: block; background: var(--bg-2);
+  .lm-img-gallery__empty {
+    color: var(--fg-3); font-size: 0.8125rem;
+    padding: 14px 4px; text-align: center;
   }
-  .img-tile-meta {
-    padding: 10px 12px; font-size: 0.75rem; color: var(--fg-2);
-    border-top: 1px solid var(--bg-2); display: flex; gap: 8px; flex-wrap: wrap;
+  .lm-img-gallery__loadmore {
+    grid-column: 1 / -1; margin-top: 8px;
   }
-  .img-tile-meta code { color: var(--fg-1); }
 
-  .img-composer {
-    padding: 12px 16px 16px; border-top: 1px solid var(--bg-2);
-    background: var(--bg-1); display: flex; flex-direction: column; gap: 10px;
+  /* Viewer (center) */
+  .lm-img-viewer {
+    display: flex; flex-direction: column; gap: 12px; height: 100%;
   }
-  .img-composer textarea {
-    width: 100%; min-height: 64px; resize: vertical;
+  .lm-img-viewer__image {
+    flex: 1; display: flex; align-items: center; justify-content: center;
     background: var(--bg-0); border: 1px solid var(--bg-3);
-    color: var(--fg-0); padding: 10px 12px; font-size: 0.9375rem;
-    font-family: inherit; line-height: 1.5;
+    min-height: 360px;
   }
-  .img-composer textarea:focus { outline: none; border-color: var(--accent); }
-  .img-composer-row {
-    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
-    font-size: 0.75rem; color: var(--fg-2);
+  .lm-img-viewer__image img {
+    max-width: 100%; max-height: 100%; object-fit: contain;
   }
-  .img-status { flex: 1; color: var(--fg-2); }
-  .img-status code { color: var(--fg-1); }
-  .img-status .live { color: var(--accent); }
+  .lm-img-viewer__empty {
+    color: var(--fg-3); font-size: 0.875rem; text-align: center;
+    padding: 40px 20px;
+  }
+  .lm-img-meta {
+    background: var(--bg-0);
+    border: 1px solid var(--bg-3);
+    padding: 10px 12px;
+    font-size: 0.8125rem;
+    color: var(--fg-1);
+  }
+  .lm-img-meta__row {
+    display: flex; gap: 8px; margin-bottom: 4px; line-height: 1.4;
+  }
+  .lm-img-meta__label {
+    color: var(--fg-2); min-width: 88px;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    font-size: 0.6875rem;
+    padding-top: 2px;
+  }
+  .lm-img-meta__prompt {
+    margin: 8px 0 0; padding: 8px 10px;
+    background: var(--bg-1); border-left: 2px solid var(--accent);
+    font-size: 0.8125rem; line-height: 1.5;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .lm-img-meta__actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
 
-  .img-empty {
-    display: flex; align-items: center; justify-content: center;
-    height: 100%; color: var(--fg-3); font-size: 0.875rem;
-    grid-column: 1 / -1;
+  /* Composer (right) */
+  .lm-img-composer { display: flex; flex-direction: column; gap: 12px; }
+  .lm-img-composer__head {
+    display: flex; justify-content: space-between; align-items: baseline;
   }
-  .img-ref-thumb {
-    position: relative; width: 56px; height: 56px; flex-shrink: 0;
-    border: 1px solid var(--bg-3); background: var(--bg-2); overflow: hidden;
+  .lm-img-composer__title { font-size: 0.875rem; color: var(--fg-0); }
+  .lm-img-composer__hint  { font-size: 0.6875rem; color: var(--fg-3);
+    text-transform: uppercase; letter-spacing: 0.1em; }
+  .lm-img-field { display: flex; flex-direction: column; gap: 4px; }
+  .lm-img-field__label {
+    font-size: 0.6875rem;
+    text-transform: uppercase; letter-spacing: 0.1em;
+    color: var(--fg-2);
   }
-  .img-ref-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .img-ref-thumb-del {
-    position: absolute; top: 2px; right: 2px; width: 16px; height: 16px;
-    background: rgba(0,0,0,0.7); color: #fff; border: 0; cursor: pointer;
-    font-size: 0.625rem; line-height: 14px; padding: 0;
-    display: flex; align-items: center; justify-content: center;
+  .lm-img-field__help { font-size: 0.6875rem; color: var(--fg-3); }
+  .lm-img-prompt { font-family: inherit; }
+  .lm-img-overrides { display: flex; flex-direction: column; gap: 10px; }
+  .lm-img-row { display: flex; gap: 8px; }
+  .lm-img-seed-row { display: flex; gap: 6px; align-items: stretch; }
+  .lm-img-seed-row input { flex: 1; }
+  .lm-img-actions { display: flex; gap: 8px; margin-top: 4px; }
+  .lm-img-status {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 0.8125rem; color: var(--fg-1);
   }
-  .img-ref-thumb-del:hover { background: var(--bad); }
-  @media (max-width: 640px) {
-    #img-app { height: calc(100vh - 140px); flex-direction: column; }
-    .img-rail { width: 100%; border-right: 0; border-bottom: 1px solid var(--bg-2); max-height: 140px; }
-    .img-history { display: flex; flex-direction: row; overflow-x: auto; padding: 6px; gap: 4px; }
-    .img-history-item { flex: 0 0 auto; max-width: 200px; border: 1px solid var(--bg-3); }
-    .img-gallery { grid-template-columns: 1fr; }
-    .img-gallery .img-tile:first-child { grid-column: auto; grid-row: auto; }
+  .lm-img-status progress { flex: 1; height: 6px; }
+  .lm-img-error {
+    color: var(--bad); font-size: 0.8125rem;
+    padding: 8px 10px; border: 1px solid var(--bad);
+    background: oklch(from var(--bad) l c h / 0.08);
   }
 </style>
 
-<header class="lm-page-head" style="padding-bottom: 12px;">
-  <h1 class="lm-page-title">Images</h1>
-  <p class="lm-page-lede">
-    Generate images via the locally-loaded diffusion model. One-shot per
-    request &mdash; the engine loads, generates, and exits. While a text
-    model is running, llamanager swaps the GPU slot to image and back
-    automatically.
-  </p>
-</header>
-
-<div id="img-app">
-  <aside class="img-rail">
-    <div class="img-rail-head">History</div>
-    <div class="img-history" id="img-history"></div>
+<div class="lm-img-shell">
+  <aside class="lm-img-pane">
+    <div class="lm-img-pane__head">
+      <span>Gallery</span>
+      <span id="lm-img-gallery-count">0</span>
+    </div>
+    <div class="lm-img-pane__body">
+      <div id="lm-img-gallery" class="lm-img-gallery">
+        <p class="lm-img-gallery__empty" id="lm-img-gallery-empty">
+          No images yet. Generate one to populate the gallery.
+        </p>
+      </div>
+      <button type="button" id="lm-img-gallery-loadmore"
+              class="lm-btn lm-btn--ghost lm-btn--xs lm-img-gallery__loadmore"
+              hidden>
+        Load older images
+      </button>
+    </div>
   </aside>
 
-  <section class="img-main">
-    <div class="img-settings-bar">
-      <label>Model</label>
-      <select id="img-model" {% if not image_models %}disabled{% endif %}>
-        {% for m in image_models %}
-        <option value="{{ m.model_id }}">{{ m.model_id }} &middot; {{ m.engine }}</option>
-        {% endfor %}
-        {% if not image_models %}
-        <option value="">No image models detected</option>
-        {% endif %}
-      </select>
-      <label>Profile</label>
-      <select id="img-profile">
-        <option value="">(model default)</option>
-      </select>
-      <label>n</label>
-      <input type="number" id="img-n" value="1" min="1" max="4" style="width:64px;">
-      <label>Seed</label>
-      <input type="number" id="img-seed" placeholder="random" style="width:120px;">
+  <section class="lm-img-pane">
+    <div class="lm-img-pane__head">
+      <span id="lm-img-viewer-title">Viewer</span>
+      <a id="lm-img-viewer-download" hidden href="#" download
+         class="lm-btn lm-btn--ghost lm-btn--xs">Download PNG</a>
     </div>
-
-    <div class="img-gallery" id="img-gallery">
-      <div class="img-empty">Submit a prompt to generate an image.</div>
+    <div class="lm-img-pane__body">
+      <div class="lm-img-viewer">
+        <div class="lm-img-viewer__image" id="lm-img-viewer-image-wrap">
+          <p class="lm-img-viewer__empty" id="lm-img-viewer-empty">
+            Select an image from the gallery or generate a new one.
+          </p>
+        </div>
+        <div class="lm-img-meta" id="lm-img-meta" hidden></div>
+      </div>
     </div>
+  </section>
 
-    <div class="img-composer">
-      <div id="img-refs-row" style="display:none; flex-direction:column; gap:6px; padding:4px 0 2px;">
-        <div id="img-refs-thumbs" style="display:flex; gap:6px; flex-wrap:wrap;"></div>
-        <label style="display:flex; align-items:center; gap:6px; font-size:0.6875rem; color:var(--fg-2); cursor:pointer; user-select:none;">
-          <input type="checkbox" id="img-keep-aspect" style="margin:0;">
-          <span>Keep original aspect (single ref only)</span>
-        </label>
-      </div>
-      <textarea id="img-prompt" placeholder="A still life of three pears on a blue table, soft window light, oil paint texture."></textarea>
-      <div class="img-composer-row">
-        <button type="button" id="img-attach" class="lm-btn lm-btn--ghost">+ Image</button>
-        <input id="img-ref-files" type="file" accept="image/png,image/jpeg,image/webp" multiple style="display:none;">
-        <span class="img-status" id="img-status"></span>
-        <button type="button" id="img-cancel" class="lm-btn lm-btn--ghost" style="display:none;">Cancel</button>
-        <button type="button" id="img-generate" class="lm-btn lm-btn--primary">Generate</button>
-      </div>
+  <section class="lm-img-pane">
+    <div class="lm-img-pane__head">
+      <span>Compose</span>
+    </div>
+    <div class="lm-img-pane__body">
+      {% include "_image_composer.html" %}
     </div>
   </section>
 </div>
 
 <script>
-  (function () {
-    const API_KEY = {{ api_key | tojson }};
-    const IMAGE_MODELS = {{ image_models_json | safe }};
-    const PROFILES = {{ profiles_json | safe }};
+  window.LM_IMAGES_CFG = {
+    imageModels: {{ image_models_json | safe }},
+    profiles: {{ profiles_json | safe }},
+    enginesSchema: {{ engines_schema_json | safe }},
+    apiKey: "{{ api_key }}",
+    galleryUrl: "/ui/images/gallery",
+    fileUrlPrefix: "/ui/images/file/",
+    generationsUrl: "/v1/images/generations"
+  };
+</script>
 
-    const $ = (id) => document.getElementById(id);
-    const STORAGE_KEY = 'lm-image-history-v1';
+<script>
+(function() {
+  const cfg = window.LM_IMAGES_CFG;
+  const $ = (id) => document.getElementById(id);
 
-    // ----- history (per-browser, never leaves localStorage) -----
-    function loadHistory() {
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        return raw ? JSON.parse(raw) : [];
-      } catch (e) { return []; }
+  const state = { selected: null, nextBefore: null, inFlight: false, abort: null };
+
+  const modelSel    = $("lm-img-model");
+  const profileSel  = $("lm-img-profile");
+  const overrides   = $("lm-img-overrides");
+  const promptEl    = $("lm-img-prompt");
+  const seedEl      = $("lm-img-seed");
+  const seedDice    = $("lm-img-seed-dice");
+  const nEl         = $("lm-img-n");
+  const form        = $("lm-img-composer");
+  const submitBtn   = $("lm-img-generate");
+  const cancelBtn   = $("lm-img-cancel");
+  const statusBox   = $("lm-img-status");
+  const statusText  = $("lm-img-status-text");
+  const progressEl  = $("lm-img-progress");
+  const errorEl     = $("lm-img-error");
+  const galleryEl   = $("lm-img-gallery");
+  const galleryEmpty= $("lm-img-gallery-empty");
+  const galleryCount= $("lm-img-gallery-count");
+  const loadMoreBtn = $("lm-img-gallery-loadmore");
+  const viewerEmpty = $("lm-img-viewer-empty");
+  const viewerWrap  = $("lm-img-viewer-image-wrap");
+  const viewerMeta  = $("lm-img-meta");
+  const dlLink      = $("lm-img-viewer-download");
+  const engineHint  = $("lm-img-engine-hint");
+
+  function populateModelDropdown() {
+    modelSel.innerHTML = "";
+    if (!cfg.imageModels.length) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "(no image models installed)";
+      opt.disabled = true;
+      modelSel.appendChild(opt);
+      return;
     }
-    function saveHistory(h) {
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(h)); } catch (e) {}
-    }
-    let history = loadHistory();
-    let activeRunId = null;
+    cfg.imageModels.forEach(m => {
+      const opt = document.createElement("option");
+      opt.value = m.model_id;
+      opt.dataset.engine = m.engine;
+      opt.textContent = `${m.model_id}  ·  ${m.engine}`;
+      modelSel.appendChild(opt);
+    });
+  }
 
-    function renderHistory() {
-      const wrap = $('img-history');
-      wrap.innerHTML = '';
-      if (history.length === 0) {
-        const empty = document.createElement('div');
-        empty.style.cssText = 'padding:10px 14px;font-size:0.75rem;color:var(--fg-3);';
-        empty.textContent = 'No generations yet.';
-        wrap.appendChild(empty);
-        return;
-      }
-      history.forEach((h) => {
-        const btn = document.createElement('button');
-        btn.className = 'img-history-item' + (h.id === activeRunId ? ' img-history-item--active' : '');
-        btn.type = 'button';
-        const label = document.createElement('span');
-        label.className = 'img-history-label';
-        label.textContent = h.prompt.slice(0, 60) || '(no prompt)';
-        const del = document.createElement('button');
-        del.className = 'img-history-del';
-        del.type = 'button';
-        del.textContent = '×';
-        del.title = 'Delete';
-        del.addEventListener('click', (e) => {
-          e.stopPropagation();
-          history = history.filter((x) => x.id !== h.id);
-          saveHistory(history);
-          renderHistory();
-          if (h.id === activeRunId) { renderResult(null); }
+  function currentEngine() {
+    const opt = modelSel.selectedOptions[0];
+    return opt ? opt.dataset.engine : null;
+  }
+
+  function populateProfileDropdown() {
+    profileSel.innerHTML = "";
+    const mid = modelSel.value;
+    const profiles = cfg.profiles.filter(p => p.model === mid);
+    const noneOpt = document.createElement("option");
+    noneOpt.value = "";
+    noneOpt.textContent = "(use engine defaults)";
+    profileSel.appendChild(noneOpt);
+    profiles.forEach(p => {
+      const opt = document.createElement("option");
+      opt.value = p.name;
+      opt.textContent = p.name;
+      profileSel.appendChild(opt);
+    });
+  }
+
+  function renderOverrides() {
+    const engine = currentEngine();
+    overrides.innerHTML = "";
+    engineHint.textContent = engine ? `engine: ${engine}` : "";
+    if (!engine || !cfg.enginesSchema[engine]) return;
+    const profileName = profileSel.value;
+    const profile = cfg.profiles.find(
+      p => p.name === profileName && p.model === modelSel.value);
+    const profileFields = profile ? (profile.fields || {}) : {};
+
+    cfg.enginesSchema[engine].forEach(f => {
+      const wrap = document.createElement("div");
+      wrap.className = "lm-img-field";
+      const label = document.createElement("label");
+      label.className = "lm-img-field__label";
+      label.textContent = f.label;
+      wrap.appendChild(label);
+
+      const placeholder = profileFields[f.key] != null
+        ? String(profileFields[f.key])
+        : (f.default != null ? String(f.default) : "");
+
+      let input;
+      if (f.kind === "select") {
+        input = document.createElement("select");
+        input.className = "lm-input lm-input--mono";
+        const blank = document.createElement("option");
+        blank.value = "";
+        blank.textContent = placeholder
+          ? `— inherit (${placeholder}) —`
+          : "— inherit —";
+        input.appendChild(blank);
+        (f.options || []).forEach(opt => {
+          const o = document.createElement("option");
+          o.value = opt;
+          o.textContent = opt;
+          input.appendChild(o);
         });
-        btn.appendChild(label);
-        btn.appendChild(del);
-        btn.addEventListener('click', () => {
-          activeRunId = h.id;
-          renderHistory();
-          renderResult(h);
-        });
-        wrap.appendChild(btn);
-      });
-    }
-
-    function renderResult(entry) {
-      const gal = $('img-gallery');
-      gal.innerHTML = '';
-      if (!entry || !entry.images || entry.images.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'img-empty';
-        empty.textContent = 'Submit a prompt to generate an image.';
-        gal.appendChild(empty);
-        return;
+      } else {
+        input = document.createElement("input");
+        input.className = "lm-input lm-input--mono";
+        input.type = (f.kind === "int" || f.kind === "float") ? "number" : "text";
+        if (f.kind === "int") input.step = "1";
+        if (f.kind === "float") input.step = "any";
+        input.placeholder = placeholder || "";
       }
-      entry.images.forEach((src) => {
-        const tile = document.createElement('div');
-        tile.className = 'img-tile';
-        const img = document.createElement('img');
-        img.src = src;
-        img.alt = entry.prompt;
-        tile.appendChild(img);
-        const meta = document.createElement('div');
-        meta.className = 'img-tile-meta';
-        if (entry.engine) meta.appendChild(makeChip('engine', entry.engine));
-        if (entry.model) meta.appendChild(makeChip('model', entry.model));
-        if (entry.profile) meta.appendChild(makeChip('profile', entry.profile));
-        if (entry.seed !== null && entry.seed !== undefined) meta.appendChild(makeChip('seed', String(entry.seed)));
-        if (entry.duration_s) meta.appendChild(makeChip('duration', entry.duration_s.toFixed(1) + 's'));
-        tile.appendChild(meta);
-        gal.appendChild(tile);
-      });
-    }
-    function makeChip(key, value) {
-      const span = document.createElement('span');
-      span.innerHTML = '<small style="color:var(--fg-3);">' + key + '</small> <code>' + escapeHtml(String(value)) + '</code>';
-      return span;
-    }
-    function escapeHtml(s) {
-      return s.replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-    }
+      input.name = f.key;
+      input.dataset.kind = f.kind;
+      wrap.appendChild(input);
 
-    // ----- profile filter (binds to selected model) -----
-    function refreshProfiles() {
-      const modelSel = $('img-model');
-      const profSel = $('img-profile');
-      const current = modelSel.value;
-      profSel.innerHTML = '<option value="">(model default)</option>';
-      PROFILES.forEach((p) => {
-        if (p.model === current) {
-          const opt = document.createElement('option');
-          opt.value = p.name;
-          opt.textContent = p.name;
-          profSel.appendChild(opt);
-        }
-      });
-    }
-    $('img-model').addEventListener('change', refreshProfiles);
-
-    // ----- reference images -----
-    // Engine arity comes from IMAGE_MODELS (each entry has .engine).
-    let pendingRefs = [];   // [{ dataUrl, filename }]
-    function currentEngine() {
-      const modelId = $('img-model').value;
-      const entry = IMAGE_MODELS.find((m) => m.model_id === modelId);
-      return entry ? entry.engine : '';
-    }
-    function maxRefs() {
-      return currentEngine() === 'flux2' ? 1 : 8;
-    }
-    function renderRefs() {
-      const row = $('img-refs-row');
-      const wrap = $('img-refs-thumbs');
-      wrap.innerHTML = '';
-      if (!pendingRefs.length) { row.style.display = 'none'; return; }
-      row.style.display = 'flex';
-      pendingRefs.forEach((r, idx) => {
-        const thumb = document.createElement('div');
-        thumb.className = 'img-ref-thumb';
-        thumb.title = r.filename;
-        const im = document.createElement('img');
-        im.src = r.dataUrl;
-        im.alt = r.filename;
-        thumb.appendChild(im);
-        const del = document.createElement('button');
-        del.type = 'button';
-        del.className = 'img-ref-thumb-del';
-        del.textContent = '×';
-        del.title = 'Remove';
-        del.addEventListener('click', () => {
-          pendingRefs.splice(idx, 1);
-          renderRefs();
-        });
-        thumb.appendChild(del);
-        wrap.appendChild(thumb);
-      });
-    }
-    function readAsDataUrl(file) {
-      return new Promise((resolve, reject) => {
-        const fr = new FileReader();
-        fr.onload = () => resolve(fr.result);
-        fr.onerror = () => reject(fr.error || new Error('read failed'));
-        fr.readAsDataURL(file);
-      });
-    }
-    function addRefFiles(fileList) {
-      const max = maxRefs();
-      let files = Array.from(fileList || []);
-      if (max === 1) pendingRefs = [];
-      const room = Math.max(0, max - pendingRefs.length);
-      if (files.length > room) {
-        setStatus(`Only ${room} more ref allowed for ${currentEngine()}.`);
-        files = files.slice(0, room);
+      if (f.help) {
+        const h = document.createElement("span");
+        h.className = "lm-img-field__help";
+        h.textContent = f.help;
+        wrap.appendChild(h);
       }
-      Promise.all(files.map((f) =>
-        readAsDataUrl(f).then((url) => ({ dataUrl: url, filename: f.name }))))
-        .then((entries) => {
-          pendingRefs = pendingRefs.concat(entries);
-          renderRefs();
-        })
-        .catch((err) => setStatus('Image read failed: ' + err.message));
-    }
-    $('img-attach').addEventListener('click', () => $('img-ref-files').click());
-    $('img-ref-files').addEventListener('change', (e) => {
-      addRefFiles(e.target.files);
-      e.target.value = '';
+      overrides.appendChild(wrap);
     });
-    $('img-model').addEventListener('change', () => {
-      const max = maxRefs();
-      if (pendingRefs.length > max) {
-        pendingRefs = pendingRefs.slice(0, max);
-        renderRefs();
-      }
-    });
-    $('img-prompt').addEventListener('dragover', (e) => { e.preventDefault(); });
-    $('img-prompt').addEventListener('drop', (e) => {
-      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
-        e.preventDefault();
-        addRefFiles(e.dataTransfer.files);
-      }
-    });
+  }
 
-    // ----- generate -----
-    let currentRequest = null;
+  modelSel.addEventListener("change", () => {
+    populateProfileDropdown();
+    renderOverrides();
+  });
+  profileSel.addEventListener("change", renderOverrides);
 
-    async function generate() {
-      const prompt = $('img-prompt').value.trim();
-      if (!prompt) return;
-      const model = $('img-model').value;
-      if (!model) { setStatus('No image model selected.'); return; }
-      const profile = $('img-profile').value;
-      const n = parseInt($('img-n').value, 10) || 1;
-      const seedRaw = $('img-seed').value.trim();
-      const seed = seedRaw ? parseInt(seedRaw, 10) : null;
+  seedDice.addEventListener("click", () => {
+    seedEl.value = String(Math.floor(Math.random() * 4294967295));
+  });
 
-      const body = { prompt, model, n, response_format: 'b64_json' };
-      if (profile) body.profile = profile;
-      if (seed !== null && !isNaN(seed)) body.seed = seed;
-      if (pendingRefs.length) {
-        body.images = pendingRefs.map((r) => r.dataUrl);
-        if ($('img-keep-aspect').checked && pendingRefs.length === 1) {
-          body.keep_original_aspect = true;
-        }
-      }
-
-      setBusy(true);
-      setStatus('Queued&hellip;');
-      const ctrl = new AbortController();
-      currentRequest = ctrl;
-      try {
-        const headers = { 'Content-Type': 'application/json' };
-        if (API_KEY) headers['Authorization'] = 'Bearer ' + API_KEY;
-        const resp = await fetch('/v1/images/generations', {
-          method: 'POST', headers, body: JSON.stringify(body), signal: ctrl.signal,
-        });
-        if (!resp.ok) {
-          const text = await resp.text();
-          setStatus('Error: ' + text.slice(0, 200));
-          return;
-        }
-        const data = await resp.json();
-        if (!data.data || data.data.length === 0) {
-          setStatus('No images returned.');
-          return;
-        }
-        const images = data.data.map((d) => d.b64_json
-          ? 'data:image/png;base64,' + d.b64_json
-          : d.url);
-        const entry = {
-          id: 'r-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8),
-          prompt,
-          model,
-          profile: profile || null,
-          engine: (data.llamanager || {}).engine || null,
-          seed: (data.llamanager || {}).seed,
-          duration_s: (data.llamanager || {}).duration_s,
-          images,
-          ts: Date.now(),
-        };
-        history = [entry, ...history].slice(0, 50);
-        saveHistory(history);
-        activeRunId = entry.id;
-        renderHistory();
-        renderResult(entry);
-        setStatus('');
-      } catch (err) {
-        if (err.name === 'AbortError') {
-          setStatus('Cancelled.');
-        } else {
-          setStatus('Error: ' + err.message);
-        }
-      } finally {
-        currentRequest = null;
-        setBusy(false);
-      }
+  async function fetchGallery({reset=false} = {}) {
+    const params = new URLSearchParams({limit: "60"});
+    if (!reset && state.nextBefore != null) {
+      params.set("before", String(state.nextBefore));
     }
-
-    function setBusy(busy) {
-      $('img-generate').disabled = busy;
-      $('img-cancel').style.display = busy ? 'inline-block' : 'none';
-    }
-    function setStatus(html) {
-      $('img-status').innerHTML = html || '';
-    }
-    $('img-generate').addEventListener('click', generate);
-    $('img-cancel').addEventListener('click', () => {
-      if (currentRequest) currentRequest.abort();
+    const r = await fetch(`${cfg.galleryUrl}?${params.toString()}`, {
+      headers: cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : {},
+      credentials: "same-origin",
     });
-    // Ctrl+Enter to submit
-    $('img-prompt').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        generate();
+    if (!r.ok) throw new Error(`gallery list failed: ${r.status}`);
+    return r.json();
+  }
+
+  function tileFor(item) {
+    const div = document.createElement("div");
+    div.className = "lm-img-gallery__tile";
+    div.dataset.url = item.url;
+    div.dataset.name = item.name;
+    div.title = (item.sidecar && item.sidecar.prompt) ? item.sidecar.prompt : item.name;
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.src = item.url;
+    div.appendChild(img);
+    div.addEventListener("click", () => selectImage(item));
+    return div;
+  }
+
+  function appendItems(items) {
+    if (galleryEmpty.parentNode) galleryEmpty.remove();
+    items.forEach(it => galleryEl.appendChild(tileFor(it)));
+    galleryCount.textContent = String(galleryEl.querySelectorAll(".lm-img-gallery__tile").length);
+  }
+
+  function prependItems(items) {
+    if (galleryEmpty.parentNode) galleryEmpty.remove();
+    items.forEach(it => {
+      const tile = tileFor(it);
+      galleryEl.insertBefore(tile, galleryEl.firstChild);
+    });
+    galleryCount.textContent = String(galleryEl.querySelectorAll(".lm-img-gallery__tile").length);
+  }
+
+  async function loadInitialGallery() {
+    try {
+      const payload = await fetchGallery({reset: true});
+      appendItems(payload.items);
+      state.nextBefore = payload.next_before;
+      loadMoreBtn.hidden = state.nextBefore == null;
+      if (payload.items.length) selectImage(payload.items[0]);
+    } catch (e) {
+      showError(`Could not load gallery: ${e.message}`);
+    }
+  }
+
+  loadMoreBtn.addEventListener("click", async () => {
+    try {
+      const payload = await fetchGallery({reset: false});
+      appendItems(payload.items);
+      state.nextBefore = payload.next_before;
+      loadMoreBtn.hidden = state.nextBefore == null;
+    } catch (e) {
+      showError(`Could not load more: ${e.message}`);
+    }
+  });
+
+  function selectImage(item) {
+    state.selected = item;
+    document.querySelectorAll(".lm-img-gallery__tile.is-active")
+      .forEach(t => t.classList.remove("is-active"));
+    const tile = galleryEl.querySelector(`.lm-img-gallery__tile[data-url="${CSS.escape(item.url)}"]`);
+    if (tile) tile.classList.add("is-active");
+
+    viewerEmpty.hidden = true;
+    viewerWrap.innerHTML = "";
+    const img = document.createElement("img");
+    img.src = item.url;
+    viewerWrap.appendChild(img);
+    dlLink.hidden = false;
+    dlLink.href = item.url;
+    dlLink.download = item.name;
+
+    renderMeta(item);
+  }
+
+  function renderMeta(item) {
+    const sc = item.sidecar || {};
+    viewerMeta.hidden = false;
+    viewerMeta.innerHTML = "";
+    const rows = [
+      ["Model",    sc.model_id || sc.model || ""],
+      ["Profile",  sc.profile || ""],
+      ["Engine",   sc.engine || ""],
+      ["Size",     (sc.width && sc.height) ? `${sc.width}×${sc.height}` : ""],
+      ["Steps",    sc.steps != null ? String(sc.steps) : ""],
+      ["Guidance", sc.guidance != null ? String(sc.guidance) : ""],
+      ["Seed",     sc.seed != null ? String(sc.seed) : ""],
+      ["Duration", sc.duration_s != null ? `${(+sc.duration_s).toFixed(2)} s` : ""],
+      ["Saved",    new Date(item.mtime * 1000).toLocaleString()],
+    ];
+    rows.forEach(([k, v]) => {
+      if (!v) return;
+      const r = document.createElement("div");
+      r.className = "lm-img-meta__row";
+      const l = document.createElement("span");
+      l.className = "lm-img-meta__label";
+      l.textContent = k;
+      const val = document.createElement("span");
+      val.textContent = v;
+      r.appendChild(l); r.appendChild(val);
+      viewerMeta.appendChild(r);
+    });
+    if (sc.prompt) {
+      const p = document.createElement("p");
+      p.className = "lm-img-meta__prompt";
+      p.textContent = sc.prompt;
+      viewerMeta.appendChild(p);
+    }
+    const actions = document.createElement("div");
+    actions.className = "lm-img-meta__actions";
+    if (sc.prompt) {
+      const reuse = document.createElement("button");
+      reuse.type = "button";
+      reuse.className = "lm-btn lm-btn--ghost lm-btn--xs";
+      reuse.textContent = "Reuse prompt";
+      reuse.addEventListener("click", () => { promptEl.value = sc.prompt; promptEl.focus(); });
+      actions.appendChild(reuse);
+    }
+    if (sc.seed != null) {
+      const reseed = document.createElement("button");
+      reseed.type = "button";
+      reseed.className = "lm-btn lm-btn--ghost lm-btn--xs";
+      reseed.textContent = "Reuse seed";
+      reseed.addEventListener("click", () => { seedEl.value = String(sc.seed); });
+      actions.appendChild(reseed);
+    }
+    viewerMeta.appendChild(actions);
+  }
+
+  function showError(msg) {
+    errorEl.hidden = false;
+    errorEl.textContent = msg;
+  }
+  function clearError() { errorEl.hidden = true; errorEl.textContent = ""; }
+
+  function collectOverrides() {
+    const out = {};
+    overrides.querySelectorAll("input, select").forEach(el => {
+      const v = (el.value || "").trim();
+      if (v === "") return;
+      const kind = el.dataset.kind;
+      if (kind === "int") out[el.name] = parseInt(v, 10);
+      else if (kind === "float") out[el.name] = parseFloat(v);
+      else out[el.name] = v;
+    });
+    return out;
+  }
+
+  function setBusy(busy) {
+    state.inFlight = busy;
+    submitBtn.disabled = busy;
+    cancelBtn.hidden = !busy;
+    statusBox.hidden = !busy;
+    if (!busy) {
+      progressEl.value = 0;
+      statusText.textContent = "Queued…";
+    }
+  }
+
+  cancelBtn.addEventListener("click", () => {
+    if (state.abort) state.abort.abort();
+  });
+
+  function buildRequestBody() {
+    const body = {
+      model: modelSel.value,
+      prompt: promptEl.value.trim(),
+      n: Math.max(1, parseInt(nEl.value || "1", 10) || 1),
+      stream: true,
+      response_format: "b64_json",
+    };
+    if (profileSel.value) body.profile = profileSel.value;
+    if (seedEl.value !== "") body.seed = parseInt(seedEl.value, 10);
+
+    const o = collectOverrides();
+    if (o.image_size) body.size = o.image_size;
+    if (o.image_steps != null) body.steps = o.image_steps;
+    if (o.image_guidance != null) body.guidance = o.image_guidance;
+    if (o.image_seed != null && body.seed == null) body.seed = o.image_seed;
+    if (o.image_model_type) body.model_type = o.image_model_type;
+    if (o.image_editing_scheduler) body.editing_scheduler = o.image_editing_scheduler;
+    return body;
+  }
+
+  async function generate() {
+    clearError();
+    if (!modelSel.value) { showError("Pick a model first."); return; }
+    if (!promptEl.value.trim()) { showError("Prompt is empty."); return; }
+
+    setBusy(true);
+    statusText.textContent = "Sending…";
+    const body = buildRequestBody();
+    const ctrl = new AbortController();
+    state.abort = ctrl;
+
+    try {
+      const r = await fetch(cfg.generationsUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : {}),
+        },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+        credentials: "same-origin",
+      });
+      if (!r.ok) {
+        const text = await r.text();
+        throw new Error(`HTTP ${r.status}: ${text.slice(0, 240)}`);
       }
-    });
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, {stream: true});
+        let idx;
+        while ((idx = buf.indexOf("\n\n")) !== -1) {
+          const block = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          handleSseBlock(block);
+        }
+      }
+    } catch (e) {
+      if (e.name === "AbortError") {
+        statusText.textContent = "Cancelled.";
+      } else {
+        showError(`Generation failed: ${e.message}`);
+      }
+    } finally {
+      setBusy(false);
+      state.abort = null;
+    }
+  }
 
-    // initial render
-    refreshProfiles();
-    renderHistory();
-  })();
+  function handleSseBlock(block) {
+    let event = "message", data = "";
+    block.split("\n").forEach(line => {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) data += line.slice(5).trim();
+    });
+    if (!data) return;
+    let payload;
+    try { payload = JSON.parse(data); } catch { return; }
+    if (event === "progress") {
+      if (payload.percent != null) progressEl.value = payload.percent;
+      else if (payload.step != null && payload.total_steps != null) {
+        progressEl.value = Math.round(100 * payload.step / payload.total_steps);
+      }
+      const s = payload.step != null ? payload.step : "?";
+      const t = payload.total_steps != null ? payload.total_steps : "?";
+      statusText.textContent = `Step ${s} / ${t}`;
+    } else if (event === "complete" || event === "done" || event === "result") {
+      progressEl.value = 100;
+      statusText.textContent = "Saving…";
+      refreshFront();
+    } else if (event === "error") {
+      showError(payload.message || JSON.stringify(payload));
+    }
+  }
+
+  async function refreshFront() {
+    try {
+      const r = await fetch(`${cfg.galleryUrl}?limit=4`, {
+        headers: cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : {},
+        credentials: "same-origin",
+      });
+      if (!r.ok) return;
+      const payload = await r.json();
+      const have = new Set(
+        Array.from(galleryEl.querySelectorAll(".lm-img-gallery__tile"))
+          .map(t => t.dataset.url));
+      const fresh = payload.items.filter(it => !have.has(it.url));
+      if (fresh.length) {
+        prependItems(fresh);
+        selectImage(fresh[0]);
+      }
+    } catch (e) {
+      console.warn("front refresh failed", e);
+    }
+  }
+
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    generate();
+  });
+
+  populateModelDropdown();
+  if (modelSel.options.length) {
+    populateProfileDropdown();
+    renderOverrides();
+  }
+  loadInitialGallery();
+})();
 </script>
 {% endblock %}

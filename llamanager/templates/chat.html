@@ -187,8 +187,21 @@
       <div id="chat-empty" style="color: var(--fg-3); font-style: italic; padding: 40px 0; text-align: center; font-size: 0.875rem;">Send a message to start chatting.</div>
     </div>
 
+    {# Attachments strip — visible only when the current profile is
+       vision-capable AND the user has picked at least one image. #}
+    <div id="chat-attachments"
+         style="display: none; padding: 8px 12px 0; gap: 8px; flex-wrap: wrap;
+                border-top: 1px solid var(--bg-2);"></div>
+
     {# Input #}
-    <div style="padding: 14px 12px 0; border-top: 1px solid var(--bg-2); display: flex; gap: 10px; align-items: flex-end;">
+    <div style="padding: 14px 12px 0; border-top: 1px solid var(--bg-2); display: flex; gap: 8px; align-items: flex-end;">
+      <button id="chat-attach" type="button" class="lm-btn lm-btn--ghost lm-btn--sm"
+              title="Attach an image (only when the loaded profile supports vision)"
+              style="flex-shrink: 0; padding: 9px 11px;"
+              hidden>📎</button>
+      <input id="chat-attach-input" type="file"
+             accept="image/png,image/jpeg,image/webp,image/gif"
+             multiple style="display: none;">
       <textarea id="chat-input" class="lm-input" rows="1" placeholder="Type a message..."
                 style="flex: 1; resize: none; font-size: 0.9375rem; padding: 10px 2px; line-height: 1.5; max-height: 150px; overflow-y: auto; border-bottom-width: 1px;"
                 {% if status.state != 'running' %}disabled{% endif %}></textarea>
@@ -214,6 +227,96 @@
   var apiKey = {{ api_key | tojson }};
   var streaming = false;
   var userScrolledUp = false;
+
+  // ---- Image attachment state (W3: vision input when profile.mmproj) ----
+  // Each entry: {name, type, dataUrl}. Built from FileReader.readAsDataURL,
+  // shaped to match the OpenAI multimodal content array we send to
+  // /v1/chat/completions. llama-server (with --mmproj) accepts these
+  // verbatim — verified against the Anthropic translator that already
+  // produces the same shape (see api_anthropic.py).
+  var attachments = [];
+  var PROFILES_VISION = {{ profiles_json | safe }};
+  var MAX_IMG_BYTES = 10 * 1024 * 1024;  // 10 MB pre-encoded
+  var attachBtn = document.getElementById('chat-attach');
+  var attachInput = document.getElementById('chat-attach-input');
+  var attachStrip = document.getElementById('chat-attachments');
+
+  function visionCapable() {
+    var pname = profileEl.value;
+    var mid = modelSelectEl.value;
+    for (var i = 0; i < PROFILES_VISION.length; i++) {
+      var p = PROFILES_VISION[i];
+      if (p.name === pname && (!mid || p.model === mid)) return !!p.vision;
+    }
+    return false;
+  }
+
+  function refreshAttachButton() {
+    if (visionCapable()) {
+      attachBtn.hidden = false;
+    } else {
+      attachBtn.hidden = true;
+      // Drop any pending attachments — the new profile can't consume them.
+      attachments = [];
+      renderAttachStrip();
+    }
+  }
+
+  function renderAttachStrip() {
+    attachStrip.innerHTML = '';
+    if (!attachments.length) {
+      attachStrip.style.display = 'none';
+      return;
+    }
+    attachStrip.style.display = 'flex';
+    attachments.forEach(function(a, idx) {
+      var wrap = document.createElement('div');
+      wrap.style.cssText = 'position: relative; width: 56px; height: 56px; border: 1px solid var(--bg-3); background: var(--bg-0); overflow: hidden;';
+      var img = document.createElement('img');
+      img.src = a.dataUrl;
+      img.style.cssText = 'width: 100%; height: 100%; object-fit: cover;';
+      img.title = a.name;
+      wrap.appendChild(img);
+      var x = document.createElement('button');
+      x.type = 'button';
+      x.textContent = '×';
+      x.title = 'Remove';
+      x.style.cssText = 'position: absolute; top: 0; right: 0; padding: 0 4px; border: none; background: rgba(0,0,0,0.55); color: #fff; cursor: pointer; font-size: 12px;';
+      x.addEventListener('click', function() {
+        attachments.splice(idx, 1);
+        renderAttachStrip();
+      });
+      wrap.appendChild(x);
+      attachStrip.appendChild(wrap);
+    });
+  }
+
+  attachBtn.addEventListener('click', function() { attachInput.click(); });
+  attachInput.addEventListener('change', function() {
+    var files = Array.from(attachInput.files || []);
+    attachInput.value = '';
+    files.forEach(function(file) {
+      if (file.size > MAX_IMG_BYTES) {
+        alert('Image too large: ' + file.name + ' (' +
+              (file.size / (1024*1024)).toFixed(1) + ' MB, max 10 MB)');
+        return;
+      }
+      var reader = new FileReader();
+      reader.onload = function() {
+        attachments.push({
+          name: file.name,
+          type: file.type || 'image/png',
+          dataUrl: reader.result,
+        });
+        renderAttachStrip();
+      };
+      reader.readAsDataURL(file);
+    });
+  });
+
+  profileEl.addEventListener('change', refreshAttachButton);
+  modelSelectEl.addEventListener('change', refreshAttachButton);
+  refreshAttachButton();
 
   // ---- Chat history (localStorage, per-origin) ----
   var STORAGE_KEY = 'lm-admin-chat-' + apiKey.slice(-8);
@@ -448,15 +551,48 @@
       saveHistory();
       renderHistoryList();
     }
-    activeChat.messages.push({ role: 'user', content: text });
+    // Build the content payload. With no attachments we keep the
+    // plain-text string shape for backwards compat with non-vision
+    // models; with attachments we switch to the OpenAI multimodal
+    // content array that llama-server (--mmproj) accepts.
+    var userContent;
+    if (attachments.length) {
+      userContent = [{type: 'text', text: text}];
+      attachments.forEach(function(a) {
+        userContent.push({
+          type: 'image_url',
+          image_url: { url: a.dataUrl }
+        });
+      });
+    } else {
+      userContent = text;
+    }
+    activeChat.messages.push({ role: 'user', content: userContent });
     activeChat.draft = '';
     saveHistory();
     // Remove empty placeholder
     var emptyPlaceholder = messagesEl.querySelector('[style*="font-style:italic"]');
     if (emptyPlaceholder) emptyPlaceholder.remove();
     var userEl = buildMsgEl('user', text);
+    // Render the attached thumbnails inline in the user message bubble
+    // so the operator can verify what got sent (kept inside the same
+    // message DOM node so history scroll-restoration still works).
+    if (attachments.length) {
+      var thumbs = document.createElement('div');
+      thumbs.style.cssText = 'display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap;';
+      attachments.forEach(function(a) {
+        var img = document.createElement('img');
+        img.src = a.dataUrl;
+        img.style.cssText = 'max-width: 160px; max-height: 160px; border: 1px solid var(--bg-3);';
+        img.title = a.name;
+        thumbs.appendChild(img);
+      });
+      userEl.bubble.appendChild(thumbs);
+    }
     messagesEl.appendChild(userEl.el);
     inputEl.value = '';
+    attachments = [];
+    renderAttachStrip();
     autoResize();
     userScrolledUp = false;
     scrollToBottom();

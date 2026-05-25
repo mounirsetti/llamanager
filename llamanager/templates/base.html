@@ -36,6 +36,14 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/htmx/1.9.12/htmx.min.js"
           crossorigin="anonymous"
           referrerpolicy="no-referrer"></script>
+  {# Idiomorph: morph-style HTMX swap that preserves form state, open
+     <details>, focus, and scroll position when a parent partial is
+     re-rendered (e.g. the 2s polls on /ui/models and /ui/setup-diffusion).
+     Without this, a poll that re-renders the wrapper would wipe any
+     in-flight profile-edit form the operator had open. #}
+  <script src="https://unpkg.com/idiomorph@0.3.0/dist/idiomorph-ext.min.js"
+          crossorigin="anonymous"
+          referrerpolicy="no-referrer"></script>
 
   <style>
     /* ---------- tokens: dark ---------- */
@@ -1257,7 +1265,14 @@
     }
   </style>
 </head>
-<body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+<body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-boost="true"
+      hx-ext="morph">
+  {# hx-boost intercepts <a> and <form> POSTs and turns them into HTMX
+     swaps so 303-redirect handlers no longer scroll-to-top after each
+     click. hx-ext="morph" activates the idiomorph extension loaded in
+     <head>; polled fragments use ``hx-swap="morph"`` to preserve form
+     state across re-renders. The login form opts out explicitly. #}
   <div class="lm-shell">
     <aside class="lm-rail">
       <div style="display:flex;flex-direction:column;gap:6px;">
@@ -1311,7 +1326,10 @@
              style="display: inline-flex; align-items: center; justify-content: center; background: transparent; border: 1px solid var(--bg-3); border-radius: 2px; padding: 4px 7px; font-size: 0.875rem; color: var(--fg-2); text-decoration: none; line-height: 1; transition: color 180ms ease;"
              title="Reload page and refresh status">&#x21bb;</a>
         </div>
-        <form class="lm-logout" method="post" action="/ui/logout">
+        {# Logout must be a full-page navigation so the browser commits
+           the cleared Set-Cookie response before landing on /ui/login;
+           opt out of hx-boost to bypass HTMX swap. #}
+        <form class="lm-logout" method="post" action="/ui/logout" hx-boost="false">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button type="submit">Sign out</button>
         </form>

@@ -9,7 +9,10 @@
       Check for updates
     </button>
     {% if update_available %}
-    <form method="post" action="/ui/about/update"
+    {# Update triggers a self-restart; opt out of hx-boost so the
+       browser does a full page nav and doesn't try to swap a partial
+       from a daemon that's mid-shutdown. #}
+    <form method="post" action="/ui/about/update" hx-boost="false"
           data-confirm="Update llamanager to {{ latest_version }}? This will pull the latest code, reinstall, and restart the server."
           style="margin: 0;">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

@@ -115,39 +115,9 @@
 
 {# ---------- Macros ---------- #}
 
-{% macro field_input(field, value, name_prefix="field_") %}
-  {% set fname = name_prefix ~ field.key %}
-  {% if field.kind == 'select' %}
-    <select class="lm-input lm-input--mono" name="{{ fname }}">
-      <option value="">— inherit —</option>
-      {% for opt in field.options %}
-      <option value="{{ opt }}" {% if value == opt %}selected{% endif %}>{{ opt }}</option>
-      {% endfor %}
-    </select>
-  {% elif field.kind == 'int' %}
-    <input class="lm-input lm-input--mono" type="number" step="1"
-           name="{{ fname }}" value="{{ value }}"
-           placeholder="{% if field.default is not none %}{{ field.default }}{% endif %}">
-  {% elif field.kind == 'float' %}
-    <input class="lm-input lm-input--mono" type="number" step="any"
-           name="{{ fname }}" value="{{ value }}"
-           placeholder="{% if field.default is not none %}{{ field.default }}{% endif %}">
-  {% else %}
-    <input class="lm-input lm-input--mono" type="text"
-           name="{{ fname }}" value="{{ value }}"
-           placeholder="{% if field.default is not none %}{{ field.default }}{% endif %}">
-  {% endif %}
-{% endmacro %}
-
-{% macro schema_fields(schema, profile=None) %}
-  {% for f in schema %}
-  <div class="lm-dm-field">
-    <label class="lm-dm-field__label" for="">{{ f.label }}</label>
-    {{ field_input(f, profile.fields[f.key] if profile else '') }}
-    {% if f.help %}<span class="lm-dm-field__help">{{ f.help }}</span>{% endif %}
-  </div>
-  {% endfor %}
-{% endmacro %}
+{# Field rendering lives in a shared partial so the image-gen composer
+   (/ui/images) and the profile editor here render identical inputs. #}
+{% from "_diffusion_fields.html" import field_input, schema_fields %}
 
 {% macro profile_summary(profile) %}
 {% set parts = [] %}

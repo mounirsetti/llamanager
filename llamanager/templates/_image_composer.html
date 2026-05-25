@@ -1,0 +1,83 @@
+{# Right-rail composer for the image generation page.
+
+   Used by both /ui/images (admin) and /images (public). The skeleton is
+   identical; the parent templates wire up the auth header and the
+   gallery endpoint via window-level config (window.LM_IMAGES_CFG).
+
+   Inputs and JS rely on data injected into the page:
+     - LM_IMAGES_CFG.imageModels         — [{model_id, engine}, ...]
+     - LM_IMAGES_CFG.profiles            — [{name, model, fields}, ...]
+     - LM_IMAGES_CFG.enginesSchema       — {engine: [ProfileField, ...]}
+     - LM_IMAGES_CFG.apiKey              — bearer for /v1/images/generations
+                                            and the gallery endpoints
+     - LM_IMAGES_CFG.galleryUrl          — '/ui/images/gallery' or '/images/gallery'
+     - LM_IMAGES_CFG.fileUrlPrefix       — '/ui/images/file/' or '/images/file/'
+
+   The composer never imports any styles of its own — styles live in the
+   parent page so admin and public can theme differently.
+#}
+
+<form id="lm-img-composer" class="lm-img-composer" autocomplete="off">
+  <div class="lm-img-composer__head">
+    <span class="lm-img-composer__title">Generate</span>
+    <span class="lm-img-composer__hint" id="lm-img-engine-hint"></span>
+  </div>
+
+  <div class="lm-img-field">
+    <label class="lm-img-field__label" for="lm-img-model">Model</label>
+    <select id="lm-img-model" class="lm-input"></select>
+  </div>
+
+  <div class="lm-img-field">
+    <label class="lm-img-field__label" for="lm-img-profile">Profile</label>
+    <select id="lm-img-profile" class="lm-input"></select>
+    <span class="lm-img-field__help">
+      The profile's settings are used as defaults. Override individual
+      fields below; leave blank to inherit.
+    </span>
+  </div>
+
+  <div class="lm-img-field">
+    <label class="lm-img-field__label" for="lm-img-prompt">Prompt</label>
+    <textarea id="lm-img-prompt" class="lm-input lm-img-prompt" rows="6"
+              placeholder="A misty cliffside in oil paint, dawn light, a single lantern"></textarea>
+  </div>
+
+  {# Schema-driven override fields land here. Built by JS from
+     LM_IMAGES_CFG.enginesSchema when the model selection changes. #}
+  <div id="lm-img-overrides" class="lm-img-overrides"></div>
+
+  <div class="lm-img-row">
+    <div class="lm-img-field" style="flex: 1;">
+      <label class="lm-img-field__label" for="lm-img-seed">Seed</label>
+      <div class="lm-img-seed-row">
+        <input id="lm-img-seed" class="lm-input lm-input--mono" type="number"
+               placeholder="random" step="1" min="0">
+        <button type="button" id="lm-img-seed-dice"
+                class="lm-btn lm-btn--ghost lm-btn--xs" title="Random seed">🎲</button>
+      </div>
+    </div>
+    <div class="lm-img-field" style="width: 80px;">
+      <label class="lm-img-field__label" for="lm-img-n">Batch</label>
+      <input id="lm-img-n" class="lm-input lm-input--mono" type="number"
+             value="1" min="1" max="8" step="1">
+    </div>
+  </div>
+
+  <div class="lm-img-actions">
+    <button type="submit" id="lm-img-generate" class="lm-btn lm-btn--primary">
+      Generate
+    </button>
+    <button type="button" id="lm-img-cancel"
+            class="lm-btn lm-btn--danger" hidden>
+      Cancel
+    </button>
+  </div>
+
+  <div class="lm-img-status" id="lm-img-status" hidden>
+    <progress id="lm-img-progress" max="100" value="0"></progress>
+    <span id="lm-img-status-text">Queued…</span>
+  </div>
+
+  <div id="lm-img-error" class="lm-img-error" hidden></div>
+</form>

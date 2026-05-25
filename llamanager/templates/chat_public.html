@@ -372,7 +372,18 @@
         <div id="chat-empty" class="chat-empty">Send a message to start chatting.</div>
       </div>
 
+      {# Attachments strip — visible when the active profile has mmproj
+         set AND the user has picked at least one image to attach. #}
+      <div id="chat-attachments"
+           style="display: none; padding: 8px 24px 0; gap: 8px; flex-wrap: wrap;"></div>
+
       <div class="chat-input-area">
+        <button id="chat-attach" type="button" class="chat-btn chat-btn--ghost"
+                title="Attach an image (visible only when the loaded profile supports vision)"
+                style="margin-right: 6px;" hidden>📎</button>
+        <input id="chat-attach-input" type="file"
+               accept="image/png,image/jpeg,image/webp,image/gif"
+               multiple style="display: none;">
         <textarea id="chat-input" rows="1" placeholder="Type a message..." disabled></textarea>
         <button id="chat-send" class="chat-btn" disabled>Send</button>
       </div>
@@ -401,8 +412,9 @@
   var speedEl = document.getElementById('chat-speed');
 
   // Populate profile and model dropdowns from server-rendered JSON.
-  // Profile entries arrive as [name, bound_model_id]; an empty bound_model
-  // means a global (args-only) profile.
+  // Profile entries arrive as triples [name, bound_model_id, vision].
+  // ``vision`` is True iff the profile has an mmproj set; the chat
+  // composer uses it to show or hide the image-attach button.
   var profilePairs = {{ profiles_json | safe }};
   var modelIds = {{ models_json | safe }};
   modelIds.forEach(function (mid) {
@@ -414,18 +426,22 @@
   function rebuildProfiles() {
     while (profileEl.options.length > 1) profileEl.remove(1);
     var chosenModel = modelSelectEl.value;
-    profilePairs.forEach(function (pair) {
-      var name = pair[0], bound = pair[1];
+    profilePairs.forEach(function (triple) {
+      var name = triple[0], bound = triple[1], vision = !!triple[2];
       // Show profile if it has no binding (global) or matches the model.
       if (bound && chosenModel && bound !== chosenModel) return;
       var o = document.createElement('option');
       o.value = name;
       o.dataset.model = bound || '';
+      o.dataset.vision = vision ? '1' : '';
       o.textContent = bound ? name : name + ' (global)';
       profileEl.appendChild(o);
     });
   }
-  modelSelectEl.addEventListener('change', rebuildProfiles);
+  modelSelectEl.addEventListener('change', function() {
+    rebuildProfiles();
+    refreshAttachButton();
+  });
   rebuildProfiles();
   modelSelectEl.addEventListener('change', function () { if (modelSelectEl.value) profileEl.value = ''; });
 
@@ -433,6 +449,80 @@
   var streaming = false;
   var statusPoll = null;
   var userScrolledUp = false;
+
+  // ---- Image attachment state (W3) ----
+  // Mirrors the admin chat: a vision-capable profile (mmproj set on the
+  // server side) surfaces the paperclip; clicking it pushes images into
+  // the attachments array as base64 dataURLs. On send we build the
+  // OpenAI multimodal content array which llama-server consumes.
+  var attachments = [];
+  var MAX_IMG_BYTES = 10 * 1024 * 1024;
+  var attachBtn = document.getElementById('chat-attach');
+  var attachInput = document.getElementById('chat-attach-input');
+  var attachStrip = document.getElementById('chat-attachments');
+
+  function visionCapable() {
+    var opt = profileEl.options[profileEl.selectedIndex];
+    return !!(opt && opt.dataset && opt.dataset.vision);
+  }
+  function refreshAttachButton() {
+    if (visionCapable()) {
+      attachBtn.hidden = false;
+    } else {
+      attachBtn.hidden = true;
+      attachments = [];
+      renderAttachStrip();
+    }
+  }
+  function renderAttachStrip() {
+    attachStrip.innerHTML = '';
+    if (!attachments.length) { attachStrip.style.display = 'none'; return; }
+    attachStrip.style.display = 'flex';
+    attachments.forEach(function(a, idx) {
+      var wrap = document.createElement('div');
+      wrap.style.cssText = 'position: relative; width: 56px; height: 56px; border: 1px solid var(--bg-3); background: var(--bg-0); overflow: hidden;';
+      var img = document.createElement('img');
+      img.src = a.dataUrl;
+      img.style.cssText = 'width: 100%; height: 100%; object-fit: cover;';
+      img.title = a.name;
+      wrap.appendChild(img);
+      var x = document.createElement('button');
+      x.type = 'button';
+      x.textContent = '×';
+      x.title = 'Remove';
+      x.style.cssText = 'position: absolute; top: 0; right: 0; padding: 0 4px; border: none; background: rgba(0,0,0,0.55); color: #fff; cursor: pointer; font-size: 12px;';
+      x.addEventListener('click', function() {
+        attachments.splice(idx, 1);
+        renderAttachStrip();
+      });
+      wrap.appendChild(x);
+      attachStrip.appendChild(wrap);
+    });
+  }
+  attachBtn.addEventListener('click', function() { attachInput.click(); });
+  attachInput.addEventListener('change', function() {
+    var files = Array.from(attachInput.files || []);
+    attachInput.value = '';
+    files.forEach(function(file) {
+      if (file.size > MAX_IMG_BYTES) {
+        alert('Image too large: ' + file.name + ' (' +
+              (file.size / (1024*1024)).toFixed(1) + ' MB, max 10 MB)');
+        return;
+      }
+      var reader = new FileReader();
+      reader.onload = function() {
+        attachments.push({
+          name: file.name,
+          type: file.type || 'image/png',
+          dataUrl: reader.result,
+        });
+        renderAttachStrip();
+      };
+      reader.readAsDataURL(file);
+    });
+  });
+  profileEl.addEventListener('change', refreshAttachButton);
+  refreshAttachButton();
 
   // ---- Chat history (localStorage, per-origin) ----
   var STORAGE_KEY = '';  // set after login with key suffix
@@ -751,15 +841,42 @@
       renderHistoryList();
     }
 
-    activeChat.messages.push({ role: 'user', content: text });
+    // Build the content payload. Plain string when no images attached
+    // (back-compat with non-vision models); OpenAI multimodal content
+    // array otherwise. Server-side, llama-server with --mmproj consumes
+    // the multimodal shape verbatim (same shape api_anthropic.py emits).
+    var userContent;
+    if (attachments.length) {
+      userContent = [{type: 'text', text: text}];
+      attachments.forEach(function(a) {
+        userContent.push({type: 'image_url', image_url: {url: a.dataUrl}});
+      });
+    } else {
+      userContent = text;
+    }
+    activeChat.messages.push({ role: 'user', content: userContent });
     activeChat.draft = '';
     saveHistory();
     var userEl = buildMsgEl('user', text);
+    if (attachments.length) {
+      var thumbs = document.createElement('div');
+      thumbs.style.cssText = 'display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap;';
+      attachments.forEach(function(a) {
+        var img = document.createElement('img');
+        img.src = a.dataUrl;
+        img.style.cssText = 'max-width: 160px; max-height: 160px; border: 1px solid var(--bg-3);';
+        img.title = a.name;
+        thumbs.appendChild(img);
+      });
+      userEl.bubble.appendChild(thumbs);
+    }
     var emptyPlaceholder = messagesEl.querySelector('.chat-empty');
     if (emptyPlaceholder) emptyPlaceholder.remove();
     messagesEl.appendChild(userEl.el);
 
     inputEl.value = '';
+    attachments = [];
+    renderAttachStrip();
     autoResize();
     userScrolledUp = false;
     scrollToBottom();

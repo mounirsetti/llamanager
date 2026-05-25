@@ -353,13 +353,18 @@ def create_app(config_path: Path | None = None,
         from pathlib import Path as _Path
         import json as _json
         _templates = Jinja2Templates(directory=str(_Path(__file__).parent / "templates"))
-        # Profiles are emitted as [name, bound_model] pairs so the page can
-        # filter the dropdown to the user's chosen model.
-        profile_pairs = [(p.name, mid) for mid, p in cfg.iter_profiles()]
+        # Profile triples: (name, bound_model, vision_capable). The page
+        # uses ``vision`` to enable an image-attach button on the chat
+        # composer. Vision capability == the profile has an mmproj set.
+        # Per-bearer gating (allowed_models) is applied client-side after
+        # the user logs in, since the page is anonymous until then.
+        profile_triples = [
+            [p.name, mid, bool(p.mmproj)] for mid, p in cfg.iter_profiles()
+        ]
         model_ids = [m.model_id for m in registry.list()]
         return _templates.TemplateResponse(request, "chat_public.html", {
             "request": request,
-            "profiles_json": _json.dumps(profile_pairs),
+            "profiles_json": _json.dumps(profile_triples),
             "models_json": _json.dumps(model_ids),
         })
 
@@ -367,64 +372,72 @@ def create_app(config_path: Path | None = None,
     async def images_public(request: Request):
         """Public images page — any valid origin key, no admin session.
 
-        Sibling to /chat. Surfaces only image-family models in the picker,
-        plus their image profiles (with adapter-declared size buckets),
-        plus per-engine default sizes as a fallback when a profile doesn't
-        constrain sizes itself.
+        Sibling to /chat. Re-uses the same schema-driven context the admin
+        page builds so the two surfaces stay structurally identical; the
+        only difference is which gallery endpoint and which bearer the
+        page calls.
         """
         from fastapi.templating import Jinja2Templates
         from pathlib import Path as _Path
-        import json as _json
-        from .config import ENGINE_FAMILY, detect_engine_for_id
-        from . import engines as _engines_pkg
+        from .api_ui import _build_image_page_context
 
         _templates = Jinja2Templates(directory=str(_Path(__file__).parent / "templates"))
-
-        # Image-family models only.
-        image_models: list[dict[str, str]] = []
-        image_model_ids: set[str] = set()
-        for m in registry.list():
-            engine = detect_engine_for_id(m.model_id, cfg.models_dir)
-            if ENGINE_FAMILY.get(engine, "text") == "image":
-                image_models.append({"model_id": m.model_id, "engine": engine})
-                image_model_ids.add(m.model_id)
-
-        # Each profile entry: [name, model_id, sizes_csv].
-        # sizes_csv is "WxH|WxH|..." — derived from the adapter schema's
-        # select-type image_size field if present; empty otherwise.
-        adapter_sizes_cache: dict[str, list[str]] = {}
-
-        def _engine_sizes(engine: str) -> list[str]:
-            if engine in adapter_sizes_cache:
-                return adapter_sizes_cache[engine]
-            sizes: list[str] = []
-            try:
-                adapter = _engines_pkg.get(engine)
-                for field in adapter.profile_schema():
-                    if field.key == "image_size" and field.kind == "select":
-                        sizes = list(field.options or [])
-                        break
-            except (KeyError, AttributeError):
-                pass
-            adapter_sizes_cache[engine] = sizes
-            return sizes
-
-        profile_entries: list[list] = []
-        model_to_engine = {m["model_id"]: m["engine"] for m in image_models}
-        for mid, p in cfg.iter_profiles():
-            if mid not in image_model_ids:
-                continue
-            sizes_csv = "|".join(_engine_sizes(model_to_engine[mid]))
-            profile_entries.append([p.name, mid, sizes_csv])
-
-        engine_sizes = {e: _engine_sizes(e) for e in {m["engine"] for m in image_models}}
-
+        ctx = _build_image_page_context(cfg, registry)
         return _templates.TemplateResponse(request, "images_public.html", {
             "request": request,
-            "image_models_json": _json.dumps(image_models),
-            "profiles_json": _json.dumps(profile_entries),
-            "engine_sizes_json": _json.dumps(engine_sizes),
+            **ctx,
         })
+
+    @app.get("/images/gallery")
+    async def images_gallery_public(request: Request,
+                                    limit: int = 60,
+                                    before: float | None = None) -> JSONResponse:
+        """Public counterpart of /ui/images/gallery, scoped to the bearer's
+        origin. Same payload shape; only this origin's subdirectory under
+        ``images_dir`` is enumerated."""
+        from .api_v1 import _origin_from_request
+        from .api_ui import _list_gallery
+        if limit < 1 or limit > 500:
+            return JSONResponse({"detail": "limit must be 1..500"},
+                                status_code=400)
+        origin = await _origin_from_request(request)
+        # Mirror the on-disk name produced by image_runner._gallery_dir
+        safe_origin = "".join(c for c in origin.name
+                              if c.isalnum() or c in "-_") or "anon"
+        payload = _list_gallery(cfg.images_dir,
+                                origin_filter=safe_origin,
+                                limit=limit, before=before)
+        return JSONResponse(payload)
+
+    @app.get("/images/file/{day}/{origin}/{name}")
+    async def images_file_serve_public(request: Request,
+                                       day: str, origin: str,
+                                       name: str) -> Response:
+        """Bearer-authenticated PNG serving for the public gallery. The path
+        is constrained to this origin's own directory to avoid leaking
+        other users' galleries."""
+        from .api_v1 import _origin_from_request
+        from .api_ui import _safe_path_components
+        from fastapi.responses import FileResponse as _FileResponse
+        bearer_origin = await _origin_from_request(request)
+        safe_origin = "".join(c for c in bearer_origin.name
+                              if c.isalnum() or c in "-_") or "anon"
+        if origin != safe_origin:
+            raise HTTPException(status_code=403,
+                                detail="cannot access another origin's gallery")
+        _safe_path_components(day, origin, name)
+        if not name.lower().endswith(".png"):
+            raise HTTPException(status_code=400,
+                                detail="only .png files are served here")
+        p = (cfg.images_dir / day / origin / name).resolve()
+        try:
+            p.relative_to(cfg.images_dir.resolve())
+        except ValueError:
+            raise HTTPException(status_code=400,
+                                detail="path escapes images_dir")
+        if not p.exists() or not p.is_file():
+            raise HTTPException(status_code=404, detail="not found")
+        return _FileResponse(p, media_type="image/png")
 
     @app.get("/")
     async def root() -> JSONResponse:
