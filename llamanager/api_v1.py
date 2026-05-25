@@ -203,7 +203,7 @@ async def _stream_with_keepalives(
     try:
         # Phase 1: wait for slot, emit keepalives.
         ready_task = asyncio.create_task(qr.ready.wait())
-        last_status_emitted = ""
+        last_emit: tuple[str, int] = ("", -2)
         while not ready_task.done():
             try:
                 await asyncio.wait_for(asyncio.shield(ready_task),
@@ -213,9 +213,19 @@ async def _stream_with_keepalives(
                     cancelled_flag["value"] = True
                     return
                 status = qr.status
-                if status != last_status_emitted:
-                    last_status_emitted = status
-                    yield f": status={status}\n\n".encode("utf-8")
+                # position is only meaningful while still pending; once
+                # the dispatcher pulls us off the heap, we're no longer
+                # countable. Emit -1 to mean "not in pending anymore"
+                # so the client knows to drop the position label.
+                pos = qm.position_for(qr) if status == "queued" else -1
+                emit_key = (status, pos)
+                if emit_key != last_emit:
+                    last_emit = emit_key
+                    chunk = f": status={status}\n"
+                    if pos >= 0:
+                        chunk += f": queue_pos={pos}\n"
+                    chunk += "\n"
+                    yield chunk.encode("utf-8")
                 else:
                     yield b": keepalive\n\n"
 
@@ -857,7 +867,7 @@ async def _images_stream(
             # Phase 1: wait for slot. ImageTaskRunner is invoked AFTER the
             # slot is acquired; until then emit keepalives.
             ready_task = asyncio.create_task(qr.ready.wait())
-            last_status = ""
+            last_emit: tuple[str, int] = ("", -2)
             while not ready_task.done():
                 try:
                     await asyncio.wait_for(asyncio.shield(ready_task),
@@ -865,9 +875,16 @@ async def _images_stream(
                 except asyncio.TimeoutError:
                     if qr.cancel.is_set():
                         return
-                    if qr.status != last_status:
-                        last_status = qr.status
-                        yield f": status={qr.status}\n\n".encode("utf-8")
+                    status = qr.status
+                    pos = qm.position_for(qr) if status == "queued" else -1
+                    emit_key = (status, pos)
+                    if emit_key != last_emit:
+                        last_emit = emit_key
+                        chunk = f": status={status}\n"
+                        if pos >= 0:
+                            chunk += f": queue_pos={pos}\n"
+                        chunk += "\n"
+                        yield chunk.encode("utf-8")
                     else:
                         yield b": keepalive\n\n"
             if qr.error:

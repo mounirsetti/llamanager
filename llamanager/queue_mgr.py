@@ -223,6 +223,32 @@ class QueueManager:
     def get(self, request_id: str) -> QueuedRequest | None:
         return self._by_id.get(request_id)
 
+    def position_for(self, req: QueuedRequest) -> int:
+        """Position of ``req`` in the pending queue, 0-indexed.
+
+        ``0`` means ``req`` is next up; ``2`` means two other pending
+        requests will be dispatched before it; ``-1`` means ``req`` is
+        no longer in pending (already dispatched, in flight, or done).
+
+        We count across all families — the dashboard cares about how
+        many requests sit ahead, not which family they belong to. With
+        ``allow_concurrent=False`` (the default) text and image
+        contend for the same hardware slot anyway, so a single
+        ordering reflects reality.
+        """
+        if req.request_id not in self._by_id:
+            return -1
+        # _heap stores (heap_key, qr) tuples; sort by key to mirror the
+        # order the dispatcher will pop them in.
+        ahead = 0
+        for _, other in sorted(self._heap, key=lambda kv: kv[0]):
+            if other.request_id == req.request_id:
+                return ahead
+            if other.status == "cancelled":
+                continue
+            ahead += 1
+        return -1
+
     # ---- handler-side API ----
     async def wait_for_slot(self, req: QueuedRequest) -> None:
         """Called by the request handler. Returns when it's safe to proxy.

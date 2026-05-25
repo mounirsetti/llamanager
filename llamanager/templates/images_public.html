@@ -106,27 +106,40 @@
       width: 100%; box-sizing: border-box;
     }
 
-    /* App shell — three panes, identical structure to /ui/images */
+    /* App shell — three panes + promptbar across the bottom-right.
+       Mirrors the admin /ui/images layout; same class names so the JS
+       is identical. */
+    .lm-img-form { display: contents; }
     .lm-img-shell {
       display: grid;
       grid-template-columns: 260px 1fr 360px;
+      grid-template-rows: 1fr auto;
+      grid-template-areas:
+        "gallery viewer composer"
+        "gallery prompt  prompt";
       gap: 12px;
       height: 100vh;
       padding: 12px;
       box-sizing: border-box;
     }
-    @media (max-width: 1100px) {
-      .lm-img-shell { grid-template-columns: 1fr; height: auto; padding: 8px; gap: 8px; }
-    }
     .lm-img-pane {
       border: 1px solid var(--bg-3); background: var(--bg-1);
-      display: flex; flex-direction: column; min-width: 0;
+      display: flex; flex-direction: column; min-width: 0; min-height: 0;
     }
+    .lm-img-pane--gallery  { grid-area: gallery; }
+    .lm-img-pane--viewer   { grid-area: viewer; }
+    .lm-img-pane--composer { grid-area: composer; }
     .lm-img-pane__head {
       padding: 6px 12px; border-bottom: 1px solid var(--bg-3);
       font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.12em;
       color: var(--fg-2);
       display: flex; justify-content: space-between; align-items: center;
+      gap: 8px;
+    }
+    .lm-img-pane__head-close {
+      display: none;  /* shown only on mobile */
+      background: transparent; border: none; color: var(--fg-2);
+      font-size: 1.1rem; cursor: pointer; padding: 4px 6px;
     }
     .lm-img-pane__body { flex: 1; overflow-y: auto; padding: 8px 12px; }
     .lm-img-gallery {
@@ -134,10 +147,20 @@
     }
     .lm-img-gallery__tile {
       aspect-ratio: 1; background: var(--bg-0); border: 1px solid var(--bg-3);
-      cursor: pointer; overflow: hidden; transition: border-color 120ms ease;
+      cursor: pointer; overflow: hidden; position: relative;
+      transition: border-color 120ms ease, box-shadow 120ms ease;
     }
     .lm-img-gallery__tile:hover { border-color: var(--fg-2); }
-    .lm-img-gallery__tile.is-active { border-color: var(--accent); }
+    .lm-img-gallery__tile.is-active {
+      border-color: var(--accent);
+      box-shadow: inset 0 0 0 2px var(--accent-soft);
+    }
+    .lm-img-gallery__tile.is-active::after {
+      content: ""; position: absolute; left: 6px; top: 6px;
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 2px var(--bg-0);
+    }
     .lm-img-gallery__tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
     .lm-img-gallery__empty { color: var(--fg-3); font-size: 0.8125rem; padding: 14px 4px; text-align: center; }
     .lm-img-gallery__loadmore { grid-column: 1 / -1; margin-top: 8px; }
@@ -148,7 +171,23 @@
       background: var(--bg-0); border: 1px solid var(--bg-3); min-height: 360px;
     }
     .lm-img-viewer__image img { max-width: 100%; max-height: 100%; object-fit: contain; }
-    .lm-img-viewer__empty { color: var(--fg-3); font-size: 0.875rem; text-align: center; padding: 40px 20px; }
+    .lm-img-viewer__empty {
+      color: var(--fg-3);
+      font-family: 'Fraunces', serif; font-style: italic;
+      font-variation-settings: 'opsz' 48, 'SOFT' 24;
+      font-size: 1rem;
+      text-align: center;
+      padding: 48px 24px;
+      line-height: 1.5;
+    }
+    .lm-img-viewer__empty::before,
+    .lm-img-viewer__empty::after {
+      content: ""; display: block;
+      width: 32px; height: 1px;
+      margin: 0 auto 16px;
+      background: var(--bg-3);
+    }
+    .lm-img-viewer__empty::after { margin: 16px auto 0; }
     .lm-img-meta {
       background: var(--bg-0); border: 1px solid var(--bg-3);
       padding: 10px 12px; font-size: 0.8125rem; color: var(--fg-1);
@@ -179,12 +218,28 @@
       color: var(--fg-2);
     }
     .lm-img-field__help { font-size: 0.6875rem; color: var(--fg-3); }
-    .lm-img-prompt { font-family: inherit; }
     .lm-img-overrides { display: flex; flex-direction: column; gap: 10px; }
     .lm-img-row { display: flex; gap: 8px; }
     .lm-img-seed-row { display: flex; gap: 6px; align-items: stretch; }
     .lm-img-seed-row input { flex: 1; }
-    .lm-img-actions { display: flex; gap: 8px; margin-top: 4px; }
+
+    /* Prompt bar — bottom strip with the textarea + Generate + status */
+    .lm-img-promptbar {
+      grid-area: prompt;
+      background: var(--bg-1);
+      border: 1px solid var(--bg-3);
+      padding: 10px 12px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .lm-img-promptbar__row {
+      display: flex; gap: 8px; align-items: flex-end;
+    }
+    .lm-img-prompt {
+      flex: 1; resize: vertical; min-height: 44px; max-height: 200px;
+      font-family: inherit;
+    }
+    .lm-img-actions { display: flex; gap: 8px; }
+    .lm-img-actions .lm-btn { white-space: nowrap; }
     .lm-img-status {
       display: flex; align-items: center; gap: 10px;
       font-size: 0.8125rem; color: var(--fg-1);
@@ -194,6 +249,60 @@
       color: var(--bad); font-size: 0.8125rem;
       padding: 8px 10px; border: 1px solid var(--bad);
       background: oklch(from var(--bad) l c h / 0.08);
+    }
+
+    /* Mobile toolbar + drawer backdrop (hidden on desktop) */
+    .lm-img-toolbar { display: none; }
+    .lm-img-backdrop {
+      display: none; position: fixed; inset: 0;
+      background: oklch(0 0 0 / 0.45); z-index: 45;
+    }
+    .lm-img-shell.is-drawer-open .lm-img-backdrop { display: block; }
+
+    @media (max-width: 900px) {
+      .lm-img-shell {
+        grid-template-columns: 1fr;
+        grid-template-rows: 1fr;
+        grid-template-areas: "viewer";
+        gap: 0; padding: 0;
+        height: auto; min-height: 100vh;
+        padding-bottom: 168px;
+      }
+      .lm-img-pane--gallery,
+      .lm-img-pane--composer {
+        position: fixed; top: 0; bottom: 0;
+        width: min(360px, 88vw);
+        z-index: 50;
+        transition: transform 200ms ease;
+        box-shadow: 0 0 24px oklch(0 0 0 / 0.35);
+      }
+      .lm-img-pane--gallery  { left: 0;  transform: translateX(-100%); }
+      .lm-img-pane--composer { right: 0; transform: translateX(100%); }
+      .lm-img-shell.is-gallery-open  .lm-img-pane--gallery  { transform: translateX(0); }
+      .lm-img-shell.is-composer-open .lm-img-pane--composer { transform: translateX(0); }
+      .lm-img-pane__head-close { display: inline-flex; }
+
+      .lm-img-pane--viewer { border-left: none; border-right: none; }
+
+      .lm-img-toolbar {
+        display: flex; gap: 8px; padding: 8px 12px;
+        border-bottom: 1px solid var(--bg-3);
+        background: var(--bg-0);
+        position: sticky; top: 0; z-index: 30;
+      }
+      .lm-img-toolbar .lm-btn { flex: 1; }
+
+      .lm-img-promptbar {
+        position: fixed; left: 0; right: 0; bottom: 0;
+        border-left: none; border-right: none; border-bottom: none;
+        z-index: 40;
+      }
+      .lm-img-prompt { min-height: 56px; max-height: 32vh; }
+      .lm-img-actions .lm-btn--primary { padding: 10px 14px; }
+
+      .lm-img-viewer__empty { padding: 24px 12px; }
+      .lm-img-meta__row     { flex-wrap: wrap; }
+      .lm-img-meta__label   { min-width: 72px; }
     }
 
     .public-foot {
@@ -224,55 +333,99 @@
     </div>
   </div>
 
-  <!-- App screen -->
-  <div id="app-screen" class="lm-img-shell" style="display: none;">
-    <aside class="lm-img-pane">
-      <div class="lm-img-pane__head">
-        <span>Gallery</span>
-        <span id="lm-img-gallery-count">0</span>
-      </div>
-      <div class="lm-img-pane__body">
-        <div id="lm-img-gallery" class="lm-img-gallery">
-          <p class="lm-img-gallery__empty" id="lm-img-gallery-empty">
-            No images yet. Generate one to populate the gallery.
-          </p>
-        </div>
-        <button type="button" id="lm-img-gallery-loadmore"
-                class="lm-btn lm-btn--ghost lm-btn--xs lm-img-gallery__loadmore"
-                hidden>
-          Load older images
-        </button>
-      </div>
-    </aside>
+  <!-- App screen — wrapped in a form so the prompt bar can live outside
+       the composer drawer but still submit together with model/profile
+       selections. The login flow toggles display between 'none' and the
+       grid-aware value of '' (CSS provides the grid display). -->
+  <form id="lm-img-composer" class="lm-img-form" autocomplete="off" style="display: none;">
+    <div class="lm-img-toolbar">
+      <button type="button" class="lm-btn lm-btn--ghost"
+              data-lm-img-toggle="gallery">Gallery</button>
+      <button type="button" class="lm-btn lm-btn--ghost"
+              data-lm-img-toggle="composer">Settings</button>
+    </div>
 
-    <section class="lm-img-pane">
-      <div class="lm-img-pane__head">
-        <span>Viewer</span>
-        <a id="lm-img-viewer-download" hidden href="#" download
-           class="lm-btn lm-btn--ghost lm-btn--xs">Download PNG</a>
-      </div>
-      <div class="lm-img-pane__body">
-        <div class="lm-img-viewer">
-          <div class="lm-img-viewer__image" id="lm-img-viewer-image-wrap">
-            <p class="lm-img-viewer__empty" id="lm-img-viewer-empty">
-              Select an image from the gallery or generate a new one.
+    <div class="lm-img-shell" id="lm-img-shell">
+      <aside class="lm-img-pane lm-img-pane--gallery">
+        <div class="lm-img-pane__head">
+          <span>Gallery</span>
+          <span style="display:flex; align-items:center; gap:8px;">
+            <span id="lm-img-gallery-count">0</span>
+            <button type="button" class="lm-img-pane__head-close"
+                    data-lm-img-toggle="gallery" aria-label="Close gallery">✕</button>
+          </span>
+        </div>
+        <div class="lm-img-pane__body">
+          <div id="lm-img-gallery" class="lm-img-gallery">
+            <p class="lm-img-gallery__empty" id="lm-img-gallery-empty">
+              No images yet. Generate one to populate the gallery.
             </p>
           </div>
-          <div class="lm-img-meta" id="lm-img-meta" hidden></div>
+          <button type="button" id="lm-img-gallery-loadmore"
+                  class="lm-btn lm-btn--ghost lm-btn--xs lm-img-gallery__loadmore"
+                  hidden>
+            Load older images
+          </button>
         </div>
-      </div>
-    </section>
+      </aside>
 
-    <section class="lm-img-pane">
-      <div class="lm-img-pane__head">
-        <span>Compose</span>
-        <button id="logout-btn" type="button" class="lm-btn lm-btn--ghost lm-btn--xs">Sign out</button>
+      <section class="lm-img-pane lm-img-pane--viewer">
+        <div class="lm-img-pane__head">
+          <span>Viewer</span>
+          <a id="lm-img-viewer-download" hidden href="#" download
+             class="lm-btn lm-btn--ghost lm-btn--xs">Download PNG</a>
+        </div>
+        <div class="lm-img-pane__body">
+          <div class="lm-img-viewer">
+            <div class="lm-img-viewer__image" id="lm-img-viewer-image-wrap">
+              <p class="lm-img-viewer__empty" id="lm-img-viewer-empty">
+                Select an image from the gallery or generate a new one.
+              </p>
+            </div>
+            <div class="lm-img-meta" id="lm-img-meta" hidden></div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="lm-img-pane lm-img-pane--composer">
+        <div class="lm-img-pane__head">
+          <span>Compose</span>
+          <span style="display:flex; align-items:center; gap:6px;">
+            <button id="logout-btn" type="button" class="lm-btn lm-btn--ghost lm-btn--xs">Sign out</button>
+            <button type="button" class="lm-img-pane__head-close"
+                    data-lm-img-toggle="composer" aria-label="Close settings">✕</button>
+          </span>
+        </div>
+        <div class="lm-img-pane__body">
+          {% include "_image_composer.html" %}
+        </div>
+      </aside>
+
+      <div class="lm-img-promptbar">
+        <div class="lm-img-promptbar__row">
+          <textarea id="lm-img-prompt" class="lm-input lm-img-prompt" rows="2"
+                    placeholder="A misty cliffside in oil paint, dawn light, a single lantern"></textarea>
+          <div class="lm-img-actions">
+            <button type="submit" id="lm-img-generate" class="lm-btn lm-btn--primary">
+              Generate
+            </button>
+            <button type="button" id="lm-img-cancel"
+                    class="lm-btn lm-btn--danger" hidden>
+              Cancel
+            </button>
+          </div>
+        </div>
+        <div class="lm-img-status" id="lm-img-status" hidden>
+          <progress id="lm-img-progress" max="100" value="0"></progress>
+          <span id="lm-img-status-text">Queued…</span>
+        </div>
+        <div id="lm-img-error" class="lm-img-error" hidden></div>
       </div>
-      <div class="lm-img-pane__body">
-        {% include "_image_composer.html" %}
-      </div>
-    </section>
-  </div>
+
+      <div class="lm-img-backdrop" id="lm-img-backdrop"
+           data-lm-img-toggle="close" aria-hidden="true"></div>
+    </div>
+  </form>
 
   <div class="public-foot">
     <div class="theme-btns" role="group">
@@ -323,7 +476,7 @@
   (function() {
     const cfg = window.LM_IMAGES_CFG;
     const login = document.getElementById('login-screen');
-    const app = document.getElementById('app-screen');
+    const app = document.getElementById('lm-img-composer');
     const keyInput = document.getElementById('login-key');
     const loginBtn = document.getElementById('login-btn');
     const loginErr = document.getElementById('login-error');
@@ -331,7 +484,9 @@
 
     function showApp() {
       login.style.display = 'none';
-      app.style.display = 'grid';
+      // The form has display:contents from the lm-img-form class; clear
+      // the inline 'none' to let CSS take over.
+      app.style.display = '';
     }
     function showLogin() {
       app.style.display = 'none';
@@ -399,6 +554,30 @@
 
     const $ = (id) => document.getElementById(id);
     const state = { selected: null, nextBefore: null, inFlight: false, abort: null };
+
+    // Mobile drawer toggles (no-op classes on desktop where the
+    // side panes are part of the grid).
+    const shell = document.getElementById("lm-img-shell");
+    function openDrawer(which) {
+      if (which !== "gallery" && which !== "composer") return;
+      shell.classList.remove("is-gallery-open", "is-composer-open");
+      shell.classList.add(`is-${which}-open`, "is-drawer-open");
+    }
+    function closeDrawers() {
+      shell.classList.remove("is-gallery-open", "is-composer-open", "is-drawer-open");
+    }
+    document.querySelectorAll("[data-lm-img-toggle]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const target = btn.dataset.lmImgToggle;
+        if (target === "close") { closeDrawers(); return; }
+        const openClass = `is-${target}-open`;
+        if (shell.classList.contains(openClass)) closeDrawers();
+        else openDrawer(target);
+      });
+    });
+    function isMobile() {
+      return window.matchMedia("(max-width: 900px)").matches;
+    }
 
     const modelSel    = $("lm-img-model");
     const profileSel  = $("lm-img-profile");
@@ -530,7 +709,10 @@
           img.src = URL.createObjectURL(blob);
           div.appendChild(img);
         });
-      div.addEventListener("click", () => selectImage(item));
+      div.addEventListener("click", () => {
+        selectImage(item);
+        if (isMobile()) closeDrawers();
+      });
       return div;
     }
 
@@ -677,7 +859,10 @@
       clearError();
       if (!modelSel.value) { showError("Pick a model first."); return; }
       if (!promptEl.value.trim()) { showError("Prompt is empty."); return; }
+      // On mobile, hide any open drawer so progress is visible.
+      closeDrawers();
       setBusy(true);
+      stage.phase = ""; stage.pos = -1; stage.step = null; stage.total = null;
       statusText.textContent = "Sending…";
       const body = buildRequestBody();
       const ctrl = new AbortController();
@@ -717,9 +902,60 @@
         setBusy(false); state.abort = null;
       }
     }
+    // Stage tracker for the bottom status line. Driven by SSE
+    // comment lines `: status=...`, `: queue_pos=...`, `: step=N/M`,
+    // plus the final `data:` payload.
+    const stage = { phase: "", pos: -1, step: null, total: null };
+    function renderStatus() {
+      let txt = "Sending…";
+      if (stage.phase === "queued") {
+        if (stage.pos === 0) txt = "Next in line…";
+        else if (stage.pos > 0) txt = `Queued · ${stage.pos} ahead`;
+        else txt = "Queued…";
+      } else if (stage.phase === "swapping_model") {
+        txt = "Loading model…";
+      } else if (stage.phase === "running") {
+        if (stage.step != null && stage.total != null) {
+          txt = `Step ${stage.step} / ${stage.total}`;
+        } else {
+          txt = "Generating…";
+        }
+      } else if (stage.phase === "saving") {
+        txt = "Saving…";
+      } else if (stage.phase) {
+        txt = stage.phase;
+      }
+      statusText.textContent = txt;
+    }
     function handleSseBlock(block) {
       let event = "message", data = "";
       block.split("\n").forEach(line => {
+        if (!line) return;
+        if (line.startsWith(":")) {
+          const body = line.slice(1).trim();
+          if (body.startsWith("status=")) {
+            stage.phase = body.slice(7);
+            if (stage.phase !== "queued") stage.pos = -1;
+            renderStatus();
+          } else if (body.startsWith("queue_pos=")) {
+            const n = parseInt(body.slice(10), 10);
+            if (!isNaN(n)) stage.pos = n;
+            renderStatus();
+          } else if (body.startsWith("step=")) {
+            const m = body.slice(5).match(/^(\d+)\s*\/\s*(\d+)$/);
+            if (m) {
+              stage.step = parseInt(m[1], 10);
+              stage.total = parseInt(m[2], 10);
+              if (stage.total > 0) {
+                progressEl.value = Math.round(
+                  100 * stage.step / stage.total);
+              }
+              stage.phase = "running";
+              renderStatus();
+            }
+          }
+          return;
+        }
         if (line.startsWith("event:")) event = line.slice(6).trim();
         else if (line.startsWith("data:")) data += line.slice(5).trim();
       });
@@ -731,15 +967,19 @@
         else if (payload.step != null && payload.total_steps != null) {
           progressEl.value = Math.round(100 * payload.step / payload.total_steps);
         }
-        const s = payload.step != null ? payload.step : "?";
-        const t = payload.total_steps != null ? payload.total_steps : "?";
-        statusText.textContent = `Step ${s} / ${t}`;
-      } else if (event === "complete" || event === "done" || event === "result") {
+        stage.step = payload.step != null ? payload.step : stage.step;
+        stage.total = payload.total_steps != null ? payload.total_steps : stage.total;
+        stage.phase = "running";
+        renderStatus();
+      } else if (event === "error" || payload.error) {
+        const msg = (payload.error && (payload.error.message || payload.error))
+                 || payload.message || JSON.stringify(payload);
+        showError(msg);
+      } else {
         progressEl.value = 100;
-        statusText.textContent = "Saving…";
+        stage.phase = "saving";
+        renderStatus();
         refreshFront();
-      } else if (event === "error") {
-        showError(payload.message || JSON.stringify(payload));
       }
     }
     async function refreshFront() {

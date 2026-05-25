@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,12 @@ from ..config import Config, Profile
 from ._base import ImageRequest, ProfileField, ProgressEvent
 
 log = logging.getLogger(__name__)
+
+# Cache for `_supports_steps_flag` keyed by (python_path, inference_py_path,
+# inference_py_mtime) so we don't pay the ~1-3 s `python inference.py --help`
+# probe on every image request. Invalidates automatically when the upstream
+# script is edited (e.g. by our install-time patcher or a manual git pull).
+_HELP_PROBE_CACHE: dict[tuple[str, str, float], bool] = {}
 
 ENGINE = "hidream"
 LABEL = "HiDream-O1-Image"
@@ -74,6 +81,47 @@ def _resolved_steps(profile: Profile, req: ImageRequest, model_type: str) -> int
     return _DEFAULT_STEPS_FULL if model_type == "full" else _DEFAULT_STEPS_DEV
 
 
+def _supports_steps_flag(python: Path, inference_py: Path) -> bool:
+    """Does the local ``inference.py`` accept ``--num_inference_steps``?
+
+    Probes by running ``python inference.py --help`` once and scanning
+    the output. The installer applies a patch to add the flag when it
+    clones hidream-source, but operators with hand-rolled checkouts
+    won't have it — and passing the flag to an unpatched script makes
+    argparse reject the whole invocation with rc=2 before the model
+    even loads. Cheaper to ask the script what it understands than to
+    require the patch to have run.
+    """
+    try:
+        mtime = inference_py.stat().st_mtime
+    except OSError:
+        return False
+    key = (str(python), str(inference_py), mtime)
+    if key in _HELP_PROBE_CACHE:
+        return _HELP_PROBE_CACHE[key]
+    try:
+        r = subprocess.run(
+            [str(python), str(inference_py), "--help"],
+            capture_output=True, text=True, timeout=30,
+        )
+        text = (r.stdout or "") + (r.stderr or "")
+    except (OSError, subprocess.SubprocessError):
+        _HELP_PROBE_CACHE[key] = False
+        return False
+    supported = ("--num_inference_steps" in text
+                 or "--num-inference-steps" in text)
+    _HELP_PROBE_CACHE[key] = supported
+    if not supported:
+        log.info(
+            "hidream: inference.py at %s does not advertise "
+            "--num_inference_steps; profile/request step counts will be "
+            "ignored. Re-run the engine install to apply the patch, or "
+            "patch the file manually.",
+            inference_py,
+        )
+    return supported
+
+
 def build_command(
     cfg: Config,
     model_path: Path,
@@ -114,10 +162,13 @@ def build_command(
         "--height", str(height),
     ]
     # Upstream's dev path is hardwired to 28 timesteps via DEFAULT_TIMESTEPS
-    # and ignores --num_inference_steps. The full path now does accept it
-    # (we patched inference.py to expose the flag) — so forward image_steps
-    # there, but only there.
-    if model_type == "full" and steps is not None:
+    # and ignores --num_inference_steps. The full path can accept the flag,
+    # but only if our install-time patcher (engine_installer._patch_hidream
+    # _inference_steps) has run — vanilla hidream-source rejects the flag
+    # and exits 2 before loading the model. Probe the help output so we
+    # never emit a flag the script doesn't understand.
+    if (model_type == "full" and steps is not None
+            and _supports_steps_flag(python, inference_py)):
         argv += ["--num_inference_steps", str(int(steps))]
     if seed is not None:
         argv += ["--seed", str(int(seed))]

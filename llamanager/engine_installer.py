@@ -566,6 +566,15 @@ class EngineInstaller:
                 set_progress(95, "Patching pipeline.py (use_flash_attn=False)")
                 self._apply_flash_attn_patch(engine, emit)
 
+            # Always-on: add --num_inference_steps to hidream-source's
+            # argparse and thread it into the pipeline call. Without this
+            # patch, profile.image_steps / req.steps make the inference
+            # script exit 2 ("unrecognized arguments"). Safe to run every
+            # install: it's a no-op if the flag already exists.
+            if engine == "hidream":
+                set_progress(96, "Patching inference.py (--num_inference_steps)")
+                self._apply_inference_steps_patch(engine, emit)
+
             set_progress(100, f"Installed at {python_path}")
             self._set(install_id, status="done", finished_at=time.time())
             self.db.log_event("install_done", {
@@ -676,6 +685,102 @@ class EngineInstaller:
                  f"(backup at {bak.name})")
         except OSError as e:
             emit(f"[warn] flash-attn patch failed to write {pipeline}: {e}")
+
+    def _apply_inference_steps_patch(self, engine: str, emit) -> None:
+        """Add ``--num_inference_steps`` to hidream-source/inference.py.
+
+        Vanilla hidream-source rejects the flag with ``error:
+        unrecognized arguments`` and exits 2 before loading the model.
+        We do two things:
+
+        1. Add ``parser.add_argument("--num_inference_steps", type=int,
+           default=None, ...)`` after the first existing add_argument.
+        2. Find pipeline call sites of the shape ``num_inference_steps=
+           <ident-or-int>`` and wrap them so the CLI value wins when set
+           and the upstream default kicks in otherwise.
+
+        Idempotent — re-running on an already-patched file is a no-op
+        (step 1 detects the existing flag, step 2's regex won't match
+        the wrapped form a second time).
+        """
+        if engine != "hidream":
+            return
+        repo = getattr(self.cfg, "hidream_repo", None)
+        if not repo:
+            emit("[warn] skipping --num_inference_steps patch: "
+                 "hidream_repo not set in config.")
+            return
+        inference = Path(repo).expanduser() / "inference.py"
+        if not inference.is_file():
+            emit(f"[warn] skipping --num_inference_steps patch: "
+                 f"{inference} not found")
+            return
+        try:
+            text = inference.read_text(encoding="utf-8")
+        except OSError as e:
+            emit(f"[warn] cannot read {inference}: {e}")
+            return
+
+        original = text
+        already_declared = ("--num_inference_steps" in text
+                            or "--num-inference-steps" in text)
+
+        # Step 1: inject argparse registration if missing. Anchor on the
+        # first existing parser.add_argument(...) line so we land in the
+        # right argparse block with the right indentation.
+        if not already_declared:
+            anchor = re.search(
+                r'(^[ \t]*)parser\.add_argument\([^\n]*\n',
+                text, flags=re.MULTILINE,
+            )
+            if not anchor:
+                emit(f"[warn] --num_inference_steps patch: no "
+                     f"parser.add_argument() found in {inference}; skipped.")
+                return
+            indent = anchor.group(1)
+            injection = (
+                f'{indent}parser.add_argument('
+                '"--num_inference_steps", type=int, default=None, '
+                'help="Override default step count (llamanager patch)")\n'
+            )
+            insert_at = anchor.end()
+            text = text[:insert_at] + injection + text[insert_at:]
+
+        # Step 2: route args.num_inference_steps into pipeline call sites.
+        # Match `num_inference_steps=<ident-or-int>` but only when not
+        # already wrapped (we look for the opening paren of our wrapper).
+        call_re = re.compile(
+            r'(num_inference_steps\s*=\s*)'
+            r'(?!\(\s*args\.num_inference_steps\b)'  # not already wrapped
+            r'([A-Za-z_][A-Za-z_0-9.]*|\d+)',
+        )
+        def _wrap(m: re.Match) -> str:
+            return (f"{m.group(1)}(args.num_inference_steps "
+                    f"if args.num_inference_steps is not None "
+                    f"else {m.group(2)})")
+        text, n_wraps = call_re.subn(_wrap, text)
+
+        if text == original:
+            emit(f"[ok] --num_inference_steps patch already applied to "
+                 f"{inference}")
+            return
+
+        bak = inference.with_suffix(inference.suffix + ".bak")
+        try:
+            if not bak.exists():
+                bak.write_text(original, encoding="utf-8")
+            inference.write_text(text, encoding="utf-8")
+            actions = []
+            if not already_declared:
+                actions.append("added argparse flag")
+            if n_wraps:
+                actions.append(f"wired {n_wraps} pipeline call(s)")
+            emit(f"[ok] patched {inference}: "
+                 f"{' + '.join(actions) or 'no-op'} "
+                 f"(backup at {bak.name})")
+        except OSError as e:
+            emit(f"[warn] --num_inference_steps patch failed to write "
+                 f"{inference}: {e}")
 
     def _set(self, install_id: str, **fields: Any) -> None:
         if not fields:

@@ -244,6 +244,27 @@
       padding: 4px 12px; color: var(--fg-3); font-size: 0.8125rem;
       line-height: 1.5; white-space: pre-wrap;
     }
+    /* Queue / swap status pill — shown above the thinking dots while
+       the request waits, replaced by tokens once they stream in.
+       Uses the muted fg-2 ramp rather than the accent so it reads as
+       "in progress" not "alert". */
+    .chat-queue-status {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-size: 0.75rem; letter-spacing: 0.02em;
+      color: var(--fg-2);
+      margin-bottom: 8px;
+      padding: 4px 9px;
+      border: 1px solid var(--bg-3); background: var(--bg-1);
+    }
+    .chat-queue-status__dot {
+      display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+      background: var(--fg-2);
+      animation: chat-queue-pulse 1.6s infinite ease-in-out;
+    }
+    @keyframes chat-queue-pulse {
+      0%, 80%, 100% { opacity: 0.35; }
+      40% { opacity: 1; }
+    }
     /* thinking dots animation */
     .thinking-dots { display: inline-flex; gap: 3px; align-items: center; }
     .thinking-dots span {
@@ -259,39 +280,106 @@
     /* top-level speed indicator */
     .chat-speed { font-size: 0.6875rem; color: var(--fg-3); margin-left: auto; white-space: nowrap; }
 
-    @media (max-width: 700px) {
-      .app-shell { flex-direction: column; height: 100vh; }
-      .history-rail {
-        width: 100%; height: auto; max-height: 140px;
-        border-right: 0; border-bottom: 1px solid var(--bg-2);
+    /* Mobile toolbar (top) + drawer backdrop. Hidden on desktop. */
+    .chat-toolbar { display: none; }
+    .chat-backdrop {
+      display: none; position: fixed; inset: 0;
+      background: oklch(0 0 0 / 0.45); z-index: 45;
+    }
+    .app-shell.is-drawer-open .chat-backdrop { display: block; }
+    .chat-drawer-close {
+      display: none; background: transparent; border: 0;
+      color: var(--fg-2); font-size: 1.1rem; cursor: pointer;
+      padding: 4px 6px;
+    }
+
+    @media (max-width: 900px) {
+      .app-shell {
+        flex-direction: column;
+        position: relative;
+        height: 100dvh;
+        height: 100vh;
       }
-      .history-header { padding: 10px 14px; }
+      /* History rail → left drawer */
+      .history-rail {
+        position: fixed; top: 0; bottom: 0; left: 0;
+        width: min(280px, 84vw); height: 100dvh; height: 100vh;
+        max-height: none;
+        z-index: 50;
+        transform: translateX(-100%);
+        transition: transform 200ms ease;
+        box-shadow: 0 0 24px oklch(0 0 0 / 0.35);
+        border-right: 1px solid var(--bg-3); border-bottom: 0;
+      }
+      .app-shell.is-history-open .history-rail { transform: translateX(0); }
       .history-list {
-        display: flex; flex-direction: row;
-        overflow-x: auto; overflow-y: hidden;
-        padding: 6px 10px; gap: 6px;
+        display: flex; flex-direction: column;
+        overflow-y: auto; overflow-x: hidden;
+        padding: 6px 0; gap: 0;
       }
       .history-item {
-        flex: 0 0 auto; max-width: 160px;
-        border: 1px solid var(--bg-3); border-radius: 2px;
-        padding: 5px 10px;
+        flex: 0 0 auto; max-width: none;
+        border: 0; border-radius: 0;
+        padding: 10px 14px;
       }
       .history-delete { display: inline; }
       .history-foot {
-        flex-direction: row; flex-wrap: wrap; align-items: center; gap: 10px;
-        padding: 8px 14px;
+        flex-direction: column; flex-wrap: nowrap; align-items: stretch;
+        padding: 10px 12px; gap: 10px;
       }
-      .history-foot .toggle-row, .history-foot .theme-btns { width: auto; }
-      .history-foot #chat-logout { width: auto; margin-left: auto; }
-      .chat-topbar, .chat-controls, .chat-messages, .chat-input-area { padding-left: 16px; padding-right: 16px; }
-    }
-    @media (max-width: 480px) {
-      .chat-topbar { gap: 8px; padding: 10px 12px; }
-      .chat-controls { gap: 8px; padding: 6px 12px; flex-direction: column; align-items: stretch; }
-      .chat-controls > div { width: 100%; }
-      .chat-controls select, .chat-controls input[type="text"] { width: 100%; }
-      .chat-messages { padding: 14px 12px; gap: 16px; }
-      .chat-input-area { padding: 10px 12px 14px; }
+      .history-foot #chat-logout { margin-left: 0; width: 100%; }
+
+      /* Settings (chat-controls) → right drawer */
+      .chat-controls {
+        position: fixed; top: 0; bottom: 0; right: 0;
+        width: min(320px, 88vw); height: 100dvh; height: 100vh;
+        z-index: 50;
+        transform: translateX(100%);
+        transition: transform 200ms ease;
+        box-shadow: 0 0 24px oklch(0 0 0 / 0.35);
+        background: var(--bg-0);
+        border-bottom: 0; border-left: 1px solid var(--bg-3);
+        flex-direction: column; align-items: stretch;
+        padding: 56px 14px 14px; gap: 14px;
+        overflow-y: auto;
+      }
+      .app-shell.is-settings-open .chat-controls { transform: translateX(0); }
+      .chat-controls > div { flex-direction: column; align-items: stretch; gap: 6px; width: 100%; }
+      .chat-controls select,
+      .chat-controls input[type="text"] { width: 100%; min-width: 0; }
+      .chat-controls .chat-drawer-close {
+        position: absolute; top: 8px; right: 8px;
+      }
+
+      .chat-drawer-close { display: inline-flex; }
+
+      /* Main column fills the screen; leave room for the fixed input row. */
+      .chat-main { width: 100%; min-height: 0; padding-bottom: 132px; }
+
+      /* Top compact toolbar with History/Settings/Status. */
+      .chat-toolbar {
+        display: flex; align-items: center; gap: 8px;
+        padding: 8px 12px; border-bottom: 1px solid var(--bg-2);
+        background: var(--bg-0);
+        position: sticky; top: 0; z-index: 30;
+      }
+      .chat-toolbar .chat-btn--ghost { padding: 6px 10px; font-size: 0.75rem; }
+      .chat-toolbar #chat-status { margin-left: auto; }
+
+      /* Hide the desktop topbar in favour of the compact toolbar. */
+      .chat-topbar { display: none; }
+
+      /* Fixed bottom input area. */
+      .chat-input-area {
+        position: fixed; left: 0; right: 0; bottom: 0;
+        z-index: 40;
+        background: var(--bg-0);
+        padding: 10px 12px;
+        border-top: 1px solid var(--bg-3);
+      }
+      .chat-attachments-strip { padding: 8px 12px 0 !important; }
+
+      .chat-messages { padding: 12px; gap: 14px; }
       .chat-msg-badge { width: 24px; height: 24px; font-size: 0.5625rem; }
       .chat-msg-text { font-size: 0.875rem; }
       .chat-msg-text pre { font-size: 0.6875rem; padding: 8px 10px; }
@@ -322,11 +410,13 @@
   <!-- Chat screen -->
   <div id="chat-screen" class="app-shell" style="display: none;">
 
-    <!-- History sidebar -->
+    <!-- History sidebar — drawer on mobile, fixed rail on desktop. -->
     <aside class="history-rail">
       <div class="history-header">
         <span class="history-header-brand">Chats</span>
         <button id="history-new" class="history-new">New</button>
+        <button type="button" class="chat-drawer-close"
+                data-chat-toggle="history" aria-label="Close history">✕</button>
       </div>
       <div id="history-list" class="history-list"></div>
       <div class="history-foot">
@@ -343,6 +433,15 @@
 
     <!-- Main chat area -->
     <div class="chat-main">
+      <!-- Mobile-only toolbar with drawer toggles + status pill -->
+      <div class="chat-toolbar">
+        <button type="button" class="chat-btn chat-btn--ghost"
+                data-chat-toggle="history">Chats</button>
+        <button type="button" class="chat-btn chat-btn--ghost"
+                data-chat-toggle="settings">Settings</button>
+        <span id="chat-status-mobile" class="chat-status">connecting</span>
+      </div>
+
       <div class="chat-topbar">
         <span id="chat-status" class="chat-status">connecting</span>
         <span id="chat-model" style="font-size: 0.75rem; color: var(--fg-2);"></span>
@@ -350,6 +449,8 @@
       </div>
 
       <div class="chat-controls">
+        <button type="button" class="chat-drawer-close"
+                data-chat-toggle="settings" aria-label="Close settings">✕</button>
         <div style="display: flex; align-items: center; gap: 6px;">
           <label>Model</label>
           <select id="chat-model-select" style="background: transparent; border: 0; border-bottom: 1px solid var(--bg-3); padding: 4px 6px; font: inherit; font-size: 0.8125rem; color: var(--fg-0); min-width: 120px;">
@@ -374,7 +475,7 @@
 
       {# Attachments strip — visible when the active profile has mmproj
          set AND the user has picked at least one image to attach. #}
-      <div id="chat-attachments"
+      <div id="chat-attachments" class="chat-attachments-strip"
            style="display: none; padding: 8px 24px 0; gap: 8px; flex-wrap: wrap;"></div>
 
       <div class="chat-input-area">
@@ -388,6 +489,9 @@
         <button id="chat-send" class="chat-btn" disabled>Send</button>
       </div>
     </div>
+
+    <!-- Drawer backdrop — tap to dismiss any open drawer. -->
+    <div class="chat-backdrop" data-chat-toggle="close" aria-hidden="true"></div>
   </div>
 
 <script>
@@ -399,7 +503,31 @@
   var loginBtn = document.getElementById('login-btn');
   var loginError = document.getElementById('login-error');
   var statusEl = document.getElementById('chat-status');
+  var statusMobileEl = document.getElementById('chat-status-mobile');
   var logoutBtn = document.getElementById('chat-logout');
+
+  // ---- Mobile drawer toggles ----
+  var appShell = document.getElementById('chat-screen');
+  function openDrawer(which) {
+    if (which !== 'history' && which !== 'settings') return;
+    appShell.classList.remove('is-history-open', 'is-settings-open');
+    appShell.classList.add('is-' + which + '-open', 'is-drawer-open');
+  }
+  function closeDrawers() {
+    appShell.classList.remove('is-history-open', 'is-settings-open', 'is-drawer-open');
+  }
+  function isMobileChat() {
+    return window.matchMedia('(max-width: 900px)').matches;
+  }
+  document.querySelectorAll('[data-chat-toggle]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var target = btn.dataset.chatToggle;
+      if (target === 'close') { closeDrawers(); return; }
+      var openClass = 'is-' + target + '-open';
+      if (appShell.classList.contains(openClass)) closeDrawers();
+      else openDrawer(target);
+    });
+  });
   var messagesEl = document.getElementById('chat-messages');
   var inputEl = document.getElementById('chat-input');
   var sendBtn = document.getElementById('chat-send');
@@ -598,9 +726,16 @@
     var del = e.target.closest('.history-delete');
     if (del) { e.stopPropagation(); deleteChat(del.getAttribute('data-id')); return; }
     var item = e.target.closest('.history-item');
-    if (item) switchTo(item.getAttribute('data-id'));
+    if (item) {
+      switchTo(item.getAttribute('data-id'));
+      // Auto-close the history drawer on mobile after picking a chat.
+      if (isMobileChat()) closeDrawers();
+    }
   });
-  historyNewBtn.addEventListener('click', newChat);
+  historyNewBtn.addEventListener('click', function () {
+    newChat();
+    if (isMobileChat()) closeDrawers();
+  });
 
   // ---- Markdown toggle ----
   var renderMarkdown = false;
@@ -690,21 +825,28 @@
   });
 
   // ---- Status polling ----
+  function setStatus(text, ok) {
+    var cls = 'chat-status' + (ok === true ? ' chat-status--ok'
+                              : ok === false ? ' chat-status--bad' : '');
+    statusEl.textContent = text;
+    statusEl.className = cls;
+    if (statusMobileEl) {
+      statusMobileEl.textContent = text;
+      statusMobileEl.className = cls;
+    }
+  }
   function pollStatus() {
     fetch('/health').then(function (r) { return r.json(); }).then(function (d) {
       if (d.state === 'running') {
-        statusEl.textContent = 'running';
-        statusEl.className = 'chat-status chat-status--ok';
+        setStatus('running', true);
         inputEl.disabled = false;
         sendBtn.disabled = streaming;
       } else {
-        statusEl.textContent = d.state || 'stopped';
-        statusEl.className = 'chat-status chat-status--bad';
+        setStatus(d.state || 'stopped', false);
         if (!streaming) { inputEl.disabled = true; sendBtn.disabled = true; }
       }
     }).catch(function () {
-      statusEl.textContent = 'offline';
-      statusEl.className = 'chat-status chat-status--bad';
+      setStatus('offline', false);
     });
   }
 
@@ -832,6 +974,8 @@
   function send() {
     var text = inputEl.value.trim();
     if (!text || streaming || !activeChat) return;
+    // On mobile, close any open drawer so the user sees the message stream.
+    if (isMobileChat()) closeDrawers();
 
     activeChat.system = systemEl.value;
 
@@ -886,9 +1030,41 @@
     sendBtn.textContent = '...';
 
     var assistantEl = buildMsgEl('assistant', '');
-    // Show animated thinking dots as initial placeholder
+    // Show a queue/swap status banner above the thinking dots while
+    // we wait for the slot. The banner gets updated by the SSE
+    // comment lines `: status=...` / `: queue_pos=...` the server
+    // emits, and is wiped on first content delta.
     assistantEl.bubble.innerHTML = '';
+    var qStatus = { phase: '', pos: -1 };
+    var qBanner = document.createElement('div');
+    qBanner.className = 'chat-queue-status';
+    var qDot = document.createElement('span');
+    qDot.className = 'chat-queue-status__dot';
+    var qText = document.createElement('span');
+    qText.textContent = 'Sending…';
+    qBanner.appendChild(qDot);
+    qBanner.appendChild(qText);
+    assistantEl.bubble.appendChild(qBanner);
     assistantEl.bubble.appendChild(makeThinkingDots());
+    function renderQStatus() {
+      var t = 'Waiting…';
+      if (qStatus.phase === 'queued') {
+        if (qStatus.pos === 0) t = 'Next in line…';
+        else if (qStatus.pos > 0) t = 'Queued · ' + qStatus.pos + ' ahead';
+        else t = 'Queued…';
+      } else if (qStatus.phase === 'swapping_model') {
+        t = 'Loading model…';
+      } else if (qStatus.phase === 'running') {
+        t = 'Generating…';
+      } else if (qStatus.phase) {
+        t = qStatus.phase;
+      }
+      qText.textContent = t;
+    }
+    function clearQStatus() {
+      if (qBanner && qBanner.parentNode) qBanner.parentNode.removeChild(qBanner);
+      qBanner = null;
+    }
     messagesEl.appendChild(assistantEl.el);
     scrollToBottom();
 
@@ -932,7 +1108,24 @@
             buffer = lines.pop();
             for (var i = 0; i < lines.length; i++) {
               var line = lines[i].trim();
-              if (!line || line.startsWith(':')) continue;
+              if (!line) continue;
+              if (line.startsWith(':')) {
+                // SSE comment — used by the server to relay queue /
+                // swap state while we wait. Surface as a banner so
+                // the user can distinguish "queued" from "swapping"
+                // from "generating".
+                var body = line.slice(1).trim();
+                if (body.indexOf('status=') === 0) {
+                  qStatus.phase = body.slice(7);
+                  if (qStatus.phase !== 'queued') qStatus.pos = -1;
+                  if (qBanner) renderQStatus();
+                } else if (body.indexOf('queue_pos=') === 0) {
+                  var n = parseInt(body.slice(10), 10);
+                  if (!isNaN(n)) qStatus.pos = n;
+                  if (qBanner) renderQStatus();
+                }
+                continue;
+              }
               if (!line.startsWith('data: ')) continue;
               var data = line.slice(6);
               if (data === '[DONE]') { finish(); return; }
@@ -951,6 +1144,8 @@
                   fullContent += delta.content;
                 }
                 if (delta.content || delta.reasoning_content) {
+                  // First real token — drop the queue / swap banner.
+                  clearQStatus();
                   var p = parseThinking(fullContent, reasoningContent);
                   var stillThinking = reasoningContent ? !fullContent : !p.done;
                   if (stillThinking) {
@@ -986,6 +1181,7 @@
         return read();
       })
       .catch(function (err) {
+        clearQStatus();
         assistantEl.bubble.textContent = 'Error: ' + err.message;
         assistantEl.bubble.style.color = 'var(--bad)';
         finish();

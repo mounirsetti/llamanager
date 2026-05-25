@@ -1607,21 +1607,49 @@ def _fmt_size(n: int) -> str:
     return f"{n} B"
 
 
+_HF_VALID_SORTS = {"downloads", "likes", "trending", "lastModified", "createdAt"}
+_HF_VALID_LIBRARIES = {"gguf", "mlx"}
+
+
 @router.get("/models/search", response_class=HTMLResponse)
 async def models_search(request: Request, q: str = "",
+                        sort: str = "downloads",
+                        library: str = "gguf",
+                        author: str = "",
                         _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    """Search Hugging Face for GGUF models.  Returns an HTML partial."""
+    """Search Hugging Face for inference-ready model repos.
+
+    Filters (all optional, all surface in the UI):
+
+    * ``q``       — free-text search across repo id and tags.
+    * ``sort``    — ``downloads`` (default), ``likes``, ``trending``,
+                    ``lastModified``, ``createdAt``.
+    * ``library`` — ``gguf`` (llama.cpp, default) or ``mlx`` (Apple silicon).
+                    The HF ``filter`` tag is set accordingly so only repos
+                    that ship that format are returned.
+    * ``author``  — restrict to a single org / user. Accepts the bare
+                    handle (``mlx-community``) or a ``user/repo`` prefix
+                    (we strip after the slash).
+    """
     import httpx as _httpx
 
-    async def _do_search(query: str) -> list[dict]:
+    if sort not in _HF_VALID_SORTS:
+        sort = "downloads"
+    if library not in _HF_VALID_LIBRARIES:
+        library = "gguf"
+    author_clean = (author.split("/", 1)[0]).strip()
+
+    async def _do_search() -> list[dict]:
         params: dict[str, str] = {
-            "filter": "gguf",
-            "sort": "downloads",
+            "filter": library,
+            "sort": sort,
             "direction": "-1",
             "limit": "20",
         }
-        if query.strip():
-            params["search"] = query.strip()
+        if q.strip():
+            params["search"] = q.strip()
+        if author_clean:
+            params["author"] = author_clean
         async with _httpx.AsyncClient(timeout=15) as client:
             r = await client.get(
                 "https://huggingface.co/api/models", params=params,
@@ -1630,7 +1658,7 @@ async def models_search(request: Request, q: str = "",
             return r.json()
 
     try:
-        raw = await _do_search(q)
+        raw = await _do_search()
         results = [
             {
                 "id": m.get("id", ""),
@@ -1645,12 +1673,14 @@ async def models_search(request: Request, q: str = "",
         log.warning("HF search failed: %s", e)
         return templates.TemplateResponse(
             request, "_model_search_results.html",
-            _ctx(request, search_results=[], search_error=str(e), search_query=q),
+            _ctx(request, search_results=[], search_error=str(e),
+                 search_query=q, search_library=library),
         )
 
     return templates.TemplateResponse(
         request, "_model_search_results.html",
-        _ctx(request, search_results=results, search_error=None, search_query=q),
+        _ctx(request, search_results=results, search_error=None,
+             search_query=q, search_library=library),
     )
 
 

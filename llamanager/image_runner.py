@@ -326,6 +326,21 @@ class ImageTaskRunner:
     ) -> None:
         log_path = self.cfg.logs_dir / f"{engine}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Truncate the engine log on every new request so the dashboard
+        # log tail only shows lines from *this* run. Without this, stale
+        # tracebacks from prior installs / model swaps / failures linger
+        # in the file and bleed through into the UI, making it look like
+        # the current run is failing for old reasons. The DB activity
+        # feed remains the system-of-record for cross-run history.
+        try:
+            with open(log_path, "w", encoding="utf-8") as fp:
+                ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                fp.write(
+                    f"# {engine} request {request_id} — {model_id} "
+                    f"(profile={profile_name}) — {ts}\n"
+                )
+        except OSError:
+            pass
         # Update runtime state — generating.
         state = rt.load(self.cfg.runtime_path)
         state.image = rt.ImageRuntimeState(

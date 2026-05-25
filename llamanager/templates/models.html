@@ -3,24 +3,234 @@
 {% block title %}LLM models - llamanager{% endblock %}
 {% block content %}
 
+{# Page composition (top → bottom):
+   1. Compact heading row.
+   2. Installed language models (above the fold) — stats strip,
+      filter bar, card list. Profiles are still nested inside each
+      card's expandable body, exactly as before.
+   3. Add a language model — three modes in a single section:
+      Hugging Face search (with filters), pull by repo, add local file.
+   4. Advanced (collapsed by default) — storage location, engine args.
+#}
+
 <style>
-  /* ====== Models-page composition (model cards + inline profiles) ====== */
+  /* ====== Models-page composition ====== */
+
+  /* --- Heading + stats strip --- */
+  .lm-models-head {
+    display: flex; align-items: baseline; gap: 16px;
+    flex-wrap: wrap;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--bg-3);
+    margin-bottom: 22px;
+  }
+  .lm-models-head__title { margin: 0; }
+  .lm-models-head__lede {
+    margin: 0; max-width: 56ch;
+    font-size: 0.9375rem; color: var(--fg-1); line-height: 1.5;
+  }
+  .lm-models-head__stats {
+    margin-left: auto;
+    display: flex; gap: 18px;
+    font-size: 0.8125rem; color: var(--fg-2);
+    flex-wrap: wrap;
+  }
+  .lm-models-head__stat strong {
+    display: block;
+    font-family: 'Fraunces', serif;
+    font-variation-settings: 'opsz' 48, 'SOFT' 20;
+    font-weight: 500;
+    font-size: 1.5rem;
+    color: var(--fg-0);
+    line-height: 1.1;
+  }
+  .lm-models-head__stat small {
+    display: block;
+    font-size: 0.6875rem; letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--fg-3);
+    margin-top: 4px;
+  }
+
+  /* --- Installed-list filter bar --- */
+  .lm-models-filter {
+    display: flex; gap: 10px; align-items: stretch;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }
+  .lm-models-filter__search {
+    flex: 1; min-width: 220px;
+    position: relative;
+  }
+  .lm-models-filter__search input {
+    width: 100%; padding-left: 32px;
+  }
+  .lm-models-filter__search::before {
+    content: "";
+    position: absolute;
+    left: 10px; top: 50%;
+    width: 12px; height: 12px;
+    border: 1.5px solid var(--fg-3);
+    border-radius: 50%;
+    transform: translateY(-50%);
+    pointer-events: none;
+  }
+  .lm-models-filter__search::after {
+    content: "";
+    position: absolute;
+    left: 18px; top: calc(50% + 4px);
+    width: 6px; height: 1.5px;
+    background: var(--fg-3);
+    transform: rotate(45deg);
+    pointer-events: none;
+  }
+  .lm-chip-row {
+    display: inline-flex;
+    gap: 0;
+    border: 1px solid var(--bg-3);
+  }
+  .lm-chip {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    border-right: 1px solid var(--bg-3);
+    color: var(--fg-2);
+    padding: 6px 14px;
+    font: inherit;
+    font-size: 0.75rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: color 120ms ease, background 120ms ease;
+  }
+  .lm-chip:last-child { border-right: 0; }
+  .lm-chip:hover { color: var(--fg-0); }
+  .lm-chip.is-active {
+    background: var(--bg-2);
+    color: var(--fg-0);
+  }
+  .lm-chip.is-active::after {
+    content: "";
+    display: block;
+    height: 2px;
+    background: var(--accent);
+    margin: 4px -14px -7px;
+  }
+
+  /* Hidden cards (filtered out) */
+  .lm-model[hidden] { display: none; }
+  .lm-models-empty-filter {
+    display: none;
+    padding: 20px 16px;
+    text-align: center;
+    color: var(--fg-2);
+    font-style: italic;
+    font-family: 'Fraunces', serif;
+    font-size: 0.9375rem;
+    border: 1px dashed var(--bg-3);
+  }
+  .lm-models-empty-filter.is-visible { display: block; }
+
+  /* --- Add-a-model tabbed area --- */
+  .lm-add-section {
+    margin-top: 36px;
+  }
+  .lm-add-tabs {
+    display: inline-flex;
+    border-bottom: 1px solid var(--bg-3);
+    margin-bottom: 18px;
+    gap: 0;
+  }
+  .lm-add-tab {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    padding: 8px 16px;
+    font: inherit;
+    font-size: 0.8125rem;
+    color: var(--fg-2);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color 120ms ease;
+  }
+  .lm-add-tab:hover { color: var(--fg-0); }
+  .lm-add-tab.is-active {
+    color: var(--fg-0);
+    border-bottom-color: var(--accent);
+  }
+  .lm-add-panel[hidden] { display: none; }
+  .lm-add-panel {
+    animation: lm-fade-in 240ms ease;
+  }
+  @keyframes lm-fade-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* --- HF search filter row --- */
+  .lm-hf-filters {
+    display: flex; gap: 10px; align-items: stretch;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .lm-hf-filters input,
+  .lm-hf-filters select {
+    font-size: 0.8125rem; padding: 6px 10px;
+  }
+  .lm-hf-filters input[type="search"] { flex: 1; min-width: 240px; }
+  .lm-hf-filters .lm-field-label {
+    display: block; font-size: 0.6875rem;
+    letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--fg-3); margin-bottom: 4px;
+  }
+  .lm-hf-filters__col {
+    display: flex; flex-direction: column;
+  }
+
+  /* --- Advanced disclosure --- */
+  .lm-advanced {
+    margin-top: 48px;
+    padding-top: 22px;
+    border-top: 1px solid var(--bg-3);
+  }
+  .lm-advanced > summary {
+    cursor: pointer;
+    list-style: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: 'Fraunces', serif;
+    font-variation-settings: 'opsz' 48, 'SOFT' 20;
+    font-size: 1.0625rem;
+    color: var(--fg-1);
+    user-select: none;
+    padding: 4px 0;
+  }
+  .lm-advanced > summary::-webkit-details-marker { display: none; }
+  .lm-advanced > summary::before {
+    content: "▸";
+    color: var(--fg-3);
+    font-size: 0.875rem;
+    transition: transform 160ms ease;
+    display: inline-block;
+  }
+  .lm-advanced[open] > summary::before { transform: rotate(90deg); }
+  .lm-advanced__body {
+    margin-top: 20px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 28px;
+  }
+  @media (max-width: 800px) {
+    .lm-advanced__body { grid-template-columns: 1fr; }
+  }
+
+  /* --- Reused styling (kept from previous version) --- */
 
   .lm-models-group { display: flex; flex-direction: column; gap: 8px; }
-  .lm-models-group__head {
-    display: flex; align-items: baseline; justify-content: space-between;
-    gap: 8px; padding: 4px 0 8px;
-    border-bottom: 1px solid var(--bg-3);
-    margin-bottom: 6px;
-  }
-  .lm-models-group__count {
-    font-size: 0.75rem; color: var(--fg-2);
-  }
-
   .lm-model-cards {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
+    display: flex; flex-direction: column; gap: 6px;
   }
   .lm-model {
     border: 1px solid var(--bg-3);
@@ -41,7 +251,6 @@
     background: var(--accent);
     z-index: 1;
   }
-  /* Lean summary: only the model name + key pills + size/engine. Click to expand. */
   .lm-model__expand > .lm-model__summary {
     cursor: pointer;
     list-style: none;
@@ -54,11 +263,9 @@
   }
   .lm-model__expand > .lm-model__summary::-webkit-details-marker { display: none; }
   .lm-model__chevron {
-    color: var(--fg-3);
-    font-size: 0.7rem;
+    color: var(--fg-3); font-size: 0.7rem;
     transition: transform 160ms ease;
-    display: inline-block;
-    width: 0.7em;
+    display: inline-block; width: 0.7em;
   }
   .lm-model__expand[open] > .lm-model__summary > .lm-model__chevron {
     transform: rotate(90deg);
@@ -74,102 +281,59 @@
   }
   .lm-model__summary-spacer { flex: 1; }
   .lm-model__summary-meta {
-    font-size: 0.75rem;
-    color: var(--fg-2);
-    white-space: nowrap;
+    font-size: 0.75rem; color: var(--fg-2); white-space: nowrap;
   }
-  .lm-model__body {
-    padding: 12px 14px 14px;
-  }
+  .lm-model__body { padding: 12px 14px 14px; }
   .lm-model__meta {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    font-size: 0.75rem;
-    color: var(--fg-2);
-    margin-bottom: 12px;
-    flex-wrap: wrap;
+    display: flex; align-items: baseline; gap: 8px;
+    font-size: 0.75rem; color: var(--fg-2);
+    margin-bottom: 12px; flex-wrap: wrap;
   }
   .lm-model__sep { color: var(--fg-3); }
-
   .lm-model__actions {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-    margin-bottom: 12px;
+    display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px;
   }
-
   .lm-model__profiles {
-    border-top: 1px solid var(--bg-3);
-    padding-top: 10px;
+    border-top: 1px solid var(--bg-3); padding-top: 10px;
   }
   .lm-model__profiles-summary {
-    cursor: pointer;
-    list-style: none;
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 14px;
-    padding: 4px 0;
-    user-select: none;
+    cursor: pointer; list-style: none;
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 14px; padding: 4px 0; user-select: none;
   }
   .lm-model__profiles-summary::before {
-    content: "▸";
-    color: var(--fg-3);
-    font-size: 0.75rem;
-    transition: transform 160ms ease;
-    margin-right: 8px;
+    content: "▸"; color: var(--fg-3); font-size: 0.75rem;
+    transition: transform 160ms ease; margin-right: 8px;
     display: inline-block;
   }
   .lm-model__profiles[open] > .lm-model__profiles-summary::before {
     transform: rotate(90deg);
   }
-  .lm-model__profiles-body {
-    margin-top: 8px;
-  }
-
+  .lm-model__profiles-body { margin-top: 8px; }
   .lm-profile-list {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
+    list-style: none; padding: 0; margin: 0;
+    display: flex; flex-direction: column; gap: 6px;
   }
   .lm-profile {
-    padding: 10px 14px;
-    background: var(--bg-2);
+    padding: 10px 14px; background: var(--bg-2);
     border-left: 2px solid var(--bg-3);
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
+    display: flex; flex-direction: column; gap: 8px;
   }
-  .lm-profile.is-default {
-    border-left-color: var(--accent);
-  }
-  .lm-profile__head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
+  .lm-profile.is-default { border-left-color: var(--accent); }
+  .lm-profile__head { display: flex; align-items: center; gap: 8px; }
   .lm-profile__name {
     font-family: 'Fraunces', serif;
     font-variation-settings: 'opsz' 24, 'SOFT' 16;
-    font-size: 0.9375rem;
-    color: var(--fg-0);
+    font-size: 0.9375rem; color: var(--fg-0);
   }
   .lm-profile__details summary,
   .lm-profile-add__summary {
-    cursor: pointer;
-    list-style: none;
-    font-size: 0.75rem;
-    color: var(--accent);
-    user-select: none;
+    cursor: pointer; list-style: none;
+    font-size: 0.75rem; color: var(--accent); user-select: none;
   }
   .lm-profile__details summary::before,
   .lm-profile-add__summary::before {
-    content: "▸ ";
-    color: var(--fg-3);
+    content: "▸ "; color: var(--fg-3);
   }
   .lm-profile__details[open] summary::before,
   .lm-profile-add[open] .lm-profile-add__summary::before {
@@ -177,315 +341,386 @@
   }
   .lm-profile__actions,
   .lm-profile__row-actions {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-    margin-top: 4px;
+    display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px;
   }
   .lm-profile-empty {
-    font-family: 'Fraunces', serif;
-    font-style: italic;
-    color: var(--fg-2);
-    font-size: 0.8125rem;
+    font-family: 'Fraunces', serif; font-style: italic;
+    color: var(--fg-2); font-size: 0.8125rem;
     margin: 4px 0 8px;
   }
   .lm-profile-add {
-    margin-top: 10px;
-    padding: 8px 12px;
+    margin-top: 10px; padding: 8px 12px;
     border: 1px dashed var(--bg-3);
   }
-
   .lm-form--inline {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin-top: 6px;
+    display: flex; flex-direction: column; gap: 6px; margin-top: 6px;
   }
   .lm-form--inline .lm-input { max-width: none; }
   .lm-form--inline .lm-field-label {
-    font-size: 0.6875rem;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--fg-2);
-    margin: 4px 0 0;
+    font-size: 0.6875rem; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--fg-2); margin: 4px 0 0;
   }
   .lm-btn--xs { padding: 4px 10px; font-size: 0.75rem; }
-
-  /* ---- Profile basic/advanced tabs ---- */
   .lm-tabs {
-    display: flex;
-    gap: 4px;
+    display: flex; gap: 4px;
     margin: 8px 0 6px;
     border-bottom: 1px solid var(--bg-3);
   }
   .lm-tab {
-    appearance: none;
-    background: transparent;
-    border: 0;
-    padding: 6px 12px;
-    font: inherit;
-    font-size: 0.75rem;
-    color: var(--fg-2);
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
+    appearance: none; background: transparent; border: 0;
+    padding: 6px 12px; font: inherit; font-size: 0.75rem;
+    color: var(--fg-2); cursor: pointer;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
   }
   .lm-tab.is-active {
-    color: var(--fg-0);
-    border-bottom-color: var(--accent);
+    color: var(--fg-0); border-bottom-color: var(--accent);
   }
-  .lm-tab-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
+  .lm-tab-panel { display: flex; flex-direction: column; gap: 6px; }
   .lm-tab-panel[hidden] { display: none; }
   .lm-help {
-    font-size: 0.75rem;
-    color: var(--fg-2);
-    margin: 0;
-    line-height: 1.4;
+    font-size: 0.75rem; color: var(--fg-2);
+    margin: 0; line-height: 1.4;
   }
 
-  /* ---- Global default profile card ---- */
-  .lm-global-default {
-    padding: 18px 22px;
-    margin: 0 0 24px;
-    border: 1px solid var(--bg-3);
-    background: var(--bg-1);
-    position: relative;
-  }
-  .lm-global-default__title {
-    font-family: 'Fraunces', serif;
-    font-variation-settings: 'opsz' 48, 'SOFT' 20;
-    font-size: 1.125rem;
-    color: var(--fg-0);
-    margin-bottom: 2px;
-  }
-  .lm-global-default__lede {
-    font-size: 0.8125rem;
-    color: var(--fg-2);
-    margin-bottom: 12px;
-    max-width: 64ch;
-    font-style: italic;
-    font-family: 'Fraunces', serif;
-  }
-  .lm-global-default__current {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-    margin-bottom: 12px;
-    font-size: 0.875rem;
-    color: var(--fg-1);
-  }
-  .lm-global-default__current code {
-    font-size: 0.8125rem;
-    color: var(--accent);
-  }
-  .lm-global-default__form {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    flex-wrap: wrap;
+  /* Mobile tweaks for the heading row */
+  @media (max-width: 700px) {
+    .lm-models-head {
+      align-items: stretch;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .lm-models-head__stats {
+      margin-left: 0;
+      gap: 14px;
+    }
+    .lm-models-head__stat strong { font-size: 1.25rem; }
+    .lm-add-tabs { width: 100%; overflow-x: auto; }
+    .lm-add-tab { white-space: nowrap; }
   }
 </style>
 
-<div class="lm-eyebrow">Operate</div>
-<h1 class="lm-page-title">LLM models</h1>
-<p class="lm-page-lede">Pull, organise, and tune language models for the <code>llama</code> and <code>mlx</code> engines. Diffusion models live on the <a href="/ui/setup-diffusion" style="color: var(--accent);">Diffusion engines</a> page.</p>
-<p class="lm-page-lede" style="font-size: 0.875rem; color: var(--fg-2); font-style: italic;">
-  <strong style="color: var(--fg-1); font-style: normal;">Profiles</strong> &mdash; per-model presets for context size, VRAM cap, RAM spill, mmproj, reasoning, and raw engine args. Expand any model card below to view its profiles and add or edit them. A model can have multiple profiles (e.g. <code>fast</code>, <code>balanced</code>, <code>long-ctx</code>) and one of them is marked as the model's default.
-</p>
-
-{# ---- Storage location ---- #}
-<section class="lm-section" style="margin-top: 32px;">
-  <header class="lm-section-head">
-    <span class="lm-section-marker">Storage location</span>
-  </header>
-
-  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
-    By default models are stored in <code>~/.llamanager/models</code>. If you have a separate drive or prefer a different path, change it here. The directory will be created if it does not exist.
-  </p>
-
-  <form class="lm-form" method="post" action="/ui/models/set-dir">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <div class="lm-field">
-      <label class="lm-field-label" for="models-dir-input">Models directory</label>
-      <div style="display: flex; gap: 8px; align-items: flex-end; max-width: 480px;">
-        <input id="models-dir-input"
-               class="lm-input lm-input--mono"
-               type="text"
-               name="models_dir"
-               value="{{ models_dir }}"
-               style="flex: 1; min-width: 0;">
-        <button type="button"
-                class="lm-btn lm-btn--ghost lm-btn--xs"
-                hx-get="/ui/fs/browse?kind=dir&target=models-dir-input"
-                data-fs-prefill="models-dir-input"
-                hx-target="[data-fs-host='models-dir-input']"
-                hx-swap="innerHTML">Browse…</button>
-      </div>
-      <div class="lm-fs-host" data-fs-host="models-dir-input"></div>
-    </div>
-    <div>
-      <button type="submit" class="lm-btn lm-btn--primary"
-              data-confirm="Change the models directory? Existing models in the old location will not be moved.">
-        Save location
-      </button>
-    </div>
-  </form>
-</section>
-
-{# ---- Engine-keyed default args ---- #}
-<section class="lm-section" style="margin-top: 32px;">
-  <header class="lm-section-head">
-    <span class="lm-section-marker">Engine defaults</span>
-  </header>
-
-  <div class="lm-global-default">
-    <p class="lm-global-default__lede">
-      Minimum default args applied to every model of a given engine. A model's profile (and the request itself) overrides any key set here.
+{# ---- Heading + at-a-glance stats ---------------------------------- #}
+{% set _total_bytes = text_models | sum(attribute='size') %}
+<header class="lm-models-head">
+  <div>
+    <div class="lm-eyebrow" style="margin-bottom: 4px;">Operate</div>
+    <h1 class="lm-page-title lm-models-head__title">LLM models</h1>
+    <p class="lm-models-head__lede" style="margin-top: 6px;">
+      Pull, organise, and tune <code>llama</code> and <code>mlx</code> models.
+      Diffusion models live on the
+      <a href="/ui/setup-diffusion" style="color: var(--accent);">Diffusion engines</a>
+      page.
     </p>
-
-    {% for engine in ['llama', 'mlx'] %}
-    <details class="lm-profile-add" style="margin-top: 10px;" {% if default_args.get(engine) %}open{% endif %}>
-      <summary class="lm-profile-add__summary">
-        <code>{{ engine }}</code> — {{ default_args.get(engine, {}) | length }} keys
-      </summary>
-      <form method="post" action="/ui/models/default-args/save"
-            class="lm-form lm-form--inline" style="margin-top: 10px;">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="engine" value="{{ engine }}">
-        <label class="lm-field-label">args (JSON object)</label>
-        <textarea class="lm-input lm-input--mono" name="args_json" rows="4" spellcheck="false"
-                  style="max-width: 520px; resize: vertical;">{{ default_args.get(engine, {}) | tojson(indent=2) }}</textarea>
-        <div>
-          <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Save {{ engine }} defaults</button>
-        </div>
-      </form>
-    </details>
-    {% endfor %}
   </div>
-</section>
+  <div class="lm-models-head__stats">
+    <div class="lm-models-head__stat">
+      <strong>{{ text_models | length }}</strong>
+      <small>installed</small>
+    </div>
+    <div class="lm-models-head__stat">
+      <strong>{{ '%.1f' % (_total_bytes / (1024**3)) }} GB</strong>
+      <small>on disk</small>
+    </div>
+    <div class="lm-models-head__stat">
+      <strong>
+        {% if current_model %}<code style="font-family: 'JetBrains Mono', monospace; font-size: 0.875rem; font-weight: 500; color: var(--accent);">{{ current_model.rsplit('/', 1)[-1] }}</code>
+        {% else %}—{% endif %}
+      </strong>
+      <small>currently loaded</small>
+    </div>
+  </div>
+</header>
 
-{# ---- Models (LLMs only on this page) ---- #}
-<section class="lm-section">
-  <header class="lm-section-head">
-    <span class="lm-section-marker">Language models</span>
-    <span class="lm-section-meta">
-      {{ text_models|length }} on disk
-    </span>
-  </header>
-
-  <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 16px; font-size: 0.8125rem; color: var(--fg-2);">
-    <span>Location: <code style="color: var(--fg-1);">{{ models_dir }}</code></span>
-    <form method="post" action="/ui/models/open-dir" style="margin: 0;">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">{{ open_label }}</button>
-    </form>
+{# ---- Installed models (above the fold) ---------------------------- #}
+<section class="lm-section" style="margin-top: 0;">
+  <div class="lm-models-filter">
+    <div class="lm-models-filter__search">
+      <input id="lm-model-filter" class="lm-input"
+             type="search"
+             placeholder="Filter installed models…"
+             autocomplete="off">
+    </div>
+    <div class="lm-chip-row" role="tablist" aria-label="Filter by engine">
+      <button type="button" class="lm-chip is-active" data-engine="all">All</button>
+      <button type="button" class="lm-chip" data-engine="llama">llama</button>
+      <button type="button" class="lm-chip" data-engine="mlx">mlx</button>
+    </div>
   </div>
 
   {% with show_image=False %}
     {% include "_models_list_partial.html" %}
   {% endwith %}
+
+  <p class="lm-models-empty-filter" id="lm-models-empty-filter">
+    No installed models match this filter.
+  </p>
 </section>
 
-{# ---- Find a language model ---- #}
-<section class="lm-section">
+{# ---- Add a language model ---------------------------------------- #}
+<section class="lm-section lm-add-section" id="add-model">
   <header class="lm-section-head">
-    <span class="lm-section-marker">Find a language model</span>
-    <span class="lm-section-meta">search Hugging Face — GGUF</span>
+    <span class="lm-section-marker">Add a language model</span>
+    <span class="lm-section-meta">search · pull · symlink</span>
   </header>
 
-  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
-    Search Hugging Face for GGUF-format models (compatible with the <code>llama</code> engine). Results are filtered by the <code>gguf</code> tag and sorted by popularity. Click a model to see its files and pull one with a single click.
-  </p>
-
-  <div style="margin-bottom: 20px;">
-    <input type="search" id="model-search" class="lm-input"
-           name="q" placeholder="Search models, e.g. llama, phi, gemma, mistral..."
-           hx-get="/ui/models/search"
-           hx-trigger="input changed delay:400ms, search"
-           hx-target="#search-results"
-           hx-swap="innerHTML"
-           style="max-width: 520px;">
+  <div class="lm-add-tabs" role="tablist" aria-label="Add a model">
+    <button type="button" class="lm-add-tab is-active"
+            data-add-tab="search">Search Hugging Face</button>
+    <button type="button" class="lm-add-tab"
+            data-add-tab="pull">By URL or repo</button>
+    <button type="button" class="lm-add-tab"
+            data-add-tab="local">From a local file</button>
   </div>
 
-  <div id="search-results"
-       hx-get="/ui/models/search?q="
-       hx-trigger="load"
-       hx-swap="innerHTML">
-    <p style="color: var(--fg-2); font-size: 0.875rem;">Loading popular models...</p>
+  {# --- Tab 1: HF search with filters --- #}
+  <div class="lm-add-panel" data-add-panel="search">
+    <p class="lm-help" style="margin-bottom: 14px; max-width: 64ch;">
+      Repos that ship a GGUF (llama engine) or MLX-format checkpoint.
+      Sort by popularity, freshness or trend, and narrow by author when
+      a specific org publishes the build you want.
+    </p>
+    <form class="lm-hf-filters" id="lm-hf-form"
+          hx-get="/ui/models/search"
+          hx-trigger="change, input changed delay:400ms, submit"
+          hx-target="#search-results"
+          hx-swap="innerHTML"
+          onsubmit="return false;">
+      <div class="lm-hf-filters__col" style="flex: 1; min-width: 240px;">
+        <span class="lm-field-label">Search</span>
+        <input type="search" class="lm-input" name="q"
+               placeholder="llama, qwen, phi, gemma…"
+               autocomplete="off">
+      </div>
+      <div class="lm-hf-filters__col">
+        <span class="lm-field-label">Library</span>
+        <select class="lm-input" name="library">
+          <option value="gguf">gguf · llama.cpp</option>
+          <option value="mlx">mlx · Apple silicon</option>
+        </select>
+      </div>
+      <div class="lm-hf-filters__col">
+        <span class="lm-field-label">Sort by</span>
+        <select class="lm-input" name="sort">
+          <option value="downloads">Most downloaded</option>
+          <option value="likes">Most liked</option>
+          <option value="trending">Trending</option>
+          <option value="lastModified">Recently updated</option>
+          <option value="createdAt">Recently created</option>
+        </select>
+      </div>
+      <div class="lm-hf-filters__col">
+        <span class="lm-field-label">Author</span>
+        <input type="text" class="lm-input lm-input--mono" name="author"
+               placeholder="mlx-community"
+               autocomplete="off"
+               style="min-width: 160px;">
+      </div>
+    </form>
+
+    <div id="search-results"
+         hx-get="/ui/models/search?q="
+         hx-trigger="load"
+         hx-swap="innerHTML"
+         style="margin-top: 6px;">
+      <p style="color: var(--fg-2); font-size: 0.875rem;">Loading popular models…</p>
+    </div>
+  </div>
+
+  {# --- Tab 2: pull by URL or repo --- #}
+  <div class="lm-add-panel" data-add-panel="pull" hidden>
+    <p class="lm-help" style="margin-bottom: 14px; max-width: 64ch;">
+      Already know what you want? Enter a Hugging Face repo and the
+      specific GGUF file (or paste a direct URL). Downloads run in the
+      background. For MLX, point at the MLX repo and leave the file
+      blank.
+    </p>
+    <form class="lm-form lm-form--wide" method="post" action="/ui/models/pull">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="lm-form-row">
+        <div class="lm-field">
+          <label class="lm-field-label" for="model-source">Source</label>
+          <input id="model-source" class="lm-input lm-input--mono"
+                 type="text" name="source"
+                 placeholder="hf://org/repo-GGUF or https://…"
+                 required>
+        </div>
+        <div class="lm-field">
+          <label class="lm-field-label" for="model-files">File (HF repos only)</label>
+          <input id="model-files" class="lm-input lm-input--mono"
+                 type="text" name="files"
+                 placeholder="Q4_K_M.gguf">
+        </div>
+        <button type="submit" class="lm-btn lm-btn--primary">Start pull</button>
+      </div>
+    </form>
+  </div>
+
+  {# --- Tab 3: add existing on-disk file --- #}
+  <div class="lm-add-panel" data-add-panel="local" hidden>
+    <p class="lm-help" style="margin-bottom: 14px; max-width: 64ch;">
+      If you already have a GGUF on disk, enter its path. We'll
+      symlink it into the models directory so it appears in the list
+      above without copying.
+    </p>
+    <form class="lm-form" method="post" action="/ui/models/add-existing">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="lm-field">
+        <label class="lm-field-label" for="existing-path">Path to .gguf file</label>
+        <div style="display: flex; gap: 8px; align-items: flex-end; max-width: 520px;">
+          <input id="existing-path"
+                 class="lm-input lm-input--mono"
+                 type="text"
+                 name="file_path"
+                 placeholder="/path/to/model.gguf"
+                 required
+                 style="flex: 1; min-width: 0;">
+          <button type="button"
+                  class="lm-btn lm-btn--ghost lm-btn--xs"
+                  hx-get="/ui/fs/browse?kind=file&ext=.gguf&target=existing-path"
+                  data-fs-prefill="existing-path"
+                  hx-target="[data-fs-host='existing-path']"
+                  hx-swap="innerHTML">Browse…</button>
+        </div>
+        <div class="lm-fs-host" data-fs-host="existing-path"></div>
+      </div>
+      <div>
+        <button type="submit" class="lm-btn lm-btn--primary">Add model</button>
+      </div>
+    </form>
   </div>
 </section>
 
-{# ---- Pull a language model (manual) ---- #}
-<section class="lm-section">
-  <header class="lm-section-head">
-    <span class="lm-section-marker">Pull a language model</span>
-    <span class="lm-section-meta">manual entry</span>
-  </header>
-
-  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
-    Already know what you want? Enter a Hugging Face repo and the specific GGUF file (or paste a direct URL). Downloads run in the background. For MLX models, point at an MLX-formatted repo and leave the file blank.
-  </p>
-
-  <form class="lm-form lm-form--wide" method="post" action="/ui/models/pull">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <div class="lm-form-row">
-      <div class="lm-field">
-        <label class="lm-field-label" for="model-source">Source</label>
-        <input id="model-source" class="lm-input lm-input--mono"
-               type="text" name="source"
-               placeholder="hf://org/repo-GGUF or https://..."
-               required>
-      </div>
-      <div class="lm-field">
-        <label class="lm-field-label" for="model-files">File (required for HF repos)</label>
-        <input id="model-files" class="lm-input lm-input--mono"
-               type="text" name="files"
-               placeholder="Q4_K_M.gguf">
-      </div>
-      <button type="submit" class="lm-btn lm-btn--primary">Start pull</button>
-    </div>
-  </form>
-</section>
-
-{# ---- Add existing model ---- #}
-<section class="lm-section">
-  <header class="lm-section-head">
-    <span class="lm-section-marker">Add existing model</span>
-  </header>
-
-  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
-    If you already have a GGUF file on disk, enter its full path here. The file will be symlinked into the models directory so it appears in the list above without copying.
-  </p>
-
-  <form class="lm-form" method="post" action="/ui/models/add-existing">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <div class="lm-field">
-      <label class="lm-field-label" for="existing-path">Path to .gguf file</label>
-      <div style="display: flex; gap: 8px; align-items: flex-end; max-width: 480px;">
-        <input id="existing-path"
-               class="lm-input lm-input--mono"
-               type="text"
-               name="file_path"
-               placeholder="/path/to/model.gguf"
-               required
-               style="flex: 1; min-width: 0;">
-        <button type="button"
-                class="lm-btn lm-btn--ghost lm-btn--xs"
-                hx-get="/ui/fs/browse?kind=file&ext=.gguf&target=existing-path"
-                data-fs-prefill="existing-path"
-                hx-target="[data-fs-host='existing-path']"
-                hx-swap="innerHTML">Browse…</button>
-      </div>
-      <div class="lm-fs-host" data-fs-host="existing-path"></div>
-    </div>
+{# ---- Advanced (collapsed): storage location + engine defaults --- #}
+<details class="lm-advanced">
+  <summary>Advanced</summary>
+  <div class="lm-advanced__body">
     <div>
-      <button type="submit" class="lm-btn lm-btn--primary">Add model</button>
+      <header class="lm-section-head" style="margin-top: 0;">
+        <span class="lm-section-marker">Storage location</span>
+      </header>
+      <p class="lm-help" style="margin-bottom: 12px; max-width: 60ch;">
+        Defaults to <code>~/.llamanager/models</code>. Change here if
+        you want a separate drive — the directory is created if missing.
+      </p>
+      <form class="lm-form" method="post" action="/ui/models/set-dir">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="lm-field">
+          <label class="lm-field-label" for="models-dir-input">Models directory</label>
+          <div style="display: flex; gap: 8px; align-items: flex-end;">
+            <input id="models-dir-input"
+                   class="lm-input lm-input--mono"
+                   type="text"
+                   name="models_dir"
+                   value="{{ models_dir }}"
+                   style="flex: 1; min-width: 0;">
+            <button type="button"
+                    class="lm-btn lm-btn--ghost lm-btn--xs"
+                    hx-get="/ui/fs/browse?kind=dir&target=models-dir-input"
+                    data-fs-prefill="models-dir-input"
+                    hx-target="[data-fs-host='models-dir-input']"
+                    hx-swap="innerHTML">Browse…</button>
+          </div>
+          <div class="lm-fs-host" data-fs-host="models-dir-input"></div>
+        </div>
+        <div style="margin-top: 8px;">
+          <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs"
+                  data-confirm="Change the models directory? Existing models in the old location will not be moved.">
+            Save location
+          </button>
+          <form method="post" action="/ui/models/open-dir" style="display: inline; margin-left: 6px;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">{{ open_label }}</button>
+          </form>
+        </div>
+      </form>
     </div>
-  </form>
-</section>
+
+    <div>
+      <header class="lm-section-head" style="margin-top: 0;">
+        <span class="lm-section-marker">Engine defaults</span>
+      </header>
+      <p class="lm-help" style="margin-bottom: 12px; max-width: 60ch;">
+        Minimum args applied to every model of a given engine. A
+        profile (or the request itself) overrides any key set here.
+      </p>
+      {% for engine in ['llama', 'mlx'] %}
+      <details class="lm-profile-add" style="margin-top: 10px;" {% if default_args.get(engine) %}open{% endif %}>
+        <summary class="lm-profile-add__summary">
+          <code>{{ engine }}</code> — {{ default_args.get(engine, {}) | length }} keys
+        </summary>
+        <form method="post" action="/ui/models/default-args/save"
+              class="lm-form lm-form--inline" style="margin-top: 10px;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="engine" value="{{ engine }}">
+          <label class="lm-field-label">args (JSON object)</label>
+          <textarea class="lm-input lm-input--mono" name="args_json" rows="4" spellcheck="false"
+                    style="resize: vertical;">{{ default_args.get(engine, {}) | tojson(indent=2) }}</textarea>
+          <div>
+            <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Save {{ engine }} defaults</button>
+          </div>
+        </form>
+      </details>
+      {% endfor %}
+    </div>
+  </div>
+</details>
+
+<script>
+(function () {
+  // -------- Installed-list client-side filter --------
+  const filterInput = document.getElementById('lm-model-filter');
+  const chipRow = document.querySelector('.lm-chip-row');
+  const emptyMsg = document.getElementById('lm-models-empty-filter');
+
+  function applyFilter() {
+    if (!filterInput) return;
+    const q = filterInput.value.trim().toLowerCase();
+    const activeChip = chipRow ? chipRow.querySelector('.lm-chip.is-active') : null;
+    const engine = activeChip ? activeChip.dataset.engine : 'all';
+    const cards = document.querySelectorAll('.lm-model[data-model-id]');
+    let shown = 0;
+    cards.forEach(card => {
+      const id = (card.dataset.modelId || '').toLowerCase();
+      // Engine pill is rendered inside the card's <code> tag in the
+      // summary meta. Read it directly so we don't depend on extra
+      // data attributes.
+      const engineEl = card.querySelector('.lm-model__summary-meta code');
+      const engineText = engineEl ? engineEl.textContent.trim() : '';
+      const matchesQuery = !q || id.indexOf(q) !== -1;
+      const matchesEngine = engine === 'all' || engineText === engine;
+      const show = matchesQuery && matchesEngine;
+      card.hidden = !show;
+      if (show) shown++;
+    });
+    if (emptyMsg) {
+      emptyMsg.classList.toggle('is-visible', shown === 0 && cards.length > 0);
+    }
+  }
+
+  if (filterInput) filterInput.addEventListener('input', applyFilter);
+  if (chipRow) {
+    chipRow.addEventListener('click', e => {
+      const chip = e.target.closest('.lm-chip');
+      if (!chip) return;
+      chipRow.querySelectorAll('.lm-chip').forEach(c => c.classList.remove('is-active'));
+      chip.classList.add('is-active');
+      applyFilter();
+    });
+  }
+  // Re-apply on HTMX content swaps (when the list polls during downloads).
+  document.body.addEventListener('htmx:afterSettle', applyFilter);
+
+  // -------- Add-a-model tab switcher --------
+  const tabs = document.querySelectorAll('.lm-add-tab');
+  const panels = document.querySelectorAll('.lm-add-panel');
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      const target = tab.dataset.addTab;
+      tabs.forEach(t => t.classList.toggle('is-active', t === tab));
+      panels.forEach(p => p.hidden = p.dataset.addPanel !== target);
+    });
+  });
+})();
+</script>
 
 {% endblock %}

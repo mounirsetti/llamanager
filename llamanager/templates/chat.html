@@ -3,40 +3,43 @@
 {% block title %}Chat - llamanager{% endblock %}
 {% block content %}
 <style>
-  @media (max-width: 640px) {
-    #chat-app {
-      height: calc(100vh - 140px) !important; min-height: 300px !important;
-      flex-direction: column !important;
-    }
-    #chat-system { min-width: 0 !important; max-width: 100% !important; width: 100% !important; }
-    #chat-profile { min-width: 0 !important; width: 100% !important; }
-    .chat-settings-bar { flex-direction: column !important; align-items: stretch !important; gap: 10px !important; }
-    .chat-settings-bar > div { width: 100%; }
-    .chat-settings-bar select, .chat-settings-bar input { width: 100%; }
-    .chat-history-rail {
-      width: 100% !important; flex-shrink: 0 !important;
-      border-right: 0 !important; border-bottom: 1px solid var(--bg-2) !important;
-      max-height: 130px !important;
-    }
-    .chat-history-list {
-      display: flex !important; flex-direction: row !important;
-      overflow-x: auto !important; overflow-y: hidden !important;
-      padding: 6px 8px !important; gap: 6px !important;
-    }
-    .chat-history-item {
-      flex: 0 0 auto !important; max-width: 160px !important;
-      border: 1px solid var(--bg-3) !important; border-radius: 2px !important;
-      padding: 5px 9px !important;
-    }
-    .chat-history-del { display: inline !important; }
-    .chat-history-foot {
-      flex-direction: row !important; align-items: center !important;
-      padding: 6px 12px !important;
-    }
+  /* Chat app: history rail + main column. The main column owns its
+     own messages scroll area and a sticky-on-mobile input row. */
+  .chat-app {
+    display: flex; min-height: 0;
+    height: calc(100vh - 180px);
+    margin-top: 12px;
   }
+  .chat-main-col {
+    flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  }
+  .chat-messages {
+    flex: 1; overflow-y: auto; padding: 16px 12px;
+    display: flex; flex-direction: column; gap: 20px;
+  }
+  .chat-attachments {
+    padding: 8px 12px 0; gap: 8px; flex-wrap: wrap;
+    border-top: 1px solid var(--bg-2);
+  }
+  .chat-input-row {
+    padding: 14px 12px; border-top: 1px solid var(--bg-2);
+    display: flex; gap: 8px; align-items: flex-end;
+    background: var(--bg-0);
+  }
+
+  /* Toolbar shown on mobile only; contains the History / Settings
+     buttons that open the off-canvas drawers. */
+  .chat-toolbar { display: none; }
+  .chat-backdrop {
+    display: none; position: fixed; inset: 0;
+    background: oklch(0 0 0 / 0.45); z-index: 45;
+  }
+  .chat-app.is-drawer-open .chat-backdrop { display: block; }
+
   .chat-history-rail {
     width: 200px; flex-shrink: 0; border-right: 1px solid var(--bg-2);
     display: flex; flex-direction: column; overflow: hidden;
+    background: var(--bg-0);
   }
   .chat-history-header {
     padding: 10px 12px; border-bottom: 1px solid var(--bg-2);
@@ -88,6 +91,56 @@
     padding: 4px 12px; color: var(--fg-3); font-size: 0.8125rem;
     line-height: 1.5; white-space: pre-wrap;
   }
+  /* Page header — single line on desktop, wraps on narrow screens. */
+  .chat-page-head {
+    display: flex; align-items: baseline; gap: 14px;
+    flex-wrap: wrap;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--bg-3);
+    margin-bottom: 4px;
+  }
+  .chat-page-head__title { display: flex; align-items: center; gap: 12px; }
+  .chat-page-head__model {
+    margin-left: auto;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.75rem; color: var(--fg-2);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 60%;
+  }
+  /* Not-running notice — a quiet inline note, not a chunky alert box. */
+  .chat-page-notice {
+    margin: 12px 0 0;
+    padding-left: 10px;
+    border-left: 2px solid var(--bg-3);
+    font-size: 0.875rem; color: var(--fg-2);
+    font-family: 'Fraunces', serif; font-style: italic;
+  }
+  .chat-page-notice a {
+    color: var(--accent); font-style: normal; font-family: inherit;
+  }
+
+  /* Queue / swap status pill — shown above the thinking dots while the
+     request waits. The dot uses the warning-yellow-ish foreground tone
+     of the fg-2/3 ramp rather than full accent to feel like a
+     "we're working on it" beat rather than a live alarm. */
+  .chat-queue-status {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 0.75rem; letter-spacing: 0.02em;
+    color: var(--fg-2);
+    margin-bottom: 8px;
+    padding: 4px 9px;
+    border: 1px solid var(--bg-3);
+    background: var(--bg-1);
+  }
+  .chat-queue-status__dot {
+    display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+    background: var(--fg-2);
+    animation: chat-queue-pulse 1.6s infinite ease-in-out;
+  }
+  @keyframes chat-queue-pulse {
+    0%, 80%, 100% { opacity: 0.35; }
+    40% { opacity: 1; }
+  }
   /* thinking dots animation */
   .thinking-dots { display: inline-flex; gap: 3px; align-items: center; }
   .thinking-dots span {
@@ -113,36 +166,142 @@
     font-size: 0.6875rem; color: var(--fg-2);
     font-family: 'JetBrains Mono', ui-monospace, monospace;
   }
+
+  /* Drawer close button — visible only on mobile, inside each rail header */
+  .chat-drawer-close {
+    display: none; background: transparent; border: none;
+    color: var(--fg-2); font-size: 1.1rem; cursor: pointer;
+    padding: 4px 6px;
+  }
+
+  /* ---------------- Mobile ---------------- */
+  @media (max-width: 900px) {
+    .chat-app {
+      /* Lose the row layout; main column fills the screen and the
+         history rail becomes an off-canvas drawer. Leave room for
+         the fixed-bottom input row. */
+      flex-direction: column;
+      height: calc(100vh - 56px);
+      margin-top: 0;
+      padding-bottom: 140px;  /* reserve space for sticky input row */
+      position: relative;
+    }
+    /* History rail: drawer from the left. */
+    .chat-history-rail {
+      position: fixed; top: 0; bottom: 0; left: 0;
+      width: min(280px, 84vw);
+      z-index: 50;
+      transform: translateX(-100%);
+      transition: transform 200ms ease;
+      box-shadow: 0 0 24px oklch(0 0 0 / 0.35);
+      border-right: 1px solid var(--bg-3);
+      border-bottom: 0;
+      max-height: none;
+    }
+    .chat-app.is-history-open .chat-history-rail { transform: translateX(0); }
+    /* History list: vertical (override the horizontal pill row from
+       the previous mobile design). */
+    .chat-history-list {
+      display: flex; flex-direction: column;
+      overflow-y: auto; overflow-x: hidden;
+      padding: 6px 0; gap: 0;
+    }
+    .chat-history-item {
+      flex: 0 0 auto; max-width: none;
+      border: 0; border-radius: 0;
+      padding: 8px 12px;
+    }
+    .chat-history-del { display: inline; }
+    .chat-history-foot {
+      flex-direction: column; align-items: stretch;
+      padding: 8px 12px;
+    }
+
+    /* Settings bar becomes a drawer from the right. */
+    .chat-settings-bar {
+      position: fixed; top: 0; bottom: 0; right: 0;
+      width: min(320px, 88vw);
+      z-index: 50;
+      transform: translateX(100%);
+      transition: transform 200ms ease;
+      box-shadow: 0 0 24px oklch(0 0 0 / 0.35);
+      background: var(--bg-0);
+      border-bottom: 0; border-left: 1px solid var(--bg-3);
+      flex-direction: column !important; align-items: stretch !important;
+      padding: 16px 14px !important; gap: 14px !important;
+      overflow-y: auto;
+    }
+    .chat-app.is-settings-open .chat-settings-bar { transform: translateX(0); }
+    .chat-settings-bar > div { width: 100%; flex-direction: column !important; align-items: stretch !important; }
+    .chat-settings-bar select,
+    .chat-settings-bar input { width: 100% !important; max-width: none !important; }
+
+    /* Show close buttons inside the rails on mobile. */
+    .chat-drawer-close { display: inline-flex; }
+
+    /* Main column fills the screen; messages scroll, input is fixed. */
+    .chat-main-col { width: 100%; min-height: 0; }
+    .chat-messages { padding: 12px; gap: 16px; }
+    .chat-attachments { padding: 8px 12px 0 !important; }
+    .chat-input-row {
+      position: fixed; left: 0; right: 0; bottom: 0;
+      z-index: 40;
+      border-top: 1px solid var(--bg-3);
+      padding: 10px 12px;
+    }
+
+    /* Toolbar visible on mobile. */
+    .chat-toolbar {
+      display: flex; gap: 8px; padding: 8px 12px;
+      border-bottom: 1px solid var(--bg-2);
+      background: var(--bg-0);
+      position: sticky; top: 0; z-index: 30;
+      margin: 0 -12px 8px;  /* break out of the page padding */
+    }
+    .chat-toolbar .lm-btn { flex: 1; justify-content: center; }
+    .chat-speed { font-size: 0.625rem; }
+  }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/15.0.7/marked.min.js"
         crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 
-{# ---- Header ---- #}
-<div style="display: flex; align-items: center; gap: 14px; margin-bottom: 4px; flex-wrap: wrap;">
-  <div class="lm-eyebrow" style="margin-bottom: 0;">Chat</div>
-  <span class="lm-pill lm-pill--{{ status.state }}">{{ status.state }}</span>
+{# ---- Header: a single restrained line. The status pill carries the
+       state colour, the model id sits in mono right-aligned. ---- #}
+<header class="chat-page-head">
+  <div class="chat-page-head__title">
+    <span class="lm-eyebrow" style="margin-bottom: 0;">Chat</span>
+    <span class="lm-pill lm-pill--{{ status.state }}">{{ status.state }}</span>
+  </div>
   {% if status.current_model %}
-  <code style="font-size: 0.75rem; color: var(--fg-2);">{{ status.current_model }}</code>
+  <code class="chat-page-head__model">{{ status.current_model }}</code>
   {% endif %}
-</div>
+</header>
 
 {% if status.state != 'running' %}
-<div style="padding: 18px 20px; background: var(--bg-1); border: 1px solid var(--bg-3); margin: 16px 0;">
-  <p style="font-size: 0.875rem; color: var(--fg-1); margin: 0;">
-    llama-server is not running.
-    <a href="/ui/launch" style="color: var(--accent); font-weight: 500;">Launch it</a> to start chatting.
-  </p>
-</div>
+<p class="chat-page-notice">
+  llama-server is not running.
+  <a href="/ui/launch">Launch it</a> to start chatting.
+</p>
 {% endif %}
 
-{# ---- Chat app with history sidebar ---- #}
-<div id="chat-app" style="display: flex; height: calc(100vh - 180px); min-height: 400px; margin-top: 12px;">
+{# Mobile-only toolbar with drawer toggles. Hidden on desktop via CSS. #}
+<div class="chat-toolbar">
+  <button type="button" class="lm-btn lm-btn--ghost"
+          data-chat-toggle="history">History</button>
+  <button type="button" class="lm-btn lm-btn--ghost"
+          data-chat-toggle="settings">Settings</button>
+</div>
 
-  {# History sidebar #}
+{# ---- Chat app with history sidebar ---- #}
+<div id="chat-app" class="chat-app">
+
+  {# History sidebar — drawer on mobile, fixed rail on desktop. #}
   <div class="chat-history-rail">
     <div class="chat-history-header">
       <span>Chats</span>
       <button id="history-new" type="button" style="margin-left: auto; background: transparent; border: 1px solid var(--bg-3); border-radius: 2px; padding: 3px 8px; font-size: 0.625rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-2); cursor: pointer;">New</button>
+      <button type="button" class="chat-drawer-close"
+              data-chat-toggle="history" aria-label="Close history">✕</button>
     </div>
     <div id="history-list" class="chat-history-list"></div>
     <div class="chat-history-foot">
@@ -153,7 +312,7 @@
   </div>
 
   {# Main chat area #}
-  <div style="flex: 1; display: flex; flex-direction: column; min-width: 0;">
+  <div class="chat-main-col">
     {# Settings bar #}
     <div class="chat-settings-bar" style="display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--bg-2); flex-wrap: wrap;">
       <div style="display: flex; align-items: center; gap: 6px;">
@@ -180,21 +339,21 @@
                style="font-size: 0.8125rem; padding: 4px 8px; min-width: 200px; max-width: 360px; border-bottom-width: 1px;">
       </div>
       <span id="chat-speed" class="chat-speed" style="display: none;"></span>
+      <button type="button" class="chat-drawer-close"
+              data-chat-toggle="settings" aria-label="Close settings">✕</button>
     </div>
 
     {# Messages #}
-    <div id="chat-messages" style="flex: 1; overflow-y: auto; padding: 16px 12px; display: flex; flex-direction: column; gap: 20px;">
+    <div id="chat-messages" class="chat-messages">
       <div id="chat-empty" style="color: var(--fg-3); font-style: italic; padding: 40px 0; text-align: center; font-size: 0.875rem;">Send a message to start chatting.</div>
     </div>
 
     {# Attachments strip — visible only when the current profile is
        vision-capable AND the user has picked at least one image. #}
-    <div id="chat-attachments"
-         style="display: none; padding: 8px 12px 0; gap: 8px; flex-wrap: wrap;
-                border-top: 1px solid var(--bg-2);"></div>
+    <div id="chat-attachments" class="chat-attachments" style="display: none;"></div>
 
-    {# Input #}
-    <div style="padding: 14px 12px 0; border-top: 1px solid var(--bg-2); display: flex; gap: 8px; align-items: flex-end;">
+    {# Input row — fixed to the bottom of the viewport on mobile. #}
+    <div class="chat-input-row">
       <button id="chat-attach" type="button" class="lm-btn lm-btn--ghost lm-btn--sm"
               title="Attach an image (only when the loaded profile supports vision)"
               style="flex-shrink: 0; padding: 9px 11px;"
@@ -210,6 +369,9 @@
               {% if status.state != 'running' %}disabled{% endif %}>Send</button>
     </div>
   </div>
+
+  {# Backdrop — fades in when any drawer is open. Tap to dismiss. #}
+  <div class="chat-backdrop" data-chat-toggle="close" aria-hidden="true"></div>
 </div>
 
 <script>
@@ -227,6 +389,29 @@
   var apiKey = {{ api_key | tojson }};
   var streaming = false;
   var userScrolledUp = false;
+
+  // ---- Mobile drawer toggles (no-op on desktop) ----
+  var chatApp = document.getElementById('chat-app');
+  function openDrawer(which) {
+    if (which !== 'history' && which !== 'settings') return;
+    chatApp.classList.remove('is-history-open', 'is-settings-open');
+    chatApp.classList.add('is-' + which + '-open', 'is-drawer-open');
+  }
+  function closeDrawers() {
+    chatApp.classList.remove('is-history-open', 'is-settings-open', 'is-drawer-open');
+  }
+  function isMobileChat() {
+    return window.matchMedia('(max-width: 900px)').matches;
+  }
+  document.querySelectorAll('[data-chat-toggle]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var target = btn.dataset.chatToggle;
+      if (target === 'close') { closeDrawers(); return; }
+      var openClass = 'is-' + target + '-open';
+      if (chatApp.classList.contains(openClass)) closeDrawers();
+      else openDrawer(target);
+    });
+  });
 
   // ---- Image attachment state (W3: vision input when profile.mmproj) ----
   // Each entry: {name, type, dataUrl}. Built from FileReader.readAsDataURL,
@@ -380,9 +565,16 @@
     var del = e.target.closest('.chat-history-del');
     if (del) { e.stopPropagation(); deleteChat(del.getAttribute('data-id')); return; }
     var item = e.target.closest('.chat-history-item');
-    if (item) switchTo(item.getAttribute('data-id'));
+    if (item) {
+      switchTo(item.getAttribute('data-id'));
+      // Auto-close the history drawer on mobile after picking a chat.
+      if (isMobileChat()) closeDrawers();
+    }
   });
-  historyNewBtn.addEventListener('click', newChat);
+  historyNewBtn.addEventListener('click', function () {
+    newChat();
+    if (isMobileChat()) closeDrawers();
+  });
 
   // ---- Markdown toggle ----
   var renderMarkdown = false;
@@ -567,6 +759,8 @@
   function send() {
     var text = inputEl.value.trim();
     if (!text || streaming || !activeChat) return;
+    // On mobile, close any open drawer so the user sees the message stream.
+    if (isMobileChat()) closeDrawers();
     activeChat.system = systemEl.value;
     if (!activeChat.messages.length) {
       activeChat.title = text.length > 40 ? text.slice(0, 40) + '...' : text;
@@ -624,9 +818,44 @@
     sendBtn.textContent = '...';
 
     var assistantEl = buildMsgEl('assistant', '');
-    // Show animated thinking dots as initial placeholder
+    // Show animated thinking dots as initial placeholder, with a small
+    // status banner above for the queue / swap phase. The banner is
+    // updated by SSE comment lines (`: status=...` / `: queue_pos=...`)
+    // emitted by the server while we wait, and wiped as soon as the
+    // first content token arrives.
     assistantEl.bubble.innerHTML = '';
+    var qStatus = { phase: '', pos: -1 };
+    var qBanner = document.createElement('div');
+    qBanner.className = 'chat-queue-status';
+    var qDot = document.createElement('span');
+    qDot.className = 'chat-queue-status__dot';
+    var qText = document.createElement('span');
+    qText.textContent = 'Sending…';
+    qBanner.appendChild(qDot);
+    qBanner.appendChild(qText);
+    assistantEl.bubble.appendChild(qBanner);
     assistantEl.bubble.appendChild(makeThinkingDots());
+    function renderQStatus() {
+      var t = 'Waiting…';
+      if (qStatus.phase === 'queued') {
+        if (qStatus.pos === 0) t = 'Next in line…';
+        else if (qStatus.pos > 0) t = 'Queued · ' + qStatus.pos + ' ahead';
+        else t = 'Queued…';
+      } else if (qStatus.phase === 'swapping_model') {
+        t = 'Loading model…';
+      } else if (qStatus.phase === 'running') {
+        // Tokens are imminent — switch to a generic "Generating".
+        // Will be wiped on first content delta anyway.
+        t = 'Generating…';
+      } else if (qStatus.phase) {
+        t = qStatus.phase;
+      }
+      qText.textContent = t;
+    }
+    function clearQStatus() {
+      if (qBanner && qBanner.parentNode) qBanner.parentNode.removeChild(qBanner);
+      qBanner = null;
+    }
     messagesEl.appendChild(assistantEl.el);
     scrollToBottom();
 
@@ -671,7 +900,24 @@
             var lines = buf.split('\n'); buf = lines.pop();
             for (var i = 0; i < lines.length; i++) {
               var line = lines[i].trim();
-              if (!line || line.startsWith(':')) continue;
+              if (!line) continue;
+              if (line.startsWith(':')) {
+                // SSE comment — server uses these to relay queue / swap
+                // status while we wait. Surface them as a small banner
+                // in the assistant bubble so the user can tell apart
+                // "queued" from "model swapping" from "generating".
+                var body = line.slice(1).trim();
+                if (body.indexOf('status=') === 0) {
+                  qStatus.phase = body.slice(7);
+                  if (qStatus.phase !== 'queued') qStatus.pos = -1;
+                  if (qBanner) renderQStatus();
+                } else if (body.indexOf('queue_pos=') === 0) {
+                  var n = parseInt(body.slice(10), 10);
+                  if (!isNaN(n)) qStatus.pos = n;
+                  if (qBanner) renderQStatus();
+                }
+                continue;
+              }
               if (!line.startsWith('data: ')) continue;
               var data = line.slice(6);
               if (data === '[DONE]') { finish(); return; }
@@ -690,6 +936,8 @@
                   fullContent += delta.content;
                 }
                 if (delta.content || delta.reasoning_content) {
+                  // First real token — drop the queue / swap banner.
+                  clearQStatus();
                   var p = parseThinking(fullContent, reasoningContent);
                   // Check if we're still in thinking phase
                   var stillThinking = reasoningContent ? !fullContent : !p.done;
@@ -727,6 +975,7 @@
         return read();
       })
       .catch(function (err) {
+        clearQStatus();
         assistantEl.bubble.textContent = 'Error: ' + err.message;
         assistantEl.bubble.style.color = 'var(--bad)';
         finish();
