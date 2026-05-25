@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.2.5-green.svg" alt="Version 0.2.5">
+  <img src="https://img.shields.io/badge/version-0.2.6-green.svg" alt="Version 0.2.6">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -156,7 +156,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.2.5" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.2.6" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -282,7 +282,9 @@ llamanager auto-creates a default profile when you pull a model. Add more from t
 
 ## Diffusion models
 
-The Diffusion engines page is the one-stop shop for the image side: per-engine setup cards, dependency installer, model downloader with progress, profile editor for the installed models, and the coexistence policy at the bottom.
+Two pages cover the image side. The **Diffusion engines** page (`/ui/setup-diffusion`) is the one-stop shop for setup: per-engine setup cards, dependency installer, model downloader with progress, and the coexistence policy at the bottom. The **Diffusion models** page (`/ui/diffusion-models`) is where you manage what's actually installed: a catalog of known-good models joined against what's on disk, an Activate button to pick the dashboard/API default, and the per-image-model profile editor (CRUD + clone + materialize built-in defaults). The catalog rows for not-yet-installed entries link back to the engines page with the canonical HF repo pre-suggested.
+
+Both pages also have CLI counterparts under `llamanager diffusion` — see [CLI](#cli).
 
 Three engines are wired today:
 
@@ -410,9 +412,13 @@ curl -X POST http://localhost:7200/v1/images/generations \
 
 ### Generating from the UI
 
-Open <http://localhost:7200/ui/images>. Pick a model, pick a profile, type a prompt, hit Generate. Results land in an asymmetric gallery; per-session history is in browser localStorage. Generated PNGs and a sidecar JSON live under `~/.llamanager/images/YYYY-MM-DD/<origin>/`. The gallery is size-capped (`[image].max_disk_gb = 10` by default, oldest-first GC).
+Open <http://localhost:7200/ui/images>. Three-pane workspace: an on-disk gallery on the left (every PNG under `~/.llamanager/images/YYYY-MM-DD/<origin>/`, newest first, lazy-loaded), the selected image plus its sidecar metadata in the center, and a schema-driven composer on the right.
 
-The images page also has a reference-image picker: an `+ Image` button, drag-and-drop onto the prompt, thumbnail strip with per-chip remove, and a `Keep original aspect` checkbox. The picker is engine-aware: switching to a Flux2 model auto-trims a multi-ref selection down to one.
+The composer auto-renders the right fields per engine by walking each adapter's `profile_schema()` — the same mechanism the Diffusion models page uses for profile editing. Pick a model, optionally pick one of its profiles to pre-fill the override placeholders, then override any individual field per-request. Generation streams back via SSE so the `<progress>` bar advances step-by-step rather than just toggling between "Queued" and "Done". When the request finishes, the new image is auto-prepended to the gallery and selected.
+
+Selected images surface their full sidecar (model, profile, seed, size, steps, guidance, duration) plus `Reuse prompt` / `Reuse seed` shortcuts that push the value back into the composer. Generated PNGs and a sidecar JSON live under `~/.llamanager/images/YYYY-MM-DD/<origin>/`. The gallery is size-capped (`[image].max_disk_gb = 10` by default, oldest-first GC).
+
+There's also a public sibling page at `/images` for non-admin API-key holders. Same three-pane layout; instead of the admin session cookie it accepts a bearer key (pasted on a login screen, stored in localStorage) and scopes the gallery to that origin's own directory.
 
 ### Sharing the GPU with the text engine
 
@@ -546,6 +552,8 @@ A built-in chat UI lives at <http://localhost:7200/chat>. Any user with a valid 
 
 The UI has streaming token display, multiple conversations stored in localStorage, configurable system prompt, per-conversation profile and model selection, a markdown toggle, and dark/light theme. The admin panel has its own chat page at `/ui/chat` that reuses the admin session.
 
+**Image input (vision).** When the currently-selected profile has an `mmproj` configured (i.e. it's vision-capable), a paperclip button appears next to the textarea. Click it (or drop files) to attach PNG/JPEG/WEBP/GIF images up to 10 MB each; thumbnails show above the input. On send, the message goes out as an OpenAI multimodal `content` array (`[{type:"text",text:"..."}, {type:"image_url",image_url:{url:"data:image/png;base64,..."}}]`) that llama-server with `--mmproj` consumes directly. Switching to a profile without `mmproj` hides the paperclip and clears any pending attachments. The public `/chat` page does the same — the bearer's `allowed_models` decides which profiles even appear in the dropdown.
+
 ## Auto-start at boot or login
 
 ### macOS — launchd
@@ -678,7 +686,24 @@ llamanager events [--limit 200]
 llamanager disk
 llamanager reload
 llamanager logs [--source llama-server|llamanager] [--tail 200]
+
+llamanager diffusion engines                              # per-engine install state + GPU detection
+llamanager diffusion install <engine> [--patch-flash-attn]
+llamanager diffusion cancel-install <engine>
+llamanager diffusion models                               # installed + catalog of installable
+llamanager diffusion activate <model_id>                  # set as dashboard/API default
+llamanager diffusion profiles list <model_id>
+llamanager diffusion profiles create <model_id> <name> [--field K=V ...] [--make-default]
+llamanager diffusion profiles update <model_id> <name> [--field K=V ...] [--rename NEW]
+llamanager diffusion profiles delete <model_id> <name>
+llamanager diffusion profiles clone <model_id> <name> <new_name>
+llamanager diffusion profiles set-default <model_id> [--profile NAME]
+llamanager diffusion profiles materialize-defaults <model_id> <engine>
+
+llamanager update [--check]                               # pull + reinstall + restart (same as the /ui/about button)
 ```
+
+`llamanager diffusion` is the CLI counterpart of the Diffusion engines + Diffusion models pages. `install` kicks the same auto-installer the UI button uses (with `--patch-flash-attn` to flip `use_flash_attn=True → False` in hidream-source's `pipeline.py` on AMD); `profiles ...` is full CRUD against per-image-model profiles. `update` runs `git pull --ff-only && pip install -e .` against the project dir then restarts the daemon — exactly what the `/ui/about` Update button does. `--check` reports the latest GitHub tag without doing anything.
 
 Example, an agent that wants to swap models before a long batch and revert after:
 
