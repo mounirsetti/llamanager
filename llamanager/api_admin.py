@@ -1,10 +1,13 @@
 """Admin endpoints — server lifecycle, queue, models, origins, logs, events."""
 from __future__ import annotations
 
+import logging
 import shutil
 import time
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -427,6 +430,15 @@ async def exclusive_set(request: Request, body: ExclusiveModeBody,
                 detail=f"invalid mode {body.mode!r}; "
                        f"must be one of {VALID_EXCLUSIVE_MODES}",
             )
+    # Pre-check the mutex with multi-slot so we can return a 409
+    # (Conflict) instead of a generic 400 — clients can branch on it.
+    if (body.mode is not None and body.mode.strip().lower() != "off"
+            and bool(getattr(cfg, "multi_slot_enabled", False))):
+        raise HTTPException(
+            status_code=409,
+            detail="cannot enable exclusive mode while multi-slot is on; "
+                   "disable multi-slot first.",
+        )
     try:
         update_exclusive_mode(
             cfg.path,
@@ -468,6 +480,196 @@ async def exclusive_sweep_now(request: Request,
         grace_seconds=float(getattr(cfg, "exclusive_grace_seconds", 5.0)),
     )
     return JSONResponse({"ran": True, "result": result.to_dict()})
+
+
+# ---------- multi-slot LLM (beta) ----------
+
+class SlotsEnableBody(BaseModel):
+    enabled: bool
+
+
+class SlotLoadBody(BaseModel):
+    model: str
+    profile: str | None = None
+    args: dict[str, Any] = Field(default_factory=dict)
+    force: bool = False
+
+
+class SlotsCoexBody(BaseModel):
+    allow: bool
+
+
+def _slots_payload(request: Request) -> dict[str, Any]:
+    cfg = request.app.state.cfg
+    sm = request.app.state.sm
+    slot_views: list[dict[str, Any]] = []
+    total_loaded_gb = 0.0
+    if hasattr(sm, "slots"):
+        slot_views = [sv.to_dict() for sv in sm.slots()]
+    if hasattr(sm, "total_loaded_size_gb"):
+        total_loaded_gb = sm.total_loaded_size_gb()
+    return {
+        "enabled": bool(getattr(cfg, "multi_slot_enabled", False)),
+        "max_slots": int(getattr(cfg, "multi_slot_max", 4)),
+        "base_port": int(getattr(cfg, "multi_slot_base_port", 7201)),
+        "allow_diffusion_with_slots": bool(
+            getattr(cfg, "allow_diffusion_with_slots", False)
+        ),
+        "total_loaded_size_gb": total_loaded_gb,
+        "slots": slot_views,
+    }
+
+
+@router.get("/slots")
+async def slots_status(request: Request,
+                       _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Snapshot of the slot fleet — used by the UI dashboard + CLI."""
+    return JSONResponse(_slots_payload(request))
+
+
+@router.post("/slots/enable")
+async def slots_enable(request: Request, body: SlotsEnableBody,
+                       _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Master switch. Force-disables exclusive_mode on the way ON; on
+    the way OFF, drains slots 1..N (up to 30s) then force-stops."""
+    from .config import (load_config, update_exclusive_mode,
+                         update_multi_slot)
+    cfg = request.app.state.cfg
+    sm = request.app.state.sm
+    if body.enabled:
+        # Mutex with exclusive mode: force exclusive=off first so
+        # update_multi_slot doesn't refuse.
+        if (getattr(cfg, "exclusive_mode", "off") or "off") != "off":
+            try:
+                update_exclusive_mode(cfg.path, mode="off")
+            except (ValueError, OSError) as e:
+                raise HTTPException(status_code=500,
+                                    detail=f"could not force exclusive off: {e}")
+            request.app.state.db.log_event("slots_force_exclusive_off", {})
+        try:
+            update_multi_slot(cfg.path, enabled=True)
+        except (ValueError, OSError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        new_cfg = load_config(cfg.path)
+        new_cfg.bind = cfg.bind
+        new_cfg.port = cfg.port
+        request.app.state.cfg = new_cfg
+        # Restore any slots 1..N that exist in the manifest from a
+        # previous enable. Boot is best-effort.
+        try:
+            await sm.boot_slots(supervisor=request.app.state.supervisor)
+        except Exception as e:  # noqa: BLE001
+            log.warning("slots: boot after enable failed: %s", e)
+    else:
+        # Drain + stop slots 1..N. Per user decision: wait up to 30s
+        # then force.
+        if hasattr(sm, "slots"):
+            for sv in sm.slots():
+                if sv.id == 0:
+                    continue
+                try:
+                    await sm.stop_slot(sv.id)
+                except Exception:  # noqa: BLE001
+                    log.exception("slots: stop_slot %d failed", sv.id)
+        try:
+            update_multi_slot(cfg.path, enabled=False)
+        except (ValueError, OSError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        new_cfg = load_config(cfg.path)
+        new_cfg.bind = cfg.bind
+        new_cfg.port = cfg.port
+        request.app.state.cfg = new_cfg
+    return JSONResponse(_slots_payload(request))
+
+
+@router.post("/slots")
+async def slots_add(request: Request,
+                    _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Allocate the next free slot id + port."""
+    cfg = request.app.state.cfg
+    sm = request.app.state.sm
+    if not getattr(cfg, "multi_slot_enabled", False):
+        raise HTTPException(status_code=409,
+                            detail="multi-slot is not enabled")
+    try:
+        slot_id = await sm.add_slot(supervisor=request.app.state.supervisor)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=409, detail=str(e))
+    return JSONResponse({"id": slot_id, **_slots_payload(request)})
+
+
+@router.delete("/slots/{slot_id}")
+async def slots_remove(request: Request, slot_id: int,
+                       _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Stop + remove a slot. Slot 0 is unremovable."""
+    sm = request.app.state.sm
+    try:
+        result = await sm.remove_slot(slot_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse({"result": result, **_slots_payload(request)})
+
+
+@router.post("/slots/{slot_id}/load")
+async def slots_load(request: Request, slot_id: int, body: SlotLoadBody,
+                     _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Load (or swap) a model into a specific slot.
+
+    v1 has no automatic VRAM admission — the dashboard surfaces total
+    loaded file size as a proxy for VRAM pressure (``size_gb`` per
+    slot in the response payload). ``body.force`` is accepted for
+    forward compatibility and currently ignored.
+    """
+    cfg = request.app.state.cfg
+    sm = request.app.state.sm
+    try:
+        spec = resolve_spec(cfg, model=body.model,
+                            profile=body.profile, args=body.args or {})
+    except (ServerError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    slot_sm = sm.slot(slot_id) if hasattr(sm, "slot") else None
+    if slot_sm is None:
+        raise HTTPException(status_code=404, detail=f"no such slot {slot_id}")
+    try:
+        if slot_sm.is_running:
+            await sm.swap_in(slot_id, spec)
+        else:
+            await sm.start_slot(slot_id, spec)
+    except ServerError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse(_slots_payload(request))
+
+
+@router.post("/slots/{slot_id}/unload")
+async def slots_unload(request: Request, slot_id: int,
+                       _: Origin = Depends(admin_origin)) -> JSONResponse:
+    sm = request.app.state.sm
+    try:
+        await sm.stop_slot(slot_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse(_slots_payload(request))
+
+
+@router.post("/slots/diffusion-coexistence")
+async def slots_diffusion_coex(request: Request, body: SlotsCoexBody,
+                               _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Toggle the ``allow_diffusion_with_slots`` policy.
+
+    When on, dispatching an image task does NOT unload the LLM slots;
+    operator accepts the VRAM contention risk.
+    """
+    from .config import load_config, update_coexistence_policy
+    cfg = request.app.state.cfg
+    try:
+        update_coexistence_policy(cfg.path, allow_diffusion_with_slots=body.allow)
+    except (ValueError, OSError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    new_cfg = load_config(cfg.path)
+    new_cfg.bind = cfg.bind
+    new_cfg.port = cfg.port
+    request.app.state.cfg = new_cfg
+    return JSONResponse(_slots_payload(request))
 
 
 # ---------- disk ----------

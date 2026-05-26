@@ -941,6 +941,20 @@ def _topbar_models(request: Request) -> dict[str, Any]:
 
     text.sort(key=lambda r: r["model_id"])
     image.sort(key=lambda r: r["model_id"])
+    # Multi-slot indicator strip: when the beta is on, the topbar
+    # renders one read-only row per slot below the main LLM lane. The
+    # views carry just enough to render the strip — id, port, model,
+    # and engine state. Empty list when the feature is off.
+    topbar_slots: list[dict[str, Any]] = []
+    if getattr(cfg, "multi_slot_enabled", False) and hasattr(sm, "slots"):
+        for sv in sm.slots():
+            topbar_slots.append({
+                "id": sv.id,
+                "port": sv.port,
+                "model": sv.model,
+                "profile": sv.profile,
+                "state": sv.state,
+            })
     return {
         "topbar_text_models": text,
         "topbar_image_models": image,
@@ -949,6 +963,8 @@ def _topbar_models(request: Request) -> dict[str, Any]:
         "topbar_default_llm": cfg.default_model or "",
         "topbar_default_image": cfg.default_image_model or "",
         "topbar_default_image_profile": cfg.default_image_profile or "",
+        "topbar_slots_enabled": bool(getattr(cfg, "multi_slot_enabled", False)),
+        "topbar_slots": topbar_slots,
     }
 
 
@@ -3876,4 +3892,174 @@ async def diffusion_profiles_materialize_defaults(
             )
     _reload_config(request)
     return RedirectResponse("/ui/diffusion-models", status_code=303)
+
+
+# ============================================================ #
+# Multi-slot LLM (beta) UI                                     #
+# ============================================================ #
+
+
+def _slots_ui_ctx(request: Request) -> dict[str, Any]:
+    cfg = request.app.state.cfg
+    sm = request.app.state.sm
+    reg: Registry = request.app.state.registry
+    text_model_ids: list[str] = []
+    for entry in reg.list():
+        try:
+            engine = detect_engine_for_id(entry.model_id, cfg.models_dir)
+        except Exception:
+            engine = "llama"
+        if ENGINE_FAMILY.get(engine, "text") == "text":
+            text_model_ids.append(entry.model_id)
+    slot_views: list[dict[str, Any]] = []
+    if hasattr(sm, "slots"):
+        slot_views = [sv.to_dict() for sv in sm.slots()]
+    return _ctx(
+        request,
+        slots_enabled=bool(getattr(cfg, "multi_slot_enabled", False)),
+        slots_max=int(getattr(cfg, "multi_slot_max", 4)),
+        slots_base_port=int(getattr(cfg, "multi_slot_base_port", 7201)),
+        slots_allow_diffusion=bool(
+            getattr(cfg, "allow_diffusion_with_slots", False)),
+        slots=slot_views,
+        text_model_ids=sorted(text_model_ids),
+        exclusive_mode_now=(getattr(cfg, "exclusive_mode", "off") or "off"),
+    )
+
+
+@router.get("/slots", response_class=HTMLResponse)
+async def slots_view(request: Request,
+                     _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    return templates.TemplateResponse(request, "slots.html",
+                                       _slots_ui_ctx(request))
+
+
+@router.post("/slots/toggle", response_class=HTMLResponse)
+async def slots_toggle(request: Request,
+                       enabled: str = Form("off"),
+                       _: None = Depends(require_csrf)) -> Response:
+    """Master switch. Mirrors POST /admin/slots/enable for the UI cookie path."""
+    from .config import (load_config, update_exclusive_mode,
+                         update_multi_slot)
+    cfg = request.app.state.cfg
+    sm = request.app.state.sm
+    want_on = (enabled == "on")
+    if want_on:
+        if (getattr(cfg, "exclusive_mode", "off") or "off") != "off":
+            try:
+                update_exclusive_mode(cfg.path, mode="off")
+                request.app.state.db.log_event(
+                    "slots_force_exclusive_off", {})
+            except (ValueError, OSError) as e:
+                return _error_html(
+                    f"could not force exclusive off: {e}", status_code=500)
+        try:
+            update_multi_slot(cfg.path, enabled=True)
+        except (ValueError, OSError) as e:
+            return _error_html(str(e), status_code=400)
+        new_cfg = load_config(cfg.path)
+        new_cfg.bind = cfg.bind
+        new_cfg.port = cfg.port
+        request.app.state.cfg = new_cfg
+        try:
+            await sm.boot_slots(supervisor=request.app.state.supervisor)
+        except Exception:  # noqa: BLE001
+            log.exception("slots: boot after enable failed")
+    else:
+        if hasattr(sm, "slots"):
+            for sv in sm.slots():
+                if sv.id == 0:
+                    continue
+                try:
+                    await sm.stop_slot(sv.id)
+                except Exception:  # noqa: BLE001
+                    log.exception("slots: stop_slot %d failed", sv.id)
+        try:
+            update_multi_slot(cfg.path, enabled=False)
+        except (ValueError, OSError) as e:
+            return _error_html(str(e), status_code=400)
+        new_cfg = load_config(cfg.path)
+        new_cfg.bind = cfg.bind
+        new_cfg.port = cfg.port
+        request.app.state.cfg = new_cfg
+    return RedirectResponse("/ui/slots", status_code=303)
+
+
+@router.post("/slots/add", response_class=HTMLResponse)
+async def slots_ui_add(request: Request,
+                       _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    sm = request.app.state.sm
+    if not getattr(cfg, "multi_slot_enabled", False):
+        return _error_html("multi-slot is not enabled", status_code=409)
+    try:
+        await sm.add_slot(supervisor=request.app.state.supervisor)
+    except Exception as e:  # noqa: BLE001
+        return _error_html(str(e), status_code=409)
+    return RedirectResponse("/ui/slots", status_code=303)
+
+
+@router.post("/slots/{slot_id}/remove", response_class=HTMLResponse)
+async def slots_ui_remove(request: Request, slot_id: int,
+                          _: None = Depends(require_csrf)) -> Response:
+    sm = request.app.state.sm
+    try:
+        await sm.remove_slot(slot_id)
+    except Exception as e:  # noqa: BLE001
+        return _error_html(str(e), status_code=400)
+    return RedirectResponse("/ui/slots", status_code=303)
+
+
+@router.post("/slots/{slot_id}/load", response_class=HTMLResponse)
+async def slots_ui_load(request: Request, slot_id: int,
+                        model: str = Form(...),
+                        profile: str = Form(""),
+                        _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    sm = request.app.state.sm
+    try:
+        spec = resolve_spec(cfg, model=model.strip(),
+                            profile=profile.strip() or None)
+    except (ServerError, ValueError) as e:
+        return _error_html(str(e), status_code=400)
+    slot_sm = sm.slot(slot_id) if hasattr(sm, "slot") else None
+    if slot_sm is None:
+        return _error_html(f"no such slot {slot_id}", status_code=404)
+    try:
+        if slot_sm.is_running:
+            await sm.swap_in(slot_id, spec)
+        else:
+            await sm.start_slot(slot_id, spec)
+    except ServerError as e:
+        return _error_html(str(e), status_code=400)
+    return RedirectResponse("/ui/slots", status_code=303)
+
+
+@router.post("/slots/{slot_id}/unload", response_class=HTMLResponse)
+async def slots_ui_unload(request: Request, slot_id: int,
+                          _: None = Depends(require_csrf)) -> Response:
+    sm = request.app.state.sm
+    try:
+        await sm.stop_slot(slot_id)
+    except Exception as e:  # noqa: BLE001
+        return _error_html(str(e), status_code=400)
+    return RedirectResponse("/ui/slots", status_code=303)
+
+
+@router.post("/slots/coex", response_class=HTMLResponse)
+async def slots_ui_coex(request: Request,
+                        allow: str = Form("off"),
+                        _: None = Depends(require_csrf)) -> Response:
+    from .config import load_config, update_coexistence_policy
+    cfg = request.app.state.cfg
+    try:
+        update_coexistence_policy(
+            cfg.path, allow_diffusion_with_slots=(allow == "on"))
+    except (ValueError, OSError) as e:
+        return _error_html(str(e), status_code=400)
+    new_cfg = load_config(cfg.path)
+    new_cfg.bind = cfg.bind
+    new_cfg.port = cfg.port
+    request.app.state.cfg = new_cfg
+    return RedirectResponse("/ui/slots", status_code=303)
 

@@ -392,6 +392,61 @@ def cmd_exclusive_sweep(args):
     return _run_admin(lambda: c.exclusive_sweep())
 
 
+# ---- slots (multi-slot LLM beta) ----
+
+def cmd_slots_status(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.slots_status())
+
+
+def cmd_slots_enable(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.slots_set_enabled(True))
+
+
+def cmd_slots_disable(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.slots_set_enabled(False))
+
+
+def cmd_slots_list(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.slots_status())
+
+
+def cmd_slots_add(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.slots_add())
+
+
+def cmd_slots_remove(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.slots_remove(args.slot_id))
+
+
+def cmd_slots_load(args):
+    c = _make_admin_client(args)
+    extra = _parse_kv_args(args.arg) if args.arg else {}
+    return _run_admin(lambda: c.slots_load(
+        args.slot_id,
+        model=args.model,
+        profile=args.profile,
+        args=extra or None,
+        force=bool(args.force),
+    ))
+
+
+def cmd_slots_unload(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.slots_unload(args.slot_id))
+
+
+def cmd_slots_coex(args):
+    c = _make_admin_client(args)
+    allow = args.state == "on"
+    return _run_admin(lambda: c.slots_diffusion_coex(allow))
+
+
 # ---- diffusion ----
 #
 # Talk to /admin/diffusion/* so the CLI can do what the
@@ -1190,6 +1245,66 @@ def main(argv: list[str] | None = None) -> int:
     sp = esp.add_parser("sweep",
                         help="run one sweep now (warn-scan if mode is off)")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_exclusive_sweep)
+
+    # slots — multi-slot LLM (beta). When the master switch is on,
+    # multiple llama-servers run in parallel, each holding a different
+    # model. Routing is by model id; cold-cache requests are rejected.
+    ssp = sub.add_parser(
+        "slots",
+        help="manage the multi-slot LLM beta (parallel models on their "
+             "own ports; routing by model id)",
+    ).add_subparsers(dest="slots_cmd", required=True)
+
+    sp = ssp.add_parser("status",
+                        help="enabled flag + per-slot dashboard")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_slots_status)
+
+    sp = ssp.add_parser("list",
+                        help="alias for `slots status`")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_slots_list)
+
+    sp = ssp.add_parser("enable",
+                        help="turn on the multi-slot beta (force-disables "
+                             "exclusive mode)")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_slots_enable)
+
+    sp = ssp.add_parser("disable",
+                        help="turn off — drains and stops slots 1..N")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_slots_disable)
+
+    sp = ssp.add_parser("add",
+                        help="allocate the next free slot id + port")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_slots_add)
+
+    sp = ssp.add_parser("remove",
+                        help="stop and remove a slot (slot 0 cannot be removed)")
+    sp.add_argument("slot_id", type=int)
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_slots_remove)
+
+    sp = ssp.add_parser("load",
+                        help="load (or swap) a model into a specific slot")
+    sp.add_argument("slot_id", type=int)
+    sp.add_argument("--model", required=True,
+                    help="model id (e.g. org/repo-GGUF/Q4_K_M.gguf)")
+    sp.add_argument("--profile", default=None,
+                    help="profile bound to that model (optional)")
+    sp.add_argument("--arg", action="append", default=None,
+                    metavar="KEY=VALUE",
+                    help="extra llama-server arg override (repeatable)")
+    sp.add_argument("--force", action="store_true",
+                    help="bypass the VRAM admission warning")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_slots_load)
+
+    sp = ssp.add_parser("unload",
+                        help="stop the model running in a specific slot")
+    sp.add_argument("slot_id", type=int)
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_slots_unload)
+
+    sp = ssp.add_parser("coex",
+                        help="diffusion-coexistence policy "
+                             "(on = image task keeps LLM slots loaded)")
+    sp.add_argument("state", choices=["on", "off"])
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_slots_coex)
 
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO,

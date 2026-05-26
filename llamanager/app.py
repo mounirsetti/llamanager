@@ -26,6 +26,7 @@ from .image_runner import ImageTaskRunner
 from .queue_mgr import QueueManager
 from .registry import Registry
 from .server_manager import ServerManager
+from .server_pool import ServerPool
 from .supervisor import Supervisor
 from .llama_installer import detect_binary, InstallState, list_variants
 from . import __version__
@@ -124,7 +125,10 @@ def create_app(config_path: Path | None = None,
     lookup_secret = load_or_create_lookup_secret(cfg.data_dir)
     auth = AuthManager(db, lookup_secret=lookup_secret,
                        default_priority=cfg.default_origin_priority)
-    sm = ServerManager(cfg, db)
+    # ``sm`` is the multi-slot pool. With ``cfg.multi_slot_enabled = False``
+    # (the default) the pool forwards every method to slot 0 and behaves
+    # byte-identically to the legacy single ServerManager.
+    sm = ServerPool(cfg, db)
     queue = QueueManager(cfg, db, sm)
     supervisor = Supervisor(cfg, sm)
     registry = Registry(cfg, db)
@@ -146,6 +150,14 @@ def create_app(config_path: Path | None = None,
     async def lifespan(app: FastAPI):  # type: ignore[override]
         queue.start()
         supervisor.start()
+
+        # Multi-slot beta: if the pool has a saved manifest, restore the
+        # additional slots and (re)start any that carry a model
+        # assignment. No-op when ``cfg.multi_slot_enabled`` is False.
+        try:
+            await sm.boot_slots(supervisor=supervisor)
+        except Exception:  # noqa: BLE001
+            log.exception("pool: boot_slots failed (continuing)")
 
         # Autolaunch the configured default model (+ its default profile if
         # any) when autolaunch is on and a binary is available.

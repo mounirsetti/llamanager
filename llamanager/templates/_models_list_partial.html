@@ -60,11 +60,40 @@
         </div>
 
         <div class="lm-model__actions">
+          {% if topbar_slots_enabled and topbar_slots %}
+          {# Multi-slot beta is on: replace the single Load button with a
+             dropdown listing every slot. Each option submits to the slot's
+             own load endpoint. When a slot already holds a model, the
+             item shows "slot N · <basename>" so the user can swap with
+             one click. #}
+          <details class="lm-slot-dropdown">
+            <summary class="lm-btn lm-btn--xs">Load into slot ▾</summary>
+            <div class="lm-slot-dropdown__menu">
+              {% for s in topbar_slots %}
+              <form method="post" action="/ui/slots/{{ s.id }}/load"
+                    style="margin: 0;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="model" value="{{ m.model_id }}">
+                <button type="submit" class="lm-slot-dropdown__item">
+                  <span class="lm-slot-dropdown__slot">slot {{ s.id }}</span>
+                  {% if s.model %}
+                  <span class="lm-slot-dropdown__sep">·</span>
+                  <code class="lm-slot-dropdown__current">{{ s.model.rsplit('/', 1)[-1] }}</code>
+                  {% else %}
+                  <span class="lm-slot-dropdown__empty">empty</span>
+                  {% endif %}
+                </button>
+              </form>
+              {% endfor %}
+            </div>
+          </details>
+          {% else %}
           <form method="post" action="/ui/models/load" style="display: inline;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="model_id" value="{{ m.model_id }}">
             <button type="submit" class="lm-btn lm-btn--xs">{% if is_loaded %}Reload{% else %}Load{% endif %}</button>
           </form>
+          {% endif %}
           {% if not is_default_model %}
           <form method="post" action="/ui/models/set-default" style="display: inline;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

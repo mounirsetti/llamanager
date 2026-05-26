@@ -212,6 +212,23 @@
       transition: color 180ms cubic-bezier(0.22, 1, 0.36, 1);
     }
     .lm-nav-link:hover { color: var(--fg-0); }
+    /* Inline pill used to flag beta nav entries. Sits to the right of
+       the link label and inherits the rail's quiet language. */
+    .lm-beta-pill {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 1px 6px;
+      font-size: 0.5625rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--fg-3);
+      border: 1px solid var(--bg-3);
+      border-radius: 2px;
+    }
+    .lm-nav-link[aria-current="page"] .lm-beta-pill {
+      color: var(--accent);
+      border-color: var(--accent);
+    }
     .lm-nav-link[aria-current="page"] {
       color: var(--fg-0);
       font-weight: 500;
@@ -323,6 +340,53 @@
       width: 1px;
       background: var(--bg-3);
       margin: 8px 20px;
+    }
+
+    /* Multi-slot strip — one row per slot, stacked vertically. Caps at
+       3 rows tall then scrolls. The clickable card jumps to /ui/slots. */
+    .lm-topbar__slots {
+      display: flex; flex-direction: column;
+      gap: 2px;
+      margin: 4px 0;
+      padding: 4px 10px;
+      max-height: calc(3 * 22px + 8px);  /* ~3 rows visible */
+      overflow-y: auto;
+      align-self: stretch;
+      text-decoration: none;
+      border-left: 1px solid var(--bg-3);
+      border-right: 1px solid var(--bg-3);
+      transition: background 140ms ease;
+    }
+    .lm-topbar__slots:hover { background: var(--bg-2); }
+    .lm-topbar__slot {
+      display: flex; align-items: center; gap: 8px;
+      padding: 2px 6px;
+      font-size: 0.6875rem;
+      color: var(--fg-2);
+      border-radius: 2px;
+      white-space: nowrap;
+    }
+    .lm-topbar__slot.is-loaded {
+      color: var(--fg-1);
+      border-left: 2px solid var(--accent);
+      padding-left: 4px;
+    }
+    .lm-topbar__slot-id {
+      font-family: 'JetBrains Mono', monospace;
+      letter-spacing: 0.04em;
+      color: var(--fg-3);
+    }
+    .lm-topbar__slot.is-loaded .lm-topbar__slot-id { color: var(--accent); }
+    .lm-topbar__slot-model {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.6875rem;
+      color: var(--fg-1);
+      overflow: hidden; text-overflow: ellipsis;
+      max-width: 22ch;
+    }
+    .lm-topbar__slot-empty {
+      font-family: 'Fraunces', serif; font-style: italic;
+      color: var(--fg-3);
     }
 
     /* sigil = label chip + state dot, set in the rhythm of the .lm-eyebrow */
@@ -1300,6 +1364,7 @@
         <a class="lm-nav-link" href="/ui/models" {% if active=='models' %}aria-current="page"{% endif %}>LLM models</a>
         <a class="lm-nav-link" href="/ui/diffusion-models" {% if active=='diffusion-models' %}aria-current="page"{% endif %}>Diffusion models</a>
         <a class="lm-nav-link" href="/ui/launch" {% if active=='launch' %}aria-current="page"{% endif %}>Launch</a>
+        <a class="lm-nav-link" href="/ui/slots" {% if active=='slots' %}aria-current="page"{% endif %}>Slots <span class="lm-beta-pill" aria-label="beta">beta</span></a>
         <a class="lm-nav-link" href="/ui/chat" {% if active=='chat' %}aria-current="page"{% endif %}>Chat</a>
         <a class="lm-nav-link" href="/ui/images" {% if active=='images' %}aria-current="page"{% endif %}>Images</a>
         <span class="lm-nav-eyebrow" style="margin-top: 16px;">Configure</span>
@@ -1432,6 +1497,25 @@
           </span>
           {% endif %}
         </form>
+
+        {% if topbar_slots_enabled and topbar_slots %}
+        {# Slot-status strip — one row per slot. Caps visible rows at
+           ~3 then scrolls. Click anywhere on the strip to jump to the
+           full management page at /ui/slots. #}
+        <a class="lm-topbar__slots" href="/ui/slots"
+           title="Manage slots (beta)">
+          {% for s in topbar_slots %}
+          <span class="lm-topbar__slot {% if s.model %}is-loaded{% endif %}">
+            <span class="lm-topbar__slot-id">slot {{ s.id }}</span>
+            {% if s.model %}
+            <code class="lm-topbar__slot-model">{{ s.model.rsplit('/', 1)[-1] }}</code>
+            {% else %}
+            <span class="lm-topbar__slot-empty">empty</span>
+            {% endif %}
+          </span>
+          {% endfor %}
+        </a>
+        {% endif %}
 
         <div class="lm-topbar__divider" aria-hidden="true"></div>
 

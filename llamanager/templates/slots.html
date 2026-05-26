@@ -1,0 +1,382 @@
+{% extends "base.html" %}
+{% set active = 'slots' %}
+{% block title %}Slots (beta) - llamanager{% endblock %}
+{% block content %}
+
+{# The multi-slot LLM beta page.
+
+   Layout:
+     1. Header row with the master switch on the right.
+     2. Inline note when the switch is on (mutex with exclusive mode +
+        the diffusion-coexistence toggle).
+     3. Slot table with [Load] / [Unload] / [Remove] per row + the
+        Add-slot affordance underneath.
+
+   When the switch is OFF, slot 0 is still shown so the operator gets
+   a baseline view of "what's loaded"; the per-row controls disappear
+   since there's nothing to assign. Add slot / Remove are hidden.
+#}
+
+<style>
+  .lm-slots-head {
+    display: flex; align-items: baseline; gap: 18px;
+    flex-wrap: wrap;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--bg-3);
+    margin-bottom: 22px;
+  }
+  .lm-slots-head__title { margin: 0; }
+  .lm-slots-head__lede {
+    margin: 0; max-width: 60ch;
+    font-size: 0.9375rem; color: var(--fg-1); line-height: 1.55;
+  }
+  .lm-slots-head__switch {
+    margin-left: auto;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .lm-slots-head__switch span {
+    font-size: 0.6875rem; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--fg-2);
+  }
+  /* iOS-style toggle, built from a single label + checkbox. Keeps the
+     interaction native (form-submit on change) without JS framework. */
+  .lm-toggle {
+    --w: 38px; --h: 22px; --pad: 3px;
+    position: relative;
+    display: inline-block;
+    width: var(--w); height: var(--h);
+  }
+  .lm-toggle input { opacity: 0; width: 0; height: 0; }
+  .lm-toggle__slider {
+    position: absolute; inset: 0;
+    background: var(--bg-2);
+    border: 1px solid var(--bg-3);
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 160ms ease, border-color 160ms ease;
+  }
+  .lm-toggle__slider::before {
+    content: "";
+    position: absolute;
+    top: var(--pad); left: var(--pad);
+    width: calc(var(--h) - var(--pad) * 2 - 2px);
+    height: calc(var(--h) - var(--pad) * 2 - 2px);
+    background: var(--fg-2);
+    border-radius: 50%;
+    transition: transform 160ms ease, background 160ms ease;
+  }
+  .lm-toggle input:checked + .lm-toggle__slider {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+  }
+  .lm-toggle input:checked + .lm-toggle__slider::before {
+    transform: translateX(calc(var(--w) - var(--h)));
+    background: var(--accent);
+  }
+  .lm-toggle__slider:hover { border-color: var(--fg-2); }
+  .lm-toggle input:checked + .lm-toggle__slider:hover {
+    border-color: var(--accent);
+  }
+
+  .lm-slots-note {
+    margin: 0 0 22px;
+    padding: 10px 14px;
+    background: oklch(from var(--accent) l c h / 0.06);
+    border-left: 2px solid var(--accent);
+    font-size: 0.875rem; color: var(--fg-1); line-height: 1.55;
+  }
+  .lm-slots-note__bullets {
+    margin: 6px 0 0; padding-left: 18px;
+    font-size: 0.8125rem; color: var(--fg-2);
+  }
+  .lm-slots-note__bullets li { margin: 2px 0; }
+
+  .lm-slots-stats {
+    display: flex; gap: 18px; flex-wrap: wrap;
+    margin-bottom: 14px;
+    font-size: 0.6875rem; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--fg-3);
+  }
+  .lm-slots-stats strong {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.8125rem; letter-spacing: 0;
+    text-transform: none; color: var(--fg-0);
+    font-weight: 500;
+    margin-left: 6px;
+  }
+
+  .lm-slot-table {
+    width: 100%; border-collapse: collapse;
+    border: 1px solid var(--bg-3);
+    background: var(--bg-1);
+    font-size: 0.875rem;
+  }
+  .lm-slot-table th, .lm-slot-table td {
+    padding: 10px 12px; text-align: left;
+    border-bottom: 1px solid var(--bg-3);
+    vertical-align: middle;
+  }
+  .lm-slot-table tr:last-child td { border-bottom: 0; }
+  .lm-slot-table th {
+    font-size: 0.6875rem; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--fg-2);
+    font-weight: 500;
+    background: var(--bg-0);
+  }
+  .lm-slot-table tr.is-loaded {
+    background: linear-gradient(90deg, var(--accent-soft), transparent 60%);
+  }
+  .lm-slot-table tr.is-loaded td:first-child {
+    border-left: 3px solid var(--accent);
+    padding-left: 9px;
+  }
+  .lm-slot__id {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8125rem; color: var(--fg-2);
+  }
+  .lm-slot__port {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem; color: var(--fg-3);
+  }
+  .lm-slot__model {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8125rem; color: var(--fg-0);
+    word-break: break-all;
+  }
+  .lm-slot__model--empty {
+    font-family: 'Fraunces', serif; font-style: italic;
+    color: var(--fg-3); font-size: 0.875rem;
+  }
+  .lm-slot__actions {
+    display: flex; gap: 6px; flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .lm-slot__actions form { margin: 0; }
+
+  /* Inline load form (model + profile selects + Load button) */
+  .lm-slot-load {
+    display: flex; gap: 6px; align-items: stretch;
+    flex-wrap: wrap;
+  }
+  .lm-slot-load select {
+    font-size: 0.75rem; padding: 4px 6px;
+    background: var(--bg-0); border: 1px solid var(--bg-3);
+    color: var(--fg-0);
+    max-width: 220px;
+  }
+  .lm-slot-add {
+    margin-top: 14px;
+    display: flex; gap: 10px; align-items: center;
+  }
+  .lm-slot-add__hint {
+    font-size: 0.75rem; color: var(--fg-3);
+  }
+
+  .lm-slots-coex {
+    display: flex; gap: 12px; align-items: center;
+    margin: 22px 0 6px;
+    font-size: 0.875rem; color: var(--fg-1);
+  }
+
+  /* Off-state: greyed dashboard. */
+  .lm-slots-empty {
+    margin-top: 18px;
+    padding: 16px 18px;
+    border: 1px dashed var(--bg-3);
+    background: var(--bg-1);
+    color: var(--fg-2);
+    font-size: 0.875rem;
+    font-family: 'Fraunces', serif; font-style: italic;
+  }
+  .lm-slots-empty strong { color: var(--fg-0); font-style: normal;
+                           font-family: 'Inter', sans-serif; }
+</style>
+
+<header class="lm-slots-head">
+  <div>
+    <div class="lm-eyebrow" style="margin-bottom: 4px;">Operate ·
+      <span style="color: var(--accent);">beta</span></div>
+    <h1 class="lm-page-title lm-slots-head__title">Slots</h1>
+    <p class="lm-slots-head__lede" style="margin-top: 6px;">
+      Run multiple LLM models in parallel, each in its own slot on its own
+      port. Requests route by <code>model</code> id — no swap penalty when
+      the requested model is already warm in some slot.
+    </p>
+  </div>
+  <div class="lm-slots-head__switch">
+    <span>{% if slots_enabled %}On{% else %}Off{% endif %}</span>
+    <form method="post" action="/ui/slots/toggle" style="margin: 0;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="enabled" value="{% if slots_enabled %}off{% else %}on{% endif %}">
+      <label class="lm-toggle"
+             data-confirm="{% if slots_enabled %}Turn slots OFF? Slots 1..N will be stopped and unloaded.{% else %}Turn slots ON? Exclusive mode will be force-disabled.{% endif %}">
+        <input type="checkbox" {% if slots_enabled %}checked{% endif %}
+               onclick="this.closest('form').submit();">
+        <span class="lm-toggle__slider" aria-hidden="true"></span>
+      </label>
+    </form>
+  </div>
+</header>
+
+{% if slots_enabled %}
+<div class="lm-slots-note">
+  Slots is <strong>on</strong>. A few rules to keep in mind:
+  <ul class="lm-slots-note__bullets">
+    <li><strong>Exclusive mode</strong> is automatically disabled (the two are
+        mutually exclusive — see the Launch page).</li>
+    <li>Requests that name an unloaded model are rejected with <code>409</code>
+        — you own slot assignments, no auto-eviction.</li>
+    <li>VRAM is the operator's call. Loading a 32 GB-worth of models on a
+        32 GB card will OOM somewhere.</li>
+  </ul>
+</div>
+
+{% set total_loaded_gb = (slots | selectattr('size_gb') | sum(attribute='size_gb', start=0)) | round(1) %}
+<div class="lm-slots-stats">
+  <span>Slots <strong>{{ slots | length }} / {{ slots_max }}</strong></span>
+  <span>Loaded <strong>{{ slots | selectattr('model') | list | length }}</strong></span>
+  <span>Combined size <strong>{{ '%.1f' % total_loaded_gb }} GB</strong></span>
+  <span>Base port <strong>{{ slots_base_port }}</strong></span>
+</div>
+
+<table class="lm-slot-table">
+  <thead>
+    <tr>
+      <th style="width: 7%;">Slot</th>
+      <th style="width: 10%;">Port</th>
+      <th>Model · profile</th>
+      <th style="width: 13%;">State</th>
+      <th style="width: 38%; text-align: right;">Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in slots %}
+    <tr class="{% if s.model %}is-loaded{% endif %}">
+      <td><span class="lm-slot__id">#{{ s.id }}{% if s.id == 0 %} · default{% endif %}</span></td>
+      <td><span class="lm-slot__port">:{{ s.port }}</span></td>
+      <td>
+        {% if s.model %}
+        <div>
+          <span class="lm-slot__model">{{ s.model }}</span>
+          {% if s.profile %}
+          <span style="color: var(--fg-2);">·</span>
+          <code style="font-size: 0.75rem; color: var(--fg-2);">{{ s.profile }}</code>
+          {% endif %}
+          {% if s.size_gb %}
+          <span style="color: var(--fg-3); font-size: 0.75rem; margin-left: 6px;">
+            {{ '%.1f' % s.size_gb }} GB
+          </span>
+          {% endif %}
+        </div>
+        {% else %}
+        <span class="lm-slot__model--empty">empty</span>
+        {% endif %}
+      </td>
+      <td>
+        <span class="lm-pill lm-pill--{{ s.state }}">{{ s.state }}</span>
+      </td>
+      <td class="lm-slot__actions">
+        {% if s.model %}
+        <form method="post" action="/ui/slots/{{ s.id }}/unload">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs"
+                  data-confirm="Unload {{ s.model }} from slot {{ s.id }}?">
+            Unload
+          </button>
+        </form>
+        {% endif %}
+        <form method="post" action="/ui/slots/{{ s.id }}/load" class="lm-slot-load">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <select name="model" required aria-label="Model">
+            <option value="">{% if s.model %}Swap to…{% else %}Load model…{% endif %}</option>
+            {% for mid in text_model_ids %}
+            <option value="{{ mid }}" {% if mid == s.model %}selected{% endif %}>
+              {{ mid.rsplit('/', 1)[-1] }}
+            </option>
+            {% endfor %}
+          </select>
+          <button type="submit" class="lm-btn lm-btn--xs">
+            {% if s.model %}Swap{% else %}Load{% endif %}
+          </button>
+        </form>
+        {% if s.id != 0 %}
+        <form method="post" action="/ui/slots/{{ s.id }}/remove">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs"
+                  data-confirm="Remove slot {{ s.id }}? Any in-flight requests will be aborted after a 30s drain window.">
+            Remove
+          </button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<div class="lm-slot-add">
+  {% if slots | length < slots_max %}
+  <form method="post" action="/ui/slots/add" style="margin: 0;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="lm-btn lm-btn--xs">+ Add slot</button>
+  </form>
+  <span class="lm-slot-add__hint">
+    {{ slots_max - (slots | length) }} more available.
+  </span>
+  {% else %}
+  <span class="lm-slot-add__hint">
+    Slot capacity ({{ slots_max }}) reached. Raise <code>[server].multi_slot_max</code>
+    in config.toml to add more.
+  </span>
+  {% endif %}
+</div>
+
+<div class="lm-slots-coex">
+  <form method="post" action="/ui/slots/coex" style="margin: 0; display: flex; align-items: center; gap: 10px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="allow" value="{% if slots_allow_diffusion %}off{% else %}on{% endif %}">
+    <label class="lm-toggle" data-confirm="{% if slots_allow_diffusion %}Disable: image tasks will unload all LLM slots while running.{% else %}Enable: image tasks will run alongside LLM slots. Risks VRAM OOM on smaller cards.{% endif %}">
+      <input type="checkbox" {% if slots_allow_diffusion %}checked{% endif %}
+             onclick="this.closest('form').submit();">
+      <span class="lm-toggle__slider" aria-hidden="true"></span>
+    </label>
+    <span>Allow diffusion alongside LLM slots</span>
+  </form>
+</div>
+
+{% else %}
+<div class="lm-slots-empty">
+  Slots is <strong>off</strong>. Toggle on above to add parallel LLM slots.
+  When off, llamanager runs one model at a time (legacy behaviour) — this is
+  the safe default for cards with limited VRAM.
+</div>
+
+{% if slots %}
+<div class="lm-slots-stats" style="margin-top: 22px;">
+  <span>Default slot loaded model:</span>
+</div>
+<table class="lm-slot-table">
+  <thead><tr><th>Slot</th><th>Port</th><th>Model · profile</th><th>State</th></tr></thead>
+  <tbody>
+  {% for s in slots %}
+    <tr class="{% if s.model %}is-loaded{% endif %}">
+      <td><span class="lm-slot__id">#{{ s.id }} · default</span></td>
+      <td><span class="lm-slot__port">:{{ s.port }}</span></td>
+      <td>
+        {% if s.model %}
+        <span class="lm-slot__model">{{ s.model }}</span>
+        {% if s.profile %}<span style="color: var(--fg-2);"> · </span>
+        <code style="font-size: 0.75rem; color: var(--fg-2);">{{ s.profile }}</code>{% endif %}
+        {% else %}
+        <span class="lm-slot__model--empty">empty</span>
+        {% endif %}
+      </td>
+      <td><span class="lm-pill lm-pill--{{ s.state }}">{{ s.state }}</span></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
+
+{% endblock %}

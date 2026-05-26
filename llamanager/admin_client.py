@@ -168,6 +168,38 @@ class AdminClient:
     def exclusive_sweep(self) -> dict[str, Any]:
         return self._post("/admin/exclusive/sweep")
 
+    # ---- multi-slot LLM (beta) ----
+
+    def slots_status(self) -> dict[str, Any]:
+        return self._get("/admin/slots")
+
+    def slots_set_enabled(self, enabled: bool) -> dict[str, Any]:
+        return self._post("/admin/slots/enable", {"enabled": bool(enabled)})
+
+    def slots_add(self) -> dict[str, Any]:
+        return self._post("/admin/slots")
+
+    def slots_remove(self, slot_id: int) -> dict[str, Any]:
+        return self._delete(f"/admin/slots/{slot_id}")
+
+    def slots_load(self, slot_id: int, *, model: str,
+                   profile: str | None = None,
+                   args: dict[str, Any] | None = None,
+                   force: bool = False) -> dict[str, Any]:
+        body: dict[str, Any] = {"model": model, "force": bool(force)}
+        if profile is not None:
+            body["profile"] = profile
+        if args:
+            body["args"] = args
+        return self._post(f"/admin/slots/{slot_id}/load", body)
+
+    def slots_unload(self, slot_id: int) -> dict[str, Any]:
+        return self._post(f"/admin/slots/{slot_id}/unload")
+
+    def slots_diffusion_coex(self, allow: bool) -> dict[str, Any]:
+        return self._post("/admin/slots/diffusion-coexistence",
+                          {"allow": bool(allow)})
+
     # ---- server lifecycle ----
 
     def server_start(self, *, profile: str | None = None,

@@ -270,21 +270,68 @@ class ServerError(Exception):
 
 
 class ServerManager:
-    def __init__(self, cfg: Config, db: DB):
+    def __init__(self, cfg: Config, db: DB, *,
+                 slot_id: int = 0,
+                 port_override: int | None = None) -> None:
+        """One llama-server child process.
+
+        ``slot_id`` and ``port_override`` exist for the multi-slot beta
+        (see ``server_pool.ServerPool``). With both at their defaults,
+        behaviour is byte-identical to the legacy single-instance design:
+        port from ``cfg.llama_server_port``, runtime persisted to
+        ``cfg.runtime_path``, log at ``logs_dir/llama-server.log``.
+
+        For non-default slots (``slot_id > 0``), the runtime state is
+        kept in-memory — the slot manifest in ``slots.json`` is the
+        persistence layer — and the log file is suffixed with the slot
+        id so simultaneously-running children don't interleave logs.
+        """
         self.cfg = cfg
         self.db = db
+        self.slot_id = slot_id
+        self._port = (port_override if port_override is not None
+                      else cfg.llama_server_port)
+        if slot_id == 0:
+            self._log_name = "llama-server.log"
+            self._runtime_path: Path | None = cfg.runtime_path
+            self.runtime: rt.RuntimeState = rt.load(cfg.runtime_path)
+        else:
+            self._log_name = f"llama-server-slot{slot_id}.log"
+            self._runtime_path = None  # in-memory only for non-default slots
+            self.runtime = rt.RuntimeState()
         self.proc: asyncio.subprocess.Process | None = None
         self.spec: StartSpec | None = None
-        self.runtime: rt.RuntimeState = rt.load(cfg.runtime_path)
         self._wait_task: asyncio.Task[int] | None = None
         self._lock = asyncio.Lock()
         self._log_fp = None  # type: ignore[assignment]
         self._intentional_stop = False
         # subscribers to unexpected-exit events
-        self._exit_listeners: list[asyncio.Queue[int]] = []
+        # Each listener queue receives ``(slot_id, returncode)`` tuples so a
+        # supervisor watching multiple slots can tell whose child died.
+        self._exit_listeners: list[asyncio.Queue[tuple[int, int]]] = []
+
+    # ---- internal: runtime persistence shim ----
+    def _save_runtime(self) -> None:
+        """Persist ``self.runtime`` to disk for slot 0; no-op for slot N>0.
+
+        Multi-slot's slot 1..N runtime is purely in-memory — the
+        persistent manifest in slots.json is the source of truth for
+        what gets re-started on daemon boot. This avoids generating a
+        runtime-slot1.json sibling for every slot and keeps the legacy
+        runtime.json shape unchanged.
+        """
+        if self._runtime_path is not None:
+            rt.save(self._runtime_path, self.runtime)
 
     # ---- lifecycle hooks ----
-    def add_exit_listener(self, q: asyncio.Queue[int]) -> None:
+    def add_exit_listener(self, q: asyncio.Queue) -> None:
+        """Subscribe to unexpected-exit events for this slot.
+
+        The queue receives ``(slot_id, returncode)`` tuples. A single
+        queue can be passed to multiple ServerManagers (see
+        ``ServerPool.add_exit_listener``) so one supervisor consumer
+        sees every slot's exits.
+        """
         self._exit_listeners.append(q)
 
     @property
@@ -293,7 +340,7 @@ class ServerManager:
 
     @property
     def upstream_base(self) -> str:
-        return f"http://127.0.0.1:{self.cfg.llama_server_port}"
+        return f"http://127.0.0.1:{self._port}"
 
     # ---- start ----
     async def start(self, spec: StartSpec) -> int:
@@ -308,8 +355,13 @@ class ServerManager:
             if spec.mmproj_path and not spec.mmproj_path.exists():
                 raise ServerError(f"mmproj file not found: {spec.mmproj_path}")
             # If exclusive mode is on, evict any foreign llama-server /
-                # engine workers before we try to claim the port + VRAM.
+            # engine workers before we try to claim the port + VRAM.
+            # Belt-and-suspenders: even if config drift somehow left the
+            # value set, multi-slot is mutually exclusive — skip the sweep.
             mode = (getattr(self.cfg, "exclusive_mode", "off") or "off").lower()
+            if (getattr(self.cfg, "multi_slot_enabled", False)
+                    and mode not in ("off", "")):
+                mode = "off"
             if mode not in ("off", ""):
                 try:
                     await _exclusive.sweep_and_record(
@@ -319,12 +371,12 @@ class ServerManager:
                     )
                 except Exception:  # noqa: BLE001 — sweep must never block start
                     log.exception("exclusive: pre-start sweep failed")
-            port = self.cfg.llama_server_port
+            port = self._port
             if not _port_free(port):
                 raise ServerError(f"port {port} is busy on 127.0.0.1")
 
             cmd = spec.cmdline(self.cfg.llama_server_binary, port, engine=engine)
-            log_path = self.cfg.logs_dir / "llama-server.log"
+            log_path = self.cfg.logs_dir / self._log_name
             log_path.parent.mkdir(parents=True, exist_ok=True)
             self._log_fp = open(log_path, "ab", buffering=0)
             log.info("launching %s engine: %s", engine, shlex.join(cmd))
@@ -351,7 +403,7 @@ class ServerManager:
                 started_at=time.time(),
                 last_event_at=time.time(),
             )
-            rt.save(self.cfg.runtime_path, self.runtime)
+            self._save_runtime()
             self.db.log_event("server_starting", {"pid": self.proc.pid,
                                                   "cmd": cmd,
                                                   "model": spec.model_id,
@@ -366,7 +418,7 @@ class ServerManager:
 
         self.runtime.state = "running"
         self.runtime.last_event_at = time.time()
-        rt.save(self.cfg.runtime_path, self.runtime)
+        self._save_runtime()
         self.db.log_event("server_running", {"pid": self.proc.pid if self.proc else None,
                                              "model": spec.model_id})
         return self.proc.pid if self.proc else -1
@@ -397,7 +449,7 @@ class ServerManager:
             self.runtime.current_model = None
             self.runtime.current_profile = None
             self.runtime.last_event_at = time.time()
-            rt.save(self.cfg.runtime_path, self.runtime)
+            self._save_runtime()
             self.db.log_event("server_stopped", {})
 
     async def _terminate(self) -> None:
@@ -447,7 +499,7 @@ class ServerManager:
         old_spec = self.spec
         self.runtime.state = "swapping"
         self.runtime.last_event_at = time.time()
-        rt.save(self.cfg.runtime_path, self.runtime)
+        self._save_runtime()
         self.db.log_event("server_swap_begin",
                           {"from": old_spec.model_id if old_spec else None,
                            "to": new_spec.model_id})
@@ -467,7 +519,7 @@ class ServerManager:
                 except Exception as e2:
                     self.runtime.state = "degraded"
                     self.runtime.last_event_at = time.time()
-                    rt.save(self.cfg.runtime_path, self.runtime)
+                    self._save_runtime()
                     self.db.log_event("server_degraded",
                                       {"reason": "rollback_failed", "error": str(e2)})
                     raise ServerError(
@@ -477,17 +529,20 @@ class ServerManager:
 
     # ---- crash detection ----
     def _notify_exit_listeners(self, rc: int) -> None:
-        """Push an exit code to every registered listener queue.
+        """Push ``(slot_id, rc)`` to every registered listener queue.
 
         Extracted so paths that aren't a real ``proc.wait()`` — like a
         failed restore after an image-yield — can still trigger the
         supervisor's restart/backoff cycle. Without this, a
         yield-to-image whose restore raised would leave the daemon in
         a non-running state with no recovery plan.
+
+        The slot id is included so a multi-slot supervisor can route
+        the crash back to the right ServerManager via the pool.
         """
         for q in list(self._exit_listeners):
             try:
-                q.put_nowait(rc)
+                q.put_nowait((self.slot_id, rc))
             except asyncio.QueueFull:
                 pass
 
@@ -503,7 +558,7 @@ class ServerManager:
         self.runtime.state = "crashed"
         self.runtime.pid = None
         self.runtime.last_event_at = time.time()
-        rt.save(self.cfg.runtime_path, self.runtime)
+        self._save_runtime()
         self._notify_exit_listeners(rc)
         return rc
 
@@ -544,7 +599,7 @@ class ServerManager:
     def mark_degraded(self, reason: str) -> None:
         self.runtime.state = "crashed"
         self.runtime.last_event_at = time.time()
-        rt.save(self.cfg.runtime_path, self.runtime)
+        self._save_runtime()
         self.db.log_event("server_supervisor_giveup", {"reason": reason})
 
     # ---- image-family coordination ----
@@ -580,7 +635,11 @@ class ServerManager:
         await self.stop()
         # Exclusive sweep before the image worker takes the slot — kills
         # any straggler llama-server / ComfyUI / etc. holding VRAM.
+        # Belt-and-suspenders mutex with multi-slot (see start()).
         mode = (getattr(self.cfg, "exclusive_mode", "off") or "off").lower()
+        if (getattr(self.cfg, "multi_slot_enabled", False)
+                and mode not in ("off", "")):
+            mode = "off"
         if mode not in ("off", ""):
             try:
                 await _exclusive.sweep_and_record(
@@ -617,7 +676,7 @@ class ServerManager:
                     self.runtime.state = "crashed"
                     self.runtime.pid = None
                     self.runtime.last_event_at = time.time()
-                    rt.save(self.cfg.runtime_path, self.runtime)
+                    self._save_runtime()
                     self._notify_exit_listeners(-1)
             else:
                 self.db.log_event("text_yield_to_image_kept_unloaded", {

@@ -65,6 +65,10 @@ class QueuedRequest:
     # when this is set, so early-abort paths (failures before dispatch)
     # don't leak capacity.
     dispatched: bool = False
+    # Multi-slot routing: set by the dispatcher to the slot id that
+    # owns this request's upstream. None means "use the pool default
+    # (slot 0)" — which is also the single-slot behaviour.
+    slot_id: int | None = None
 
     def heap_key(self) -> tuple[int, float, int]:
         # higher priority first → negate. Then FIFO by enqueued_at, then seq.
@@ -516,6 +520,69 @@ class QueueManager:
             req.ready.set()
             return
 
+        # ---- Multi-slot routing branch ----
+        # When the beta is on, we route by model id across N parallel
+        # ServerManagers instead of swapping a single slot. The cold-cache
+        # decision is "reject" per plan: the operator owns slot assignments.
+        if getattr(self.cfg, "multi_slot_enabled", False):
+            if wanted is None:
+                req.error = (
+                    "multi-slot is on; this request must include a model "
+                    "(via the request body or X-Llamanager-Model header)."
+                )
+                req.status = "failed"
+                self.db.update_request_status(req.request_id, "failed",
+                                              error=req.error,
+                                              finished_at=time.time())
+                req.ready.set()
+                return
+            slot_sm = None
+            if hasattr(self.sm, "find_for"):
+                slot_sm = self.sm.find_for(wanted)
+            if slot_sm is None:
+                req.error = (
+                    f"model {wanted!r} is not loaded in any slot. "
+                    "Load it via /ui/slots or `llamanager slots load`."
+                )
+                req.status = "failed"
+                self.db.update_request_status(req.request_id, "failed",
+                                              error=req.error,
+                                              finished_at=time.time())
+                req.ready.set()
+                return
+            # Found a slot. If the profile differs, swap in-place within
+            # that slot (cheap when the model file is the same — llama-server
+            # is restarted with new args).
+            target_spec = resolve_spec(self.cfg, model=wanted,
+                                       profile=wanted_profile)
+            if slot_sm.runtime.current_profile != target_spec.profile_name:
+                req.status = "swapping_model"
+                self.db.update_request_status(req.request_id, "swapping_model")
+                self.db.log_event("dispatch_slot_swap",
+                                  {"req": req.request_id,
+                                   "slot": slot_sm.slot_id,
+                                   "to_profile": target_spec.profile_name})
+                try:
+                    await slot_sm.swap(target_spec)
+                except Exception as e:
+                    req.error = f"slot {slot_sm.slot_id} swap failed: {e}"
+                    req.status = "failed"
+                    self.db.update_request_status(req.request_id, "failed",
+                                                  error=req.error,
+                                                  finished_at=time.time())
+                    req.ready.set()
+                    return
+            req.slot_id = slot_sm.slot_id
+            self._in_flight[req.request_id] = req
+            req.status = "running"
+            req.started_at = time.time()
+            self.db.update_request_status(req.request_id, "running",
+                                          started_at=req.started_at,
+                                          model=target_spec.model_id)
+            req.ready.set()
+            return
+
+        # ---- Legacy single-slot path (multi-slot off) ----
         need_swap = False
         target_spec: StartSpec | None = None
 

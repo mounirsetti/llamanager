@@ -145,7 +145,8 @@
     <span class="lm-section-meta">claim the GPU for llamanager</span>
   </header>
 
-  <div style="padding: 18px 20px; border: 1px solid var(--bg-3); background: var(--bg-1); max-width: 72ch;">
+  <div style="padding: 18px 20px; border: 1px solid var(--bg-3); background: var(--bg-1); max-width: 72ch;
+              {% if topbar_slots_enabled %}opacity: 0.55;{% endif %}">
     <p style="margin: 0 0 14px; font-size: 0.875rem; color: var(--fg-1); line-height: 1.6;">
       When on, llamanager kills foreign <code>llama-server</code> and engine workers
       (and, in aggressive mode, ComfyUI / vLLM / Ollama / SD WebUI / kohya / etc.)
@@ -154,6 +155,22 @@
       <code>{{ exclusive_heartbeat }} s</code> in the background.
     </p>
 
+    {% if topbar_slots_enabled %}
+    <p style="margin: 0 0 14px; padding: 8px 12px;
+              background: oklch(from var(--accent) l c h / 0.08);
+              border-left: 2px solid var(--accent);
+              font-size: 0.8125rem; color: var(--fg-1); line-height: 1.5;
+              font-family: 'Fraunces', serif; font-style: italic;">
+      Disabled while <strong style="font-style: normal; font-family: 'Inter', sans-serif;">
+      Slots (beta)</strong> is on — the two are mutually exclusive.
+      <a href="/ui/slots" style="color: var(--accent); font-style: normal;
+                                 font-family: 'Inter', sans-serif;">Open Slots</a>
+      to manage parallel models.
+    </p>
+    {% endif %}
+
+    <fieldset {% if topbar_slots_enabled %}disabled{% endif %}
+              style="border: 0; padding: 0; margin: 0;">
     <form method="post" action="/ui/launch/exclusive" style="margin-bottom: 14px;">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label style="display: flex; gap: 12px; align-items: center; font-size: 0.875rem; color: var(--fg-1);">
@@ -181,6 +198,7 @@
         Sweep now
       </button>
     </form>
+    </fieldset>
 
     {% if exclusive_last %}
     <details style="margin-top: 10px;">

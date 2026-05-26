@@ -160,7 +160,8 @@ def _apply_thinking_to_body(body: dict[str, Any], thinking: str,
 async def _proxy_non_streaming(
     qr: QueuedRequest, sm: ServerManager, path: str, body: dict[str, Any]
 ) -> Response:
-    url = f"{sm.upstream_base}{path}"
+    from ._routing import upstream_base as _upstream
+    url = f"{_upstream(sm, qr)}{path}"
     async with httpx.AsyncClient(timeout=None) as client:
         try:
             r = await client.post(url, json=body)
@@ -240,7 +241,9 @@ async def _stream_with_keepalives(
             return
 
         # Phase 2: proxy stream.
-        url = f"{sm.upstream_base}{path}"
+        from ._routing import upstream_base as _upstream
+        slot_base = _upstream(sm, qr)
+        url = f"{slot_base}{path}"
         try:
             async with httpx.AsyncClient(timeout=None) as client:
                 async with client.stream("POST", url, json=body) as r:
@@ -280,7 +283,7 @@ async def _stream_with_keepalives(
             )
             payload = {"error": {
                 "message": (
-                    f"could not reach inference engine at {sm.upstream_base}: "
+                    f"could not reach inference engine at {slot_base}: "
                     f"{e}. The engine may have crashed or stopped — check "
                     f"its status."
                 ),
@@ -1005,8 +1008,20 @@ async def list_models(request: Request) -> Response:
                 continue
             if a in registered:
                 visible.append(a)
-    if sm.runtime.current_model and sm.runtime.current_model not in visible:
-        visible.insert(0, sm.runtime.current_model)
+    # Surface every loaded slot's model so consumers see them all when
+    # multi-slot is on. ``sm.slots()`` exists on ServerPool; in legacy
+    # single-instance mode (or under tests with a bare ServerManager) we
+    # fall back to the single ``runtime.current_model`` field.
+    loaded_models: list[str] = []
+    if hasattr(sm, "slots"):
+        for sv in sm.slots():
+            if sv.model and sv.model not in loaded_models:
+                loaded_models.append(sv.model)
+    elif sm.runtime.current_model:
+        loaded_models.append(sm.runtime.current_model)
+    for m in loaded_models:
+        if m not in visible:
+            visible.insert(0, m)
 
     now = int(time.time())
     return JSONResponse({

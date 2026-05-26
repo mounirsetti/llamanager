@@ -59,6 +59,15 @@ exclusive_mode = "off"
 exclusive_grace_seconds = 5
 exclusive_heartbeat_seconds = 120
 
+# Multi-slot LLM (beta). When false, llamanager runs one llama-server at a
+# time (legacy behaviour). When true, multiple slots can each hold a
+# different model on its own port; routing is by `model` id in the request.
+# Mutually exclusive with `exclusive_mode` — enabling slots force-disables
+# exclusive sweeps.
+multi_slot_enabled = false
+multi_slot_base_port = 7201
+multi_slot_max = 4
+
 
 [defaults]
 model = ""
@@ -108,6 +117,10 @@ restart_text_after_image = true
 # Concurrent mode: keep both loaded at once. Risks VRAM OOM on cards with
 # less than ~48 GiB. Recommended only when you know both fit.
 allow_concurrent = false
+# Multi-slot only: when true AND `[server].multi_slot_enabled = true`,
+# dispatching an image task does NOT unload the LLM slots. VRAM headroom
+# is the operator's responsibility.
+allow_diffusion_with_slots = false
 """
 
 
@@ -357,6 +370,10 @@ class Config:
     unload_text_on_arrival: bool = True
     restart_text_after_image: bool = True
     allow_concurrent: bool = False
+    # Multi-slot only: when true AND ``multi_slot_enabled`` is true, image
+    # dispatch leaves LLM slots loaded. See server_pool.ServerPool and
+    # image_runner.ImageTaskRunner.run for the gating logic.
+    allow_diffusion_with_slots: bool = False
 
     # Where image outputs land. None → data_dir/images/.
     images_dir_override: Path | None = None
@@ -368,6 +385,12 @@ class Config:
     exclusive_mode: str = "off"
     exclusive_grace_seconds: float = 5.0
     exclusive_heartbeat_seconds: int = 120
+
+    # ---- multi-slot LLM (beta) ----
+    # Master switch + capacity caps. See server_pool.ServerPool.
+    multi_slot_enabled: bool = False
+    multi_slot_base_port: int = 7201
+    multi_slot_max: int = 4
 
     raw: dict[str, Any] = field(default_factory=dict)
     path: Path | None = None
@@ -534,6 +557,9 @@ def load_config(path: Path | None = None) -> Config:
         unload_text_on_arrival=bool(coex_cfg.get("unload_text_on_arrival", True)),
         restart_text_after_image=bool(coex_cfg.get("restart_text_after_image", True)),
         allow_concurrent=bool(coex_cfg.get("allow_concurrent", False)),
+        allow_diffusion_with_slots=bool(
+            coex_cfg.get("allow_diffusion_with_slots", False)
+        ),
         exclusive_mode=(
             str(server.get("exclusive_mode", "off") or "off").strip().lower()
             if str(server.get("exclusive_mode", "off") or "off").strip().lower()
@@ -541,6 +567,9 @@ def load_config(path: Path | None = None) -> Config:
         ),
         exclusive_grace_seconds=float(server.get("exclusive_grace_seconds", 5.0) or 5.0),
         exclusive_heartbeat_seconds=int(server.get("exclusive_heartbeat_seconds", 120) or 120),
+        multi_slot_enabled=bool(server.get("multi_slot_enabled", False)),
+        multi_slot_base_port=int(server.get("multi_slot_base_port", 7201) or 7201),
+        multi_slot_max=max(1, int(server.get("multi_slot_max", 4) or 4)),
         raw=raw,
         path=cfg_path,
     )
@@ -954,7 +983,12 @@ def update_exclusive_mode(cfg_path: Path, *,
                           mode: str | None = None,
                           grace_seconds: float | None = None,
                           heartbeat_seconds: int | None = None) -> None:
-    """Update the exclusive-mode knobs under [server] in config.toml."""
+    """Update the exclusive-mode knobs under [server] in config.toml.
+
+    Refuses to set a non-``off`` mode while ``multi_slot_enabled`` is on
+    — the two features are mutually exclusive. Caller (admin handler)
+    should either disable multi-slot first or surface the error.
+    """
     import tomlkit
     if mode is not None:
         m = mode.strip().lower()
@@ -968,6 +1002,12 @@ def update_exclusive_mode(cfg_path: Path, *,
     if "server" not in doc:
         doc.add("server", tomlkit.table())
     srv = doc["server"]
+    if mode is not None and mode != "off":
+        if bool(srv.get("multi_slot_enabled", False)):
+            raise ValueError(
+                "cannot enable exclusive mode while multi-slot is on; "
+                "disable multi-slot first (or set exclusive_mode = \"off\")."
+            )
     if mode is not None:
         srv["exclusive_mode"] = mode
     if grace_seconds is not None:
@@ -980,7 +1020,8 @@ def update_exclusive_mode(cfg_path: Path, *,
 def update_coexistence_policy(cfg_path: Path, *,
                               unload_text_on_arrival: bool | None = None,
                               restart_text_after_image: bool | None = None,
-                              allow_concurrent: bool | None = None) -> None:
+                              allow_concurrent: bool | None = None,
+                              allow_diffusion_with_slots: bool | None = None) -> None:
     """Update the [coexistence] section in config.toml."""
     import tomlkit
     doc = _load_tomlkit(cfg_path)
@@ -993,4 +1034,37 @@ def update_coexistence_policy(cfg_path: Path, *,
         sect["restart_text_after_image"] = bool(restart_text_after_image)
     if allow_concurrent is not None:
         sect["allow_concurrent"] = bool(allow_concurrent)
+    if allow_diffusion_with_slots is not None:
+        sect["allow_diffusion_with_slots"] = bool(allow_diffusion_with_slots)
+    _save_tomlkit(cfg_path, doc)
+
+
+def update_multi_slot(cfg_path: Path, *,
+                      enabled: bool | None = None,
+                      base_port: int | None = None,
+                      max_slots: int | None = None) -> None:
+    """Update the multi-slot knobs under [server] in config.toml.
+
+    Refuses to enable multi-slot while ``exclusive_mode != off`` — caller
+    must clear exclusive first (or the admin handler does the choreography
+    of writing both keys in one shot).
+    """
+    import tomlkit
+    doc = _load_tomlkit(cfg_path)
+    if "server" not in doc:
+        doc.add("server", tomlkit.table())
+    srv = doc["server"]
+    if enabled is True:
+        existing_excl = str(srv.get("exclusive_mode", "off") or "off")
+        if existing_excl.strip().lower() not in ("", "off"):
+            raise ValueError(
+                "cannot enable multi-slot while exclusive_mode is "
+                f"{existing_excl!r}; set exclusive_mode = \"off\" first."
+            )
+    if enabled is not None:
+        srv["multi_slot_enabled"] = bool(enabled)
+    if base_port is not None:
+        srv["multi_slot_base_port"] = int(base_port)
+    if max_slots is not None:
+        srv["multi_slot_max"] = max(1, int(max_slots))
     _save_tomlkit(cfg_path, doc)

@@ -914,7 +914,8 @@ async def _blocking_messages(request: Request, qm: QueueManager, qr,
     completion_tokens: int | None = None
     try:
         await qm.wait_for_slot(qr)
-        url = f"{sm.upstream_base}/v1/chat/completions"
+        from ._routing import upstream_base as _upstream
+        url = f"{_upstream(sm, qr)}/v1/chat/completions"
         try:
             async with httpx.AsyncClient(timeout=None) as client:
                 r = await client.post(url, json=openai_body)
@@ -1115,6 +1116,10 @@ async def count_tokens(request: Request) -> Response:
         approx = max(1, len(rendered) // 4)
         return JSONResponse({"input_tokens": approx})
 
+    # Advisory tokenize: hit slot 0 (the pool's default forwarder). Even
+    # with multi-slot on, we don't know which slot the caller intends to
+    # eventually talk to, so we use the default slot's tokenizer. The
+    # estimate is good enough for SDK budgeting.
     url = f"{sm.upstream_base}/tokenize"
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -1160,8 +1165,17 @@ async def list_models(request: Request) -> Response:
         registered = {m.model_id for m in reg.list()}
         visible = [a for a in origin.allowed_models
                    if a != "default" and a in registered]
-    if sm.runtime.current_model and sm.runtime.current_model not in visible:
-        visible.insert(0, sm.runtime.current_model)
+    # Union loaded slots so multi-slot users see every warm model.
+    loaded_models: list[str] = []
+    if hasattr(sm, "slots"):
+        for sv in sm.slots():
+            if sv.model and sv.model not in loaded_models:
+                loaded_models.append(sv.model)
+    elif sm.runtime.current_model:
+        loaded_models.append(sm.runtime.current_model)
+    for m in loaded_models:
+        if m not in visible:
+            visible.insert(0, m)
 
     now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     data = [{

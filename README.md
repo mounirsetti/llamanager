@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.3.1-green.svg" alt="Version 0.3.1">
+  <img src="https://img.shields.io/badge/version-0.3.9-green.svg" alt="Version 0.3.9">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -31,9 +31,11 @@
 
 ---
 
-llamanager runs on a single host you already own. It installs the inference engines, downloads model weights from Hugging Face, supervises the processes, queues requests with per-origin priorities, and exposes everything behind one OpenAI-compatible endpoint. Text and image families share the same dashboard, the same queue, and the same auth.
+llamanager runs on a single host you already own. It installs the inference engines, downloads model weights from Hugging Face, supervises the processes, queues requests with per-origin priorities, and exposes everything behind one OpenAI-compatible (and Anthropic-compatible) endpoint. Text and image families share the same dashboard, the same queue, and the same auth.
 
 The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silicon. The image side runs three diffusion stacks: HiDream-O1-Image, FLUX 2 via `sd.cpp`, and Z-Image (Tongyi-MAI), with Z-Anime supported as a Z-Image fine-tune. New engines plug in as small adapter modules.
+
+> **New in 0.3.9 · beta.** **Multi-slot LLM** lets you keep multiple language models warm at the same time, each on its own port. Routing is by model id — no swap penalty when the requested model is already loaded. Off by default; enable from the **Slots (beta)** page or `llamanager slots enable`. See [Multi-slot LLM (beta)](#multi-slot-llm-beta).
 
 ## Table of contents
 
@@ -44,6 +46,7 @@ The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silic
 - [First run](#first-run)
 - [The model picker top bar](#the-model-picker-top-bar)
 - [LLM models](#llm-models)
+- [Multi-slot LLM (beta)](#multi-slot-llm-beta)
 - [Diffusion models](#diffusion-models)
   - [Install dependencies](#install-dependencies)
   - [Download models](#download-models)
@@ -77,6 +80,7 @@ What you get out of the box:
 - **Per-origin priority queue** with cancellation that propagates all the way to the running subprocess. A long batch can't block your editor; cancelling a queued or in-flight image task actually stops the work.
 - **Family-aware concurrency.** Text and image are mutually exclusive by default (they fight over the same GPU), but the policy is one toggle to switch when you have the VRAM headroom.
 - **Hot-swap by header.** Requests can name a specific model via `X-Llamanager-Model`; the queue swaps the loaded model in-flight without dropping in-flight work.
+- **Multi-slot LLM (beta, since 0.3.9).** Opt-in mode that keeps several models warm in parallel slots, each on its own port. Requests route by model id — no swap penalty. Mutually exclusive with the host-wide "exclusive mode" sweep; managed from the **Slots** page or the `llamanager slots` CLI. See [Multi-slot LLM (beta)](#multi-slot-llm-beta).
 - **Crash supervisor** with a 3-in-5-minutes restart cap, applied to text servers and image engines alike.
 - **Sticky model picker** at the top of every page: pick the loaded LLM, save default LLM and default diffusion model, with a live "loaded" indicator.
 - **HTMX web UI** that works from a phone over Tailscale or any LAN.
@@ -156,7 +160,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.3.1" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.3.9" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -245,6 +249,8 @@ Every page in the admin UI has a sticky model-picker strip at the top, designed 
 
 The LLM lane has a pulsing dot when a model is loaded, the model and profile dropdowns, a primary `Load` button, an `Unload` icon, and a star toggle that saves the current selection as the default LLM. Clicking the filled star clears the default; clicking the hollow one sets it.
 
+When [Multi-slot LLM (beta)](#multi-slot-llm-beta) is enabled, a scrollable strip appears below the LLM lane showing one row per slot with its currently-loaded model. The strip caps at ~3 visible rows then scrolls; the whole strip is clickable and jumps to the Slots page. The **Load** button on the LLM models page becomes a dropdown listing every slot (`Load into slot N`, or `slot N · <model>` when already loaded).
+
 The diffusion lane has the same shape with one action: a star toggle that saves the selected model + profile as the default diffusion model. There's no `Load` for diffusion because the engines are one-shot per request; "default" means "use this when `/v1/images/generations` omits the model field".
 
 Setting both defaults is the fastest way to use llamanager from a client that doesn't know about your specific model IDs: send a request without a model and the right engine picks it up.
@@ -279,6 +285,178 @@ curl http://localhost:7200/admin/models \
 ```
 
 llamanager auto-creates a default profile when you pull a model. Add more from the LLM models page or in `config.toml` (see [Configuration](#configuration)).
+
+## Multi-slot LLM (beta)
+
+> **Status:** beta as of **0.3.9**. The wire format and config keys are
+> considered stable; the UI dashboard and crash-recovery semantics may
+> still evolve. Off by default; opt in from the **Slots** page or
+> `llamanager slots enable`.
+
+### What it solves
+
+Single-instance llamanager loads one LLM at a time. Every cross-model
+request pays a swap (stop, free VRAM, restart, warm) — fine when one
+model fits your workflow, painful when you alternate between, say, a
+fast 7B for autocomplete and a larger 30B for code review.
+
+Multi-slot keeps several `llama-server` processes alive in parallel,
+each on its own port, each holding a different model. Requests are
+routed by `model` id — when the model is already warm in some slot,
+there's no swap and no warm-up cost. When it isn't, the request is
+rejected with a clear error (no auto-eviction in v1 — the operator
+owns slot assignments).
+
+### Quick start
+
+1. Open **Slots (beta)** in the left nav.
+2. Flip the master switch ON. Exclusive mode is force-disabled if it
+   was on — the two features are mutually exclusive (see "Caveats").
+3. Click **Add slot** to allocate slot 1 (port 7202). Repeat up to
+   `multi_slot_max` (default 4).
+4. For each slot, pick a model from the dropdown and click **Load**.
+5. Send chat requests with `X-Llamanager-Model: <model id>` (or with
+   `model` in the JSON body). The dispatcher routes to whichever slot
+   holds that model.
+
+From the CLI:
+
+```bash
+llamanager slots enable
+llamanager slots add                       # → {"id": 1, ...}
+llamanager slots load 1 --model org/repo-7B-GGUF/Q4_K_M.gguf --profile fast
+llamanager slots add                       # → {"id": 2, ...}
+llamanager slots load 2 --model org/repo-30B-GGUF/Q4_K_M.gguf --profile balanced
+llamanager slots list                      # full dashboard JSON
+```
+
+Slot 0 is always the legacy single-instance slot — it can never be
+removed. Slots 1..N are added at runtime and persist in
+`~/.llamanager/slots.json`, so they survive daemon restarts.
+
+### Routing rules
+
+| Scenario | What happens |
+|----------|--------------|
+| Request names a model loaded in some slot | Routes to that slot. No swap. |
+| Request names a model loaded with a different profile | Swaps the profile **within that slot**. Other slots untouched. |
+| Request names a model not in any slot | Rejected with `failed` status and a clear "model X is not loaded in any slot — load it via /ui/slots or `llamanager slots load`" message. |
+| Request omits the model entirely | Rejected. Multi-slot requires the request to name a model — there's no ambiguous "default". |
+
+The `X-Llamanager-Slot` header is **not** part of v1. Routing is
+strictly by model id; if you load the same model into two slots
+(e.g. one with a long-context profile and one with a fast profile),
+only the first match is used. Distinguish them by giving each one a
+unique model id alias or by using `X-Llamanager-Profile` against the
+unique-named profile.
+
+### Topbar + Load button
+
+When multi-slot is on:
+
+- A scrollable strip in the top bar shows one row per slot with its
+  loaded model. The strip caps at ~3 rows visible; beyond that it
+  scrolls vertically. Click the strip to jump to the Slots page.
+- The **Load** button on the LLM models page becomes a dropdown
+  listing every slot: `Load into slot N` for empty slots,
+  `slot N · <current model>` for ones already holding something
+  (clicking swaps to your new pick).
+
+### Diffusion coexistence
+
+By default, dispatching an image task while LLM slots are loaded will
+unload **all** slots, run the image, then restart them — the same
+"yield_to_image" behaviour as the legacy single slot, fanned out
+across the pool.
+
+If you have the VRAM headroom and want LLM slots to stay loaded
+across image tasks, enable **"Allow diffusion alongside LLM slots"**
+on the Slots page (or `llamanager slots coex on`). With this on:
+
+```text
+[image task arrives]
+  → LLM slots stay loaded
+  → image worker spawns on whatever VRAM is left
+  → potential VRAM OOM is on you
+```
+
+This is independent of the legacy `[coexistence].allow_concurrent`
+flag, which governs single-slot mutual exclusion. With multi-slot
+on, only the new toggle applies.
+
+### Persistence
+
+Slot 0 keeps writing to `~/.llamanager/runtime.json` (legacy shape,
+unchanged). Slots 1..N are described in a sibling
+`~/.llamanager/slots.json`:
+
+```json
+{
+  "version": 1,
+  "slots": [
+    {"id": 1, "port": 7202, "model_id": "org/repo-7B.gguf",  "profile": "fast",     "args": {}},
+    {"id": 2, "port": 7203, "model_id": "org/repo-30B.gguf", "profile": "balanced", "args": {}}
+  ]
+}
+```
+
+On daemon start, llamanager re-creates each slot and (re)starts any
+that have a `model_id`. On disable (toggling the master switch off),
+slots 1..N are stopped but their entries are kept in `slots.json` so
+you can re-enable and find your layout intact.
+
+### Caveats
+
+- **No auto-eviction.** Requests for a model not in any slot fail
+  fast. This is deliberate — automatic LRU eviction would silently
+  drop a model you wanted kept warm. Plan your slot assignments
+  explicitly.
+- **No live VRAM admission.** The dashboard shows the **combined
+  on-disk file size** of loaded models as a VRAM-pressure proxy; the
+  daemon won't refuse a slot load that "looks" too big. On the
+  AMD AI PRO R9700 (32 GB) for example, two 13B-Q4 models fit
+  comfortably; two 30B-Q4 models do not. Treat the combined-size
+  number as your guardrail.
+- **Mutex with exclusive mode.** When slots is on, `exclusive_mode`
+  is force-disabled and the controls on the Launch page are greyed
+  out with a note. The reverse also holds: trying to enable
+  exclusive mode while slots is on returns HTTP 409. The two
+  features address opposite problems (exclusive: "kill everyone
+  else's GPU process"; slots: "run multiple of our own GPU
+  processes") and are mutually exclusive by design.
+- **Single-shared `--parallel`.** Within a single slot, llama-server
+  still allocates one decoding slot per request unless you pass
+  `--parallel N` via the profile args. Multi-slot is about parallel
+  *models*, not parallel requests against one model.
+- **`/admin/server/swap`** and the autolaunch path target slot 0
+  only — they predate slots and we keep that contract for the
+  legacy off-path. Use `llamanager slots load / swap` for slots
+  1..N.
+- **`/v1/models` and the Anthropic `/models` facade** union every
+  loaded slot's model so SDK clients discover them all.
+- **Crash supervisor is per-slot.** A flapping slot 2 enters its own
+  exponential cooldown window without affecting slot 0's recovery.
+- **Drain on disable / remove.** When you disable slots or remove a
+  slot, in-flight requests on the affected slot are aborted after a
+  short grace window (v1 takes the hammer route per spec).
+
+### Configuration
+
+```toml
+[server]
+multi_slot_enabled    = true     # master switch (write via /admin/slots/enable or the UI)
+multi_slot_base_port  = 7201     # first port for the pool; slot 0 uses this
+multi_slot_max        = 4        # hard cap on slot count
+
+[coexistence]
+allow_diffusion_with_slots = false   # when true AND slots is on,
+                                     # image tasks leave LLM slots loaded
+```
+
+Toggling `multi_slot_enabled` via SIGHUP hot-reload is **not** safe —
+slot lifecycles need explicit start/stop choreography. Always use
+`POST /admin/slots/enable`, `llamanager slots enable|disable`, or
+the UI toggle, which orchestrate the transition correctly.
 
 ## Diffusion models
 
@@ -442,6 +620,12 @@ unload_text_on_arrival = true
 restart_text_after_image = true
 allow_concurrent = false
 ```
+
+When the [Multi-slot LLM (beta)](#multi-slot-llm-beta) feature is on,
+the legacy `allow_concurrent` toggle no longer applies; the multi-slot
+equivalent is `[coexistence].allow_diffusion_with_slots` (also
+toggleable from the Slots page) which leaves every LLM slot loaded
+when an image task arrives.
 
 Cancellation: cancelling a queued image request removes it before it starts. Cancelling an in-flight one terminates the subprocess (SIGTERM, escalating to SIGKILL after 5 s) so the GPU is freed promptly.
 
@@ -732,9 +916,20 @@ llamanager diffusion profiles set-default <model_id> [--profile NAME]
 llamanager diffusion profiles materialize-defaults <model_id> <engine>
 
 llamanager update [--check]                               # pip install --upgrade + restart (same as the /ui/about button)
+
+llamanager slots status                                   # enabled flag + per-slot dashboard
+llamanager slots list                                     # alias for `slots status`
+llamanager slots enable                                   # turn on (force-disables exclusive mode)
+llamanager slots disable                                  # turn off — drains slots 1..N
+llamanager slots add                                      # allocate the next free slot id + port
+llamanager slots remove <slot_id>                         # stop + remove (slot 0 cannot be removed)
+llamanager slots load <slot_id> --model M [--profile P]   # load (or swap) a model into a slot
+        [--arg KEY=VALUE ...] [--force]
+llamanager slots unload <slot_id>                         # stop the model in a slot
+llamanager slots coex on|off                              # diffusion-coexistence (on = image keeps LLMs loaded)
 ```
 
-The CLI mirrors the web UI feature-for-feature: every page that lets you click something has a `llamanager` verb that does the same thing against `/admin/*`. `llamanager profiles` covers the LLM-profile editor on `/ui/models`, `llamanager diffusion` covers the Diffusion engines + Diffusion models pages, `llamanager setup` covers paths/coexistence/autolaunch and the llama-server installer, `llamanager models {set-default,add-existing,set-dir}` covers the LLM-model housekeeping rows, and `llamanager queue cancel-all` + `llamanager origins update` round out the existing groups. `update` runs `pip install --upgrade llamanager` against the daemon's venv and SIGTERMs so the supervisor restarts it — exactly what the `/ui/about` Update button does. `--check` reports the latest GitHub tag plus the detected install mode without doing anything. If the daemon was installed in editable / developer mode (`pip install -e .` from a git checkout), the auto-update refuses with instructions to run `git pull && pip install -e .` in the checkout yourself — the operator's checkout is the source of truth in that case.
+The CLI mirrors the web UI feature-for-feature: every page that lets you click something has a `llamanager` verb that does the same thing against `/admin/*`. `llamanager profiles` covers the LLM-profile editor on `/ui/models`, `llamanager diffusion` covers the Diffusion engines + Diffusion models pages, `llamanager setup` covers paths/coexistence/autolaunch and the llama-server installer, `llamanager slots` (beta, see [Multi-slot LLM (beta)](#multi-slot-llm-beta)) covers the parallel-model dashboard, `llamanager models {set-default,add-existing,set-dir}` covers the LLM-model housekeeping rows, and `llamanager queue cancel-all` + `llamanager origins update` round out the existing groups. `update` runs `pip install --upgrade llamanager` against the daemon's venv and SIGTERMs so the supervisor restarts it — exactly what the `/ui/about` Update button does. `--check` reports the latest GitHub tag plus the detected install mode without doing anything. If the daemon was installed in editable / developer mode (`pip install -e .` from a git checkout), the auto-update refuses with instructions to run `git pull && pip install -e .` in the checkout yourself — the operator's checkout is the source of truth in that case.
 
 Example, an agent that wants to swap models before a long batch and revert after:
 
@@ -760,6 +955,12 @@ llama_server_binary = "llama-server"   # or 'C:\path\to\llama-server.exe' as a T
 llama_server_port = 7201
 data_dir = "~/.llamanager"
 
+# Multi-slot LLM (beta, see "Multi-slot LLM (beta)" section). Off by
+# default; live toggle via /admin/slots/enable or `llamanager slots enable`.
+# multi_slot_enabled   = false
+# multi_slot_base_port = 7201   # slot 0 uses this; 1..N take the next free ports above
+# multi_slot_max       = 4
+
 [defaults]
 model = ""             # set by the top bar's LLM star toggle
 image_model = ""       # set by the top bar's diffusion star toggle
@@ -784,6 +985,9 @@ max_disk_gb = 10                          # cap for the on-disk image gallery
 unload_text_on_arrival = true
 restart_text_after_image = true
 allow_concurrent = false
+# Multi-slot only (ignored when multi_slot_enabled = false): when true,
+# image tasks do NOT unload LLM slots. VRAM headroom is on you.
+# allow_diffusion_with_slots = false
 ```
 
 > **Windows paths in TOML.** Backslashes inside double-quoted strings are escape sequences; `"C:\Users\..."` will fail to parse (the `\U` looks like a Unicode escape). Use TOML literal strings (single quotes), e.g. `'C:\Soulthread\Models'`, or escape every backslash: `"C:\\Soulthread\\Models"`.
@@ -823,7 +1027,8 @@ Full endpoint list is in spec §5.
 ~/.llamanager/
 ├── config.toml             static config (you edit this)
 ├── state.db                sqlite: origins, requests, downloads, events, engine_installs
-├── runtime.json            current run state (atomic writes)
+├── runtime.json            current run state (atomic writes; describes slot 0)
+├── slots.json              multi-slot manifest (created when slots is enabled)
 ├── .session-secret         signed-cookie secret (mode 0600)
 ├── bin/                    installed llama.cpp / fork binaries
 ├── venvs/                  per-engine Python venvs created by the installer

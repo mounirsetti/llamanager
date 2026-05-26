@@ -361,6 +361,58 @@
     text-transform: uppercase; color: var(--fg-2); margin: 4px 0 0;
   }
   .lm-btn--xs { padding: 4px 10px; font-size: 0.75rem; }
+
+  /* Multi-slot Load button: dropdown of slots to load this model into. */
+  .lm-slot-dropdown { position: relative; display: inline-block; }
+  .lm-slot-dropdown > summary {
+    list-style: none; cursor: pointer; user-select: none;
+  }
+  .lm-slot-dropdown > summary::-webkit-details-marker { display: none; }
+  .lm-slot-dropdown[open] > summary {
+    background: var(--bg-2);
+    color: var(--fg-0);
+  }
+  .lm-slot-dropdown__menu {
+    position: absolute; left: 0; top: calc(100% + 4px);
+    z-index: 5;
+    min-width: 220px;
+    background: var(--bg-1);
+    border: 1px solid var(--bg-3);
+    padding: 4px;
+    display: flex; flex-direction: column;
+    box-shadow: 0 6px 24px oklch(0 0 0 / 0.35);
+  }
+  .lm-slot-dropdown__item {
+    appearance: none; background: transparent; border: 0;
+    padding: 6px 10px;
+    text-align: left;
+    cursor: pointer;
+    font: inherit; font-size: 0.8125rem;
+    color: var(--fg-1);
+    display: flex; align-items: center; gap: 8px;
+    transition: background 120ms ease;
+  }
+  .lm-slot-dropdown__item:hover {
+    background: var(--bg-2);
+    color: var(--fg-0);
+  }
+  .lm-slot-dropdown__slot {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--accent);
+  }
+  .lm-slot-dropdown__sep { color: var(--fg-3); }
+  .lm-slot-dropdown__current {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--fg-2);
+    overflow: hidden; text-overflow: ellipsis;
+    max-width: 16ch; white-space: nowrap;
+  }
+  .lm-slot-dropdown__empty {
+    font-family: 'Fraunces', serif; font-style: italic;
+    font-size: 0.75rem; color: var(--fg-3);
+  }
   .lm-tabs {
     display: flex; gap: 4px;
     margin: 8px 0 6px;
