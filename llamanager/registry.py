@@ -396,10 +396,15 @@ class Registry:
         return download_id
 
     async def estimate_repo_size(self, repo: str,
-                                 subfolder: str | None = None) -> int:
+                                 subfolder: str | None = None,
+                                 files: list[str] | None = None) -> int:
         """Sum the byte sizes of files in an HF repo (or a single subfolder).
         Cheap — one metadata API call. Returns 0 if the call fails so the
-        UI can still proceed with an unknown estimate."""
+        UI can still proceed with an unknown estimate.
+
+        When ``files`` is given, only those specific filenames are summed
+        (used to seed the progress total for a single-file GGUF pull so the
+        download strip can show a percentage, not just bytes-so-far)."""
         try:
             from huggingface_hub import HfApi  # type: ignore
         except Exception:
@@ -419,9 +424,15 @@ class Registry:
             return 0
         total = 0
         prefix = (subfolder.strip("/") + "/") if subfolder else ""
+        want = {f.strip() for f in files if f.strip()} if files else None
         for sib in getattr(info, "siblings", []):
             name = getattr(sib, "rfilename", "") or ""
-            if prefix and not name.startswith(prefix):
+            if want is not None:
+                # Match by exact name or basename (callers pass either the
+                # repo-relative path or just the file name).
+                if name not in want and name.rsplit("/", 1)[-1] not in want:
+                    continue
+            elif prefix and not name.startswith(prefix):
                 continue
             size = getattr(sib, "size", None)
             if isinstance(size, int) and size > 0:

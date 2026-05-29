@@ -1118,6 +1118,84 @@
     .htmx-swapping { opacity: 0; transition: opacity 120ms cubic-bezier(0.22, 1, 0.36, 1); }
     .htmx-settling { opacity: 1; transition: opacity 120ms cubic-bezier(0.22, 1, 0.36, 1); }
 
+    /* ---------- global request progress bar ----------
+       A hairline bar pinned to the very top that creeps forward while any
+       foreground htmx request is in flight (loads, swaps, form posts) and
+       snaps to 100% when it settles. Background 2 s polls are excluded so
+       it doesn't flicker constantly. Gives the operator immediate "working
+       on it" feedback for actions that used to look like nothing happened
+       (model load/swap can take several seconds). */
+    #lm-progress {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+      z-index: 9999;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 240ms ease;
+    }
+    #lm-progress.is-active { opacity: 1; }
+    #lm-progress > i {
+      display: block;
+      height: 100%;
+      width: 0;
+      background: var(--accent);
+      box-shadow: 0 0 8px 0 var(--accent);
+      transition: width 200ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #lm-progress > i { transition: none; }
+    }
+
+    /* ---------- toasts ----------
+       Transient feedback, bottom-right. Errors (htmx 4xx/5xx responses,
+       which htmx otherwise swallows silently) surface here instead of
+       vanishing; the server can also push success/info toasts via an
+       ``HX-Trigger: {"lmToast": {...}}`` response header. */
+    #lm-toasts {
+      position: fixed;
+      bottom: 20px; right: 20px;
+      z-index: 10000;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-width: min(380px, calc(100vw - 40px));
+      pointer-events: none;
+    }
+    .lm-toast {
+      pointer-events: auto;
+      cursor: pointer;
+      background: var(--bg-2);
+      color: var(--fg-0);
+      border: 1px solid var(--bg-4);
+      border-left: 3px solid var(--fg-2);
+      border-radius: 3px;
+      padding: 12px 14px;
+      font-size: 0.875rem;
+      line-height: 1.4;
+      box-shadow: 0 8px 28px oklch(0 0 0 / 0.32);
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity 200ms ease, transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+      word-break: break-word;
+    }
+    .lm-toast.is-in { opacity: 1; transform: translateY(0); }
+    .lm-toast--error { border-left-color: var(--bad); }
+    .lm-toast--ok { border-left-color: var(--ok); }
+    .lm-toast__title {
+      display: block;
+      font-size: 0.6875rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+      margin-bottom: 3px;
+    }
+    .lm-toast--error .lm-toast__title { color: var(--bad); }
+    .lm-toast--ok .lm-toast__title { color: var(--ok); }
+    @media (max-width: 640px) {
+      #lm-toasts { left: 16px; right: 16px; bottom: 16px; max-width: none; }
+    }
+
     /* ---------- inline file/folder browser ---------- */
     .lm-fs-host { margin-top: 8px; }
     .lm-fs-host:empty { display: none; }
@@ -1337,6 +1415,11 @@
      click. hx-ext="morph" activates the idiomorph extension loaded in
      <head>; polled fragments use ``hx-swap="morph"`` to preserve form
      state across re-renders. The login form opts out explicitly. #}
+  {# The progress bar and toast host are created by JS and mounted on
+     <html> (document.documentElement), OUTSIDE <body>. hx-boost swaps the
+     body's innerHTML on every navigation/mutation, which would wipe (and
+     detach the JS references to) any chrome living inside it — that ate
+     toasts the instant they appeared. Living above <body> they're immune. #}
   <div class="lm-shell">
     <aside class="lm-rail">
       <div style="display:flex;flex-direction:column;gap:6px;">
@@ -1899,6 +1982,164 @@
         if (host2) host2.innerHTML = '';
       }
     });
+
+    /* These three handlers attach to document.body. hx-boost re-runs inline
+       scripts when it swaps the body, so guard against double-binding (which
+       would, e.g., fire a toast twice per error). */
+    if (!window.__lmChromeInit) {
+    window.__lmChromeInit = true;
+
+    /* ---- Preserve scroll position across in-page mutations ----
+       hx-boost turns form POSTs into whole-<body> swaps, and htmx scrolls
+       a boosted navigation back to the top. For an *action* on the current
+       page (load a model, save a default, cancel a download, toggle a
+       setting) that yanked the operator away from whatever they were doing
+       — the #1 reported annoyance. We snapshot scrollY before a POST that
+       swaps the body and restore it once the new content settles. Plain
+       GET nav links still scroll to top (real navigation). */
+    (function () {
+      var pendingY = null;
+      document.body.addEventListener('htmx:configRequest', function (e) {
+        var verb = (e.detail.verb || '').toLowerCase();
+        if (verb === 'post') {
+          pendingY = window.scrollY;          // in-page mutation: keep place
+        } else if (e.detail.target === document.body) {
+          pendingY = null;                    // boosted GET nav: allow top
+        }
+        // Fragment GETs (polls, search, fs-browser) leave pendingY untouched.
+      });
+      function restore(e) {
+        if (pendingY === null || e.detail.target !== document.body) return;
+        var y = pendingY;
+        pendingY = null;
+        window.scrollTo(0, y);
+        // htmx may set its own scroll after settle; re-assert next frame.
+        requestAnimationFrame(function () { window.scrollTo(0, y); });
+      }
+      document.body.addEventListener('htmx:afterSettle', restore);
+      document.body.addEventListener('htmx:responseError', function () {
+        pendingY = null;
+      });
+    })();
+
+    /* ---- Global request progress bar ----
+       Counts in-flight foreground requests; the bar creeps to ~90% while
+       work is pending and snaps to 100% when the last one settles. The 2 s
+       background polls (hx-trigger="every …") are excluded so it doesn't
+       strobe. */
+    (function () {
+      // Mounted on <html>, above <body>, so hx-boost body swaps can't wipe it.
+      var bar = document.createElement('div');
+      bar.id = 'lm-progress';
+      bar.setAttribute('aria-hidden', 'true');
+      bar.innerHTML = '<i></i>';
+      document.documentElement.appendChild(bar);
+      var inner = bar.firstElementChild;
+      var inflight = 0, timer = null, prog = 0;
+      function isPoll(elt) {
+        if (!elt || !elt.getAttribute) return false;
+        return (elt.getAttribute('hx-trigger') || '').indexOf('every') !== -1;
+      }
+      function start() {
+        if (++inflight !== 1) return;
+        prog = 8;
+        bar.classList.add('is-active');
+        inner.style.width = prog + '%';
+        clearInterval(timer);
+        timer = setInterval(function () {
+          prog += (90 - prog) * 0.14;       // ease toward 90%, never reach
+          inner.style.width = prog.toFixed(1) + '%';
+        }, 240);
+      }
+      function done() {
+        inflight = Math.max(0, inflight - 1);
+        if (inflight !== 0) return;
+        clearInterval(timer); timer = null;
+        inner.style.width = '100%';
+        setTimeout(function () {
+          bar.classList.remove('is-active');
+          setTimeout(function () { inner.style.width = '0%'; }, 240);
+        }, 180);
+      }
+      document.body.addEventListener('htmx:beforeRequest', function (e) {
+        if (!isPoll(e.detail.elt)) start();
+      });
+      document.body.addEventListener('htmx:afterRequest', function (e) {
+        if (!isPoll(e.detail.elt)) done();
+      });
+    })();
+
+    /* ---- Toasts ----
+       Surfaces errors that htmx would otherwise swallow (it does not swap
+       4xx/5xx responses by default, so failed loads/deletes/pulls used to
+       produce *no* visible feedback at all). The server can also push
+       success/info toasts via ``HX-Trigger: {"lmToast": {...}}``. */
+    (function () {
+      // Mounted on <html>, above <body>, so hx-boost body swaps can't wipe it
+      // (a toast added just before a boosted swap used to vanish instantly).
+      var host = document.createElement('div');
+      host.id = 'lm-toasts';
+      host.setAttribute('aria-live', 'polite');
+      host.setAttribute('aria-atomic', 'false');
+      document.documentElement.appendChild(host);
+      function toast(message, kind) {
+        if (!message) return;
+        var el = document.createElement('div');
+        el.className = 'lm-toast lm-toast--' + (kind === 'error' ? 'error' : 'ok');
+        el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+        var title = document.createElement('span');
+        title.className = 'lm-toast__title';
+        title.textContent = kind === 'error' ? 'Error' : 'Done';
+        var body = document.createElement('span');
+        body.textContent = message;
+        el.appendChild(title);
+        el.appendChild(body);
+        host.appendChild(el);
+        requestAnimationFrame(function () { el.classList.add('is-in'); });
+        var ttl = kind === 'error' ? 8000 : 4000;
+        var t = setTimeout(remove, ttl);
+        function remove() {
+          clearTimeout(t);
+          el.classList.remove('is-in');
+          setTimeout(function () { if (el.parentNode) el.remove(); }, 240);
+        }
+        el.addEventListener('click', remove);
+      }
+      function extractError(xhr) {
+        var raw = (xhr && xhr.responseText || '').trim();
+        var fallback = 'Something went wrong'
+          + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.';
+        if (!raw) return fallback;
+        try {
+          var j = JSON.parse(raw);
+          if (j && j.detail) return String(j.detail);
+        } catch (e) { /* not JSON */ }
+        var tmp = document.createElement('div');
+        tmp.innerHTML = raw;
+        var txt = (tmp.textContent || '').trim();
+        return txt || fallback;
+      }
+      document.body.addEventListener('htmx:beforeSwap', function (e) {
+        var xhr = e.detail.xhr;
+        if (xhr && xhr.status >= 400) {
+          e.detail.shouldSwap = false;   // don't paint the raw error fragment
+          toast(extractError(xhr), 'error');
+        }
+      });
+      document.body.addEventListener('htmx:sendError', function () {
+        toast('Network error — is the server still running?', 'error');
+      });
+      document.body.addEventListener('htmx:timeout', function () {
+        toast('That request timed out.', 'error');
+      });
+      // Server-sent toasts: HX-Trigger {"lmToast": {"message": "...", "kind": "ok|error"}}
+      document.body.addEventListener('lmToast', function (e) {
+        var d = e.detail || {};
+        toast(d.message || d.value || '', d.kind || 'ok');
+      });
+    })();
+
+    } /* end __lmChromeInit guard */
 
     /* Register service worker for PWA install support */
     if ('serviceWorker' in navigator) {

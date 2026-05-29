@@ -278,16 +278,21 @@ def create_app(config_path: Path | None = None,
                 max_age=SESSION_TTL_S,
             )
         # Restrictive CSP scoped to the admin UI: third-party origins are
-        # explicitly listed (HTMX on cdnjs, Google Fonts CSS + woff2). The
-        # `'unsafe-inline'` allowance covers the inline <style>/<script>
-        # shipped with the templates. A compromised origin is still bad, but
-        # it is constrained to the listed hosts and cannot exfiltrate
-        # cross-origin or run plugins.
+        # explicitly listed (HTMX on cdnjs, idiomorph on unpkg, Google Fonts
+        # CSS + woff2). The `'unsafe-inline'` allowance covers the inline
+        # <style>/<script> shipped with the templates. A compromised origin
+        # is still bad, but it is constrained to the listed hosts and cannot
+        # exfiltrate cross-origin or run plugins.
+        #
+        # NOTE: unpkg.com must be listed — the idiomorph morph extension
+        # (which preserves form state, focus, open <details> and scroll
+        # across the 2 s polls) is served from there. Without it the morph
+        # swaps silently fall back and live progress strips break.
         if request.url.path.startswith("/ui"):
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; "
                 "script-src 'self' 'unsafe-inline' "
-                "https://cdnjs.cloudflare.com; "
+                "https://cdnjs.cloudflare.com https://unpkg.com; "
                 "style-src 'self' 'unsafe-inline' "
                 "https://fonts.googleapis.com; "
                 "img-src 'self' data:; "

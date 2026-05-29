@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import platform
+import re
 import secrets
 import shutil
 import subprocess
@@ -924,6 +925,13 @@ def _topbar_models(request: Request) -> dict[str, Any]:
     text: list[dict[str, Any]] = []
     image: list[dict[str, Any]] = []
     for entry in reg.list():
+        # Same de-clutter as the models list: projectors aren't launchable
+        # and only a split GGUF's first shard is the load target.
+        if _is_mmproj(entry.model_id):
+            continue
+        part = _shard_index(entry.model_id)
+        if part is not None and part > 1:
+            continue
         engine = detect_engine_for_id(entry.model_id, cfg.models_dir)
         m = cfg.get_model(entry.model_id)
         profile_names = sorted(m.profiles.keys()) if m else []
@@ -1001,7 +1009,7 @@ def _error_html(message: str, status_code: int = 400) -> HTMLResponse:
     with untrusted data here."""
     safe = html_escape(message, quote=True)
     return HTMLResponse(
-        f"<div class='error'>{safe}</div>",
+        f"<div class='lm-error'>{safe}</div>",
         status_code=status_code,
     )
 
@@ -1218,6 +1226,30 @@ def _ctx_max_for(path: Path, engine: str) -> int:
     return value
 
 
+# A split/sharded GGUF is named ``<name>-00001-of-00005.gguf``. llama.cpp
+# loads the whole set from the first shard, so only that one is a launch
+# target; the rest are pieces of the same model.
+_SHARD_RE = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", re.IGNORECASE)
+
+
+def _is_mmproj(model_id: str) -> bool:
+    """True for vision-projector files. These aren't launchable models —
+    they're attachments referenced by a profile's ``mmproj`` field — so the
+    models list shouldn't show them as their own cards."""
+    return "mmproj" in model_id.rsplit("/", 1)[-1].lower()
+
+
+def _shard_index(model_id: str) -> int | None:
+    """1-based index of a split-GGUF shard, or None if not sharded."""
+    m = _SHARD_RE.search(model_id)
+    return int(m.group(1)) if m else None
+
+
+def _model_dir(model_id: str) -> str:
+    """Parent directory (repo) of a model id, or '' for a root-level file."""
+    return model_id.rsplit("/", 1)[0] if "/" in model_id else ""
+
+
 def _models_ctx(request: Request) -> dict:
     import sys as _sys
     import psutil as _psutil
@@ -1246,12 +1278,46 @@ def _models_ctx(request: Request) -> dict:
     # without poking dataclasses.
     text_models: list[dict] = []
     image_models: list[dict] = []
-    for entry in reg.list():
+
+    entries = reg.list()
+    # Pre-pass: which repo dirs ship a vision projector (so the model in that
+    # repo can show a "vision" hint), and the combined size of each split-GGUF
+    # series (so the first shard's card shows the whole model's size, not just
+    # part 1). Projector + non-first-shard files are then skipped as cards.
+    mmproj_dirs: set[str] = set()
+    shard_series_bytes: dict[str, int] = {}
+    for entry in entries:
+        if _is_mmproj(entry.model_id):
+            mmproj_dirs.add(_model_dir(entry.model_id))
+        if _shard_index(entry.model_id) is not None:
+            key = _SHARD_RE.sub("", entry.model_id)
+            shard_series_bytes[key] = shard_series_bytes.get(key, 0) + entry.size
+
+    for entry in entries:
+        mid = entry.model_id
+        # Vision projectors are attachments, not models — never list them.
+        if _is_mmproj(mid):
+            continue
+        # For a split GGUF, only the first shard represents the model.
+        part = _shard_index(mid)
+        if part is not None and part > 1:
+            continue
         d = entry.to_dict()
+        # Clean display name: drop the "-00001-of-00003" suffix so a folded
+        # split model reads as one model (model_id keeps the real first-shard
+        # path, which is what llama.cpp loads from).
+        base = mid.rsplit("/", 1)[-1]
+        d["display_name"] = (_SHARD_RE.sub("", base) + ".gguf") if part else base
+        if part == 1:
+            # Show the whole split model's size, not just shard 1.
+            d["size"] = shard_series_bytes.get(_SHARD_RE.sub("", mid), entry.size)
         engine = detect_engine_for_id(entry.model_id, cfg.models_dir)
         d["engine"] = engine
         d["engine_family"] = ENGINE_FAMILY.get(engine, "text")
         d["ctx_max"] = _ctx_max_for(entry.path, engine)
+        # Flag models whose repo ships a projector so the card can hint that
+        # it's vision-capable (the projector is wired up via a profile).
+        d["has_mmproj"] = bool(_model_dir(mid)) and _model_dir(mid) in mmproj_dirs
         m = cfg.get_model(entry.model_id)
         prof_entries: list[dict] = []
         default_profile = ""
@@ -1334,9 +1400,18 @@ async def models_downloads_strip(request: Request,
     from ``_models_list_partial`` is what lets open profile editors
     survive the poll — the model cards (and their inline forms) live
     in a sibling div that this endpoint never touches."""
-    return templates.TemplateResponse(
-        request, "_models_downloads_strip.html", _models_ctx(request),
+    ctx = _models_ctx(request)
+    resp = templates.TemplateResponse(
+        request, "_models_downloads_strip.html", ctx,
     )
+    # The strip only polls while a download is active. When a poll finds
+    # nothing active, a download just finished — tell the page (once) to
+    # refresh the model list so the new model appears in its card group.
+    active = [d for d in ctx["downloads"]
+              if d.get("status") in ("running", "pending")]
+    if not active:
+        resp.headers["HX-Trigger"] = "lmDownloadsIdle"
+    return resp
 
 
 @router.post("/models/load", response_class=HTMLResponse)
@@ -1400,13 +1475,32 @@ async def models_pull_ui(request: Request, source: str = Form(...),
                          files: str = Form(""),
                          _: None = Depends(require_csrf)) -> Response:
     reg: Registry = request.app.state.registry
+    src = source.strip()
     file_list = [f.strip() for f in files.split(",") if f.strip()] or None
+    # Seed bytes_total up-front for HF pulls so the progress bar shows a
+    # real percentage instead of only bytes-so-far. Best-effort: a failed
+    # estimate (no token, network blip) just leaves the total at 0 and the
+    # strip falls back to showing bytes downloaded.
+    bytes_total = 0
+    if src.startswith("hf://") or src.startswith("hf:"):
+        repo = src.removeprefix("hf://").removeprefix("hf:")
+        try:
+            bytes_total = await reg.estimate_repo_size(repo, files=file_list)
+        except Exception:
+            bytes_total = 0
     try:
-        reg.start_pull(source=source.strip(), files=file_list)
+        reg.start_pull(source=src, files=file_list, bytes_total=bytes_total)
     except Exception as e:
         return _error_html(f"pull failed: {e}", status_code=400)
-    # Render immediately so the HTMX polling div is present from the start
-    return templates.TemplateResponse(request, "models.html", _models_ctx(request))
+    # Render immediately so the HTMX polling div is present from the start,
+    # and pop a toast so the operator gets explicit confirmation the pull
+    # kicked off (the progress strip is higher up the page).
+    resp = templates.TemplateResponse(request, "models.html", _models_ctx(request))
+    resp.headers["HX-Trigger"] = json.dumps(
+        {"lmToast": {"message": "Download started — progress shows in the "
+                                "models list above.", "kind": "ok"}}
+    )
+    return resp
 
 
 @router.post("/models/set-dir", response_class=HTMLResponse)
@@ -1424,7 +1518,12 @@ async def models_set_dir(request: Request,
     config_path = cfg.config_path
     text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
     new_line = f'models_dir = {json.dumps(str(new_dir))}'
-    text, n = _re.subn(r'^models_dir\s*=\s*.*$', new_line, text, flags=_re.MULTILINE)
+    # Use a function replacement: a plain-string replacement makes re treat
+    # backslash sequences specially (\U, \1, …), which mangles Windows paths
+    # like C:\Users\… into invalid TOML and corrupts the config. A function
+    # returns the text verbatim.
+    text, n = _re.subn(r'^models_dir\s*=\s*.*$', lambda _m: new_line, text,
+                       flags=_re.MULTILINE)
     if n == 0:
         server_match = _re.search(r'^\[server\]', text, flags=_re.MULTILINE)
         if server_match:
@@ -3399,17 +3498,32 @@ async def models_set_default(request: Request,
 # ---- Top-bar (sticky model selector) routes ----
 
 def _topbar_redirect(request: Request) -> RedirectResponse:
-    """Send the operator back to where they triggered the top bar from
-    so the selector doesn't yank them to /ui/models on every action."""
-    referer = request.headers.get("referer", "") or "/ui/"
-    # Only honour same-origin referers; otherwise fall back to dashboard.
-    try:
-        ref_host = urlparse(referer).netloc
-    except Exception:
-        ref_host = ""
-    if ref_host and ref_host != request.url.netloc:
-        referer = "/ui/"
-    return RedirectResponse(referer, status_code=303)
+    """Send the operator back to the page they triggered the top bar from
+    so the selector doesn't yank them to the dashboard on every action.
+
+    We read HTMX's ``HX-Current-URL`` header first: the app sets
+    ``Referrer-Policy: no-referrer``, so the browser never sends a
+    ``Referer`` and the old referer-based logic *always* fell through to
+    ``/ui/`` — every topbar load/unload/star silently bounced the user to
+    the dashboard. ``HX-Current-URL`` is sent by htmx on every boosted
+    request and is immune to the referrer policy. We only honour the
+    same-origin path (never an absolute cross-origin URL)."""
+    target = "/ui/"
+    current = (request.headers.get("HX-Current-URL")
+               or request.headers.get("referer") or "")
+    if current:
+        try:
+            parsed = urlparse(current)
+        except Exception:
+            parsed = None
+        if parsed is not None and (not parsed.netloc
+                                   or parsed.netloc == request.url.netloc):
+            path = parsed.path or "/ui/"
+            if path.startswith("/ui"):
+                # Preserve query string (e.g. ?model=… on chat) so the
+                # operator lands exactly where they were.
+                target = path + (("?" + parsed.query) if parsed.query else "")
+    return RedirectResponse(target, status_code=303)
 
 
 @router.post("/topbar/llm/load", response_class=HTMLResponse)

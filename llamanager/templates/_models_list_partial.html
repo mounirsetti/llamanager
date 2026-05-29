@@ -39,9 +39,10 @@
     <details class="lm-model__expand" {% if is_loaded %}open{% endif %}>
       <summary class="lm-model__summary">
         <span class="lm-model__chevron" aria-hidden="true">▸</span>
-        <code class="lm-model__id">{{ m.model_id.rsplit('/', 1)[-1] }}</code>
+        <code class="lm-model__id">{{ m.display_name or m.model_id.rsplit('/', 1)[-1] }}</code>
         {% if is_loaded %}<span class="lm-pill lm-pill--running">loaded</span>{% endif %}
         {% if is_default_model %}<span class="lm-pill" style="color: var(--accent); border-color: var(--accent);">default</span>{% endif %}
+        {% if m.has_mmproj %}<span class="lm-pill" style="color: var(--fg-2);" title="A vision projector (mmproj) is available in this repo — wire it up in a profile to enable image input.">vision</span>{% endif %}
         <span class="lm-model__summary-spacer"></span>
         <span class="lm-model__summary-meta">
           {{ '%.1f GB' % (m.size / (1024**3)) }}
@@ -413,6 +414,19 @@
    partial lives at /ui/models/_downloads_strip. #}
 {% include "_models_downloads_strip.html" %}
 
+{# Card groups live in their own wrapper that reloads once when the
+   downloads strip goes idle (it fires ``lmDownloadsIdle`` from its poll
+   endpoint), so a freshly-pulled model appears without a manual refresh.
+   The strip is deliberately a SIBLING, not a child: a self-replacing
+   ``morph`` poll nested inside another self-replacing ``morph`` target
+   breaks the inner swap. The morph reload here keeps open profile
+   editors intact. #}
+<div id="models-cards"
+     hx-get="/ui/models/_list"
+     hx-trigger="lmDownloadsIdle from:body"
+     hx-select="#models-cards"
+     hx-swap="morph">
+
 {# ---- LLMs (text engines) ---- #}
 {% if show_text %}
 <div class="lm-models-group">
@@ -474,4 +488,6 @@
 </table>
 {% endif %}
 
-</div>
+</div>{# /#models-cards #}
+
+</div>{# /#models-list #}
