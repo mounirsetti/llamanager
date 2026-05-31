@@ -570,7 +570,11 @@
       </button>
     </form>
 
-    <form method="post" action="/ui/setup/restart">
+    {# Restart SIGTERMs the daemon, so opt out of hx-boost (like the Update
+       button does): let the browser do a full page nav and render the
+       "restarting…" response natively instead of htmx trying to swap a
+       partial out of a daemon that's mid-shutdown. #}
+    <form method="post" action="/ui/setup/restart" hx-boost="false">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="lm-btn lm-btn--danger"
               data-confirm="Restart llamanager? This will briefly disconnect all clients and stop the engine.">

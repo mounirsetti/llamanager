@@ -38,6 +38,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+from .caller import format_caller
 from .db import DB
 from .events import list_events
 
@@ -143,7 +144,9 @@ def _fmt_event(kind: str, payload: dict[str, Any]) -> tuple[str, str] | None:
                 p.get("task_type") == "image" and "image generation"
                 or "default model"
             )
-            return ("info", f"{label}: request from {origin_name} for {target}")
+            caller = format_caller(p.get("caller"))
+            who = f"{origin_name} {caller}" if caller else origin_name
+            return ("info", f"{label}: request from {who} for {target}")
         case "request_done":
             task = p.get("task_type") or "text"
             label = "chat" if task == "text" else task

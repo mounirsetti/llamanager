@@ -42,6 +42,7 @@ from .api_v1 import (
     _thinking_from_header,
 )
 from .auth import AuthManager, Origin
+from .caller import describe_caller
 from .config import Config
 from .queue_mgr import Cancelled, QueueFull, QueueManager
 from .registry import Registry
@@ -889,6 +890,7 @@ async def messages(request: Request) -> Response:
             origin=origin,
             model_required=model_required,
             profile_required=profile_required,
+            caller=await describe_caller(request),
         )
     except QueueFull:
         raise HTTPException(status_code=503, detail="queue full")

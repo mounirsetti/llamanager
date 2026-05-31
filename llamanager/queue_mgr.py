@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .auth import Origin
+from .caller import format_caller
 from .config import Config, ENGINE_FAMILY, detect_engine_for_id
 from .db import DB
 from .server_manager import ServerManager, StartSpec, resolve_spec
@@ -119,6 +120,7 @@ class QueueManager:
     async def enqueue(self, *, origin: Origin, model_required: str | None,
                       profile_required: str | None = None,
                       task_type: str | None = None,
+                      caller: dict[str, Any] | None = None,
                       ) -> QueuedRequest:
         active_pending = len(self._heap) - self._cancelled_in_heap
         if active_pending + len(self._in_flight) >= self.cfg.max_queue_depth:
@@ -152,11 +154,15 @@ class QueueManager:
             "model": model_required,
             "profile": profile_required,
             "origin": origin.name,
+            # Best-effort caller identity (peer addr, User-Agent, local PID).
+            # Absent/empty when the source can't be determined.
+            "caller": caller or None,
         })
         label = "chat" if req.task_type == "text" else req.task_type
         target = f"`{model_required}`" if model_required else "default model"
-        log.info("%s: request from %s for %s (id=%s)",
-                 label, origin.name, target, req.request_id)
+        caller_tail = f" {format_caller(caller)}" if caller else ""
+        log.info("%s: request from %s%s for %s (id=%s)",
+                 label, origin.name, caller_tail, target, req.request_id)
         async with self._cv:
             heapq.heappush(self._heap, (req.heap_key(), req))
             self._by_id[req.request_id] = req

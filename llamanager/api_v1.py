@@ -29,6 +29,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .auth import AuthManager, Origin
+from .caller import describe_caller
 from .config import ENGINE_FAMILY, Config, detect_engine_for_id
 from .engines._base import ImageRequest
 from .image_runner import ImageError, ImageTaskRunner, resolve_image_engine
@@ -333,6 +334,7 @@ async def _handle_inference(
             origin=origin,
             model_required=model_required,
             profile_required=profile_required,
+            caller=await describe_caller(request),
         )
     except QueueFull:
         raise HTTPException(status_code=503, detail="queue full")
@@ -737,6 +739,7 @@ async def images_generations(request: Request) -> Response:
             model_required=model_required,
             profile_required=profile_required,
             task_type="image",
+            caller=await describe_caller(request),
         )
     except QueueFull:
         raise HTTPException(status_code=503, detail="queue full")

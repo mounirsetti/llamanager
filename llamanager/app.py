@@ -371,7 +371,14 @@ def create_app(config_path: Path | None = None,
             "// llamanager service worker — enables PWA install\n"
             "self.addEventListener('install', e => self.skipWaiting());\n"
             "self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));\n"
-            "self.addEventListener('fetch', e => e.respondWith(fetch(e.request)));\n"
+            "// A registered fetch listener is enough to satisfy PWA install\n"
+            "// criteria. We deliberately do NOT call respondWith(): the old\n"
+            "// `e.respondWith(fetch(e.request))` pass-through re-issued every\n"
+            "// request and corrupted redirect handling for hx-boost POSTs\n"
+            "// (form submit -> 303 -> GET /ui/models), which stripped the page\n"
+            "// chrome and styles. Letting the browser serve requests natively\n"
+            "// preserves those semantics; we add no caching/offline behaviour.\n"
+            "self.addEventListener('fetch', () => {});\n"
         )
         return Response(content=sw_js, media_type="application/javascript",
                         headers={"Service-Worker-Allowed": "/"})
