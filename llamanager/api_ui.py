@@ -1551,14 +1551,63 @@ async def download_delete_ui(request: Request, download_id: str,
 
 
 def _open_path(path: str) -> None:
+    """Reveal ``path`` in the OS file manager (selecting the file when possible).
+
+    On Linux we deliberately avoid bare ``xdg-open`` as the primary strategy:
+    it chooses a handler from desktop-environment env vars, and when the server
+    process doesn't inherit those (launched from a stripped shell, a launcher,
+    or a service) it falls back to opening the path in the default *web
+    browser* — which renders the directory as a broken ``file://`` page. We talk
+    to the running file manager directly over the session bus instead, and only
+    fall back to ``xdg-open`` as a last resort.
+    """
     import subprocess, sys as _sys
     if _sys.platform == "darwin":
         subprocess.Popen(["open", "-R", path])
-    elif _sys.platform == "win32":
-        subprocess.Popen(["explorer", "/select,", path])
+        return
+    if _sys.platform == "win32":
+        # explorer selects a file; for a directory it opens it directly.
+        if Path(path).is_dir():
+            subprocess.Popen(["explorer", path])
+        else:
+            subprocess.Popen(["explorer", "/select,", path])
+        return
+
+    p = Path(path)
+    is_dir = p.is_dir()
+    # For a directory, open it so its contents show; for a file, open the
+    # containing directory and highlight the file.
+    if is_dir:
+        method, uri, target_dir = "ShowFolders", p.as_uri(), str(p)
     else:
-        # xdg-open opens the parent directory
-        subprocess.Popen(["xdg-open", str(Path(path).parent)])
+        method, uri, target_dir = "ShowItems", p.as_uri(), str(p.parent)
+    # 1) freedesktop FileManager1 — talks to the running file manager directly,
+    #    no XDG desktop detection (which can otherwise leak to a web browser).
+    try:
+        r = subprocess.run(
+            ["gdbus", "call", "--session",
+             "--dest", "org.freedesktop.FileManager1",
+             "--object-path", "/org/freedesktop/FileManager1",
+             "--method", f"org.freedesktop.FileManager1.{method}",
+             f"['{uri}']", ""],
+            timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if r.returncode == 0:
+            return
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        pass
+    # 2) gio open — uses the configured handler for inode/directory (file mgr).
+    try:
+        r = subprocess.run(["gio", "open", target_dir], timeout=5,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if r.returncode == 0:
+            return
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        pass
+    # 3) Last resort: xdg-open the directory.
+    try:
+        subprocess.Popen(["xdg-open", target_dir])
+    except (FileNotFoundError, OSError):
+        pass
 
 
 @router.post("/models/open-dir", response_class=HTMLResponse)
