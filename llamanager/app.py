@@ -215,6 +215,15 @@ def create_app(config_path: Path | None = None,
             )
         )
 
+        # Auto-update-when-idle scheduler. Always running; each tick reads
+        # app.state.cfg.auto_update_engines, so the loop is a no-op until an
+        # operator opts an engine in (UI switch / `llamanager setup
+        # auto-update`). See auto_update.AutoUpdater.
+        from .auto_update import AutoUpdater
+        au_stop = asyncio.Event()
+        app.state.auto_updater = AutoUpdater(app)
+        au_task = asyncio.create_task(app.state.auto_updater.run(au_stop))
+
         # SIGHUP -> reload config (POSIX only)
         loop = None
         try:
@@ -238,6 +247,8 @@ def create_app(config_path: Path | None = None,
             boot_sweep_task.cancel()
             excl_stop.set()
             excl_task.cancel()
+            au_stop.set()
+            au_task.cancel()
             await queue.stop()
             await supervisor.stop()
             await sm.stop()
@@ -257,6 +268,10 @@ def create_app(config_path: Path | None = None,
     # One InstallState per installable variant (source + backend), so the UI
     # can poll progress per variant independently.
     app.state.install_states = {v["id"]: InstallState() for v in list_variants()}
+    # On-demand version-picker caches (populated by the "Versions" buttons):
+    # variant id → list_versions() result; diffusion engine → versions+meta.
+    app.state.install_versions = {}
+    app.state.diffusers_versions = {}
     app.state.session_secret = _load_or_create_session_secret(cfg)
     # Server-side admin UI session store. Lives in-process; restart logs
     # everyone out, which is acceptable for a single-host operator UI.

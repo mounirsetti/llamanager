@@ -795,16 +795,67 @@ async def diffusion_engines(request: Request,
 
 class DiffusionInstallBody(BaseModel):
     patch_flash_attn: bool = False
+    # Optional explicit diffusers version (upgrade/downgrade). Persists as an
+    # override so auto-update converges to it instead of the shipped pin.
+    diffusers_version: str = ""
+    # Clear any existing override and reinstall the shipped DIFFUSERS_PIN.
+    reset_diffusers: bool = False
+
+
+@router.get("/diffusion/engines/{engine}/versions")
+async def diffusion_versions(request: Request, engine: str,
+                             _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """List installable diffusers versions (newest first) plus the engine's
+    installed version and current target (override or shipped pin)."""
+    import asyncio as _asyncio
+    from .engine_installer import (
+        list_diffusers_versions, diffusion_update_info,
+        diffusion_target_version, _plan_diffusers_pin,
+    )
+    cfg = request.app.state.cfg
+    loop = _asyncio.get_running_loop()
+    listing = await loop.run_in_executor(None, list_diffusers_versions)
+    # diffusion_update_info reads the installed version + computes has_update
+    # against the target (override or shipped pin) — the diffusion equivalent
+    # of "check for updates".
+    info = await loop.run_in_executor(None, diffusion_update_info, cfg, engine)
+    return JSONResponse({
+        "engine": engine,
+        "installed": info["installed"],
+        "target": info["target"],
+        "has_update": info["has_update"],
+        "pin": _plan_diffusers_pin(engine),
+        **listing,
+    })
 
 
 @router.post("/diffusion/engines/{engine}/install")
 async def diffusion_install(request: Request, engine: str,
                             body: DiffusionInstallBody = DiffusionInstallBody(),
                             _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .config import set_diffusers_override
+    cfg = request.app.state.cfg
     installer = request.app.state.engine_installer
     options: dict[str, Any] = {}
     if body.patch_flash_attn:
         options["patch_flash_attn"] = True
+
+    chosen = (body.diffusers_version or "").strip()
+    if body.reset_diffusers:
+        # Clear the override and reinstall the shipped pin.
+        set_diffusers_override(cfg.config_path, engine, None)
+        cfg.image_diffusers_version = {
+            k: v for k, v in (cfg.image_diffusers_version or {}).items()
+            if k != engine
+        }
+    elif chosen:
+        options["diffusers_version"] = chosen
+        # Persist as the override so a deliberate pin isn't re-bumped by
+        # auto-update.
+        set_diffusers_override(cfg.config_path, engine, chosen)
+        cfg.image_diffusers_version = dict(cfg.image_diffusers_version or {})
+        cfg.image_diffusers_version[engine] = chosen
+
     try:
         install_id = installer.start(engine, options=options)
     except (ValueError, RuntimeError) as e:
@@ -1576,6 +1627,9 @@ async def setup_autorestart(request: Request,
 class InstallLlamaBody(BaseModel):
     source: str = "llama.cpp"
     backend: str = ""
+    # Optional explicit upstream version (a GitHub release tag for llama
+    # sources, a mlx-lm PyPI version for MLX). Empty = install the latest.
+    version: str = ""
 
 
 @router.post("/setup/install-llama-server")
@@ -1586,7 +1640,8 @@ async def install_llama_server(request: Request,
 
     Returns the variant id immediately; poll
     ``GET /admin/setup/install-llama-server/status?variant=<id>`` to
-    watch progress."""
+    watch progress. ``version`` pins a specific build (upgrade or downgrade);
+    omit it to install the latest."""
     import asyncio as _asyncio
     from .llama_installer import (
         InstallState, install_variant, variant_id,
@@ -1594,6 +1649,7 @@ async def install_llama_server(request: Request,
     from .api_ui import _resolve_variant
     source, backend = _resolve_variant(body.source, body.backend)
     vid = variant_id(source, backend)
+    version = (body.version or "").strip() or None
     states: dict[str, InstallState] = request.app.state.install_states
     state = states.setdefault(vid, InstallState())
     if state.status == "running":
@@ -1603,9 +1659,60 @@ async def install_llama_server(request: Request,
     state.lines = []
     state.error = None
     state.installed_path = None
-    _asyncio.create_task(install_variant(state, source, backend))
+    _asyncio.create_task(install_variant(state, source, backend, version=version))
     return JSONResponse({"id": vid, "status": "running",
-                         "source": source, "backend": backend})
+                         "source": source, "backend": backend,
+                         "version": version})
+
+
+@router.get("/setup/engine-versions")
+async def setup_engine_versions(request: Request,
+                                variant: str,
+                                _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """List installable upstream versions for an LLM variant (newest first)."""
+    import asyncio as _asyncio
+    from .llama_installer import list_versions, parse_variant_id
+    parsed = parse_variant_id(variant)
+    if parsed is None:
+        raise HTTPException(status_code=400,
+                            detail=f"invalid variant id: {variant!r}")
+    source, backend = parsed
+    loop = _asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, list_versions, source, backend)
+    return JSONResponse({"variant": variant, **result})
+
+
+@router.get("/setup/check-updates")
+async def setup_check_updates(request: Request,
+                              variant: str = "",
+                              _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Check upstream for a newer build of one variant (``variant=<id>``) or
+    every installed variant (omit ``variant``). JSON mirror of the UI's
+    *Check for updates* button — returns ``{variant_id: {installed, latest,
+    has_update, error}}``."""
+    import asyncio as _asyncio
+    from .llama_installer import (
+        check_for_update, detect_variant_binary, list_variants, parse_variant_id,
+    )
+    loop = _asyncio.get_running_loop()
+    updates: dict[str, Any] = {}
+    if variant:
+        parsed = parse_variant_id(variant)
+        if parsed is None:
+            raise HTTPException(status_code=400,
+                                detail=f"invalid variant id: {variant!r}")
+        info = await loop.run_in_executor(None, check_for_update, *parsed)
+        updates[variant] = info.to_dict()
+    else:
+        for v in list_variants():
+            if detect_variant_binary(v["source"], v["backend"]) is None:
+                continue
+            info = await loop.run_in_executor(
+                None, check_for_update, v["source"], v["backend"])
+            updates[v["id"]] = info.to_dict()
+    # Cache so the UI's variant cards reflect the same result.
+    request.app.state.install_updates = updates
+    return JSONResponse({"updates": updates})
 
 
 @router.get("/setup/install-llama-server/status")
@@ -1655,4 +1762,88 @@ async def switch_variant(request: Request,
         "ok": True,
         "llama_server_binary": cfg.llama_server_binary,
         "llama_server_engine": cfg.llama_server_engine,
+    })
+
+
+# ---- auto-update-when-idle ----
+
+def _valid_auto_update_key(key: str) -> bool:
+    """Accept a llama variant id, a diffusion engine with an install plan,
+    or the reserved ``"llamanager"`` self-update key."""
+    from .auto_update import SELF_KEY
+    from .engine_installer import ENGINE_PLANS
+    from .llama_installer import parse_variant_id
+    if key == SELF_KEY:
+        return True
+    if parse_variant_id(key) is not None:
+        return True
+    return key in ENGINE_PLANS
+
+
+class AutoUpdateToggleBody(BaseModel):
+    engine: str
+    enabled: bool
+
+
+class AutoUpdateSettingsBody(BaseModel):
+    idle_seconds: int | None = None
+    check_interval_seconds: int | None = None
+
+
+@router.get("/setup/auto-update")
+async def get_auto_update(request: Request,
+                          _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Report the per-engine auto-update map + the idle/check tuning knobs."""
+    cfg = request.app.state.cfg
+    return JSONResponse({
+        "engines": dict(cfg.auto_update_engines or {}),
+        "idle_seconds": cfg.auto_update_idle_seconds,
+        "check_interval_seconds": cfg.auto_update_check_interval_seconds,
+    })
+
+
+@router.post("/setup/auto-update")
+async def set_auto_update(request: Request,
+                          body: AutoUpdateToggleBody,
+                          _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Flip one engine's auto-update-when-idle switch and persist it."""
+    from .config import update_auto_update
+    cfg = request.app.state.cfg
+    if not _valid_auto_update_key(body.engine):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"unknown engine key {body.engine!r}: expected a llama "
+                    f"variant id, a diffusion engine name, or 'llamanager'"))
+    update_auto_update(cfg.config_path, engine=body.engine, enabled=body.enabled)
+    cfg.auto_update_engines = dict(cfg.auto_update_engines or {})
+    cfg.auto_update_engines[body.engine] = body.enabled
+    request.app.state.db.log_event(
+        "auto_update_toggled", {"engine": body.engine, "enabled": body.enabled})
+    return JSONResponse({"ok": True, "engines": dict(cfg.auto_update_engines)})
+
+
+@router.post("/setup/auto-update/settings")
+async def set_auto_update_settings(request: Request,
+                                   body: AutoUpdateSettingsBody,
+                                   _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Tune the idle window and upstream-check cadence."""
+    from .config import update_auto_update
+    cfg = request.app.state.cfg
+    if body.idle_seconds is not None and body.idle_seconds < 0:
+        raise HTTPException(status_code=400, detail="idle_seconds must be >= 0")
+    if (body.check_interval_seconds is not None
+            and body.check_interval_seconds < 60):
+        raise HTTPException(status_code=400,
+                            detail="check_interval_seconds must be >= 60")
+    update_auto_update(cfg.config_path,
+                       idle_seconds=body.idle_seconds,
+                       check_interval_seconds=body.check_interval_seconds)
+    if body.idle_seconds is not None:
+        cfg.auto_update_idle_seconds = body.idle_seconds
+    if body.check_interval_seconds is not None:
+        cfg.auto_update_check_interval_seconds = body.check_interval_seconds
+    return JSONResponse({
+        "ok": True,
+        "idle_seconds": cfg.auto_update_idle_seconds,
+        "check_interval_seconds": cfg.auto_update_check_interval_seconds,
     })

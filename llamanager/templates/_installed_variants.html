@@ -57,6 +57,40 @@
             </form>
             {% endif %}
 
+            {# Version picker — fetched on demand so GitHub/PyPI isn't hit on
+               every load. Lets the operator install (or roll back to) any
+               available build. #}
+            {% set vlist = version_lists.get(v.id) if version_lists else none %}
+            {% if not vlist %}
+            <button type="button" class="lm-btn lm-btn--ghost lm-btn--sm lm-update-btn"
+                    hx-get="/ui/setup/versions?variant={{ v.id }}"
+                    hx-target="#installed-variants" hx-swap="outerHTML"
+                    hx-indicator="this">
+              <span class="lm-update-btn__idle">Versions&hellip;</span>
+              <span class="lm-update-btn__busy">Loading&hellip;</span>
+            </button>
+            {% elif vlist.error %}
+            <span class="lm-update-err">version list failed: {{ vlist.error[:80] }}</span>
+            {% elif vlist.versions %}
+            <form method="post" action="/ui/setup/install"
+                  style="display: inline-flex; gap: 6px; align-items: center;"
+                  data-confirm="Install this version of {{ v.source_label }} ({{ v.backend_label }})? This replaces the variant's binary; if it's the active engine, restart it afterward.">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="source" value="{{ v.source }}">
+              <input type="hidden" name="backend" value="{{ v.backend }}">
+              <select name="version" class="lm-input lm-input--mono" style="padding: 4px 6px; font-size: 0.8125rem;">
+                {% for rel in vlist.versions %}
+                <option value="{{ rel.version }}" {% if rel.version == v.installed_version %}selected{% endif %}>
+                  {{ rel.version }}{% if rel.version == v.installed_version %} (installed){% endif %}{% if rel.prerelease %} · pre-release{% endif %}
+                </option>
+                {% endfor %}
+              </select>
+              <button type="submit" class="lm-btn lm-btn--ghost lm-btn--sm">Install version</button>
+            </form>
+            {% else %}
+            <span class="mono" style="color: var(--fg-3); font-size: 0.8125rem;">no installable versions found</span>
+            {% endif %}
+
             {% if not v.active %}
             <form method="post" action="/ui/setup/switch-variant" style="display: inline-flex;">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -64,6 +98,21 @@
               <button type="submit" class="lm-btn lm-btn--ghost lm-btn--sm">Make active</button>
             </form>
             {% endif %}
+
+            {% set au_on = auto_update_engines.get(v.id) if auto_update_engines else false %}
+            <form method="post" action="/ui/setup/auto-update"
+                  class="lm-autoupdate" style="margin: 0;"
+                  title="When on, llamanager checks upstream for a newer build and updates this engine automatically once the daemon is idle.">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="engine" value="{{ v.id }}">
+              <input type="hidden" name="enabled" value="{% if au_on %}off{% else %}on{% endif %}">
+              <label class="lm-toggle">
+                <input type="checkbox" {% if au_on %}checked{% endif %}
+                       onclick="this.closest('form').submit();">
+                <span class="lm-toggle__slider" aria-hidden="true"></span>
+              </label>
+              <span>Auto-update when idle</span>
+            </form>
           </footer>
         </article>
         {% endif %}

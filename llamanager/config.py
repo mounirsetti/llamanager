@@ -121,6 +121,24 @@ allow_concurrent = false
 # dispatching an image task does NOT unload the LLM slots. VRAM headroom
 # is the operator's responsibility.
 allow_diffusion_with_slots = false
+
+[auto_update]
+# Per-engine "auto-update when idle". When an engine is enabled below,
+# llamanager checks upstream for a newer build on a fixed cadence and, once
+# the daemon has been idle (no in-flight or pending requests) for
+# `idle_seconds`, applies the update automatically. Off for every engine by
+# default — opt in per engine from the UI switch or `llamanager setup
+# auto-update <engine> on`.
+idle_seconds = 300              # quiet window required before an update fires
+check_interval_seconds = 21600  # how often each enabled engine checks upstream (6h)
+
+# Engine keys: a llama.cpp/MLX variant id ("llama.cpp-cuda", "atomic-vulkan",
+# "mlx-apple-silicon"), a diffusion engine name ("hidream", "z_image"), or the
+# reserved key "llamanager" for the daemon's own self-update.
+[auto_update.engines]
+# "llama.cpp-cuda" = true
+# "z_image"        = false
+# "llamanager"     = false
 """
 
 
@@ -361,6 +379,12 @@ class Config:
     # with llamanager (engines/_z_image_runner.py), so there's no
     # separate source folder to clone.
     z_image_python: str = ""
+    # Per-engine diffusers version override (engine name → version), set when
+    # the operator installs a specific diffusers version from the UI/CLI
+    # version picker. While set it overrides engine_installer.DIFFUSERS_PIN as
+    # the auto-update target so a deliberate downgrade isn't re-bumped. Stored
+    # under [image].diffusers_version.<engine>.
+    image_diffusers_version: dict[str, str] = field(default_factory=dict)
 
     # ---- coexistence policy ----
     # Default: when an image task arrives, snapshot the running text spec,
@@ -391,6 +415,15 @@ class Config:
     multi_slot_enabled: bool = False
     multi_slot_base_port: int = 7201
     multi_slot_max: int = 4
+
+    # ---- auto-update when idle ----
+    # See [auto_update] in DEFAULT_CONFIG_TOML and auto_update.AutoUpdater.
+    # ``auto_update_engines`` maps an engine key (llama variant id, diffusion
+    # engine name, or "llamanager") → enabled bool. The two *_seconds knobs
+    # are optional tuning parameters with documented defaults.
+    auto_update_idle_seconds: int = 300
+    auto_update_check_interval_seconds: int = 21600
+    auto_update_engines: dict[str, bool] = field(default_factory=dict)
 
     raw: dict[str, Any] = field(default_factory=dict)
     path: Path | None = None
@@ -576,6 +609,12 @@ def load_config(path: Path | None = None) -> Config:
     if "images_dir" in image_cfg:
         cfg.images_dir_override = expand(str(image_cfg["images_dir"]))
 
+    dv = image_cfg.get("diffusers_version")
+    if isinstance(dv, dict):
+        cfg.image_diffusers_version = {
+            str(k): str(v) for k, v in dv.items() if v
+        }
+
     if "models_dir" in server:
         cfg.models_dir_override = expand(str(server["models_dir"]))
 
@@ -596,6 +635,18 @@ def load_config(path: Path | None = None) -> Config:
         for engine, body in da.items():
             if isinstance(body, dict):
                 cfg.default_args[str(engine)] = dict(body)
+
+    # ---- auto-update when idle ----
+    au = raw.get("auto_update") or {}
+    if isinstance(au, dict):
+        cfg.auto_update_idle_seconds = int(au.get("idle_seconds", 300) or 300)
+        cfg.auto_update_check_interval_seconds = int(
+            au.get("check_interval_seconds", 21600) or 21600)
+        engines = au.get("engines") or {}
+        if isinstance(engines, dict):
+            cfg.auto_update_engines = {
+                str(k): bool(v) for k, v in engines.items()
+            }
 
     # ---- legacy migration ----
     migrated = _migrate_legacy_inplace(raw, cfg)
@@ -979,6 +1030,32 @@ def update_image_config(cfg_path: Path, *,
     _save_tomlkit(cfg_path, doc)
 
 
+def set_diffusers_override(cfg_path: Path, engine: str,
+                           version: str | None) -> None:
+    """Set or clear the per-engine diffusers version override under
+    ``[image].diffusers_version.<engine>``.
+
+    Pass a version string to pin it (a deliberate upgrade/downgrade); pass
+    ``None`` or an empty string to clear it and fall back to the shipped
+    ``DIFFUSERS_PIN``.
+    """
+    import tomlkit
+    doc = _load_tomlkit(cfg_path)
+    if "image" not in doc:
+        doc.add("image", tomlkit.table())
+    img = doc["image"]
+    if "diffusers_version" not in img:
+        if not version:
+            return
+        img["diffusers_version"] = tomlkit.table()
+    table = img["diffusers_version"]
+    if version:
+        table[engine] = version
+    elif engine in table:
+        del table[engine]
+    _save_tomlkit(cfg_path, doc)
+
+
 def update_exclusive_mode(cfg_path: Path, *,
                           mode: str | None = None,
                           grace_seconds: float | None = None,
@@ -1036,6 +1113,34 @@ def update_coexistence_policy(cfg_path: Path, *,
         sect["allow_concurrent"] = bool(allow_concurrent)
     if allow_diffusion_with_slots is not None:
         sect["allow_diffusion_with_slots"] = bool(allow_diffusion_with_slots)
+    _save_tomlkit(cfg_path, doc)
+
+
+def update_auto_update(cfg_path: Path, *,
+                       engine: str | None = None,
+                       enabled: bool | None = None,
+                       idle_seconds: int | None = None,
+                       check_interval_seconds: int | None = None) -> None:
+    """Update the [auto_update] section in config.toml.
+
+    Pass ``engine`` + ``enabled`` to flip one engine's switch under
+    ``[auto_update.engines]``; pass ``idle_seconds`` / ``check_interval_seconds``
+    to tune the global cadence. Engine keys are llama variant ids, diffusion
+    engine names, or the reserved ``"llamanager"`` self-update key.
+    """
+    import tomlkit
+    doc = _load_tomlkit(cfg_path)
+    if "auto_update" not in doc:
+        doc.add("auto_update", tomlkit.table())
+    sect = doc["auto_update"]
+    if idle_seconds is not None:
+        sect["idle_seconds"] = int(idle_seconds)
+    if check_interval_seconds is not None:
+        sect["check_interval_seconds"] = int(check_interval_seconds)
+    if engine is not None and enabled is not None:
+        if "engines" not in sect:
+            sect["engines"] = tomlkit.table()
+        sect["engines"][engine] = bool(enabled)
     _save_tomlkit(cfg_path, doc)
 
 

@@ -64,4 +64,28 @@
   {% if update_log %}
   <pre class="lm-log" style="max-height: 200px; font-size: 0.75rem; white-space: pre-wrap;">{{ update_log }}</pre>
   {% endif %}
+
+  <div style="padding-top: 14px; border-top: 1px solid var(--bg-2);">
+    <form method="post" action="/ui/about/auto-update" class="lm-autoupdate" style="margin: 0;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="enabled" value="{% if auto_update_self %}off{% else %}on{% endif %}">
+      <label class="lm-toggle">
+        <input type="checkbox" {% if auto_update_self %}checked{% endif %}
+               {% if install_mode == 'editable' %}disabled{% endif %}
+               onclick="this.closest('form').submit();">
+        <span class="lm-toggle__slider" aria-hidden="true"></span>
+      </label>
+      <span>Auto-update llamanager when idle</span>
+    </form>
+    <div style="margin-top: 6px; color: var(--fg-2); font-size: 0.75rem; max-width: 60ch;">
+      {% if install_mode == 'editable' %}
+      Disabled for editable installs — update your checkout with
+      <code>git pull &amp;&amp; pip install -e .</code> instead.
+      {% else %}
+      When on, llamanager checks GitHub for a newer release and, once the daemon
+      has been idle for the configured window, runs the same upgrade as the
+      button above and restarts itself.
+      {% endif %}
+    </div>
+  </div>
 </div>

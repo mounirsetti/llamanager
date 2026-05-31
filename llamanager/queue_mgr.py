@@ -101,6 +101,25 @@ class QueueManager:
         # False (the default), the two families are mutually exclusive:
         # no image starts while text is in flight and vice versa.
         self._in_flight_count: dict[str, int] = {"text": 0, "image": 0}
+        # Monotonic timestamp of the last time the queue had work — bumped on
+        # enqueue and on each in-flight completion. Read by ``idle_seconds()``
+        # for the auto-update-when-idle scheduler (see auto_update.AutoUpdater).
+        self._last_busy_monotonic: float = time.monotonic()
+
+    # ---- idle detection ----
+    def idle_seconds(self) -> float:
+        """Seconds the queue has had no work, or ``0.0`` if anything is active.
+
+        "Active" means any in-flight request (text or image) or any
+        non-cancelled pending entry in the heap. While active, returns 0.0.
+        Once fully drained, returns how long it's been since the last enqueue
+        or completion. Used to gate idle-only background work.
+        """
+        if self._in_flight:
+            return 0.0
+        if (len(self._heap) - self._cancelled_in_heap) > 0:
+            return 0.0
+        return max(0.0, time.monotonic() - self._last_busy_monotonic)
 
     # ---- lifecycle ----
     def start(self) -> None:
@@ -163,6 +182,7 @@ class QueueManager:
         caller_tail = f" {format_caller(caller)}" if caller else ""
         log.info("%s: request from %s%s for %s (id=%s)",
                  label, origin.name, caller_tail, target, req.request_id)
+        self._last_busy_monotonic = time.monotonic()
         async with self._cv:
             heapq.heappush(self._heap, (req.heap_key(), req))
             self._by_id[req.request_id] = req
@@ -277,6 +297,9 @@ class QueueManager:
                             cancelled: bool, prompt_tokens: int | None,
                             completion_tokens: int | None) -> None:
         req.finished_at = time.time()
+        # Reset the idle clock so a freshly-drained queue starts counting its
+        # quiet window from this completion (see idle_seconds()).
+        self._last_busy_monotonic = time.monotonic()
         duration_s = req.finished_at - req.enqueued_at
         if cancelled or req.cancel.is_set():
             req.status = "cancelled"

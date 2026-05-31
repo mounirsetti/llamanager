@@ -44,6 +44,15 @@ log = logging.getLogger(__name__)
 
 MAX_LOG_BYTES = 200_000  # cap stored log size so the DB doesn't bloat
 
+# The diffusers release both diffusion engines are pinned to and tested
+# against. This is the single source of truth for the version: it's what
+# new installs get, and it's the *target* the auto-update-when-idle check
+# compares the venv's installed diffusers against. Bump it (with testing)
+# when moving the engines to a newer diffusers release. 0.38.0 is the first
+# release line that exports ``ZImagePipeline`` (verified against the
+# v0.38.0 tag), so Z-Image runs on the pinned release, not git main.
+DIFFUSERS_PIN = "0.38.0"
+
 # AMD ROCm wheel index. Single curated release we test against; the
 # scraper picks the latest paired (torch, torchvision, triton) under
 # this prefix matching the current Python ABI.
@@ -111,18 +120,22 @@ ENGINE_PLANS: dict[str, EnginePackages] = {
     "z_image": EnginePackages(
         engine="z_image",
         label="Z-Image (Tongyi-MAI / Z-Anime)",
-        # Z-Image needs bleeding-edge diffusers — install from main.
+        # Pinned to the tested diffusers release (DIFFUSERS_PIN). 0.38.0 is
+        # the first release that ships ``ZImagePipeline``, so we no longer
+        # need git main — and the pin gives the auto-updater a real version
+        # to compare the installed venv against.
         packages=[
             "torch", "transformers", "accelerate", "huggingface_hub",
             "safetensors", "Pillow", "sentencepiece",
-            "git+https://github.com/huggingface/diffusers",
+            f"diffusers=={DIFFUSERS_PIN}",
         ],
         space_mb=8500,
         notes=(
-            "Installs the latest diffusers (from git) plus torch and the "
-            "Z-Image tokenizer/text-encoder deps. On NVIDIA, the default "
-            "torch wheel is CUDA 12.x; on AMD/ROCm or Apple Silicon you "
-            "should build the venv yourself and skip this button."
+            f"Installs diffusers {DIFFUSERS_PIN} (the tested release, which "
+            "ships ZImagePipeline) plus torch and the Z-Image "
+            "tokenizer/text-encoder deps. On NVIDIA, the default torch wheel "
+            "is CUDA 12.x; on AMD/ROCm or Apple Silicon you should build the "
+            "venv yourself and skip this button."
         ),
     ),
     "hidream": EnginePackages(
@@ -130,7 +143,7 @@ ENGINE_PLANS: dict[str, EnginePackages] = {
         label="HiDream-O1-Image",
         packages=[
             "torch", "transformers==4.57.1", "accelerate==1.13.0",
-            "diffusers==0.38.0", "huggingface_hub", "safetensors",
+            f"diffusers=={DIFFUSERS_PIN}", "huggingface_hub", "safetensors",
             "Pillow", "einops", "sentencepiece",
         ],
         space_mb=7500,
@@ -306,7 +319,7 @@ def resolve_plan(engine: str, gpu: GpuProfile, emit=None,
         pkgs = [
             "transformers==4.57.1",
             "accelerate==1.13.0",
-            "diffusers==0.38.0",
+            f"diffusers=={DIFFUSERS_PIN}",
             "huggingface_hub", "safetensors", "Pillow",
             "einops", "sentencepiece",
         ]
@@ -361,6 +374,135 @@ def venv_python(cfg: Config, engine: str) -> Path:
     if sys.platform == "win32":
         return root / "Scripts" / "python.exe"
     return root / "bin" / "python"
+
+
+# ---------- diffusion engine version check -----------------------------
+#
+# A diffusion engine's "version" is the version of its pinned ``diffusers``
+# dependency. The *target* is the version this llamanager build ships
+# (DIFFUSERS_PIN, parsed out of the engine's install plan); the *installed*
+# version is read live from the engine's venv. The auto-update-when-idle
+# loop uses this to fire only on a real, known-good version bump — i.e.
+# when the operator updated llamanager to a build pinning a newer diffusers
+# than what their venv currently has. It never chases a moving git branch
+# or jumps ahead of the tested pin.
+
+def _ver_tuple(v: str) -> tuple[int, ...]:
+    """Numeric core of a version string ('0.39.0.dev0' -> (0, 39, 0))."""
+    m = re.match(r"(\d+(?:\.\d+)*)", (v or "").strip())
+    return tuple(int(p) for p in m.group(1).split(".")) if m else (0,)
+
+
+def _plan_diffusers_pin(engine: str) -> str | None:
+    """The diffusers version literally pinned in ``engine``'s install plan
+    (``DIFFUSERS_PIN``), or None if the engine doesn't install diffusers."""
+    plan = ENGINE_PLANS.get(engine)
+    if plan is None:
+        return None
+    for pkg in plan.packages:
+        m = re.match(r"diffusers==([0-9][^\s;]*)", pkg.strip())
+        if m:
+            return m.group(1)
+    return None
+
+
+def diffusion_version_override(cfg: Config, engine: str) -> str | None:
+    """The operator's explicit diffusers pin for ``engine`` (set when they
+    install a specific version from the UI/CLI), or None to use the shipped
+    pin. Stored under ``[image].diffusers_version.<engine>``."""
+    overrides = getattr(cfg, "image_diffusers_version", None) or {}
+    v = overrides.get(engine)
+    return v or None
+
+
+def diffusion_target_version(engine: str, cfg: Config | None = None) -> str | None:
+    """The diffusers version auto-update should converge ``engine`` to.
+
+    Honors the operator's explicit override (a deliberate downgrade/pin) when
+    one is set in ``cfg``; otherwise falls back to the tested ``DIFFUSERS_PIN``
+    the install plan ships. None if the engine doesn't install diffusers."""
+    if cfg is not None:
+        override = diffusion_version_override(cfg, engine)
+        if override:
+            return override
+    return _plan_diffusers_pin(engine)
+
+
+def apply_diffusers_pin(packages: list[str], version: str) -> bool:
+    """Rewrite the ``diffusers==`` entry in ``packages`` to ``version`` (or
+    append one if absent). Mutates in place; returns True if an existing entry
+    was replaced. Used by the install path when the operator picks a specific
+    diffusers version."""
+    replaced = False
+    for i, pkg in enumerate(packages):
+        if re.match(r"diffusers==", pkg.strip()):
+            packages[i] = f"diffusers=={version}"
+            replaced = True
+    if not replaced:
+        packages.append(f"diffusers=={version}")
+    return replaced
+
+
+def list_diffusers_versions(*, limit: int = 30) -> dict:
+    """List released diffusers versions from PyPI, newest first. Never raises;
+    failures come back as ``{"versions": [], "error": "..."}``."""
+    url = "https://pypi.org/pypi/diffusers/json"
+    try:
+        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+            r = client.get(url)
+            r.raise_for_status()
+            data = r.json()
+    except Exception as exc:  # noqa: BLE001 — surfaced to the UI/CLI
+        return {"versions": [], "error": str(exc)}
+    releases: dict = data.get("releases") or {}
+    rows: list[tuple[str, str]] = []
+    for ver, files in releases.items():
+        if not files:
+            continue
+        if any(t in ver for t in ("a", "b", "rc", "dev")) and not ver.replace(".", "").isdigit():
+            continue
+        try:
+            upload = max((f.get("upload_time_iso_8601", "") or "") for f in files)
+        except ValueError:
+            upload = ""
+        rows.append((ver, upload))
+    rows.sort(key=lambda r: r[1], reverse=True)
+    return {"versions": [v for v, _ in rows[:limit]], "error": None}
+
+
+def installed_diffusers_version(cfg: Config, engine: str) -> str | None:
+    """Read the diffusers version installed in ``engine``'s venv, or None if
+    the venv doesn't exist / diffusers isn't importable there."""
+    import subprocess
+    py = venv_python(cfg, engine)
+    if not py.exists():
+        return None
+    try:
+        out = subprocess.run(
+            [str(py), "-c",
+             "import importlib.metadata as m; print(m.version('diffusers'))"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    ver = out.stdout.strip()
+    return ver or None
+
+
+def diffusion_update_info(cfg: Config, engine: str) -> dict[str, Any]:
+    """Compare the installed diffusers against the shipped pin for ``engine``.
+
+    Returns ``{installed, target, has_update}``. ``has_update`` is True only
+    when the engine is installed AND its diffusers is strictly older than the
+    target (the operator's override if set, else the shipped pin). Not-installed
+    engines never report an update (auto-update updates; it doesn't first-install).
+    """
+    target = diffusion_target_version(engine, cfg)
+    installed = installed_diffusers_version(cfg, engine)
+    has_update = bool(
+        target and installed and _ver_tuple(installed) < _ver_tuple(target)
+    )
+    return {"installed": installed, "target": target, "has_update": has_update}
 
 
 # ---------- installer ---------------------------------------------------
@@ -464,6 +606,16 @@ class EngineInstaller:
             plan = resolve_plan(engine, gpu, emit, cfg=self.cfg)
             if plan is None:
                 raise RuntimeError(f"no resolvable plan for engine {engine!r}")
+
+            # Optional explicit diffusers version (UI/CLI version picker —
+            # upgrade or downgrade). Rewrite the diffusers== entry in-place;
+            # the persisted override is what makes auto-update respect this
+            # choice (see config + diffusion_target_version).
+            chosen = (options.get("diffusers_version") or "").strip()
+            if chosen:
+                apply_diffusers_pin(plan.packages, chosen)
+                emit(f"[plan] diffusers pinned to {chosen} (operator override)")
+
             emit(f"[plan] target={plan.target}, "
                  f"wheel_urls={len(plan.wheel_urls)}, "
                  f"packages={len(plan.packages)}")

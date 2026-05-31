@@ -199,6 +199,25 @@ def _fmt_event(kind: str, payload: dict[str, Any]) -> tuple[str, str] | None:
             return ("info", f"Install finished: {p.get('engine') or p.get('what')}")
         case "install_failed":
             return ("error", f"Install failed: {p.get('error')}")
+        case "auto_update_toggled":
+            state = "enabled" if p.get("enabled") else "disabled"
+            return ("info", f"Auto-update {state} for {p.get('engine')}")
+        case "auto_update_check":
+            latest = p.get("latest")
+            tail = f" — {latest} available" if latest else " available"
+            return ("info", f"Auto-update: update for {p.get('engine')}{tail}")
+        case "auto_update_started":
+            return ("info", f"Auto-update: updating {p.get('engine')}")
+        case "auto_update_done":
+            note = p.get("note")
+            return ("info", f"Auto-update: {p.get('engine')} updated"
+                    + (f" ({note})" if note else ""))
+        case "auto_update_failed":
+            return ("warn", f"Auto-update failed for {p.get('engine')}: "
+                    f"{p.get('error') or 'unknown'}")
+        case "auto_update_skipped_busy":
+            return ("info", f"Auto-update for {p.get('engine')} deferred — "
+                    "daemon not idle yet")
         case "download_started":
             return ("info", f"Download started: {p.get('source') or p.get('id')}")
         case "download_done":

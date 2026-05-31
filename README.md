@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.3.91-green.svg" alt="Version 0.3.91">
+  <img src="https://img.shields.io/badge/version-0.3.92-green.svg" alt="Version 0.3.92">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -148,6 +148,79 @@ For MTP speculative decoding with Gemma 4:
 args = { ctx-size = 16384, mtp-head = "gemma4-assistant.gguf", spec-type = "mtp" }
 ```
 
+### Updating engines
+
+Every managed engine can be updated from the UI and the CLI, and each one has a
+per-engine **Auto-update when idle** switch.
+
+- **Manual update + check.** On the **LLM engines** page (`/ui/setup`) each
+  installed variant has *Check for updates* → *Update to vX*. On the
+  **Diffusion engines** page, *Reinstall dependencies* re-runs the pip install
+  (= an update). llamanager itself has *Check for updates* / *Update* on
+  `/ui/about`. The CLI mirrors all of it:
+
+  ```bash
+  llamanager setup check-updates                 # all installed LLM variants: installed vs latest
+  llamanager setup check-updates --variant llama.cpp-cuda
+  llamanager setup install-llama-server --backend cuda    # update the variant to latest
+  llamanager diffusion versions z_image          # diffusion: installed vs target (+ has_update)
+  llamanager diffusion install z_image           # reinstall/update diffusion deps
+  llamanager update --check                      # llamanager itself: is a newer release out?
+  llamanager update                              # update llamanager + restart
+  ```
+- **See versions + install any version (downgrade).** Each installed variant
+  card has a *Versions…* button that lists the builds available upstream
+  (GitHub releases for llama.cpp/Atomic, PyPI for MLX) — filtered to ones that
+  ship a binary for your backend/platform — and lets you install (or roll back
+  to) a specific one. Diffusion cards have the same for the `diffusers` version.
+  From the CLI:
+
+  ```bash
+  llamanager setup engine-versions llama.cpp-cuda            # list installable builds
+  llamanager setup install-llama-server --backend cuda --version b1234   # install/roll back to a tag
+  llamanager diffusion versions z_image                      # list diffusers versions
+  llamanager diffusion install z_image --diffusers-version 0.37.1   # pin a diffusers version
+  llamanager diffusion install z_image --reset-diffusers     # back to the tested pin
+  ```
+
+  Picking a `diffusers` version **overrides the tested pin** for that engine
+  (an untested version can break image generation). The override is persisted
+  and becomes the auto-update *target*, so a deliberate downgrade isn't silently
+  re-bumped; *Reset to pin* (or `--reset-diffusers`) clears it.
+- **Auto-update when idle.** Flip the switch next to any engine and llamanager
+  checks upstream on a fixed cadence and, once the daemon has been idle (no
+  in-flight or pending requests) for the configured window, applies the update
+  automatically. If the engine being updated is the **active** one with a model
+  loaded, llamanager unloads it, swaps the binary (required on Windows, where a
+  running `.exe` is locked), then reloads the model.
+
+Engine keys are a llama variant id (`llama.cpp-cuda`, `atomic-vulkan`,
+`mlx-apple-silicon`), a diffusion engine name (`hidream`, `z_image`), or
+`llamanager` for the daemon's own self-update. Configure it under
+`[auto_update]` (see [Configuration](#configuration)) or:
+
+```bash
+llamanager setup auto-update list                       # show all switches + cadence
+llamanager setup auto-update llama.cpp-cuda on          # enable one engine
+llamanager setup auto-update z_image off
+llamanager setup auto-update llamanager on              # auto-update llamanager itself
+llamanager setup auto-update settings --idle-seconds 300 --check-interval-seconds 21600
+```
+
+How "an update exists" is decided per engine:
+
+- **llama.cpp / Atomic** compare the installed build against the latest GitHub
+  release tag; **MLX** against the latest PyPI version.
+- **llamanager** compares against the latest GitHub release tag (editable
+  installs are skipped — update the checkout with `git pull` yourself).
+- **Diffusion engines** (`hidream`, `z_image`) track the `diffusers` release
+  llamanager pins and is tested against (currently `0.38.0`, the first release
+  that ships `ZImagePipeline`). Auto-update fires only when the engine's
+  installed `diffusers` is *older* than that pin — which happens when you
+  update llamanager to a build that bumped the pin. It never chases git `main`
+  or jumps ahead of the tested release, and only fires for an already-installed
+  engine. (`flux2` has no auto-install path, so no switch.)
+
 ## Install
 
 Clone the repo, or grab a zip from the [releases page](https://github.com/mounirsetti/Llamanager/releases) if you don't have git.
@@ -160,7 +233,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.3.91" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.3.92" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -480,7 +553,7 @@ Each engine card on the Diffusion engines page has an `Install dependencies` but
 
 | engine | what gets installed | rough size |
 |--------|---------------------|------------|
-| Z-Image | torch, transformers, accelerate, huggingface_hub, safetensors, Pillow, sentencepiece, `git+https://github.com/huggingface/diffusers` | ~8.5 GB |
+| Z-Image | torch, transformers, accelerate, huggingface_hub, safetensors, Pillow, sentencepiece, `diffusers==0.38.0` (first release shipping `ZImagePipeline`) | ~8.5 GB |
 | HiDream | GPU-aware. On AMD: official ROCm wheels (torch+rocm7.2.1, torchvision, triton) from `repo.radeon.com` + pinned `transformers==4.57.1`, `accelerate==1.13.0`, `diffusers==0.38.0`, etc. On NVIDIA/CPU: generic CUDA/CPU torch + the same HF pins. | ~7.5–9 GB |
 | FLUX 2 | (no auto-install — see below) | — |
 
@@ -898,12 +971,18 @@ llamanager setup coexistence [--unload-text-on-arrival on|off]
 llamanager setup default-args <llama|mlx> --arg KEY=VALUE ...
 llamanager setup autolaunch on|off                        # default LLM on daemon startup
 llamanager setup autorestart on|off                       # supervisor crash auto-restart
-llamanager setup install-llama-server [--source ...] [--backend ...]
+llamanager setup install-llama-server [--source ...] [--backend ...] [--version TAG]
+llamanager setup check-updates [--variant <id>]           # installed vs latest (one or all installed variants)
+llamanager setup engine-versions <variant_id>             # list installable builds (newest first)
 llamanager setup install-llama-server-status <variant_id>
 llamanager setup switch-variant <variant_id>
+llamanager setup auto-update list                         # per-engine switches + cadence
+llamanager setup auto-update <engine-key> on|off          # variant id / diffusion engine / "llamanager"
+llamanager setup auto-update settings [--idle-seconds N] [--check-interval-seconds N]
 
 llamanager diffusion engines                              # per-engine install state + GPU detection
-llamanager diffusion install <engine> [--patch-flash-attn]
+llamanager diffusion install <engine> [--patch-flash-attn] [--diffusers-version X | --reset-diffusers]
+llamanager diffusion versions <engine>                    # installable diffusers versions + installed/target
 llamanager diffusion cancel-install <engine>
 llamanager diffusion models                               # installed + catalog of installable
 llamanager diffusion activate <model_id>                  # set as dashboard/API default
@@ -988,6 +1067,19 @@ allow_concurrent = false
 # Multi-slot only (ignored when multi_slot_enabled = false): when true,
 # image tasks do NOT unload LLM slots. VRAM headroom is on you.
 # allow_diffusion_with_slots = false
+
+[auto_update]
+# Auto-update engines when the daemon is idle. Off for every engine by
+# default; opt in per engine from the UI switch or `llamanager setup
+# auto-update <engine> on`. See "Updating engines" below.
+idle_seconds = 300              # quiet window required before an update fires
+check_interval_seconds = 21600  # how often each enabled engine checks upstream (6h)
+
+[auto_update.engines]
+# Keys: a llama variant id, a diffusion engine name, or "llamanager".
+# "llama.cpp-cuda" = true
+# "z_image"        = false
+# "llamanager"     = false
 ```
 
 > **Windows paths in TOML.** Backslashes inside double-quoted strings are escape sequences; `"C:\Users\..."` will fail to parse (the `\U` looks like a Unicode escape). Use TOML literal strings (single quotes), e.g. `'C:\Soulthread\Models'`, or escape every backslash: `"C:\\Soulthread\\Models"`.

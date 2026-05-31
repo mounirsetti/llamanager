@@ -479,6 +479,33 @@ def _fetch_latest_release(github_api_url: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _releases_base(github_api_url: str) -> str:
+    """Turn the ``.../releases/latest`` API URL into the ``.../releases`` list
+    endpoint (and tolerate it already being the list endpoint)."""
+    return github_api_url[: -len("/latest")] if github_api_url.endswith("/latest") else github_api_url
+
+
+def _fetch_release_list(github_api_url: str, *, per_page: int = 30) -> list[dict]:
+    base = _releases_base(github_api_url)
+    req = urllib.request.Request(
+        f"{base}?per_page={per_page}",
+        headers={"User-Agent": "llamanager/0.1"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return data if isinstance(data, list) else []
+
+
+def _fetch_release_by_tag(github_api_url: str, tag: str) -> dict:
+    base = _releases_base(github_api_url)
+    req = urllib.request.Request(
+        f"{base}/tags/{tag}",
+        headers={"User-Agent": "llamanager/0.1"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
 def _fetch_pypi_latest(pypi_url: str) -> str:
     req = urllib.request.Request(
         pypi_url, headers={"User-Agent": "llamanager/0.1"},
@@ -486,6 +513,35 @@ def _fetch_pypi_latest(pypi_url: str) -> str:
     with urllib.request.urlopen(req, timeout=15) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     return data["info"]["version"]
+
+
+def _fetch_pypi_versions(pypi_url: str, *, limit: int = 30) -> list[str]:
+    """Return released versions of a PyPI package, newest first.
+
+    Skips yanked-only releases (no files) and prerelease tags, then keeps the
+    ``limit`` most recent by upload time (falling back to the JSON order).
+    """
+    req = urllib.request.Request(
+        pypi_url, headers={"User-Agent": "llamanager/0.1"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    releases: dict = data.get("releases") or {}
+    rows: list[tuple[str, str]] = []
+    for ver, files in releases.items():
+        if not files:
+            continue
+        # Skip obvious prereleases so the picker stays clean.
+        if any(t in ver for t in ("a", "b", "rc", "dev")) and not ver.replace(".", "").isdigit():
+            continue
+        upload = ""
+        try:
+            upload = max((f.get("upload_time_iso_8601", "") or "") for f in files)
+        except ValueError:
+            upload = ""
+        rows.append((ver, upload))
+    rows.sort(key=lambda r: r[1], reverse=True)
+    return [v for v, _ in rows[:limit]]
 
 
 # ---------------------------------------------------------------------------
@@ -538,6 +594,46 @@ def check_for_update(source: str, backend: str) -> UpdateInfo:
     return UpdateInfo(installed, latest, has_update)
 
 
+def list_versions(source: str, backend: str, *, limit: int = 30) -> dict:
+    """List installable versions for a variant, newest first.
+
+    For GitHub sources, returns only releases that actually ship an asset for
+    this (backend, platform) — so every listed version is installable here.
+    For MLX, returns released ``mlx-lm`` versions from PyPI. Never raises;
+    failures come back as ``{"versions": [], "error": "..."}``. The currently
+    installed version (from the marker) is echoed back as ``installed``.
+    """
+    src_meta = SOURCES.get(source)
+    if not src_meta:
+        return {"versions": [], "installed": None,
+                "error": f"unknown source: {source}"}
+    meta = read_install_meta(source, backend) or {}
+    installed = meta.get("version")
+    try:
+        if src_meta["engine_type"] == "mlx":
+            versions = [{"version": v, "prerelease": False, "published_at": ""}
+                        for v in _fetch_pypi_versions(src_meta["pypi_url"], limit=limit)]
+            return {"versions": versions, "installed": installed, "error": None}
+        releases = _fetch_release_list(src_meta["github_api"], per_page=max(limit, 30))
+        out: list[dict] = []
+        for rel in releases:
+            tag = rel.get("tag_name") or rel.get("name")
+            if not tag:
+                continue
+            if _select_asset(rel.get("assets", []), backend) is None:
+                continue  # no installable asset for this backend/platform
+            out.append({
+                "version": tag,
+                "prerelease": bool(rel.get("prerelease")),
+                "published_at": rel.get("published_at", "") or "",
+            })
+            if len(out) >= limit:
+                break
+        return {"versions": out, "installed": installed, "error": None}
+    except Exception as exc:  # noqa: BLE001 — surfaced to the UI/CLI
+        return {"versions": [], "installed": installed, "error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Install state + entrypoint
 # ---------------------------------------------------------------------------
@@ -557,8 +653,14 @@ class InstallState:
         }
 
 
-async def install_variant(state: InstallState, source: str, backend: str) -> None:
-    """Install (source, backend) and update *state* throughout."""
+async def install_variant(state: InstallState, source: str, backend: str,
+                           *, version: str | None = None) -> None:
+    """Install (source, backend) and update *state* throughout.
+
+    ``version`` pins a specific upstream version (a GitHub release tag for
+    llama sources, a ``mlx-lm`` PyPI version for MLX) — this is how the UI/CLI
+    upgrade *or downgrade* to a chosen build. ``None`` keeps the historical
+    "install the latest" behaviour."""
     src_meta = SOURCES.get(source)
     be_meta = BACKENDS.get(backend)
     if src_meta is None:
@@ -578,26 +680,34 @@ async def install_variant(state: InstallState, source: str, backend: str) -> Non
         return
 
     if src_meta["engine_type"] == "mlx":
-        await _install_mlx(state, source, backend, src_meta)
+        await _install_mlx(state, source, backend, src_meta, version=version)
     else:
-        await _install_llama(state, source, backend, src_meta, be_meta)
+        await _install_llama(state, source, backend, src_meta, be_meta,
+                             version=version)
 
 
 # ---- llama.cpp install (GitHub release archive) ---------------------------
 async def _install_llama(state: InstallState, source: str, backend: str,
-                         src_meta: dict, be_meta: dict) -> None:
+                         src_meta: dict, be_meta: dict,
+                         *, version: str | None = None) -> None:
     loop = asyncio.get_running_loop()
 
     def _emit(line: str) -> None:
         state.lines.append(line)
 
     try:
-        _emit(f"Fetching latest release for {src_meta['label']} ({be_meta['label']})…")
-        release = await loop.run_in_executor(
-            None, lambda: _fetch_latest_release(src_meta["github_api"])
-        )
-        tag = release.get("tag_name", "unknown")
-        _emit(f"Latest release: {tag}")
+        if version:
+            _emit(f"Fetching {src_meta['label']} {version} ({be_meta['label']})…")
+            release = await loop.run_in_executor(
+                None, lambda: _fetch_release_by_tag(src_meta["github_api"], version)
+            )
+        else:
+            _emit(f"Fetching latest release for {src_meta['label']} ({be_meta['label']})…")
+            release = await loop.run_in_executor(
+                None, lambda: _fetch_latest_release(src_meta["github_api"])
+            )
+        tag = release.get("tag_name", version or "unknown")
+        _emit(f"Release: {tag}")
 
         asset = _select_asset(release.get("assets", []), backend)
         if asset is None:
@@ -646,7 +756,7 @@ async def _install_llama(state: InstallState, source: str, backend: str,
 
 # ---- MLX install (pip into per-variant venv) ------------------------------
 async def _install_mlx(state: InstallState, source: str, backend: str,
-                       src_meta: dict) -> None:
+                       src_meta: dict, *, version: str | None = None) -> None:
     loop = asyncio.get_running_loop()
 
     def _emit(line: str) -> None:
@@ -680,12 +790,14 @@ async def _install_mlx(state: InstallState, source: str, backend: str,
             ),
         )
 
-        _emit(f"Installing {src_meta['pip_package']} from PyPI (this may take a few minutes)…")
+        pip_target = (f"{src_meta['pip_package']}=={version}" if version
+                      else src_meta["pip_package"])
+        _emit(f"Installing {pip_target} from PyPI (this may take a few minutes)…")
         result = await loop.run_in_executor(
             None,
             lambda: subprocess.run(
                 [str(python), "-m", "pip", "install", "--upgrade",
-                 src_meta["pip_package"]],
+                 pip_target],
                 check=True, capture_output=True, text=True,
             ),
         )

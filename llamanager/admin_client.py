@@ -428,9 +428,18 @@ class AdminClient:
         return self._post("/admin/setup/autorestart", {"enabled": enabled})
 
     def setup_install_llama_server(self, *, source: str = "llama.cpp",
-                                   backend: str = "") -> dict[str, Any]:
+                                   backend: str = "",
+                                   version: str = "") -> dict[str, Any]:
         return self._post("/admin/setup/install-llama-server",
-                          {"source": source, "backend": backend})
+                          {"source": source, "backend": backend,
+                           "version": version})
+
+    def setup_engine_versions(self, variant: str) -> dict[str, Any]:
+        return self._get("/admin/setup/engine-versions", variant=variant)
+
+    def setup_check_updates(self, variant: str = "") -> dict[str, Any]:
+        params = {"variant": variant} if variant else {}
+        return self._get("/admin/setup/check-updates", **params)
 
     def setup_install_llama_server_status(self, variant: str) -> dict[str, Any]:
         return self._get("/admin/setup/install-llama-server/status",
@@ -438,6 +447,24 @@ class AdminClient:
 
     def setup_switch_variant(self, variant: str) -> dict[str, Any]:
         return self._post("/admin/setup/switch-variant", {"variant": variant})
+
+    # ---- auto-update-when-idle ----
+
+    def setup_auto_update_list(self) -> dict[str, Any]:
+        return self._get("/admin/setup/auto-update")
+
+    def setup_auto_update(self, engine: str, enabled: bool) -> dict[str, Any]:
+        return self._post("/admin/setup/auto-update",
+                          {"engine": engine, "enabled": enabled})
+
+    def setup_auto_update_settings(self, *,
+                                   idle_seconds: int | None = None,
+                                   check_interval_seconds: int | None = None,
+                                   ) -> dict[str, Any]:
+        return self._post("/admin/setup/auto-update/settings", {
+            "idle_seconds": idle_seconds,
+            "check_interval_seconds": check_interval_seconds,
+        })
 
     # ---- diffusion ----
     #
@@ -449,9 +476,16 @@ class AdminClient:
         return self._get("/admin/diffusion/engines")
 
     def diffusion_install(self, engine: str, *,
-                          patch_flash_attn: bool = False) -> dict[str, Any]:
+                          patch_flash_attn: bool = False,
+                          diffusers_version: str = "",
+                          reset_diffusers: bool = False) -> dict[str, Any]:
         return self._post(f"/admin/diffusion/engines/{engine}/install",
-                          {"patch_flash_attn": patch_flash_attn})
+                          {"patch_flash_attn": patch_flash_attn,
+                           "diffusers_version": diffusers_version,
+                           "reset_diffusers": reset_diffusers})
+
+    def diffusion_versions(self, engine: str) -> dict[str, Any]:
+        return self._get(f"/admin/diffusion/engines/{engine}/versions")
 
     def diffusion_cancel_install(self, engine: str) -> dict[str, Any]:
         return self._post(f"/admin/diffusion/engines/{engine}/cancel-install")

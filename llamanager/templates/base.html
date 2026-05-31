@@ -1405,6 +1405,46 @@
       .lm-callout { padding: 14px 16px; }
       .lm-profile-meta { grid-template-columns: 1fr; gap: 4px 0; }
     }
+
+    /* iOS-style toggle, built from a single label + checkbox. Keeps the
+       interaction native (form-submit on change) without a JS framework.
+       Shared by the Slots page and the per-engine auto-update switches. */
+    .lm-toggle {
+      --w: 38px; --h: 22px; --pad: 3px;
+      position: relative; display: inline-block;
+      width: var(--w); height: var(--h);
+      vertical-align: middle;
+    }
+    .lm-toggle input { opacity: 0; width: 0; height: 0; }
+    .lm-toggle__slider {
+      position: absolute; inset: 0;
+      background: var(--bg-2);
+      border: 1px solid var(--bg-3);
+      border-radius: 999px; cursor: pointer;
+      transition: background 160ms ease, border-color 160ms ease;
+    }
+    .lm-toggle__slider::before {
+      content: ""; position: absolute;
+      top: var(--pad); left: var(--pad);
+      width: calc(var(--h) - var(--pad) * 2 - 2px);
+      height: calc(var(--h) - var(--pad) * 2 - 2px);
+      background: var(--fg-2); border-radius: 50%;
+      transition: transform 160ms ease, background 160ms ease;
+    }
+    .lm-toggle input:checked + .lm-toggle__slider {
+      background: var(--accent-soft); border-color: var(--accent);
+    }
+    .lm-toggle input:checked + .lm-toggle__slider::before {
+      transform: translateX(calc(var(--w) - var(--h)));
+      background: var(--accent);
+    }
+    .lm-toggle__slider:hover { border-color: var(--fg-2); }
+    .lm-toggle input:checked + .lm-toggle__slider:hover { border-color: var(--accent); }
+    .lm-toggle input:disabled + .lm-toggle__slider { opacity: 0.45; cursor: not-allowed; }
+    .lm-autoupdate {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-size: 0.8125rem; color: var(--fg-2);
+    }
   </style>
 </head>
 <body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'

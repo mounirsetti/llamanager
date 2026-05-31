@@ -460,7 +460,14 @@ def cmd_diffusion_engines(args):
 def cmd_diffusion_install(args):
     c = _make_admin_client(args)
     return _run_admin(lambda: c.diffusion_install(
-        args.engine, patch_flash_attn=args.patch_flash_attn))
+        args.engine, patch_flash_attn=args.patch_flash_attn,
+        diffusers_version=(args.diffusers_version or ""),
+        reset_diffusers=args.reset_diffusers))
+
+
+def cmd_diffusion_versions(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.diffusion_versions(args.engine))
 
 
 def cmd_diffusion_cancel_install(args):
@@ -742,7 +749,18 @@ def cmd_setup_autorestart(args):
 def cmd_setup_install_llama_server(args):
     c = _make_admin_client(args)
     return _run_admin(lambda: c.setup_install_llama_server(
-        source=args.source, backend=args.backend))
+        source=args.source, backend=args.backend,
+        version=(args.version or "")))
+
+
+def cmd_setup_engine_versions(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.setup_engine_versions(args.variant))
+
+
+def cmd_setup_check_updates(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.setup_check_updates(args.variant or ""))
 
 
 def cmd_setup_install_llama_server_status(args):
@@ -754,6 +772,28 @@ def cmd_setup_install_llama_server_status(args):
 def cmd_setup_switch_variant(args):
     c = _make_admin_client(args)
     return _run_admin(lambda: c.setup_switch_variant(args.variant))
+
+
+def cmd_setup_auto_update(args):
+    c = _make_admin_client(args)
+    action = args.action
+    if action == "list":
+        return _run_admin(lambda: c.setup_auto_update_list())
+    if action == "settings":
+        if args.idle_seconds is None and args.check_interval_seconds is None:
+            print("error: settings needs --idle-seconds and/or "
+                  "--check-interval-seconds", file=sys.stderr)
+            return 2
+        return _run_admin(lambda: c.setup_auto_update_settings(
+            idle_seconds=args.idle_seconds,
+            check_interval_seconds=args.check_interval_seconds))
+    # Otherwise ``action`` is an engine key and ``state`` is on|off.
+    if not args.state:
+        print("error: usage: setup auto-update <engine-key> on|off",
+              file=sys.stderr)
+        return 2
+    enabled = _on_off_or_none(args.state)
+    return _run_admin(lambda: c.setup_auto_update(action, bool(enabled)))
 
 
 def _add_admin_flags(p: argparse.ArgumentParser) -> None:
@@ -944,7 +984,20 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--patch-flash-attn", action="store_true",
                     help="apply the use_flash_attn=False patch to "
                          "hidream-source/pipeline.py (recommended on AMD)")
+    sp.add_argument("--diffusers-version", default="", dest="diffusers_version",
+                    help="install a specific diffusers version (upgrade or "
+                         "downgrade). Overrides the tested pin and persists as "
+                         "the auto-update target. See `diffusion versions`.")
+    sp.add_argument("--reset-diffusers", action="store_true", dest="reset_diffusers",
+                    help="clear any diffusers override and reinstall the "
+                         "tested pin")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_install)
+
+    sp = dfp.add_parser("versions",
+                        help="list installable diffusers versions + the "
+                             "engine's installed/target version")
+    sp.add_argument("engine", help="hidream | z_image")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_versions)
 
     sp = dfp.add_parser("cancel-install", help="cancel an in-progress install")
     sp.add_argument("engine")
@@ -1196,7 +1249,25 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--backend", default="",
                     help="backend variant; leave empty to auto-pick "
                          "(e.g. cuda, vulkan, metal, cpu)")
+    sp.add_argument("--version", default="",
+                    help="install a specific upstream version (GitHub release "
+                         "tag, or mlx-lm PyPI version) — upgrade or downgrade. "
+                         "Omit for latest. See `setup engine-versions`.")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_install_llama_server)
+
+    sp = setup.add_parser("engine-versions",
+                          help="list installable versions for an LLM variant "
+                               "(newest first)")
+    sp.add_argument("variant", help="variant id, e.g. llama.cpp-cuda")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_engine_versions)
+
+    sp = setup.add_parser("check-updates",
+                          help="check upstream for a newer build of one variant "
+                               "(--variant) or every installed variant")
+    sp.add_argument("--variant", default="",
+                    help="variant id, e.g. llama.cpp-cuda; omit to check all "
+                         "installed variants")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_check_updates)
 
     sp = setup.add_parser("install-llama-server-status",
                           help="poll an in-flight or completed llama-server install")
@@ -1207,6 +1278,24 @@ def main(argv: list[str] | None = None) -> int:
                           help="switch the active llama-server to a previously-installed variant")
     sp.add_argument("variant")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_switch_variant)
+
+    sp = setup.add_parser(
+        "auto-update",
+        help="manage auto-update-when-idle per engine "
+             "(llama variant id / diffusion engine / 'llamanager')")
+    sp.add_argument(
+        "action",
+        help="'list', 'settings', or an engine key to toggle "
+             "(e.g. llama.cpp-cuda, z_image, llamanager)")
+    sp.add_argument(
+        "state", nargs="?",
+        help="on|off when toggling an engine key (omit for list/settings)")
+    sp.add_argument("--idle-seconds", type=int, default=None, dest="idle_seconds",
+                    help="settings: quiet window before an update fires")
+    sp.add_argument("--check-interval-seconds", type=int, default=None,
+                    dest="check_interval_seconds",
+                    help="settings: how often to check upstream (seconds)")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_auto_update)
 
     # self-update — same code path as the /ui/about Update button.
     sp = sub.add_parser("update",

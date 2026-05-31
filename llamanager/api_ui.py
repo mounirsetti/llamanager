@@ -2000,6 +2000,8 @@ GITHUB_REPO = "mounirsetti/llamanager"
 
 def _about_ctx(request: Request, **extra: Any) -> dict:
     import datetime
+    cfg = request.app.state.cfg
+    from .auto_update import SELF_KEY
     ctx = _ctx(
         request,
         version=LLAMANAGER_VERSION,
@@ -2008,6 +2010,11 @@ def _about_ctx(request: Request, **extra: Any) -> dict:
         latest_version=None,
         update_check_error=None,
         update_log=None,
+        # Always surface the install mode so the auto-update toggle can be
+        # disabled for editable installs even before a "Check for updates".
+        install_mode=_detect_install_mode()["mode"],
+        # Auto-update-when-idle switch for the daemon's own self-update.
+        auto_update_self=bool((cfg.auto_update_engines or {}).get(SELF_KEY)),
     )
     ctx.update(extra)
     return ctx
@@ -2237,6 +2244,16 @@ async def about_update(request: Request,
         update_available=False,
         latest_version="restarting",
     ))
+
+
+@router.post("/about/auto-update", response_class=HTMLResponse)
+async def about_auto_update_toggle(request: Request,
+                                   enabled: str = Form(""),
+                                   _: None = Depends(require_csrf)) -> Response:
+    """Toggle auto-update-when-idle for llamanager itself."""
+    from .auto_update import SELF_KEY
+    _set_auto_update_flag(request, SELF_KEY, enabled.strip().lower() == "on")
+    return RedirectResponse("/ui/about", status_code=303)
 
 
 # ---------- chat ----------
@@ -2639,6 +2656,13 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
             downloads_by_repo[repo] = d
     ctx["downloads_by_repo"] = downloads_by_repo
 
+    # Per-engine "auto-update when idle" switch state.
+    ctx["auto_update_engines"] = dict(cfg.auto_update_engines or {})
+    # Diffusers version-picker cache (populated on demand by the Versions
+    # button), keyed by engine → {installed, target, pin, versions, error}.
+    ctx["diffusers_versions"] = (
+        getattr(request.app.state, "diffusers_versions", {}) or {})
+
     return ctx
 
 
@@ -2738,13 +2762,33 @@ async def setup_coexistence(request: Request,
              response_class=HTMLResponse)
 async def install_engine_deps(request: Request, engine: str,
                               patch_flash_attn: str = Form(""),
+                              diffusers_version: str = Form(""),
+                              reset_diffusers: str = Form(""),
                               _: None = Depends(require_csrf)) -> Response:
-    """Kick off an opinionated venv + pip install for one engine."""
+    """Kick off an opinionated venv + pip install for one engine.
+
+    ``diffusers_version`` pins a specific diffusers (upgrade/downgrade) and
+    persists as an override; ``reset_diffusers`` clears the override and
+    reinstalls the shipped pin."""
+    from .config import set_diffusers_override
+    cfg = request.app.state.cfg
     installer = request.app.state.engine_installer
     options: dict[str, Any] = {}
     # Checkbox values arrive as "on" when checked, "" when not.
     if patch_flash_attn:
         options["patch_flash_attn"] = True
+    chosen = (diffusers_version or "").strip()
+    if reset_diffusers:
+        set_diffusers_override(cfg.config_path, engine, None)
+        cfg.image_diffusers_version = {
+            k: v for k, v in (cfg.image_diffusers_version or {}).items()
+            if k != engine
+        }
+    elif chosen:
+        options["diffusers_version"] = chosen
+        set_diffusers_override(cfg.config_path, engine, chosen)
+        cfg.image_diffusers_version = dict(cfg.image_diffusers_version or {})
+        cfg.image_diffusers_version[engine] = chosen
     try:
         installer.start(engine, options=options)
     except (ValueError, RuntimeError) as e:
@@ -2799,6 +2843,39 @@ async def setup_diffusion_partial(request: Request,
                                   ) -> HTMLResponse:
     """HTMX-polled fragment so the install/download status updates live
     on the Diffusion engines page without a full reload."""
+    return templates.TemplateResponse(
+        request, "_setup_diffusion_partial.html",
+        _setup_diffusion_ctx(request),
+    )
+
+
+@router.get("/setup-diffusion/versions", response_class=HTMLResponse)
+async def setup_diffusion_versions(request: Request,
+                                   engine: str = "",
+                                   _: Origin = Depends(require_admin_ui)
+                                   ) -> HTMLResponse:
+    """Fetch the installable diffusers versions for one engine (+ its
+    installed/target) and re-render the diffusion partial with the picker
+    populated. Manual (button-triggered) to avoid per-load network/subprocess
+    cost."""
+    from .engine_installer import (
+        list_diffusers_versions, installed_diffusers_version,
+        diffusion_target_version, _plan_diffusers_pin,
+    )
+    cfg = request.app.state.cfg
+    cache: dict[str, dict] = getattr(request.app.state, "diffusers_versions", None) or {}
+    if engine:
+        loop = asyncio.get_running_loop()
+        listing = await loop.run_in_executor(None, list_diffusers_versions)
+        installed = await loop.run_in_executor(
+            None, installed_diffusers_version, cfg, engine)
+        cache[engine] = {
+            "installed": installed,
+            "target": diffusion_target_version(engine, cfg),
+            "pin": _plan_diffusers_pin(engine),
+            **listing,
+        }
+        request.app.state.diffusers_versions = cache
     return templates.TemplateResponse(
         request, "_setup_diffusion_partial.html",
         _setup_diffusion_ctx(request),
@@ -2928,6 +3005,10 @@ def _setup_ctx(request: Request,
         install=progress_state.to_dict() if progress_state else InstallState().to_dict(),
         install_variant=progress_variant,
         updates=updates,
+        version_lists=getattr(request.app.state, "install_versions", {}) or {},
+        auto_update_engines=dict(cfg.auto_update_engines or {}),
+        auto_update_idle_seconds=cfg.auto_update_idle_seconds,
+        auto_update_check_interval_seconds=cfg.auto_update_check_interval_seconds,
         config_dir=str(cfg.config_path.parent),
         config_file=str(cfg.config_path),
         open_config_label=open_config_label,
@@ -2949,9 +3030,11 @@ def _setup_ctx(request: Request,
 async def setup_install(request: Request,
                         source: str = Form("llama.cpp"),
                         backend: str = Form(""),
+                        version: str = Form(""),
                         _: None = Depends(require_csrf)) -> Response:
     source, backend = _resolve_variant(source, backend)
     vid = variant_id(source, backend)
+    pinned = (version or "").strip() or None
     states: dict[str, InstallState] = request.app.state.install_states
     state = states.setdefault(vid, InstallState())
     if state.status != "running":
@@ -2959,10 +3042,31 @@ async def setup_install(request: Request,
         state.lines = []
         state.error = None
         state.installed_path = None
-        asyncio.create_task(install_variant(state, source, backend))
+        asyncio.create_task(install_variant(state, source, backend, version=pinned))
     return templates.TemplateResponse(
         request, "setup.html",
         _setup_ctx(request, selected_source=source, selected_backend=backend),
+    )
+
+
+@router.get("/setup/versions", response_class=HTMLResponse)
+async def setup_versions(request: Request,
+                         variant: str = "",
+                         _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """Fetch the installable version list for one variant and re-render the
+    installed-variants partial with its picker populated. Manual (button-
+    triggered) so GitHub/PyPI isn't hit on every page load."""
+    from .llama_installer import list_versions
+    parsed = parse_variant_id(variant) if variant else None
+    cache: dict[str, dict] = getattr(request.app.state, "install_versions", None) or {}
+    if parsed is not None:
+        source, backend = parsed
+        loop = asyncio.get_running_loop()
+        cache[variant] = await loop.run_in_executor(
+            None, list_versions, source, backend)
+        request.app.state.install_versions = cache
+    return templates.TemplateResponse(
+        request, "_installed_variants.html", _setup_ctx(request),
     )
 
 
@@ -3016,6 +3120,42 @@ async def setup_switch_variant(request: Request,
             cfg.llama_server_engine = engine
             patch_config_binary(cfg.config_path, str(path), engine=engine)
     return RedirectResponse("/ui/setup", status_code=303)
+
+
+def _set_auto_update_flag(request: Request, engine: str, enabled: bool) -> bool:
+    """Validate + persist one engine's auto-update switch. Returns True on
+    success, False for an unknown engine key (caller ignores the toggle)."""
+    from .api_admin import _valid_auto_update_key
+    from .config import update_auto_update
+    if not _valid_auto_update_key(engine):
+        return False
+    cfg = request.app.state.cfg
+    update_auto_update(cfg.config_path, engine=engine, enabled=enabled)
+    cfg.auto_update_engines = dict(cfg.auto_update_engines or {})
+    cfg.auto_update_engines[engine] = enabled
+    request.app.state.db.log_event(
+        "auto_update_toggled", {"engine": engine, "enabled": enabled})
+    return True
+
+
+@router.post("/setup/auto-update", response_class=HTMLResponse)
+async def setup_auto_update_toggle(request: Request,
+                                   engine: str = Form(...),
+                                   enabled: str = Form(""),
+                                   _: None = Depends(require_csrf)) -> Response:
+    """Flip a llama variant's auto-update-when-idle switch (Setup page)."""
+    _set_auto_update_flag(request, engine, enabled.strip().lower() == "on")
+    return RedirectResponse("/ui/setup", status_code=303)
+
+
+@router.post("/setup-diffusion/auto-update", response_class=HTMLResponse)
+async def setup_diffusion_auto_update_toggle(request: Request,
+                                             engine: str = Form(...),
+                                             enabled: str = Form(""),
+                                             _: None = Depends(require_csrf)) -> Response:
+    """Flip a diffusion engine's auto-update-when-idle switch."""
+    _set_auto_update_flag(request, engine, enabled.strip().lower() == "on")
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
 
 
 @router.get("/setup/check-updates", response_class=HTMLResponse)
