@@ -2,6 +2,38 @@
 {% set active = 'dashboard' %}
 {% block title %}Dashboard - llamanager{% endblock %}
 {% block content %}
+{% if onboarding and onboarding.show %}
+<section class="lm-section" style="margin-bottom: 16px;">
+  <div style="
+    border: 1px solid var(--accent-soft);
+    background: var(--bg-2);
+    border-radius: 8px;
+    padding: 16px 18px;">
+    <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:10px;">
+      <strong style="color: var(--fg-0); font-size: 0.95rem;">Finish setting up llamanager</strong>
+      <span style="color: var(--fg-3); font-size: 0.8rem;">
+        {{ onboarding.done_count }}/{{ onboarding.total }} done
+      </span>
+    </div>
+    <ul style="list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px;">
+      {% for step in onboarding.steps %}
+      <li style="display:flex; align-items:center; gap:10px; font-size:0.875rem;">
+        <span style="color: {{ 'var(--ok)' if step.done else 'var(--fg-3)' }}; width:1.2em;">
+          {{ '✓' if step.done else '○' }}
+        </span>
+        {% if step.done %}
+          <span style="color: var(--fg-2);">{{ step.label }}</span>
+        {% else %}
+          <a href="{{ step.href }}" style="color: var(--accent); text-decoration:none;">{{ step.label }}</a>
+          <span style="color: var(--fg-3);">— {{ step.hint }}</span>
+        {% endif %}
+        {% if step.optional %}<span style="color: var(--fg-3); font-size:0.75rem;">(optional)</span>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+</section>
+{% endif %}
 <style>
   @media (max-width: 640px) {
     .lm-ref-grid { grid-template-columns: 1fr !important; }

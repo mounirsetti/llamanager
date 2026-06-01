@@ -242,11 +242,18 @@ def resolve_spec(cfg: Config, *, profile: str | None = None,
               if model_path.exists() else cfg.llama_server_engine)
 
     # Merge args: engine defaults → profile basic → profile.args → request args.
-    merged_args: dict[str, Any] = dict(cfg.default_args.get(engine, {}))
+    # Normalize every key to kebab-case *before* merging. The cmdline builder
+    # coerces keys with _normalize_arg_key at emit time, so an underscore key
+    # from one layer (e.g. config's ``ctx_size``) and a dash key from another
+    # (a profile's derived ``ctx-size``) would otherwise survive as two
+    # distinct dict entries and both be emitted — a duplicated ``--ctx-size``.
+    def _norm(d: dict[str, Any]) -> dict[str, Any]:
+        return {_normalize_arg_key(k): v for k, v in d.items()}
+    merged_args: dict[str, Any] = _norm(cfg.default_args.get(engine, {}))
     if prof:
-        merged_args.update(_basic_to_args(prof, engine, model_path))
-        merged_args.update(prof.args)
-    merged_args.update(args)
+        merged_args.update(_norm(_basic_to_args(prof, engine, model_path)))
+        merged_args.update(_norm(prof.args))
+    merged_args.update(_norm(args))
 
     chosen_mmproj = mmproj if mmproj is not None else (prof.mmproj if prof else "")
     mmproj_path: Path | None

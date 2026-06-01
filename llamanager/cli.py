@@ -37,6 +37,17 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tray(args: argparse.Namespace) -> int:
+    """Run the system-tray / menu-bar app (thin client over /admin/*).
+
+    Talks to an already-running daemon; does not start one. The daemon
+    is expected to run as an OS-managed background service so it can be
+    always-on independent of the desktop session."""
+    from .tray import main as tray_main
+    cfg = load_config(Path(args.config) if args.config else None)
+    return tray_main(cfg)
+
+
 def cmd_init_config(args: argparse.Namespace) -> int:
     target = expand(args.path) if args.path else expand("~/.llamanager/config.toml")
     out = write_default_config(target)
@@ -44,10 +55,143 @@ def cmd_init_config(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# `llamanager init` — the single guided front door. Stitches together the
+# steps that used to be scattered across init-config, the first `serve`, the
+# bootstrap-key dance, the binary installer, and the autostart commands.
+# ---------------------------------------------------------------------------
+
+_BACKEND_FOR_GPU = {"nvidia": "cuda", "amd": "vulkan", "apple": "metal",
+                    "cpu": "cpu"}
+
+
+def _show_bootstrap_key(cfg, key: str) -> None:
+    """Persist the bootstrap key 0600 and print it. Mirrors
+    app._emit_bootstrap_key but without importing the FastAPI stack —
+    `init` should stay lightweight."""
+    import os
+    p = cfg.data_dir / "bootstrap-key.txt"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(key + "\n", encoding="utf-8")
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
+    line = "=" * 78
+    print(f"\n{line}")
+    print("  BOOTSTRAP ADMIN KEY (shown once — also saved to:")
+    print(f"  {p})")
+    print(f"  {key}")
+    print("  Paste it at /ui/login, create a real origin, then revoke "
+          "'bootstrap' and delete that file.")
+    print(f"{line}")
+
+
+def _prompt_autostart_mode() -> str:
+    """Interactive run-mode picker. Returns a mode for `autostart --mode`
+    or 'skip'."""
+    print("\nHow should llamanager run?")
+    print("  1) tray+service  — always-on daemon + a tray/menu-bar icon "
+          "(recommended)")
+    print("  2) boot-service  — always-on, headless, no icon")
+    print("  3) login-tray    — daemon + tray, only while you're logged in")
+    print("  4) skip          — I'll start it myself")
+    choices = {"1": "tray+service", "2": "boot-service",
+               "3": "login-tray", "4": "skip", "": "tray+service"}
+    try:
+        sel = input("Choose [1]: ").strip()
+    except EOFError:
+        return "skip"
+    return choices.get(sel, "tray+service")
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    """Guided first-run setup: config → admin key → binary → autostart."""
+    import shutil
+
+    from . import gpu_detect
+    from .auth import AuthManager, load_or_create_lookup_secret
+    from .db import DB
+
+    print("llamanager — first-run setup\n" + "=" * 40)
+
+    # 1. Config -------------------------------------------------------------
+    cfg_path = (Path(args.config) if args.config
+                else expand("~/.llamanager/config.toml"))
+    if cfg_path.exists():
+        print(f"[1/4] config: found {cfg_path}")
+    else:
+        out = write_default_config(cfg_path)
+        print(f"[1/4] config: wrote default to {out}")
+    cfg = load_config(cfg_path)
+
+    # 2. Bootstrap admin key (reliable — no running daemon needed) ----------
+    # We create the bootstrap origin directly so the key is captured even
+    # when the user goes on to install a headless service (the old failure
+    # mode where the service swallowed the only printout).
+    db = DB(cfg.db_path)
+    try:
+        am = AuthManager(
+            db, lookup_secret=load_or_create_lookup_secret(cfg.data_dir),
+            default_priority=cfg.default_origin_priority)
+        key = am.ensure_bootstrap()
+    finally:
+        db.close()
+    if key:
+        print("[2/4] admin key: created bootstrap key")
+        _show_bootstrap_key(cfg, key)
+    else:
+        keyfile = cfg.data_dir / "bootstrap-key.txt"
+        print("[2/4] admin key: already initialized (origins exist).")
+        if keyfile.exists():
+            print(f"       bootstrap key still on disk: {keyfile}")
+        else:
+            print("       if you've lost all keys, create one via an existing "
+                  "admin origin, or reset state.db.")
+
+    # 3. llama-server binary ------------------------------------------------
+    binname = cfg.llama_server_binary
+    found = shutil.which(binname) or (Path(binname).is_file() and binname)
+    if found:
+        print(f"[3/4] llama-server: found ({found})")
+    else:
+        kind = gpu_detect.detect_gpu().kind
+        backend = _BACKEND_FOR_GPU.get(kind, "cpu")
+        print(f"[3/4] llama-server: not found. Detected GPU: {kind} "
+              f"→ recommended backend: {backend}")
+        print("       Install it from the dashboard (/ui/setup), or once the "
+              "daemon is running:")
+        print(f"         llamanager setup install-llama-server --backend {backend}")
+
+    # 4. Autostart ----------------------------------------------------------
+    mode = args.autostart
+    if mode is None:
+        mode = "skip" if args.yes else _prompt_autostart_mode()
+    if mode and mode != "skip":
+        print(f"\n[4/4] autostart: configuring `{mode}`")
+        args.mode = mode
+        cmd_autostart(args)
+    else:
+        print("\n[4/4] autostart: skipped. Set it later with "
+              "`llamanager autostart --mode tray+service`.")
+
+    # Next steps ------------------------------------------------------------
+    host = cfg.bind if cfg.bind not in ("0.0.0.0", "::") else "127.0.0.1"
+    print("\n" + "=" * 40 + "\nDone. Next:")
+    if mode in (None, "skip", "off"):
+        print("  • start the daemon:  llamanager serve")
+    print(f"  • open the UI:       http://{host}:{cfg.port}/ui/login  "
+          "(paste the bootstrap key)")
+    print("  • pull a model:      in /ui/models, or "
+          "`llamanager models pull <hf-repo>`")
+    return 0
+
+
 def cmd_install_launchd(args: argparse.Namespace) -> int:
     from .installer import install_launchd
+    cfg = load_config(Path(args.config) if args.config else None)
     plist_path = install_launchd(label=args.label, port=args.port,
-                                 binary=args.binary)
+                                 binary=args.binary, cfg=cfg)
     print(f"installed LaunchAgent at {plist_path}")
     print("To load now: `launchctl load -w` followed by the plist path.")
     return 0
@@ -55,8 +199,9 @@ def cmd_install_launchd(args: argparse.Namespace) -> int:
 
 def cmd_install_systemd(args: argparse.Namespace) -> int:
     from .installer import install_systemd
+    cfg = load_config(Path(args.config) if args.config else None)
     unit_path = install_systemd(unit_name=args.unit, port=args.port,
-                                binary=args.binary)
+                                binary=args.binary, cfg=cfg)
     print(f"installed user systemd unit at {unit_path}")
     print("To enable: `systemctl --user daemon-reload && "
           "systemctl --user enable --now llamanager.service`.")
@@ -65,8 +210,9 @@ def cmd_install_systemd(args: argparse.Namespace) -> int:
 
 def cmd_install_windows(args: argparse.Namespace) -> int:
     from .installer import install_windows_task
+    cfg = load_config(Path(args.config) if args.config else None)
     xml_path = install_windows_task(task_name=args.task, port=args.port,
-                                    binary=args.binary)
+                                    binary=args.binary, cfg=cfg)
     print(f"wrote Task Scheduler XML to {xml_path}")
     print("To register (runs at user logon):")
     print(f'  schtasks /Create /XML "{xml_path}" /TN {args.task}')
@@ -132,6 +278,376 @@ def cmd_remove_windows_service(args: argparse.Namespace) -> int:
     # stop first if running; ignore failure (service might not be running)
     _run_win_service_module(["stop"])
     return _run_win_service_module(["remove"])
+
+
+# ---------------------------------------------------------------------------
+# Autostart: how llamanager runs at boot/login. One command, four modes,
+# three platforms. The tray icon is produced here (modes that include it),
+# so `init` just asks which mode and delegates to `cmd_autostart`.
+#
+#   off            tear down all autostart
+#   boot-service   always-on headless daemon, no tray (before login where
+#                  the OS allows: Linux linger / Windows service / macOS
+#                  needs --pre-login, else falls back to login)
+#   login-tray     daemon + tray, both at login (no boot service)
+#   tray+service   always-on daemon + login tray (recommended; "mode #3")
+# ---------------------------------------------------------------------------
+
+# mode -> (daemon_kind, want_tray); daemon_kind in {"none","login","boot"}.
+_AUTOSTART_MODES = {
+    "off": ("none", False),
+    "boot-service": ("boot", False),
+    "login-tray": ("login", True),
+    "tray+service": ("boot", True),
+}
+
+
+def _sh(cmd: list[str], *, label: str | None = None) -> int:
+    """Run a setup step, echoing the command and its outcome. Returns the
+    exit code; never raises (so one optional step can't abort the rest)."""
+    import subprocess
+    print(f"  $ {' '.join(cmd)}")
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           check=False, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"    ! skipped ({e})")
+        return 1
+    out = (r.stdout or "").strip()
+    err = (r.stderr or "").strip()
+    if out:
+        print("    " + out.replace("\n", "\n    "))
+    if r.returncode != 0 and err:
+        print(f"    ! {err.splitlines()[0]}")
+    return r.returncode
+
+
+def cmd_autostart(args: argparse.Namespace) -> int:
+    """Configure how llamanager starts at boot/login (see --mode)."""
+    from . import installer, service_ctl
+    cfg = load_config(Path(args.config) if args.config else None)
+    daemon_kind, want_tray = _AUTOSTART_MODES[args.mode]
+    binary = args.binary
+    write_only = bool(args.write_only)
+    start_now = not args.no_start
+
+    if args.mode == "off":
+        return _autostart_off(cfg)
+
+    if want_tray:
+        print("Checking the [tray] extra is importable...")
+        try:
+            import pystray  # noqa: F401
+            from PIL import Image  # noqa: F401
+            print("  ok: pystray + Pillow present")
+        except ImportError:
+            print("  ! pystray/Pillow not installed. Run: pip install "
+                  "'llamanager[tray]'  (the tray won't launch without it)")
+
+    if sys.platform.startswith("linux"):
+        return _autostart_linux(cfg, installer, service_ctl,
+                                daemon_kind=daemon_kind, want_tray=want_tray,
+                                binary=binary, write_only=write_only,
+                                start_now=start_now)
+    if sys.platform == "darwin":
+        return _autostart_macos(cfg, installer,
+                                daemon_kind=daemon_kind, want_tray=want_tray,
+                                binary=binary, write_only=write_only,
+                                start_now=start_now, pre_login=bool(args.pre_login))
+    if sys.platform == "win32":
+        return _autostart_windows(cfg, installer,
+                                  daemon_kind=daemon_kind, want_tray=want_tray,
+                                  binary=binary, write_only=write_only,
+                                  start_now=start_now,
+                                  username=args.username, password=args.password)
+    print(f"error: unsupported platform {sys.platform!r}", file=sys.stderr)
+    return 2
+
+
+def _autostart_linux(cfg, installer, service_ctl, *, daemon_kind, want_tray,
+                     binary, write_only, start_now) -> int:
+    if daemon_kind != "none":
+        print("\n[daemon] systemd --user unit")
+        unit = installer.install_systemd(command="serve", binary=binary, cfg=cfg)
+        print(f"  wrote {unit}")
+        if not write_only:
+            _sh(["systemctl", "--user", "daemon-reload"])
+            _sh(["systemctl", "--user", "enable", "--now", "llamanager.service"])
+            if daemon_kind == "boot":
+                # Linger lets the --user manager run at boot before login.
+                _sh(["loginctl", "enable-linger", os.environ.get("USER", "")])
+        else:
+            print("  --write-only: systemctl --user daemon-reload && "
+                  "systemctl --user enable --now llamanager.service"
+                  + ("  (+ loginctl enable-linger \"$USER\")" if daemon_kind == "boot" else ""))
+    if want_tray:
+        print("\n[tray] XDG autostart entry")
+        desktop = installer.install_xdg_autostart(binary=binary)
+        print(f"  wrote {desktop}")
+        if start_now and not write_only:
+            _spawn_tray(binary)
+    print("\nDone." + (" The tray launches at your next login."
+                       if want_tray else ""))
+    return 0
+
+
+def _autostart_macos(cfg, installer, *, daemon_kind, want_tray, binary,
+                     write_only, start_now, pre_login) -> int:
+    import os
+    uid = os.getuid()
+    if want_tray:
+        print("\n[tray] LaunchAgent com.llamanager.tray")
+        tray_plist = installer.install_launchd(label="com.llamanager.tray",
+                                              command="tray", binary=binary, cfg=cfg)
+        print(f"  wrote {tray_plist}")
+
+    if daemon_kind == "boot" and pre_login:
+        staging, dest = installer.install_launchdaemon(label="com.llamanager",
+                                                       binary=binary, cfg=cfg)
+        print(f"\n[daemon] system LaunchDaemon (pre-login) staged at {staging}")
+        print(f"  → installs to {dest}; this needs root:")
+        print(f"  sudo cp {staging} {dest}")
+        print(f"  sudo launchctl bootstrap system {dest}")
+        if not write_only and start_now:
+            _sh(["sudo", "cp", str(staging), str(dest)])
+            _sh(["sudo", "launchctl", "bootstrap", "system", str(dest)])
+        print("  NOTE: stopping/starting a system daemon needs sudo, so the "
+              "tray's daemon controls will require it.")
+    elif daemon_kind != "none":
+        if daemon_kind == "boot":
+            print("\n  note: macOS can't start a per-user daemon before login; "
+                  "installing as a login agent. Re-run with --pre-login for "
+                  "true before-login start.")
+        print("\n[daemon] LaunchAgent com.llamanager (login-triggered)")
+        daemon_plist = installer.install_launchd(label="com.llamanager",
+                                                 command="serve", binary=binary, cfg=cfg)
+        print(f"  wrote {daemon_plist}")
+        if not write_only:
+            _sh(["launchctl", "bootout", f"gui/{uid}/{daemon_plist.stem}"])
+            _sh(["launchctl", "bootstrap", f"gui/{uid}", str(daemon_plist)])
+
+    if want_tray and not write_only and start_now:
+        _sh(["launchctl", "bootout", f"gui/{uid}/com.llamanager.tray"])
+        _sh(["launchctl", "bootstrap", f"gui/{uid}",
+             str(installer.expand("~/Library/LaunchAgents/com.llamanager.tray.plist"))])
+    if write_only:
+        print("\n--write-only: load each plist with "
+              f"`launchctl bootstrap gui/{uid} <plist>`.")
+    print("\nDone.")
+    return 0
+
+
+def _autostart_windows(cfg, installer, *, daemon_kind, want_tray, binary,
+                       write_only, start_now, username, password) -> int:
+    if daemon_kind == "boot":
+        print("\n[daemon] Windows service (needs an elevated shell)")
+        extra: list[str] = []
+        if username:
+            extra += ["--username", username]
+        if password:
+            extra += ["--password", password]
+        extra += ["--startup", "auto", "install"]
+        if not write_only:
+            rc = _run_win_service_module(extra)
+            if rc != 0:
+                print("  ! service install failed — re-run from an "
+                      "Administrator shell (the service step needs elevation).")
+            elif start_now:
+                _run_win_service_module(["start"])
+            ok, msg = installer.grant_windows_service_control("llamanager", username)
+            print(f"  control grant: {'ok' if ok else '!'} {msg}")
+            if not ok:
+                print("    (run elevated — editing the service SD needs admin)")
+        else:
+            print("  --write-only: install with: llamanager install-windows-service")
+    elif daemon_kind == "login":
+        print("\n[daemon] logon Task Scheduler entry")
+        xml = installer.install_windows_task(task_name="llamanager",
+                                             command="serve", binary=binary, cfg=cfg)
+        print(f"  wrote {xml}")
+        if not write_only and start_now:
+            _sh(["schtasks", "/Create", "/XML", str(xml), "/TN", "llamanager", "/F"])
+            _sh(["schtasks", "/Run", "/TN", "llamanager"])
+
+    if want_tray:
+        print("\n[tray] logon Task Scheduler entry")
+        xml = installer.install_windows_task(task_name="llamanager-tray",
+                                             command="tray", binary=binary, cfg=cfg)
+        print(f"  wrote {xml}")
+        print("  register it (no elevation needed):")
+        print(f'    schtasks /Create /XML "{xml}" /TN llamanager-tray /F')
+        if not write_only and start_now:
+            _sh(["schtasks", "/Create", "/XML", str(xml), "/TN",
+                 "llamanager-tray", "/F"])
+            _sh(["schtasks", "/Run", "/TN", "llamanager-tray"])
+    print("\nDone.")
+    return 0
+
+
+def _autostart_off(cfg) -> int:
+    """Tear down every autostart artifact on this platform."""
+    from .config import expand
+    print("Removing llamanager autostart:")
+    if sys.platform.startswith("linux"):
+        _sh(["systemctl", "--user", "disable", "--now", "llamanager.service"])
+        desktop = expand("~/.config/autostart/llamanager-tray.desktop")
+        if desktop.exists():
+            desktop.unlink(); print(f"  removed {desktop}")
+        return 0
+    if sys.platform == "darwin":
+        from .installer import LAUNCHDAEMON_DIR
+        uid = os.getuid()
+        for label in ("com.llamanager.tray", "com.llamanager"):
+            _sh(["launchctl", "bootout", f"gui/{uid}/{label}"])
+            plist = expand(f"~/Library/LaunchAgents/{label}.plist")
+            if plist.exists():
+                plist.unlink(); print(f"  removed {plist}")
+        sysd = LAUNCHDAEMON_DIR / "com.llamanager.plist"
+        if sysd.exists():
+            print(f"  found system daemon {sysd} — removing (needs sudo):")
+            _sh(["sudo", "launchctl", "bootout", "system", str(sysd)])
+            _sh(["sudo", "rm", "-f", str(sysd)])
+        return 0
+    if sys.platform == "win32":
+        _sh(["schtasks", "/Delete", "/TN", "llamanager-tray", "/F"])
+        _sh(["schtasks", "/Delete", "/TN", "llamanager", "/F"])
+        print("  daemon service left intact — remove with: "
+              "llamanager remove-windows-service")
+        return 0
+    print(f"error: unsupported platform {sys.platform!r}", file=sys.stderr)
+    return 2
+
+
+def _spawn_tray(binary: str | None) -> None:
+    """Launch the tray now, detached, so the user sees it without a re-login."""
+    import shutil
+    import subprocess
+    exe = binary or shutil.which("llamanager") or sys.executable
+    cmd = ([exe, "tray"] if exe.endswith(("llamanager", "llamanager.exe"))
+           else [exe, "-m", "llamanager", "tray"])
+    try:
+        subprocess.Popen(cmd, start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print("  launched the tray now (detached)")
+    except OSError as e:
+        print(f"  ! could not launch the tray now ({e}); it will start at login")
+
+
+def cmd_install_tray(args: argparse.Namespace) -> int:
+    """Deprecated alias for `autostart --mode tray+service`."""
+    print("note: `install-tray` is now `autostart --mode tray+service`.\n")
+    args.mode = "tray+service"
+    return cmd_autostart(args)
+
+
+def cmd_remove_tray(args: argparse.Namespace) -> int:
+    """Deprecated alias for `autostart --mode off`."""
+    cfg = load_config(Path(args.config) if args.config else None)
+    return _autostart_off(cfg)
+
+
+# ---------------------------------------------------------------------------
+# `llamanager uninstall` — stop + remove all OS integration, optionally purge
+# data/models. The package itself is removed with pip (we can't pip-uninstall
+# the interpreter we're running in).
+# ---------------------------------------------------------------------------
+
+
+def _purge_data(cfg, *, include_models: bool) -> None:
+    """Delete app data under data_dir (config, state.db, logs, secrets,
+    staged plists, images). Keeps the models dir unless include_models."""
+    import shutil
+    data = cfg.data_dir
+    models = cfg.models_dir
+
+    def _models_under(p: Path) -> bool:
+        try:
+            return models == p or models.is_relative_to(p)
+        except ValueError:
+            return False
+
+    if data.exists():
+        for child in sorted(data.iterdir()):
+            if not include_models and _models_under(child):
+                print(f"  keeping models: {child}")
+                continue
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+            print(f"  removed {child}")
+        # Remove the now-(near-)empty data dir only if nothing is left.
+        try:
+            data.rmdir()
+            print(f"  removed {data}")
+        except OSError:
+            pass
+    # A custom --config path may live outside data_dir; remove it too.
+    cfg_path = cfg.config_path
+    if cfg_path and cfg_path.exists() and not cfg_path.is_relative_to(data):
+        cfg_path.unlink(missing_ok=True)
+        print(f"  removed {cfg_path}")
+    # Models dir outside data_dir.
+    if include_models and models.exists() and not models.is_relative_to(data):
+        shutil.rmtree(models, ignore_errors=True)
+        print(f"  removed {models}")
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    """Stop the daemon, remove all autostart/service integration, and
+    (with --purge / --purge-models) delete app data and models."""
+    from . import service_ctl
+    cfg = load_config(Path(args.config) if args.config else None)
+
+    print("llamanager uninstall — this will:")
+    print("  • stop the daemon and remove ALL autostart entries "
+          "(service, agents, tasks, tray)")
+    if args.purge or args.purge_models:
+        print(f"  • delete app data in {cfg.data_dir} "
+              "(config, state.db, logs, keys)")
+    if args.purge_models:
+        print(f"  • delete ALL models in {cfg.models_dir}")
+    else:
+        print(f"  • KEEP models in {cfg.models_dir}")
+    print("  (the Python package itself is removed separately with pip)")
+
+    if not args.yes:
+        try:
+            reply = input("\nProceed? [y/N]: ").strip().lower()
+        except EOFError:
+            reply = ""
+        if reply not in ("y", "yes"):
+            print("aborted — nothing changed")
+            return 1
+
+    # 1. Stop the daemon (best-effort; service-managed daemons stop here,
+    #    a bare `serve` is stopped by the autostart teardown below).
+    print("\n[1/4] stopping daemon")
+    ok, msg = service_ctl.stop_daemon(cfg)
+    print(f"  {msg}")
+
+    # 2. Remove all autostart artifacts (service unit / agents / tasks / tray).
+    print("\n[2/4] removing autostart")
+    _autostart_off(cfg)
+
+    # 3. Windows service: _autostart_off leaves it intact on purpose, so a
+    #    full uninstall removes it here (needs an elevated shell).
+    if sys.platform == "win32":
+        print("\n[2b] removing Windows service (needs elevation)")
+        _run_win_service_module(["stop"])
+        _run_win_service_module(["remove"])
+
+    # 4. Purge data / models.
+    if args.purge or args.purge_models:
+        print("\n[3/4] purging data")
+        _purge_data(cfg, include_models=bool(args.purge_models))
+    else:
+        print("\n[3/4] data kept (pass --purge to delete config/db/logs/keys)")
+
+    print("\n[4/4] remove the package:")
+    print("  pip uninstall llamanager")
+    print("\nDone.")
+    return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -818,6 +1334,11 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--log-level", default="info")
     sp.set_defaults(func=cmd_serve)
 
+    sp = sub.add_parser("tray",
+                        help="run the system-tray / menu-bar app "
+                             "(thin client; needs the [tray] extra)")
+    sp.set_defaults(func=cmd_tray)
+
     sp = sub.add_parser("init-config", help="write a default config.toml")
     sp.add_argument("--path", default=None)
     sp.set_defaults(func=cmd_init_config)
@@ -864,6 +1385,72 @@ def main(argv: list[str] | None = None) -> int:
     sp = sub.add_parser("remove-windows-service",
                         help="stop and unregister the Windows service")
     sp.set_defaults(func=cmd_remove_windows_service)
+
+    def _add_autostart_flags(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--binary", default=None,
+                       help="path to the llamanager entrypoint (default: "
+                            "autodetect)")
+        p.add_argument("--no-start", action="store_true",
+                       help="install but don't start the daemon/tray now")
+        p.add_argument("--write-only", action="store_true",
+                       help="only write units/plists/XML; skip enable/start "
+                            "(print the manual commands instead)")
+        p.add_argument("--pre-login", action="store_true",
+                       help="macOS only: install the daemon as a system "
+                            "LaunchDaemon (runs before login; needs sudo, and "
+                            "tray daemon-controls then require sudo too)")
+        p.add_argument("--username", default=None,
+                       help="Windows only: run the service as this account "
+                            "and grant it control")
+        p.add_argument("--password", default=None,
+                       help="Windows only: password for --username")
+
+    sp = sub.add_parser("autostart",
+                        help="configure how llamanager runs at boot/login "
+                             "(the single front door for OS integration)")
+    sp.add_argument("--mode", required=True,
+                    choices=["off", "boot-service", "login-tray", "tray+service"],
+                    help="off=tear down; boot-service=always-on headless; "
+                         "login-tray=daemon+tray at login; "
+                         "tray+service=always-on daemon + login tray "
+                         "(recommended)")
+    _add_autostart_flags(sp)
+    sp.set_defaults(func=cmd_autostart)
+
+    # Back-compat aliases for the original commands.
+    sp = sub.add_parser("install-tray",
+                        help="alias for `autostart --mode tray+service`")
+    _add_autostart_flags(sp)
+    sp.set_defaults(func=cmd_install_tray)
+
+    sp = sub.add_parser("remove-tray",
+                        help="alias for `autostart --mode off`")
+    sp.set_defaults(func=cmd_remove_tray)
+
+    sp = sub.add_parser("uninstall",
+                        help="stop the daemon + remove all autostart/service "
+                             "integration; --purge also deletes data")
+    sp.add_argument("--purge", action="store_true",
+                    help="also delete app data (config, state.db, logs, keys) "
+                         "in data_dir — keeps models")
+    sp.add_argument("--purge-models", action="store_true",
+                    help="also delete the models dir (implies data purge)")
+    sp.add_argument("--yes", action="store_true",
+                    help="skip the confirmation prompt")
+    sp.set_defaults(func=cmd_uninstall)
+
+    sp = sub.add_parser("init",
+                        help="guided first-run setup: config + admin key + "
+                             "llama-server check + autostart (the front door)")
+    sp.add_argument("--yes", action="store_true",
+                    help="non-interactive: accept defaults, skip the autostart "
+                         "prompt (use --autostart to set it)")
+    sp.add_argument("--autostart", default=None,
+                    choices=["off", "boot-service", "login-tray",
+                             "tray+service", "skip"],
+                    help="set the run mode non-interactively (default: prompt)")
+    _add_autostart_flags(sp)
+    sp.set_defaults(func=cmd_init)
 
     # ---- admin verbs (drive a running daemon) ----
 

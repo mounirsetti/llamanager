@@ -20,6 +20,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import time
 
 log = logging.getLogger(__name__)
@@ -194,6 +195,23 @@ def _current_session(request: Request) -> dict[str, Any] | None:
     return _read_session(request)
 
 
+def _wants_htmx(request: Request) -> bool:
+    """True when the request was issued by htmx (vs a full-page navigation)."""
+    return request.headers.get("hx-request") == "true"
+
+
+def _auth_redirect(request: Request, location: str) -> HTTPException:
+    """Build a redirect-to-login that works for both htmx and plain requests.
+
+    A plain 3xx is transparently followed by htmx's fetch and the login HTML
+    gets swapped into the current page, which is broken. For htmx we instead
+    return HX-Redirect so the browser does a real top-level navigation.
+    """
+    if _wants_htmx(request):
+        return HTTPException(status_code=200, headers={"HX-Redirect": location})
+    return HTTPException(status_code=302, headers={"Location": location})
+
+
 async def require_admin_ui(request: Request) -> Origin:
     sess = _read_session(request)
 
@@ -216,12 +234,12 @@ async def require_admin_ui(request: Request) -> Origin:
                 return origin
 
     if not sess:
-        raise HTTPException(status_code=302, headers={"Location": "/ui/login"})
+        raise _auth_redirect(request, "/ui/login")
     am_: AuthManager = request.app.state.auth
     origin = await am_.verify(sess["key"])
     if not origin or not origin.is_admin:
         _session_store(request).delete(request.cookies.get(COOKIE_NAME))
-        raise HTTPException(status_code=302, headers={"Location": "/ui/login"})
+        raise _auth_redirect(request, "/ui/login")
     request.state.csrf_token = sess["csrf"]
     request.state.session = sess
     return origin
@@ -237,9 +255,12 @@ def _normalise_host(netloc: str) -> str:
 def _same_origin(request: Request) -> bool:
     """Best-effort same-origin check on the Origin/Referer header.
 
-    When Referrer-Policy: no-referrer is active (which we set), Chrome sends
-    Origin: null on form POSTs. In that case we skip the origin check and rely
-    solely on the CSRF token, which is the real protection.
+    We set Referrer-Policy: no-referrer, which strips the Referer header and
+    changes how browsers report the origin on same-origin form POSTs: Chrome
+    sends Origin: null, while Firefox omits the Origin header entirely. In
+    either case there is no usable origin to compare against, so we skip the
+    origin check and rely solely on the per-session CSRF token, which is the
+    real protection against forged cross-origin requests.
     """
     origin = request.headers.get("origin")
     # "null" origin is sent by browsers when referrer policy suppresses it.
@@ -248,7 +269,11 @@ def _same_origin(request: Request) -> bool:
         return True
     ref = origin or request.headers.get("referer")
     if not ref:
-        return False
+        # Firefox omits Origin (rather than sending "null") on same-origin
+        # POSTs under our no-referrer policy, and Referer is stripped too. With
+        # no header to compare, defer to the CSRF token downstream — the same
+        # treatment as the origin == "null" case above.
+        return True
     try:
         netloc = urlparse(ref).netloc
     except Exception:
@@ -278,16 +303,31 @@ async def require_csrf(request: Request,
                        _: Origin = Depends(require_admin_ui)) -> None:
     """Dependency: validate per-session CSRF token + same-origin Origin/Referer.
 
-    Must be added to every state-changing UI route.
+    Must be added to every state-changing UI route. On a recoverable failure
+    (the session was rotated out from under an already-rendered page, leaving a
+    stale CSRF token) we tell the browser to reload/redirect instead of
+    returning a dead 403 the user can only escape by clearing cookies.
     """
     sess = _current_session(request)
     if not sess:
-        raise HTTPException(status_code=403, detail="missing session")
+        # Session expired or rotated away entirely: bounce to login.
+        raise _auth_redirect(request, "/ui/login")
     if not _same_origin(request):
+        # Genuine cross-origin POST — a real security signal, not a stale
+        # cookie. Keep it a hard failure.
         raise HTTPException(status_code=403, detail="bad origin")
     token = await _extract_csrf_token(request)
     if not token or not secrets.compare_digest(str(token), sess["csrf"]):
-        raise HTTPException(status_code=403, detail="invalid csrf token")
+        # The session is valid but the page was rendered before a session
+        # rotation, so its embedded token is stale. Reload the page to pick up
+        # a fresh token (rendered from sess["csrf"]) so the user can retry,
+        # rather than dead-ending on a 403.
+        if _wants_htmx(request):
+            raise HTTPException(status_code=200, headers={"HX-Refresh": "true"})
+        raise HTTPException(
+            status_code=303,
+            headers={"Location": request.headers.get("referer") or "/ui/setup"},
+        )
 
 
 _VRAM_USAGE_CACHE: dict[str, Any] = {"at": 0.0, "value": None}
@@ -1048,6 +1088,61 @@ async def logout(request: Request,
 
 # ---------- dashboard ----------
 
+def _autostart_installed() -> bool | None:
+    """Cheap, file-based check for whether an autostart entry exists. No
+    subprocess (the dashboard renders often). Returns None when we can't
+    tell cheaply (Windows, where it needs `sc`/`schtasks`)."""
+    home = Path.home()
+    if sys.platform.startswith("linux"):
+        return ((home / ".config/systemd/user/llamanager.service").exists()
+                or (home / ".config/autostart/llamanager-tray.desktop").exists())
+    if sys.platform == "darwin":
+        return (
+            (home / "Library/LaunchAgents/com.llamanager.plist").exists()
+            or (home / "Library/LaunchAgents/com.llamanager.tray.plist").exists()
+            or Path("/Library/LaunchDaemons/com.llamanager.plist").exists()
+        )
+    return None  # Windows: unknown without sc/schtasks
+
+
+def _onboarding_status(request: Request) -> dict[str, Any]:
+    """First-run checklist for the dashboard banner. Each step is cheap to
+    compute (binary detect, registry list, one COUNT, file existence)."""
+    cfg = request.app.state.cfg
+    db = request.app.state.db
+    binary_ok = bool(detect_binary(cfg.llama_server_binary))
+    has_models = bool(request.app.state.registry.list())
+    row = db.query_one(
+        "SELECT COUNT(*) AS c FROM origins WHERE name != 'bootstrap'")
+    has_origin = bool(row and row["c"] > 0)
+    autostart = _autostart_installed()
+
+    steps = [
+        {"key": "binary", "label": "Install the llama-server binary",
+         "done": binary_ok, "href": "/ui/setup",
+         "hint": "Open Setup to install a build for your GPU."},
+        {"key": "model", "label": "Download a model",
+         "done": has_models, "href": "/ui/models",
+         "hint": "Pull a GGUF from Hugging Face."},
+        {"key": "origin", "label": "Create an API key (origin)",
+         "done": has_origin, "href": "/ui/origins",
+         "hint": "Replace the bootstrap key with a real origin."},
+    ]
+    # Autostart is optional/nudge-only — include it only when we can tell,
+    # and never let it alone keep the banner open.
+    if autostart is not None:
+        steps.append({
+            "key": "autostart", "label": "Run at startup (+ tray icon)",
+            "done": bool(autostart), "href": "/ui/setup",
+            "hint": "Run `llamanager autostart --mode tray+service`.",
+            "optional": True})
+
+    required_done = all(s["done"] for s in steps if not s.get("optional"))
+    return {"steps": steps, "show": not required_done,
+            "done_count": sum(1 for s in steps if s["done"]),
+            "total": len(steps)}
+
+
 @router.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     sm: ServerManager = request.app.state.sm
@@ -1078,6 +1173,7 @@ async def dashboard(request: Request, _: Origin = Depends(require_admin_ui)) -> 
         base_url=base_url,
         sysinfo=sysinfo,
         image_status=image_status,
+        onboarding=_onboarding_status(request),
     ))
 
 
@@ -3052,18 +3148,27 @@ async def setup_install(request: Request,
 @router.get("/setup/versions", response_class=HTMLResponse)
 async def setup_versions(request: Request,
                          variant: str = "",
+                         hide: int = 0,
                          _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    """Fetch the installable version list for one variant and re-render the
-    installed-variants partial with its picker populated. Manual (button-
-    triggered) so GitHub/PyPI isn't hit on every page load."""
+    """Fetch (or collapse) the installable version list for one variant and
+    re-render the installed-variants partial. Manual (button-triggered) so
+    GitHub/PyPI isn't hit on every page load.
+
+    ``hide=1`` drops the variant from the cached version lists so the picker
+    collapses back to the "Versions…" button — otherwise, once expanded, the
+    cache entry would keep the picker open across every subsequent render.
+    """
     from .llama_installer import list_versions
     parsed = parse_variant_id(variant) if variant else None
     cache: dict[str, dict] = getattr(request.app.state, "install_versions", None) or {}
     if parsed is not None:
-        source, backend = parsed
-        loop = asyncio.get_running_loop()
-        cache[variant] = await loop.run_in_executor(
-            None, list_versions, source, backend)
+        if hide:
+            cache.pop(variant, None)
+        else:
+            source, backend = parsed
+            loop = asyncio.get_running_loop()
+            cache[variant] = await loop.run_in_executor(
+                None, list_versions, source, backend)
         request.app.state.install_versions = cache
     return templates.TemplateResponse(
         request, "_installed_variants.html", _setup_ctx(request),

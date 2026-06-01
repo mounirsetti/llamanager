@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.3.92-green.svg" alt="Version 0.3.92">
+  <img src="https://img.shields.io/badge/version-0.3.93-green.svg" alt="Version 0.3.93">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -233,7 +233,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.3.92" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.3.93" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -277,24 +277,43 @@ You can call it without activating the venv:
 
 On Windows, run the clone command from Git Bash, PowerShell, or Windows Terminal. The installer adds `git` to `PATH` by default.
 
-## First run
+## Quick start
+
+One guided command does config, your admin key, a llama-server binary check, and (optionally) sets it to run at startup with a tray icon:
 
 ```bash
-llamanager init-config                     # writes ~/.llamanager/config.toml
-llamanager serve                           # foreground, ctrl-c to stop
+llamanager init
 ```
 
-The first launch prints a bootstrap admin key to stdout:
+`init` walks through four steps:
+
+1. **Config** — writes `~/.llamanager/config.toml` if it's missing.
+2. **Admin key** — creates the bootstrap admin key and prints it (also saved to `~/.llamanager/bootstrap-key.txt`, mode 0600). Capturing it here is reliable even if you later run headless — the old "the service swallowed the key" trap is gone.
+3. **llama-server** — checks for the binary; if missing, detects your GPU and tells you the backend to install.
+4. **Autostart** — asks how you want it to run (see [Auto-start](#auto-start-at-boot-or-login)). Pick `skip` to start it by hand.
 
 ```text
 ==============================================================================
-  llamanager BOOTSTRAP ADMIN KEY (shown ONCE — won't be displayed again)
+  BOOTSTRAP ADMIN KEY (shown once — also saved to ~/.llamanager/bootstrap-key.txt)
   lm_2n8RkFf...
-  Use it to create real origins via /admin/origins, then revoke 'bootstrap'.
+  Paste it at /ui/login, create a real origin, then revoke 'bootstrap'.
 ==============================================================================
 ```
 
-Copy it now. Only the argon2id hash is stored. If you lose the key before creating a second admin origin, the only recovery is deleting `~/.llamanager/state.db` and starting over.
+Then open <http://localhost:7200/ui/login> and paste the key. The dashboard shows a checklist for anything still left (binary, model, real API key, autostart).
+
+Non-interactive (e.g. scripted): `llamanager init --yes --autostart tray+service`.
+
+<details>
+<summary>Manual equivalent (if you'd rather do the steps yourself)</summary>
+
+```bash
+llamanager init-config                     # writes ~/.llamanager/config.toml
+llamanager serve                           # foreground, ctrl-c to stop (prints the key)
+```
+
+Only the argon2id hash of the key is stored. If you lose the key before creating a second admin origin, the only recovery is deleting `~/.llamanager/state.db` and starting over.
+</details>
 
 Default ports:
 
@@ -813,73 +832,81 @@ The UI has streaming token display, multiple conversations stored in localStorag
 
 ## Auto-start at boot or login
 
-### macOS — launchd
+One command, four modes, all three platforms:
 
 ```bash
-llamanager install-launchd
-launchctl load -w ~/Library/LaunchAgents/com.llamanager.plist
+llamanager autostart --mode tray+service     # recommended
 ```
 
-Unload:
+| mode | what it does | runs before login? | tray icon? |
+|------|--------------|:------:|:------:|
+| `tray+service` | always-on daemon **+** a tray/menu-bar icon to control it | yes¹ | yes |
+| `boot-service` | always-on daemon, headless | yes¹ | no |
+| `login-tray`   | daemon + tray, only while you're logged in | no | yes |
+| `off`          | tear everything down | — | — |
+
+¹ Linux uses `loginctl enable-linger`; Windows uses a real service. On **macOS**, before-login start needs a root LaunchDaemon — add `--pre-login` (you'll be prompted for `sudo`, and the tray's daemon controls then need `sudo` too). Without it, the macOS daemon starts at login.
+
+The **tray icon** is the daily control surface: open the web UI, start/stop the daemon, launch a model with its default profile, toggle start-at-boot — all from the menu. It needs the optional extra:
 
 ```bash
-launchctl unload -w ~/Library/LaunchAgents/com.llamanager.plist
+pip install -e '.[tray]'      # pystray + Pillow
 ```
 
-### Linux — user systemd unit
+Tear down with `llamanager autostart --mode off` (or the `remove-tray` alias).
+
+> On Windows, `tray+service`/`boot-service` register a real service (run the command from an elevated shell once; it also grants your account prompt-free start/stop afterward) and need the `pywin32` extra: `pip install -e '.[windows-service]'`.
+
+<details>
+<summary>Advanced — individual per-platform installers</summary>
+
+These are the building blocks `autostart` orchestrates; use them if you want one piece only or a custom layout.
 
 ```bash
-llamanager install-systemd
-systemctl --user daemon-reload
-systemctl --user enable --now llamanager.service
-journalctl --user -u llamanager.service -f
+# macOS LaunchAgent (login)            Linux user systemd unit
+llamanager install-launchd             llamanager install-systemd
+launchctl load -w \                    systemctl --user daemon-reload
+  ~/Library/LaunchAgents/com.llamanager.plist   systemctl --user enable --now llamanager.service
 ```
-
-For a system-wide service, copy the generated unit file to `/etc/systemd/system/` and use `sudo systemctl ...`.
-
-### Windows
-
-Two options. Pick a real Windows service if you want it always-on with no logon required, or a Task Scheduler entry if you want fewer dependencies.
-
-**Option A — real Windows service (recommended for headless boxes).** Needs the `pywin32` extra and an elevated PowerShell or cmd.
 
 ```powershell
-pip install -e ".[windows-service]"
-
-# from an elevated shell:
-llamanager install-windows-service
-```
-
-The service registers as `llamanager`, startup `auto`. Logs land in `%USERPROFILE%\.llamanager\logs\llamanager.log`. Lifecycle events also show up in the Windows Event Viewer under Windows Logs → Application.
-
-```powershell
+# Windows real service (always-on; needs pywin32 + elevation)
+llamanager install-windows-service [--username "DOMAIN\svc" --password "..."]
 sc query llamanager
-python -m llamanager.win_service start
-python -m llamanager.win_service stop
-python -m llamanager.win_service restart
 llamanager remove-windows-service
-```
 
-To run as a domain account instead of `LocalSystem`:
-
-```powershell
-llamanager install-windows-service --username "DOMAIN\svc-llamanager" --password "..."
-```
-
-> Before installing the service for the first time, run `llamanager serve` once interactively so the bootstrap admin key prints to a console you can copy. The service has no stdout; if it generates the bootstrap key, the key is gone.
-
-**Option B — Task Scheduler (no extra deps, logon-triggered).**
-
-```powershell
+# Windows Task Scheduler (logon-triggered, no extra deps)
 llamanager install-windows
 schtasks /Create /XML "$env:USERPROFILE\.llamanager\llamanager.task.xml" /TN llamanager
-schtasks /Run /TN llamanager
 ```
 
-The task is logon-triggered, retries 5 times on failure with a 1-minute interval, and runs at `LeastPrivilege` as the current user. This is the right pick for desktop or single-user setups where pulling in Visual Studio Build Tools for `pywin32` would be overkill.
+`install-tray` / `remove-tray` remain as aliases for `autostart --mode tray+service` / `--mode off`. For a system-wide Linux service, copy the generated unit to `/etc/systemd/system/` and use `sudo systemctl ...`.
+</details>
 
-```powershell
-schtasks /Delete /TN llamanager /F
+## Uninstall
+
+One command stops the daemon and removes every autostart/service entry (service unit, launch agents, scheduled tasks, tray):
+
+```bash
+llamanager uninstall
+```
+
+It keeps your data by default. To also delete config, `state.db`, logs, and keys — but keep models:
+
+```bash
+llamanager uninstall --purge
+```
+
+To delete everything including downloaded models:
+
+```bash
+llamanager uninstall --purge-models
+```
+
+It prompts before doing anything (skip with `--yes`). On Windows the service removal step needs an elevated shell; on macOS a `--pre-login` system daemon is removed with `sudo`. Finally, remove the package itself:
+
+```bash
+pip uninstall llamanager
 ```
 
 ## CLI
@@ -887,16 +914,25 @@ schtasks /Delete /TN llamanager /F
 Daemon and installer commands:
 
 ```text
+llamanager init [--yes] [--autostart MODE]   # guided first-run setup (start here)
 llamanager serve [--host ...] [--port ...] [--log-level info]
+llamanager tray                              # run the tray/menu-bar app (needs [tray])
+llamanager autostart --mode off|boot-service|login-tray|tray+service
+                                             # configure how it runs at boot/login
+llamanager uninstall [--purge] [--purge-models] [--yes]
+                                             # stop + remove autostart, optionally data
 llamanager init-config [--path PATH]
-llamanager status                    # prints last persisted runtime.json
+llamanager status                            # prints last persisted runtime.json
+llamanager --config /path/to/config.toml <subcommand>
+
+# advanced / per-platform building blocks (autostart orchestrates these):
 llamanager install-launchd [--label com.llamanager] [--port 7200] [--binary PATH]
 llamanager install-systemd [--unit llamanager.service] [--port 7200] [--binary PATH]
 llamanager install-windows [--task llamanager] [--port 7200] [--binary PATH]
 llamanager install-windows-service [--startup auto|manual|delayed|disabled]
                                    [--username USER] [--password PASS] [--no-start]
 llamanager remove-windows-service
-llamanager --config /path/to/config.toml <subcommand>
+llamanager install-tray / remove-tray        # aliases for autostart tray+service / off
 ```
 
 ### Admin verbs (drive a running daemon)
