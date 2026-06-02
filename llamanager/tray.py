@@ -18,11 +18,13 @@ Optional dependency: install with ``pip install 'llamanager[tray]'``
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import sys
 import threading
 import time
 import webbrowser
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -42,11 +44,18 @@ def _require_pystray():
         import pystray  # type: ignore[import-not-found]
         from PIL import Image  # type: ignore[import-not-found]
     except ImportError as e:  # pragma: no cover - depends on optional extra
-        raise SystemExit(
-            "error: the tray needs pystray + Pillow.\n"
-            "  Install with: pip install 'llamanager[tray]'\n"
-            f"  (import failed: {e})"
-        )
+        msg = ("error: the tray needs pystray + Pillow.\n"
+               "  Install with: pip install 'llamanager[tray]'\n"
+               f"  (import failed: {e})")
+        if sys.platform.startswith("linux"):
+            msg += ("\n  On Linux the icon also needs PyGObject + an "
+                    "AppIndicator typelib:\n"
+                    "    sudo apt install python3-gi "
+                    "gir1.2-ayatanaappindicator3-0.1\n"
+                    "  and a venv built with --system-site-packages (or "
+                    "include-system-site-packages = true in pyvenv.cfg).")
+        log.error("%s", msg)
+        raise SystemExit(msg)
     return pystray, Image
 
 
@@ -119,13 +128,45 @@ def _open_path(path: Path) -> None:
         log.warning("could not open %s: %s", path, e)
 
 
+def _autorun_label() -> str:
+    """Cheap, file-based detection of the current autorun-at-startup state —
+    'off' / 'at login' / 'before login' / 'unknown'. No subprocess (the menu
+    rebuilds on every poll). 'before login' means linger (Linux) / a system
+    LaunchDaemon (macOS)."""
+    home = Path.home()
+    if sys.platform.startswith("linux"):
+        unit = ((home / ".config/systemd/user/llamanager.service").exists() or
+                (home / ".config/systemd/user/default.target.wants/"
+                        "llamanager.service").exists())
+        tray = (home / ".config/autostart/llamanager-tray.desktop").exists()
+        if not (unit or tray):
+            return "off"
+        user = os.environ.get("USER", "")
+        linger = bool(user) and Path(f"/var/lib/systemd/linger/{user}").exists()
+        return "before login" if linger else "at login"
+    if sys.platform == "darwin":
+        sysd = Path("/Library/LaunchDaemons/com.llamanager.plist").exists()
+        agent = (home / "Library/LaunchAgents/com.llamanager.plist").exists()
+        tray = (home / "Library/LaunchAgents/com.llamanager.tray.plist").exists()
+        if not (sysd or agent or tray):
+            return "off"
+        return "before login" if sysd else "at login"
+    return "unknown"  # Windows needs sc/schtasks to tell
+
+
 class TrayApp:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.state = TrayState()
         self._stop = threading.Event()
         self._icon = None  # set in run()
-        self._web_url = resolve_base_url(cfg)
+        # The dashboard lives at /ui/, not the bare root.
+        self._web_url = resolve_base_url(cfg).rstrip("/") + "/ui/"
+        # Flicker guard: only touch the icon/menu when something visible
+        # actually changed (see _poll_loop). Reassigning icon.icon every poll
+        # makes the AppIndicator redraw, which looks like flickering.
+        self._last_sig: tuple | None = None
+        self._last_ok: bool | None = None
         # Build a client once; admin key may be missing — degrade to a
         # reachability-only tray in that case rather than refusing to start.
         try:
@@ -141,12 +182,35 @@ class TrayApp:
             self._poll_once()
             if self._icon is not None:
                 try:
-                    self._icon.menu = self._build_menu()
-                    self._icon.update_menu()
-                    self._refresh_icon_image()
+                    snap = self.state.snapshot()
+                    sig = self._display_signature(snap)
+                    # Only rebuild the menu when a displayed value changed.
+                    if sig != self._last_sig:
+                        self._last_sig = sig
+                        self._icon.menu = self._build_menu()
+                        self._icon.update_menu()
+                    # Only swap the icon image when up/down actually flips —
+                    # reassigning it every tick is what caused the flicker.
+                    ok = snap["daemon"].reachable
+                    if ok != self._last_ok:
+                        self._last_ok = ok
+                        self._refresh_icon_image()
                 except Exception as e:  # never let a UI hiccup kill the poller
                     log.debug("menu refresh failed: %s", e)
             self._stop.wait(_POLL_SECONDS)
+
+    def _display_signature(self, snap: dict[str, Any]) -> tuple:
+        """A tuple of everything the menu/icon shows. When it's unchanged
+        between polls we leave the tray untouched (no flicker)."""
+        d = snap["daemon"]
+        st = snap["status"]
+        models = tuple(_model_id(m) for m in snap["models"])
+        return (
+            d.reachable, d.detail,
+            st.get("state"), st.get("current_model"), st.get("current_profile"),
+            st.get("queue_depth"), st.get("in_flight_count"),
+            models, _autorun_label(), snap["last_error"][:60],
+        )
 
     def _poll_once(self) -> None:
         dstate = service_ctl.state(self.cfg)
@@ -197,29 +261,47 @@ class TrayApp:
     # daemon (OS service) controls
     def _act_daemon_start(self, *_: Any) -> None:
         ok, msg = service_ctl.start_daemon(self.cfg)
-        self._notify(f"Daemon start: {msg}")
+        self._notify(f"Service start: {msg}")
         self._poll_once()
 
     def _act_daemon_stop(self, *_: Any) -> None:
         ok, msg = service_ctl.stop_daemon(self.cfg)
-        self._notify(f"Daemon stop: {msg}")
+        self._notify(f"Service stop: {msg}")
         self._poll_once()
 
     def _act_daemon_restart(self, *_: Any) -> None:
         ok, msg = service_ctl.restart_daemon(self.cfg)
-        self._notify(f"Daemon restart: {msg}")
+        self._notify(f"Service restart: {msg}")
         self._poll_once()
 
-    def _act_toggle_boot(self, icon, item) -> None:
-        # `item.checked` reflects the state *before* the click.
-        ok, msg = service_ctl.set_autostart(self.cfg, not item.checked)
-        self._notify(f"Start at boot: {msg}")
-        self._poll_once()
+    # autorun at startup — shell out to `llamanager autostart --mode ...`,
+    # which runs in this desktop session (no extra privilege on Linux/macOS).
+    def _act_set_autorun(self, mode: str):
+        def run(*_: Any) -> None:
+            cmd = [sys.executable, "-m", "llamanager", "autostart",
+                   "--mode", mode]
+            threading.Thread(
+                target=self._run_autorun, args=(cmd, mode), daemon=True).start()
+        return run
 
-    # app-level autolaunch (daemon auto-loads default LLM)
-    def _act_toggle_autolaunch(self, icon, item) -> None:
-        self._safe_admin(lambda c: c.setup_autolaunch(not item.checked),
-                         "Auto-load default LLM")
+    def _run_autorun(self, cmd: list[str], mode: str) -> None:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=120, check=False)
+            ok = r.returncode == 0
+            self._notify(f"Autorun → {mode}: {'done' if ok else 'failed'}")
+            if not ok:
+                log.error("autostart --mode %s failed: %s", mode,
+                          (r.stderr or r.stdout).strip())
+        except (OSError, subprocess.SubprocessError) as e:
+            self._notify(f"Autorun change failed: {e}")
+        # Rebuild the menu so the radio reflects the new state.
+        if self._icon is not None:
+            try:
+                self._icon.menu = self._build_menu()
+                self._icon.update_menu()
+            except Exception:
+                pass
 
     # LLM controls
     def _act_launch_model(self, model_id: str):
@@ -263,28 +345,40 @@ class TrayApp:
 
         # Header line (disabled).
         if up:
-            header = f"● daemon UP · {d.detail or 'serving'}"
+            header = "● Running"
         else:
-            header = "○ daemon DOWN"
+            header = "○ Stopped"
         qd = st.get("queue_depth")
         inflight = st.get("in_flight_count")
         queue_line = (f"Queue: {inflight or 0} running / {qd or 0} queued"
                       if up else (snap["last_error"][:60] or "not reachable"))
 
-        # Daemon submenu.
-        daemon_menu = Menu(
-            Item(lambda i: f"Status: {d.detail or ('up' if up else 'down')}",
+        # Service submenu ("service" reads friendlier than "daemon").
+        service_menu = Menu(
+            Item(lambda i: f"Status: {'running' if up else 'stopped'}",
                  None, enabled=False),
-            Item("Start daemon", self._act_daemon_start, enabled=not up),
-            Item("Stop daemon", self._act_daemon_stop, enabled=up),
-            Item("Restart daemon", self._act_daemon_restart, enabled=up),
-            Menu.SEPARATOR,
-            Item("Start daemon at boot", self._act_toggle_boot,
-                 checked=lambda i: bool(d.autostart),
-                 enabled=d.installed is not False),
-            Item("Auto-load default LLM", self._act_toggle_autolaunch,
-                 checked=lambda i: bool(st.get("autolaunch")),
-                 enabled=up),
+            Item("Start", self._act_daemon_start, enabled=not up),
+            Item("Stop", self._act_daemon_stop, enabled=up),
+            Item("Restart", self._act_daemon_restart, enabled=up),
+        )
+
+        # Autorun-at-startup submenu. Radio over the three meaningful states;
+        # each shells out to `llamanager autostart --mode ...` (runs in this
+        # desktop session, so no extra privilege on Linux/macOS). The current
+        # state is detected cheaply from files (see _autorun_label).
+        cur_autorun = _autorun_label()
+        def _ar(item, want):  # checked-predicate for a radio item
+            return cur_autorun == want
+        autorun_menu = Menu(
+            Item("Off (don't start automatically)",
+                 self._act_set_autorun("off"),
+                 checked=lambda i: _ar(i, "off"), radio=True),
+            Item("At login",
+                 self._act_set_autorun("login-tray"),
+                 checked=lambda i: _ar(i, "at login"), radio=True),
+            Item("Before login (always on)",
+                 self._act_set_autorun("tray+service"),
+                 checked=lambda i: _ar(i, "before login"), radio=True),
         )
 
         # LLM "Launch ▸" submenu — one item per installed model.
@@ -319,8 +413,9 @@ class TrayApp:
             Menu.SEPARATOR,
             Item("Open Web UI", self._act_open_ui, default=True),
             Menu.SEPARATOR,
-            Item("Daemon", daemon_menu),
+            Item("Service", service_menu),
             Item("LLM", llm_menu),
+            Item(f"Autorun at startup  ({cur_autorun})", autorun_menu),
             Menu.SEPARATOR,
             Item("Open logs folder", self._act_open_logs),
             Item("Open models folder", self._act_open_models),
@@ -350,12 +445,39 @@ class TrayApp:
         return 0
 
 
+def _setup_tray_logging(cfg: Config) -> Path | None:
+    """Log to logs_dir/tray.log so a failed *autostart* launch (no console)
+    leaves a trace instead of vanishing. Also keeps the console handler."""
+    fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    if not root.handlers:
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        root.addHandler(sh)
+    try:
+        cfg.logs_dir.mkdir(parents=True, exist_ok=True)
+        log_path = cfg.logs_dir / "tray.log"
+        fh = RotatingFileHandler(log_path, maxBytes=1 * 1024 * 1024,
+                                 backupCount=2, encoding="utf-8")
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+        return log_path
+    except OSError:
+        return None
+
+
 def main(cfg: Config | None = None) -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-    )
-    return TrayApp(cfg or load_config()).run()
+    cfg = cfg or load_config()
+    log_path = _setup_tray_logging(cfg)
+    log.info("tray starting (pid=%s, log=%s)", os.getpid(), log_path)
+    try:
+        return TrayApp(cfg).run()
+    except SystemExit:
+        raise  # already logged (e.g. missing pystray)
+    except Exception:
+        log.exception("tray exited with an unexpected error")
+        raise
 
 
 if __name__ == "__main__":  # pragma: no cover

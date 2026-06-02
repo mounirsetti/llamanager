@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.3.93-green.svg" alt="Version 0.3.93">
+  <img src="https://img.shields.io/badge/version-0.3.94-green.svg" alt="Version 0.3.94">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -43,7 +43,7 @@ The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silic
 - [Supported engines](#supported-engines)
 - [Platforms and GPUs](#platforms-and-gpus)
 - [Install](#install)
-- [First run](#first-run)
+- [Quick start](#quick-start)
 - [The model picker top bar](#the-model-picker-top-bar)
 - [LLM models](#llm-models)
 - [Multi-slot LLM (beta)](#multi-slot-llm-beta)
@@ -57,6 +57,7 @@ The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silic
   - [Reasoning / thinking control](#reasoning--thinking-control)
 - [Chat in the browser](#chat-in-the-browser)
 - [Auto-start at boot or login](#auto-start-at-boot-or-login)
+- [Uninstall](#uninstall)
 - [CLI](#cli)
 - [Configuration](#configuration)
 - [Filesystem layout](#filesystem-layout)
@@ -188,7 +189,7 @@ per-engine **Auto-update when idle** switch.
   and becomes the auto-update *target*, so a deliberate downgrade isn't silently
   re-bumped; *Reset to pin* (or `--reset-diffusers`) clears it.
 - **Auto-update when idle.** Flip the switch next to any engine and llamanager
-  checks upstream on a fixed cadence and, once the daemon has been idle (no
+  checks upstream on a fixed cadence and, once the service has been idle (no
   in-flight or pending requests) for the configured window, applies the update
   automatically. If the engine being updated is the **active** one with a model
   loaded, llamanager unloads it, swaps the binary (required on Windows, where a
@@ -196,7 +197,7 @@ per-engine **Auto-update when idle** switch.
 
 Engine keys are a llama variant id (`llama.cpp-cuda`, `atomic-vulkan`,
 `mlx-apple-silicon`), a diffusion engine name (`hidream`, `z_image`), or
-`llamanager` for the daemon's own self-update. Configure it under
+`llamanager` for the service's own self-update. Configure it under
 `[auto_update]` (see [Configuration](#configuration)) or:
 
 ```bash
@@ -233,7 +234,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.3.93" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.3.94" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -279,18 +280,18 @@ On Windows, run the clone command from Git Bash, PowerShell, or Windows Terminal
 
 ## Quick start
 
-One guided command does config, your admin key, a llama-server binary check, and (optionally) sets it to run at startup with a tray icon:
+One guided command gets you running — it writes config, creates your admin key, and starts the service + tray icon immediately (no restart):
 
 ```bash
 llamanager init
 ```
 
-`init` walks through four steps:
+`init` does two steps, then launches:
 
 1. **Config** — writes `~/.llamanager/config.toml` if it's missing.
 2. **Admin key** — creates the bootstrap admin key and prints it (also saved to `~/.llamanager/bootstrap-key.txt`, mode 0600). Capturing it here is reliable even if you later run headless — the old "the service swallowed the key" trap is gone.
-3. **llama-server** — checks for the binary; if missing, detects your GPU and tells you the backend to install.
-4. **Autostart** — asks how you want it to run (see [Auto-start](#auto-start-at-boot-or-login)). Pick `skip` to start it by hand.
+
+It then starts the service (if not already running) and the tray/menu-bar icon, so the icon appears right away. Pass `--no-launch` to skip that and just write config + key.
 
 ```text
 ==============================================================================
@@ -300,9 +301,7 @@ llamanager init
 ==============================================================================
 ```
 
-Then open <http://localhost:7200/ui/login> and paste the key. The dashboard shows a checklist for anything still left (binary, model, real API key, autostart).
-
-Non-interactive (e.g. scripted): `llamanager init --yes --autostart tray+service`.
+Then open <http://localhost:7200/ui/login> and paste the key. **Run-at-startup, engine install, and model downloads all live in the UI:** choose how it starts from the tray icon (right-click → **Autorun at startup**) or the Setup page (see [Auto-start](#auto-start-at-boot-or-login)); the dashboard shows a checklist (install engine → `/ui/setup`, download a model → `/ui/models`, create an API key, set autorun) for whatever's still left.
 
 <details>
 <summary>Manual equivalent (if you'd rather do the steps yourself)</summary>
@@ -424,7 +423,7 @@ llamanager slots list                      # full dashboard JSON
 
 Slot 0 is always the legacy single-instance slot — it can never be
 removed. Slots 1..N are added at runtime and persist in
-`~/.llamanager/slots.json`, so they survive daemon restarts.
+`~/.llamanager/slots.json`, so they survive service restarts.
 
 ### Routing rules
 
@@ -492,7 +491,7 @@ unchanged). Slots 1..N are described in a sibling
 }
 ```
 
-On daemon start, llamanager re-creates each slot and (re)starts any
+On service start, llamanager re-creates each slot and (re)starts any
 that have a `model_id`. On disable (toggling the master switch off),
 slots 1..N are stopped but their entries are kept in `slots.json` so
 you can re-enable and find your layout intact.
@@ -505,7 +504,7 @@ you can re-enable and find your layout intact.
   explicitly.
 - **No live VRAM admission.** The dashboard shows the **combined
   on-disk file size** of loaded models as a VRAM-pressure proxy; the
-  daemon won't refuse a slot load that "looks" too big. On the
+  service won't refuse a slot load that "looks" too big. On the
   AMD AI PRO R9700 (32 GB) for example, two 13B-Q4 models fit
   comfortably; two 30B-Q4 models do not. Treat the combined-size
   number as your guardrail.
@@ -840,18 +839,28 @@ llamanager autostart --mode tray+service     # recommended
 
 | mode | what it does | runs before login? | tray icon? |
 |------|--------------|:------:|:------:|
-| `tray+service` | always-on daemon **+** a tray/menu-bar icon to control it | yes¹ | yes |
-| `boot-service` | always-on daemon, headless | yes¹ | no |
-| `login-tray`   | daemon + tray, only while you're logged in | no | yes |
+| `tray+service` | always-on service **+** a tray/menu-bar icon to control it | yes¹ | yes |
+| `boot-service` | always-on service, headless | yes¹ | no |
+| `login-tray`   | service + tray, only while you're logged in | no | yes |
 | `off`          | tear everything down | — | — |
 
-¹ Linux uses `loginctl enable-linger`; Windows uses a real service. On **macOS**, before-login start needs a root LaunchDaemon — add `--pre-login` (you'll be prompted for `sudo`, and the tray's daemon controls then need `sudo` too). Without it, the macOS daemon starts at login.
+¹ Linux uses `loginctl enable-linger`; Windows uses a real service. On **macOS**, before-login start needs a root LaunchDaemon — add `--pre-login` (you'll be prompted for `sudo`, and the tray's service controls then need `sudo` too). Without it, the macOS service starts at login.
 
-The **tray icon** is the daily control surface: open the web UI, start/stop the daemon, launch a model with its default profile, toggle start-at-boot — all from the menu. It needs the optional extra:
+The **tray icon** is the daily control surface: open the web UI, start/stop the service, launch a model with its default profile, and set **Autorun at startup** (Off / At login / Before login) — all from the right-click menu. It needs the optional extra:
 
 ```bash
 pip install -e '.[tray]'      # pystray + Pillow
 ```
+
+On **Linux** the icon also needs system packages for the AppIndicator backend (especially on Wayland/GNOME), and the venv must be able to see them:
+
+```bash
+sudo apt install python3-gi gir1.2-ayatanaappindicator3-0.1
+# then build the venv with --system-site-packages, or set
+# include-system-site-packages = true in .venv/pyvenv.cfg
+```
+
+Run the tray manually with `llamanager tray` (it blocks the terminal — it's a GUI loop) or `llamanager tray -b` to detach. `init` and the autostart entry launch it detached for you.
 
 Tear down with `llamanager autostart --mode off` (or the `remove-tray` alias).
 
@@ -885,7 +894,7 @@ schtasks /Create /XML "$env:USERPROFILE\.llamanager\llamanager.task.xml" /TN lla
 
 ## Uninstall
 
-One command stops the daemon and removes every autostart/service entry (service unit, launch agents, scheduled tasks, tray):
+One command stops llamanager and removes every autostart entry (the service unit, launch agents, scheduled tasks, tray):
 
 ```bash
 llamanager uninstall
@@ -903,7 +912,7 @@ To delete everything including downloaded models:
 llamanager uninstall --purge-models
 ```
 
-It prompts before doing anything (skip with `--yes`). On Windows the service removal step needs an elevated shell; on macOS a `--pre-login` system daemon is removed with `sudo`. Finally, remove the package itself:
+It prompts before doing anything (skip with `--yes`). On Windows the service removal step needs an elevated shell; on macOS a `--pre-login` system service is removed with `sudo`. Finally, remove the package itself:
 
 ```bash
 pip uninstall llamanager
@@ -911,12 +920,12 @@ pip uninstall llamanager
 
 ## CLI
 
-Daemon and installer commands:
+Service and installer commands:
 
 ```text
-llamanager init [--yes] [--autostart MODE]   # guided first-run setup (start here)
+llamanager init [--no-launch] [--binary PATH]   # guided first-run setup (start here)
 llamanager serve [--host ...] [--port ...] [--log-level info]
-llamanager tray                              # run the tray/menu-bar app (needs [tray])
+llamanager tray [-b|--background]            # run the tray/menu-bar app (needs [tray])
 llamanager autostart --mode off|boot-service|login-tray|tray+service
                                              # configure how it runs at boot/login
 llamanager uninstall [--purge] [--purge-models] [--yes]
@@ -935,7 +944,7 @@ llamanager remove-windows-service
 llamanager install-tray / remove-tray        # aliases for autostart tray+service / off
 ```
 
-### Admin verbs (drive a running daemon)
+### Admin verbs (drive a running service)
 
 These talk to a running `llamanager serve` over `/admin/*`, so an agent or shell script can manage models, queue, and origins without a custom client. They print JSON to stdout (pipe through `jq` to slice the result).
 
@@ -952,7 +961,7 @@ Base URL resolution order:
 3. derived from config (`http://<bind>:<port>`, with `0.0.0.0` rewritten to `127.0.0.1` since the CLI usually runs on the same host)
 
 ```text
-llamanager server status                    # full daemon snapshot
+llamanager server status                    # full service snapshot
 llamanager server start --profile P         # start llama-server
 llamanager server stop
 llamanager server restart [--profile P | --model M]
@@ -1005,7 +1014,7 @@ llamanager setup coexistence [--unload-text-on-arrival on|off]
                               [--restart-text-after-image on|off]
                               [--allow-concurrent on|off]
 llamanager setup default-args <llama|mlx> --arg KEY=VALUE ...
-llamanager setup autolaunch on|off                        # default LLM on daemon startup
+llamanager setup autolaunch on|off                        # default LLM on service startup
 llamanager setup autorestart on|off                       # supervisor crash auto-restart
 llamanager setup install-llama-server [--source ...] [--backend ...] [--version TAG]
 llamanager setup check-updates [--variant <id>]           # installed vs latest (one or all installed variants)
@@ -1044,7 +1053,7 @@ llamanager slots unload <slot_id>                         # stop the model in a 
 llamanager slots coex on|off                              # diffusion-coexistence (on = image keeps LLMs loaded)
 ```
 
-The CLI mirrors the web UI feature-for-feature: every page that lets you click something has a `llamanager` verb that does the same thing against `/admin/*`. `llamanager profiles` covers the LLM-profile editor on `/ui/models`, `llamanager diffusion` covers the Diffusion engines + Diffusion models pages, `llamanager setup` covers paths/coexistence/autolaunch and the llama-server installer, `llamanager slots` (beta, see [Multi-slot LLM (beta)](#multi-slot-llm-beta)) covers the parallel-model dashboard, `llamanager models {set-default,add-existing,set-dir}` covers the LLM-model housekeeping rows, and `llamanager queue cancel-all` + `llamanager origins update` round out the existing groups. `update` runs `pip install --upgrade llamanager` against the daemon's venv and SIGTERMs so the supervisor restarts it — exactly what the `/ui/about` Update button does. `--check` reports the latest GitHub tag plus the detected install mode without doing anything. If the daemon was installed in editable / developer mode (`pip install -e .` from a git checkout), the auto-update refuses with instructions to run `git pull && pip install -e .` in the checkout yourself — the operator's checkout is the source of truth in that case.
+The CLI mirrors the web UI feature-for-feature: every page that lets you click something has a `llamanager` verb that does the same thing against `/admin/*`. `llamanager profiles` covers the LLM-profile editor on `/ui/models`, `llamanager diffusion` covers the Diffusion engines + Diffusion models pages, `llamanager setup` covers paths/coexistence/autolaunch and the llama-server installer, `llamanager slots` (beta, see [Multi-slot LLM (beta)](#multi-slot-llm-beta)) covers the parallel-model dashboard, `llamanager models {set-default,add-existing,set-dir}` covers the LLM-model housekeeping rows, and `llamanager queue cancel-all` + `llamanager origins update` round out the existing groups. `update` runs `pip install --upgrade llamanager` against the service's venv and SIGTERMs so the supervisor restarts it — exactly what the `/ui/about` Update button does. `--check` reports the latest GitHub tag plus the detected install mode without doing anything. If the service was installed in editable / developer mode (`pip install -e .` from a git checkout), the auto-update refuses with instructions to run `git pull && pip install -e .` in the checkout yourself — the operator's checkout is the source of truth in that case.
 
 Example, an agent that wants to swap models before a long batch and revert after:
 
@@ -1105,7 +1114,7 @@ allow_concurrent = false
 # allow_diffusion_with_slots = false
 
 [auto_update]
-# Auto-update engines when the daemon is idle. Off for every engine by
+# Auto-update engines when the service is idle. Off for every engine by
 # default; opt in per engine from the UI switch or `llamanager setup
 # auto-update <engine> on`. See "Updating engines" below.
 idle_seconds = 300              # quiet window required before an update fires
@@ -1186,9 +1195,9 @@ On Windows, `~` resolves to `%USERPROFILE%`, e.g. `C:\Users\<you>\.llamanager`.
 
 **"would exceed max_disk_gb" when pulling a model.** The historical default cap was 80 GB and is easy to trip with diffusion checkpoints. New installs default to `0` (no cap, only the partition free-space check applies). To raise an existing config: set `[downloads].max_disk_gb = 0` and reload.
 
-**Lost the bootstrap key.** No recovery, argon2id is one-way. Stop the daemon, delete `~/.llamanager/state.db`, restart, and a new bootstrap key prints. Existing origins and keys go with it, so this is only safe if you have not created real origins yet.
+**Lost the bootstrap key.** No recovery, argon2id is one-way. Stop the service, delete `~/.llamanager/state.db`, restart, and a new bootstrap key prints. Existing origins and keys go with it, so this is only safe if you have not created real origins yet.
 
-**Web UI says "invalid admin key" but the key is admin.** The verification cache is per-process. If you just rotated the key, restart the daemon or wait 5 minutes for the cache TTL.
+**Web UI says "invalid admin key" but the key is admin.** The verification cache is per-process. If you just rotated the key, restart the service or wait 5 minutes for the cache TTL.
 
 **Crash loop, `state: crashed` and 503s.** The 3-in-5 restart policy gave up. Check `~/.llamanager/logs/llama-server.log` (or `hidream.log` / `flux2.log` / `z_image.log` for the image engines), fix the cause, then `POST /admin/server/start` (or use the UI).
 
@@ -1202,11 +1211,11 @@ On Windows, `~` resolves to `%USERPROFILE%`, e.g. `C:\Users\<you>\.llamanager`.
 
 **Windows: argon2-cffi fails to install.** Python 3.11+ ships prebuilt wheels for argon2-cffi on Windows. If you hit a build error, upgrade pip (`python -m pip install -U pip`) and retry. As a last resort, install Microsoft's [Build Tools for Visual Studio](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
 
-**Update fails with `fatal: detected dubious ownership` or `would be overwritten by merge`.** These are git's safeguards firing against the *old* git-pull-based updater that shipped before 0.2.7. The current updater calls `pip install --upgrade llamanager` and doesn't touch your checkout at all — upgrade past 0.2.7 once (using whichever path works for your install: `pip install --upgrade llamanager` against the daemon's venv, or `git pull && pip install -e .` if you cloned the repo) and these failure modes go away.
+**Update fails with `fatal: detected dubious ownership` or `would be overwritten by merge`.** These are git's safeguards firing against the *old* git-pull-based updater that shipped before 0.2.7. The current updater calls `pip install --upgrade llamanager` and doesn't touch your checkout at all — upgrade past 0.2.7 once (using whichever path works for your install: `pip install --upgrade llamanager` against the service's venv, or `git pull && pip install -e .` if you cloned the repo) and these failure modes go away.
 
-**`llamanager update` refuses with "editable install detected".** You ran `pip install -e .` from a clone, so the daemon is running directly out of your checkout. The auto-updater treats the checkout as the source of truth and won't touch it — update by running `git pull && pip install -e .` in that directory, then restart the daemon (your supervisor will pick the new code up). The About page surfaces the same instructions instead of an Update button.
+**`llamanager update` refuses with "editable install detected".** You ran `pip install -e .` from a clone, so the service is running directly out of your checkout. The auto-updater treats the checkout as the source of truth and won't touch it — update by running `git pull && pip install -e .` in that directory, then restart the service (your supervisor will pick the new code up). The About page surfaces the same instructions instead of an Update button.
 
-**`pip install --upgrade llamanager` fails with "externally-managed-environment".** PEP 668 distros (newer Debian/Ubuntu, Homebrew) refuse to mutate the system Python. The daemon should be running in a venv anyway — re-install into one (`python -m venv ~/.venvs/llamanager && ~/.venvs/llamanager/bin/pip install llamanager`), update your `llamanager.service` / launch agent to point at that venv's `llamanager` binary, and the updater will work against that venv from then on.
+**`pip install --upgrade llamanager` fails with "externally-managed-environment".** PEP 668 distros (newer Debian/Ubuntu, Homebrew) refuse to mutate the system Python. The service should be running in a venv anyway — re-install into one (`python -m venv ~/.venvs/llamanager && ~/.venvs/llamanager/bin/pip install llamanager`), update your `llamanager.service` / launch agent to point at that venv's `llamanager` binary, and the updater will work against that venv from then on.
 
 ## Releasing a new version
 

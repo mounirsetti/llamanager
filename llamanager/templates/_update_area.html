@@ -12,7 +12,7 @@
 <div id="update-area" style="display: flex; flex-direction: column; gap: 14px; max-width: 640px;">
   <div style="display: flex; gap: 10px; align-items: center;">
     <button type="button" class="lm-btn lm-btn--ghost"
-            hx-post="/ui/about/check-update"
+            hx-post="{{ update_action_base | default('/ui/about') }}/check-update"
             hx-target="#update-area"
             hx-swap="outerHTML"
             hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
@@ -22,7 +22,7 @@
     {# Update triggers a self-restart; opt out of hx-boost so the
        browser does a full page nav and doesn't try to swap a partial
        from a daemon that's mid-shutdown. #}
-    <form method="post" action="/ui/about/update" hx-boost="false"
+    <form method="post" action="{{ update_action_base | default('/ui/about') }}/update" hx-boost="false"
           data-confirm="Run `pip install --upgrade git+https://github.com/mounirsetti/llamanager.git@v{{ latest_version }}` against the daemon's venv and restart? You'll be signed out until the supervisor brings the daemon back."
           style="margin: 0;">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

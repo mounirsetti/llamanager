@@ -33,6 +33,37 @@ STOP_GRACE_S = 10.0
 HEALTH_POLL_INTERVAL_S = 0.5
 
 
+def _engine_env(binary: str) -> dict[str, str] | None:
+    """Environment override for the engine subprocess, or None to inherit.
+
+    Only the ROCm/HIP build needs help: the llama.cpp HIP release does not
+    bundle the ROCm runtime (no libamdhip64), and distros usually keep ROCm
+    under /opt/rocm, which isn't on the default loader path. Without the
+    system ROCm libs on LD_LIBRARY_PATH the HIP build enumerates ZERO GPUs
+    and silently falls back to CPU (slow). We add the system ROCm lib dir
+    only for hip/rocm variants — never for vulkan/cpu/cuda, and never the
+    binary's own directory (that shadows system libs and crashed vulkan)."""
+    name = Path(binary).parent.name.lower()
+    if "hip" not in name and "rocm" not in name:
+        return None
+    rocm_lib = None
+    candidates = [Path("/opt/rocm/lib")]
+    try:
+        candidates += sorted(Path("/opt").glob("rocm-*/lib"), reverse=True)
+    except OSError:
+        pass
+    for d in candidates:
+        if d.is_dir():
+            rocm_lib = str(d)
+            break
+    if rocm_lib is None:
+        return None
+    env = dict(os.environ)
+    existing = env.get("LD_LIBRARY_PATH", "")
+    env["LD_LIBRARY_PATH"] = rocm_lib + (os.pathsep + existing if existing else "")
+    return env
+
+
 # Args that don't translate cleanly to mlx_lm.server. mlx-lm has a much
 # narrower flag surface than llama-server; we pass through what it accepts
 # and silently drop the rest (they're llama.cpp-specific).
@@ -143,12 +174,31 @@ def _validate_model_id(model_id: str) -> None:
 
 
 def _port_free(port: int, host: str = "127.0.0.1") -> bool:
+    """True if the port can be bound. Uses SO_REUSEADDR so a socket lingering
+    in TIME_WAIT (e.g. the old engine we just stopped during a swap) doesn't
+    read as busy — that's exactly how llama-server binds, so it matches what
+    the engine can actually do. Only a live LISTENing socket reports busy."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind((host, port))
         return True
     except OSError:
         return False
+
+
+async def _wait_port_free(port: int, host: str = "127.0.0.1",
+                          timeout: float = 12.0) -> bool:
+    """Poll until the port is bindable, up to ``timeout`` seconds. Lets a
+    swap tolerate the brief window where a just-stopped engine is still
+    releasing the port, instead of failing the bind check instantly."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if _port_free(port, host):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.25)
 
 
 def resolve_default(cfg: Config) -> tuple[str, str | None]:
@@ -379,13 +429,35 @@ class ServerManager:
                 except Exception:  # noqa: BLE001 — sweep must never block start
                     log.exception("exclusive: pre-start sweep failed")
             port = self._port
-            if not _port_free(port):
-                raise ServerError(f"port {port} is busy on 127.0.0.1")
+            # Wait briefly for the port to free up rather than failing
+            # instantly. A swap stops the old llama-server then starts the
+            # new one on the same port; the just-closed socket can linger in
+            # TIME_WAIT for a moment, which would otherwise read as "busy"
+            # mid-swap. _port_free uses SO_REUSEADDR (as llama-server does),
+            # so it only reports busy when something is genuinely LISTENING.
+            if not await _wait_port_free(port):
+                raise ServerError(
+                    f"port {port} is still in use after waiting — another "
+                    "process may be holding it (see exclusive mode)."
+                )
 
             cmd = spec.cmdline(self.cfg.llama_server_binary, port, engine=engine)
             log_path = self.cfg.logs_dir / self._log_name
             log_path.parent.mkdir(parents=True, exist_ok=True)
             self._log_fp = open(log_path, "ab", buffering=0)
+            # Delimit each run so successive launches (different dates,
+            # variants, models) don't blur together in the single shared log.
+            banner = (
+                f"\n{'=' * 78}\n"
+                f"=== {time.strftime('%Y-%m-%d %H:%M:%S')}  START  engine={engine}\n"
+                f"=== binary={self.cfg.llama_server_binary}\n"
+                f"=== model={spec.model_id}\n"
+                f"{'=' * 78}\n"
+            )
+            try:
+                self._log_fp.write(banner.encode("utf-8", "replace"))
+            except OSError:
+                pass
             log.info("launching %s engine: %s", engine, shlex.join(cmd))
             try:
                 self.proc = await asyncio.create_subprocess_exec(
@@ -393,6 +465,9 @@ class ServerManager:
                     stdout=self._log_fp,
                     stderr=self._log_fp,
                     stdin=asyncio.subprocess.DEVNULL,
+                    # None → inherit (vulkan/cpu/cuda); only hip/rocm gets the
+                    # system ROCm runtime added so it can see the GPU.
+                    env=_engine_env(self.cfg.llama_server_binary),
                 )
             except FileNotFoundError as e:
                 self._close_log()

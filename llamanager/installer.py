@@ -355,8 +355,6 @@ def grant_windows_service_control(service_name: str = "llamanager",
     on the service. Must run elevated (it modifies the SD).
 
     Returns ``(ok, message)``. No-op-safe to re-run."""
-    import re
-
     # Resolve the account SID. Default: current interactive user.
     acct = account or (
         (os.environ.get("USERDOMAIN", "") + "\\" if os.environ.get("USERDOMAIN")

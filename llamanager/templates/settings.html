@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% set active = 'settings' %}
+{% block title %}Settings - llamanager{% endblock %}
+{% block content %}
+<div class="lm-eyebrow">llamanager</div>
+<h1 class="lm-page-title">Settings</h1>
+
+{# ---- Software update ---- #}
+<section class="lm-section" style="margin-top: 28px;">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Software update</span>
+  </header>
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 62ch; margin-bottom: 20px;">
+    Current version: <code>{{ version }}</code>.
+    Check if a newer version is available on GitHub, then apply it directly.
+  </p>
+  {% include "_update_area.html" %}
+</section>
+
+{# ---- Run at startup (service + tray icon) ---- #}
+<section class="lm-section" style="margin-top: 28px;">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Run at startup</span>
+  </header>
+  <p style="color: var(--fg-2); max-width: 62ch; margin-bottom: 6px;">
+    Whether llamanager (and its tray / menu-bar icon) starts on its own. The
+    same control is in the tray icon's right-click menu.
+  </p>
+  <p style="color: var(--fg-3); font-size: 0.8125rem; margin-bottom: 16px;">
+    Current: <strong style="color: var(--fg-1);">{{ autorun_mode }}</strong>
+    {% if autorun_mode == 'unknown' %}
+      &mdash; set it from the tray icon or run
+      <code>llamanager autostart --mode &lt;mode&gt;</code>.
+    {% endif %}
+  </p>
+  <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+    {% set _opts = [
+        ('off',   'off',          'Off',          "Don't start automatically"),
+        ('login', 'at login',     'At login',     'Starts when you log in'),
+        ('boot',  'before login', 'Before login', 'Always on, even before anyone logs in')
+    ] %}
+    {% for value, state, label, desc in _opts %}
+    <form method="post" action="/ui/settings/autostart">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="mode" value="{{ value }}">
+      <button type="submit"
+              class="lm-btn {{ 'lm-btn--primary' if autorun_mode == state else 'lm-btn--ghost' }}"
+              title="{{ desc }}"
+              {% if autorun_mode == state %}aria-current="true"{% endif %}>
+        {{ '✓ ' if autorun_mode == state else '' }}{{ label }}
+      </button>
+    </form>
+    {% endfor %}
+  </div>
+  <p style="color: var(--fg-3); font-size: 0.75rem; margin-top: 12px; max-width: 62ch;">
+    "Before login" needs elevated rights (Linux lingering / a system service);
+    if this daemon can't grant them, use the tray icon or the CLI. The tray
+    icon needs the <code>[tray]</code> extra installed.
+  </p>
+</section>
+
+{# ---- Engine behavior ---- #}
+<section class="lm-section" style="margin-top: 28px;">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Engine behavior</span>
+  </header>
+  <div style="display: flex; flex-direction: column; gap: 10px; max-width: 62ch;">
+    <form method="post" action="/ui/settings/autolaunch">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label class="lm-checkbox-row">
+        <input type="checkbox" name="enabled" value="on" {% if autolaunch %}checked{% endif %}
+               onchange="this.form.submit()">
+        Auto-launch the default model when llamanager starts
+      </label>
+    </form>
+    <form method="post" action="/ui/settings/autorestart">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label class="lm-checkbox-row">
+        <input type="checkbox" name="enabled" value="on" {% if autorestart %}checked{% endif %}
+               onchange="this.form.submit()">
+        Auto-restart the engine on crash (retries with increasing cooldowns)
+      </label>
+    </form>
+  </div>
+</section>
+{% endblock %}

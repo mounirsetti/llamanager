@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -42,7 +43,15 @@ def cmd_tray(args: argparse.Namespace) -> int:
 
     Talks to an already-running daemon; does not start one. The daemon
     is expected to run as an OS-managed background service so it can be
-    always-on independent of the desktop session."""
+    always-on independent of the desktop session.
+
+    Foreground by default — pystray's event loop blocks the terminal.
+    Pass --background to detach (and silence GUI-toolkit warnings)."""
+    if getattr(args, "background", False):
+        if _spawn_detached(args.binary, "tray"):
+            print("tray launched in the background (logs: see tray.log)")
+            return 0
+        return 1
     from .tray import main as tray_main
     cfg = load_config(Path(args.config) if args.config else None)
     return tray_main(cfg)
@@ -57,12 +66,11 @@ def cmd_init_config(args: argparse.Namespace) -> int:
 
 # ---------------------------------------------------------------------------
 # `llamanager init` — the single guided front door. Stitches together the
-# steps that used to be scattered across init-config, the first `serve`, the
-# bootstrap-key dance, the binary installer, and the autostart commands.
+# steps that used to be scattered: config, the bootstrap-key dance, and
+# the autostart (background service + tray) setup. Engine/binary install is
+# intentionally NOT here — that lives in the web UI (/ui/setup), which
+# detects the GPU and installs the right build.
 # ---------------------------------------------------------------------------
-
-_BACKEND_FOR_GPU = {"nvidia": "cuda", "amd": "vulkan", "apple": "metal",
-                    "cpu": "cpu"}
 
 
 def _show_bootstrap_key(cfg, key: str) -> None:
@@ -87,29 +95,14 @@ def _show_bootstrap_key(cfg, key: str) -> None:
     print(f"{line}")
 
 
-def _prompt_autostart_mode() -> str:
-    """Interactive run-mode picker. Returns a mode for `autostart --mode`
-    or 'skip'."""
-    print("\nHow should llamanager run?")
-    print("  1) tray+service  — always-on daemon + a tray/menu-bar icon "
-          "(recommended)")
-    print("  2) boot-service  — always-on, headless, no icon")
-    print("  3) login-tray    — daemon + tray, only while you're logged in")
-    print("  4) skip          — I'll start it myself")
-    choices = {"1": "tray+service", "2": "boot-service",
-               "3": "login-tray", "4": "skip", "": "tray+service"}
-    try:
-        sel = input("Choose [1]: ").strip()
-    except EOFError:
-        return "skip"
-    return choices.get(sel, "tray+service")
-
-
 def cmd_init(args: argparse.Namespace) -> int:
-    """Guided first-run setup: config → admin key → binary → autostart."""
-    import shutil
+    """Guided first-run setup: config → admin key → start the daemon + tray now.
 
-    from . import gpu_detect
+    `init` deliberately does NOT configure run-at-startup. It just gets you
+    running immediately (the tray icon appears without a restart); whether
+    llamanager comes back at boot/login is chosen later from the tray icon's
+    right-click menu or the web UI. Engine install also lives in the web UI."""
+    from . import service_ctl
     from .auth import AuthManager, load_or_create_lookup_secret
     from .db import DB
 
@@ -119,10 +112,10 @@ def cmd_init(args: argparse.Namespace) -> int:
     cfg_path = (Path(args.config) if args.config
                 else expand("~/.llamanager/config.toml"))
     if cfg_path.exists():
-        print(f"[1/4] config: found {cfg_path}")
+        print(f"[1/2] config: found {cfg_path}")
     else:
         out = write_default_config(cfg_path)
-        print(f"[1/4] config: wrote default to {out}")
+        print(f"[1/2] config: wrote default to {out}")
     cfg = load_config(cfg_path)
 
     # 2. Bootstrap admin key (reliable — no running daemon needed) ----------
@@ -138,52 +131,50 @@ def cmd_init(args: argparse.Namespace) -> int:
     finally:
         db.close()
     if key:
-        print("[2/4] admin key: created bootstrap key")
+        print("[2/2] admin key: created bootstrap key")
         _show_bootstrap_key(cfg, key)
     else:
         keyfile = cfg.data_dir / "bootstrap-key.txt"
-        print("[2/4] admin key: already initialized (origins exist).")
+        print("[2/2] admin key: already initialized (origins exist).")
         if keyfile.exists():
             print(f"       bootstrap key still on disk: {keyfile}")
         else:
             print("       if you've lost all keys, create one via an existing "
                   "admin origin, or reset state.db.")
 
-    # 3. llama-server binary ------------------------------------------------
-    binname = cfg.llama_server_binary
-    found = shutil.which(binname) or (Path(binname).is_file() and binname)
-    if found:
-        print(f"[3/4] llama-server: found ({found})")
-    else:
-        kind = gpu_detect.detect_gpu().kind
-        backend = _BACKEND_FOR_GPU.get(kind, "cpu")
-        print(f"[3/4] llama-server: not found. Detected GPU: {kind} "
-              f"→ recommended backend: {backend}")
-        print("       Install it from the dashboard (/ui/setup), or once the "
-              "daemon is running:")
-        print(f"         llamanager setup install-llama-server --backend {backend}")
-
-    # 4. Autostart ----------------------------------------------------------
-    mode = args.autostart
-    if mode is None:
-        mode = "skip" if args.yes else _prompt_autostart_mode()
-    if mode and mode != "skip":
-        print(f"\n[4/4] autostart: configuring `{mode}`")
-        args.mode = mode
-        cmd_autostart(args)
-    else:
-        print("\n[4/4] autostart: skipped. Set it later with "
-              "`llamanager autostart --mode tray+service`.")
+    # Start now — daemon (if not already up) + tray, so the icon appears
+    # immediately, no restart. Persistence across reboots is opt-in later.
+    if not args.no_launch:
+        print("\nStarting now (no restart needed):")
+        _ensure_tray_deps()
+        if service_ctl.daemon_reachable(cfg):
+            print("  daemon: already running")
+        else:
+            # If a service/autostart is already installed, start it through
+            # the service manager so systemd/launchd owns the process. A bare
+            # detached `serve` here would grab the port and leave the service
+            # stuck in a bind-failure restart loop (an orphan competing with
+            # the managed daemon). Only spawn an unmanaged serve when there's
+            # no service to manage it.
+            if service_ctl.state(cfg).installed:
+                ok, msg = service_ctl.start_daemon(cfg)
+                print(f"  daemon (service): {msg}")
+            else:
+                _spawn_serve(args.binary)
+        _spawn_tray(args.binary)
 
     # Next steps ------------------------------------------------------------
     host = cfg.bind if cfg.bind not in ("0.0.0.0", "::") else "127.0.0.1"
-    print("\n" + "=" * 40 + "\nDone. Next:")
-    if mode in (None, "skip", "off"):
-        print("  • start the daemon:  llamanager serve")
+    print("\n" + "=" * 40 + "\nDone.")
+    if args.no_launch:
+        print("  • start it:          llamanager serve   (and `llamanager tray`)")
+    else:
+        print("  • the tray icon should now be in your menu bar / notification area")
     print(f"  • open the UI:       http://{host}:{cfg.port}/ui/login  "
           "(paste the bootstrap key)")
-    print("  • pull a model:      in /ui/models, or "
-          "`llamanager models pull <hf-repo>`")
+    print("  • run at startup:    choose it from the tray icon "
+          "(right-click → Autorun at startup) or in the web UI")
+    print("  • install an engine: /ui/setup   •   download a model: /ui/models")
     return 0
 
 
@@ -322,6 +313,56 @@ def _sh(cmd: list[str], *, label: str | None = None) -> int:
     return r.returncode
 
 
+def _ensure_tray_deps() -> None:
+    """The tray needs pystray + Pillow (pip), and on Linux also PyGObject
+    (`gi`) + an AppIndicator typelib (system packages). Auto-install the pip
+    side into this interpreter; for the Linux system side we can only guide,
+    since it needs apt/sudo. Best-effort — never aborts the autostart setup.
+    The daemon runs fine regardless; only the icon depends on these."""
+    import importlib
+    import subprocess
+
+    print("  tray dependencies:")
+    try:
+        importlib.import_module("pystray")
+        importlib.import_module("PIL")
+        print("    pystray + Pillow: present")
+    except ImportError:
+        print("    installing pystray + Pillow into this environment...")
+        rc = subprocess.call([sys.executable, "-m", "pip", "install",
+                              "pystray", "pillow"])
+        if rc != 0:
+            print("    ! install failed — run manually: "
+                  "pip install 'llamanager[tray]'")
+            return
+
+    if not sys.platform.startswith("linux"):
+        return
+    # Linux GUI backend: pystray draws the icon via PyGObject + AppIndicator.
+    # On Wayland/GNOME the X11 fallback won't show, so this matters.
+    try:
+        import gi
+        gi.require_version("AyatanaAppIndicator3", "0.1")
+        from gi.repository import AyatanaAppIndicator3  # noqa: F401
+        print("    AppIndicator backend: ok")
+        return
+    except (ImportError, ValueError):
+        pass
+    print("    ! the icon needs PyGObject + an AppIndicator typelib. Install "
+          "the system packages:")
+    print("        sudo apt install python3-gi gir1.2-ayatanaappindicator3-0.1")
+    # If this is a venv that can't see the system gi, point at the fix.
+    in_venv = sys.prefix != sys.base_prefix
+    if in_venv:
+        print("      then let this venv use them (either):")
+        print("        • recreate it:  python3 -m venv --system-site-packages "
+              f"{sys.prefix}")
+        print("        • or set  include-system-site-packages = true  in "
+              f"{Path(sys.prefix) / 'pyvenv.cfg'}")
+    print("      (the daemon still runs without this — only the tray icon is "
+          "affected.)")
+
+
 def cmd_autostart(args: argparse.Namespace) -> int:
     """Configure how llamanager starts at boot/login (see --mode)."""
     from . import installer, service_ctl
@@ -334,15 +375,8 @@ def cmd_autostart(args: argparse.Namespace) -> int:
     if args.mode == "off":
         return _autostart_off(cfg)
 
-    if want_tray:
-        print("Checking the [tray] extra is importable...")
-        try:
-            import pystray  # noqa: F401
-            from PIL import Image  # noqa: F401
-            print("  ok: pystray + Pillow present")
-        except ImportError:
-            print("  ! pystray/Pillow not installed. Run: pip install "
-                  "'llamanager[tray]'  (the tray won't launch without it)")
+    if want_tray and not write_only:
+        _ensure_tray_deps()
 
     if sys.platform.startswith("linux"):
         return _autostart_linux(cfg, installer, service_ctl,
@@ -518,19 +552,37 @@ def _autostart_off(cfg) -> int:
     return 2
 
 
-def _spawn_tray(binary: str | None) -> None:
-    """Launch the tray now, detached, so the user sees it without a re-login."""
+def _spawn_detached(binary: str | None, verb: str) -> bool:
+    """Spawn `llamanager <verb>` as a detached background process. Returns
+    True on launch. Used by `init` to bring the daemon/tray up immediately
+    without installing any persistent autostart entry."""
     import shutil
     import subprocess
     exe = binary or shutil.which("llamanager") or sys.executable
-    cmd = ([exe, "tray"] if exe.endswith(("llamanager", "llamanager.exe"))
-           else [exe, "-m", "llamanager", "tray"])
+    cmd = ([exe, verb] if exe.endswith(("llamanager", "llamanager.exe"))
+           else [exe, "-m", "llamanager", verb])
     try:
         subprocess.Popen(cmd, start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print("  launched the tray now (detached)")
+        return True
     except OSError as e:
-        print(f"  ! could not launch the tray now ({e}); it will start at login")
+        print(f"  ! could not launch `{verb}` ({e})")
+        return False
+
+
+def _spawn_serve(binary: str | None) -> None:
+    if _spawn_detached(binary, "serve"):
+        print("  daemon: started (detached)")
+    else:
+        print("    run it manually: llamanager serve")
+
+
+def _spawn_tray(binary: str | None) -> None:
+    """Launch the tray now, detached, so the user sees it without a re-login."""
+    if _spawn_detached(binary, "tray"):
+        print("  tray: launched (detached)")
+    else:
+        print("    it will start when autorun is configured, or run: llamanager tray")
 
 
 def cmd_install_tray(args: argparse.Namespace) -> int:
@@ -1337,6 +1389,11 @@ def main(argv: list[str] | None = None) -> int:
     sp = sub.add_parser("tray",
                         help="run the system-tray / menu-bar app "
                              "(thin client; needs the [tray] extra)")
+    sp.add_argument("-b", "--background", action="store_true",
+                    help="detach and return immediately, instead of blocking "
+                         "the terminal with the tray event loop")
+    sp.add_argument("--binary", default=None,
+                    help="path to the llamanager entrypoint (for --background)")
     sp.set_defaults(func=cmd_tray)
 
     sp = sub.add_parser("init-config", help="write a default config.toml")
@@ -1440,16 +1497,14 @@ def main(argv: list[str] | None = None) -> int:
     sp.set_defaults(func=cmd_uninstall)
 
     sp = sub.add_parser("init",
-                        help="guided first-run setup: config + admin key + "
-                             "llama-server check + autostart (the front door)")
-    sp.add_argument("--yes", action="store_true",
-                    help="non-interactive: accept defaults, skip the autostart "
-                         "prompt (use --autostart to set it)")
-    sp.add_argument("--autostart", default=None,
-                    choices=["off", "boot-service", "login-tray",
-                             "tray+service", "skip"],
-                    help="set the run mode non-interactively (default: prompt)")
-    _add_autostart_flags(sp)
+                        help="guided first-run setup: config + admin key, then "
+                             "starts the daemon + tray now (no restart). "
+                             "Run-at-startup and engine install live in the UI.")
+    sp.add_argument("--binary", default=None,
+                    help="path to the llamanager entrypoint (default: autodetect)")
+    sp.add_argument("--no-launch", action="store_true",
+                    help="don't start the daemon/tray now — just write config "
+                         "and the admin key")
     sp.set_defaults(func=cmd_init)
 
     # ---- admin verbs (drive a running daemon) ----

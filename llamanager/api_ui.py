@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import platform
 import re
 import secrets
@@ -1103,6 +1104,31 @@ def _autostart_installed() -> bool | None:
             or Path("/Library/LaunchDaemons/com.llamanager.plist").exists()
         )
     return None  # Windows: unknown without sc/schtasks
+
+
+def _autorun_label() -> str:
+    """Cheap, file-based current autorun-at-startup state for the Setup page:
+    'off' / 'at login' / 'before login' / 'unknown'. Mirrors the tray's
+    detection. 'before login' = linger (Linux) / system LaunchDaemon (macOS)."""
+    home = Path.home()
+    if sys.platform.startswith("linux"):
+        unit = ((home / ".config/systemd/user/llamanager.service").exists() or
+                (home / ".config/systemd/user/default.target.wants/"
+                        "llamanager.service").exists())
+        tray = (home / ".config/autostart/llamanager-tray.desktop").exists()
+        if not (unit or tray):
+            return "off"
+        user = os.environ.get("USER", "")
+        linger = bool(user) and Path(f"/var/lib/systemd/linger/{user}").exists()
+        return "before login" if linger else "at login"
+    if sys.platform == "darwin":
+        sysd = Path("/Library/LaunchDaemons/com.llamanager.plist").exists()
+        agent = (home / "Library/LaunchAgents/com.llamanager.plist").exists()
+        tray = (home / "Library/LaunchAgents/com.llamanager.tray.plist").exists()
+        if not (sysd or agent or tray):
+            return "off"
+        return "before login" if sysd else "at login"
+    return "unknown"
 
 
 def _onboarding_status(request: Request) -> dict[str, Any]:
@@ -2352,6 +2378,125 @@ async def about_auto_update_toggle(request: Request,
     return RedirectResponse("/ui/about", status_code=303)
 
 
+# ---------- settings ----------
+#
+# One page for daemon-level preferences that used to be scattered across
+# About (software update), Setup (run-at-startup), and Launch (auto-launch /
+# auto-restart). The autostart action shells out to `llamanager autostart`,
+# the same per-platform logic the CLI and tray use.
+
+def _settings_ctx(request: Request, **extra: Any) -> dict:
+    cfg = request.app.state.cfg
+    supervisor = request.app.state.supervisor
+    ctx = _about_ctx(
+        request,
+        autorun_mode=_autorun_label(),
+        autolaunch=bool(cfg.autolaunch),
+        autorestart=bool(supervisor.enabled),
+        update_action_base="/ui/settings",
+    )
+    ctx.update(extra)
+    return ctx
+
+
+@router.get("/settings", response_class=HTMLResponse)
+async def settings_view(request: Request,
+                        _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    return templates.TemplateResponse(request, "settings.html",
+                                      _settings_ctx(request))
+
+
+@router.post("/settings/check-update", response_class=HTMLResponse)
+async def settings_check_update(request: Request,
+                                _: None = Depends(require_csrf)) -> HTMLResponse:
+    try:
+        info = _check_latest_release()
+        return templates.TemplateResponse(request, "_update_area.html", _settings_ctx(
+            request,
+            update_available=info["is_newer"],
+            latest_version=info["latest"],
+            install_mode=info["install_mode"],
+            install_location=info["install_location"],
+        ))
+    except Exception as e:
+        return templates.TemplateResponse(request, "_update_area.html", _settings_ctx(
+            request,
+            update_check_error=f"Could not check for updates: {e}",
+            install_mode=_detect_install_mode()["mode"],
+        ))
+
+
+@router.post("/settings/update", response_class=HTMLResponse)
+async def settings_update(request: Request,
+                          _: None = Depends(require_csrf)) -> Response:
+    loop = asyncio.get_running_loop()
+    res = await loop.run_in_executor(None, _run_self_update)
+    install_mode = res.get("mode", "unknown")
+    if not res["ok"]:
+        return templates.TemplateResponse(request, "settings.html", _settings_ctx(
+            request,
+            update_check_error=res.get("error", "update failed"),
+            update_log=res["log"],
+            install_mode=install_mode,
+        ))
+    sm: ServerManager = request.app.state.sm
+    if sm.is_running:
+        await sm.stop()
+    await _schedule_self_restart()
+    return templates.TemplateResponse(request, "settings.html", _settings_ctx(
+        request,
+        update_log=res["log"] + "\n\nUpdate complete. Restarting…",
+        update_available=False,
+        latest_version="restarting",
+    ))
+
+
+@router.post("/settings/autostart", response_class=HTMLResponse)
+async def settings_autostart(request: Request,
+                             mode: str = Form(...),
+                             _: None = Depends(require_csrf)) -> Response:
+    """Configure run-at-startup. Maps the three user-facing choices onto
+    `llamanager autostart --mode`, run as a subprocess so it reuses the exact
+    per-platform logic the CLI/tray use. Runs in the daemon's session, so for
+    a user-session daemon it needs no prompt; a system/headless daemon may
+    lack the rights for 'before login' — the result is logged either way."""
+    allowed = {"off": "off", "login": "login-tray", "boot": "tray+service"}
+    cli_mode = allowed.get(mode)
+    if cli_mode is None:
+        raise HTTPException(status_code=400, detail=f"unknown mode {mode!r}")
+    cmd = [sys.executable, "-m", "llamanager", "autostart", "--mode", cli_mode]
+    try:
+        r = await asyncio.to_thread(
+            subprocess.run, cmd, capture_output=True, text=True, timeout=120)
+        if r.returncode == 0:
+            log.info("autostart set to %s via UI", cli_mode)
+        else:
+            log.error("autostart %s via UI failed: %s", cli_mode,
+                      (r.stderr or r.stdout).strip())
+    except (OSError, subprocess.SubprocessError) as e:
+        log.error("autostart %s via UI errored: %s", cli_mode, e)
+    return RedirectResponse("/ui/settings", status_code=303)
+
+
+@router.post("/settings/autolaunch", response_class=HTMLResponse)
+async def settings_autolaunch(request: Request,
+                              enabled: str = Form("off"),
+                              _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    on = (enabled == "on")
+    cfg.autolaunch = on
+    update_defaults(cfg.config_path, autolaunch=on)
+    return RedirectResponse("/ui/settings", status_code=303)
+
+
+@router.post("/settings/autorestart", response_class=HTMLResponse)
+async def settings_autorestart(request: Request,
+                               enabled: str = Form("off"),
+                               _: None = Depends(require_csrf)) -> Response:
+    request.app.state.supervisor.enabled = (enabled == "on")
+    return RedirectResponse("/ui/settings", status_code=303)
+
+
 # ---------- chat ----------
 
 @router.get("/chat", response_class=HTMLResponse)
@@ -3194,12 +3339,24 @@ async def setup_install_progress(request: Request,
     # variant becomes active immediately. Engine type is set in lockstep so
     # server_manager builds the right cmdline.
     if state.status == "done" and state.installed_path:
+        parsed = parse_variant_id(variant)
         if cfg.llama_server_binary != state.installed_path:
             cfg.llama_server_binary = state.installed_path
-            parsed = parse_variant_id(variant)
             engine = engine_type_for(parsed[0]) if parsed else "llama"
             cfg.llama_server_engine = engine
             patch_config_binary(cfg.config_path, state.installed_path, engine=engine)
+        # We just installed the latest build for this variant, so the cached
+        # "update available" flag is now stale. Refresh it to the freshly
+        # installed version + up-to-date, so the variant row stops offering
+        # the build we just installed. (An *update* keeps the same path, so
+        # this must run regardless of the binary-path check above.)
+        if parsed is not None:
+            meta = read_install_meta(parsed[0], parsed[1]) or {}
+            ver = meta.get("version")
+            updates = getattr(request.app.state, "install_updates", None)
+            if isinstance(updates, dict) and ver:
+                updates[variant] = {"latest": ver, "has_update": False,
+                                    "current": ver}
     binary_path = detect_binary(cfg.llama_server_binary)
     return templates.TemplateResponse(request, "_install_progress.html", _ctx(
         request,
@@ -3299,6 +3456,21 @@ async def setup_open_config(request: Request,
     cfg = request.app.state.cfg
     _open_path(str(cfg.config_path))
     return RedirectResponse("/ui/setup", status_code=303)
+
+
+@router.get("/setup/_variants", response_class=HTMLResponse)
+async def setup_variants(request: Request,
+                         _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """Lightweight refresh of the installed-variants block (no network).
+
+    The install-progress 'done' partial fires `hx-get /ui/setup/_variants` to
+    show the newly-installed variant and clear its stale 'update available'
+    flag. Without this route that fetch 404s — which renders as an
+    'Error: Not Found' toast on every Setup-page load while an install state
+    is 'done'."""
+    return templates.TemplateResponse(
+        request, "_installed_variants.html", _setup_ctx(request),
+    )
 
 
 @router.post("/setup/restart", response_class=HTMLResponse)

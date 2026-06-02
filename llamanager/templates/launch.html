@@ -117,24 +117,9 @@
   </script>
   {% endif %}
 
-  {# Autolaunch + auto-restart toggles #}
-  <div style="padding-top: 18px; border-top: 1px solid var(--bg-3); display: flex; flex-direction: column; gap: 10px;">
-    <form method="post" action="/ui/launch/autolaunch">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label class="lm-checkbox-row">
-        <input type="checkbox" name="enabled" value="on" {% if autolaunch %}checked{% endif %}
-               onchange="this.form.submit()">
-        Auto-launch the default model when llamanager starts
-      </label>
-    </form>
-    <form method="post" action="/ui/launch/autorestart">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label class="lm-checkbox-row">
-        <input type="checkbox" name="enabled" value="on" {% if autorestart %}checked{% endif %}
-               onchange="this.form.submit()">
-        Auto-restart on crash (retries with increasing cooldowns if repeated failures)
-      </label>
-    </form>
+  {# Auto-launch + auto-restart moved to Settings (/ui/settings). #}
+  <div style="padding-top: 18px; border-top: 1px solid var(--bg-3);">
+    <a class="lm-meta-action" href="/ui/settings">Auto-launch &amp; auto-restart settings &rarr;</a>
   </div>
 </section>
 

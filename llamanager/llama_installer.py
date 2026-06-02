@@ -496,6 +496,26 @@ def _fetch_release_list(github_api_url: str, *, per_page: int = 30) -> list[dict
     return data if isinstance(data, list) else []
 
 
+def _latest_release_with_asset(github_api_url: str, backend: str) -> dict | None:
+    """Newest non-draft/non-prerelease release that actually ships an asset
+    for this (backend, platform).
+
+    Upstream's ``/releases/latest`` is just the newest tag — and a freshly
+    cut release often has only some assets uploaded (e.g. only a Windows
+    CUDA runtime zip), or never ships a build for this backend at all.
+    Picking that tag blindly makes "update available" advertise — and the
+    installer then attempt — a version with no matching binary. Walk the
+    recent releases newest-first and return the first that has a usable asset
+    here, so both the update check and the install agree on an installable
+    version."""
+    for rel in _fetch_release_list(github_api_url, per_page=30):
+        if rel.get("draft") or rel.get("prerelease"):
+            continue
+        if _select_asset(rel.get("assets", []), backend) is not None:
+            return rel
+    return None
+
+
 def _fetch_release_by_tag(github_api_url: str, tag: str) -> dict:
     base = _releases_base(github_api_url)
     req = urllib.request.Request(
@@ -581,8 +601,11 @@ def check_for_update(source: str, backend: str) -> UpdateInfo:
         if src_meta["engine_type"] == "mlx":
             latest = _fetch_pypi_latest(src_meta["pypi_url"])
         else:
-            release = _fetch_latest_release(src_meta["github_api"])
-            latest = release.get("tag_name") or release.get("name")
+            # Newest release that actually has a binary for THIS backend —
+            # not just the newest tag (which may be mid-upload or never ship
+            # this backend), which would advertise an uninstallable update.
+            release = _latest_release_with_asset(src_meta["github_api"], backend)
+            latest = (release.get("tag_name") or release.get("name")) if release else None
     except Exception as exc:
         return UpdateInfo(installed, None, False, str(exc))
 
@@ -704,8 +727,15 @@ async def _install_llama(state: InstallState, source: str, backend: str,
         else:
             _emit(f"Fetching latest release for {src_meta['label']} ({be_meta['label']})…")
             release = await loop.run_in_executor(
-                None, lambda: _fetch_latest_release(src_meta["github_api"])
+                None,
+                lambda: _latest_release_with_asset(src_meta["github_api"], backend),
             )
+            if release is None:
+                raise RuntimeError(
+                    f"No recent release ships a {be_meta['label']} build for "
+                    "this platform. The newest tags may still be uploading "
+                    "binaries — try again shortly, or pick a specific version."
+                )
         tag = release.get("tag_name", version or "unknown")
         _emit(f"Release: {tag}")
 
@@ -867,10 +897,68 @@ def _download_asset(url: str, emit) -> Path:
         tmp.close()
 
 
+def _place_file(dest_dir: Path, name: str, data: bytes, *,
+                make_exec: bool) -> Path:
+    """Write ``data`` to ``dest_dir/name`` without ever opening the target
+    for writing — which would fail with ETXTBSY ("Text file busy") when the
+    target is a currently-running executable (e.g. updating ``llama-server``
+    while it's serving a model).
+
+    Strategy: write to a temp file on the same filesystem, then atomically
+    rename it into place. If the target is busy/locked, move the old one
+    aside first (renaming a running binary's *path* is allowed — the live
+    process keeps its inode), then drop the new file in."""
+    out_path = dest_dir / name
+    fd, tmp_name = tempfile.mkstemp(dir=str(dest_dir), prefix=f".{name}.",
+                                    suffix=".new")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+        if make_exec and sys.platform != "win32":
+            os.chmod(tmp, 0o755)
+        try:
+            os.replace(tmp, out_path)
+        except OSError:
+            # Busy/locked target (e.g. Windows holds a running .exe open):
+            # shove the old one out of the way, then place the new file.
+            old = dest_dir / f".{name}.old"
+            try:
+                if out_path.exists():
+                    os.replace(out_path, old)
+                os.replace(tmp, out_path)
+            finally:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass  # the still-running old binary may hold it; harmless
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    return out_path
+
+
 def _extract_binary(archive_path: Path, source: str, backend: str) -> Path:
     target_path = variant_install_path(source, backend)
     dest_dir = target_path.parent
     dest_dir.mkdir(parents=True, exist_ok=True)
+    # Clear previously-extracted files first. Without this, repeated
+    # installs/updates accumulate multiple library versions in the same
+    # directory (e.g. libllama.so.0.0.9458/9459/9460), and the SONAME
+    # symlinks end up pointing at an OLD version while llama-server is new —
+    # an ABI mismatch that segfaults on model load. Unlinking is safe even
+    # for the running binary/libs: the live process keeps its open inodes;
+    # only the path goes away, and _place_file writes the new file in.
+    for old in dest_dir.iterdir():
+        if old.name == ".installed.json":
+            continue  # rewritten by the installer on completion
+        try:
+            old.unlink()
+        except OSError:
+            pass  # busy/locked (e.g. a running .exe on Windows) — skip
 
     if str(archive_path).lower().endswith(".tar.gz") or archive_path.suffix == ".gz":
         with tarfile.open(archive_path, "r:gz") as tf:
@@ -890,11 +978,8 @@ def _extract_binary(archive_path: Path, source: str, backend: str) -> Path:
                     src = tf.extractfile(m)
                     if src is None:
                         continue
-                    out_path = dest_dir / Path(m.name).name
-                    with open(out_path, "wb") as out:
-                        out.write(src.read())
-                    if sys.platform != "win32":
-                        os.chmod(out_path, 0o755)
+                    _place_file(dest_dir, Path(m.name).name, src.read(),
+                                make_exec=True)
     else:
         with zipfile.ZipFile(archive_path, "r") as zf:
             candidates = [n for n in zf.namelist() if Path(n).name == BINARY_NAME]
@@ -909,11 +994,9 @@ def _extract_binary(archive_path: Path, source: str, backend: str) -> Path:
                 if name.endswith("/"):
                     continue
                 if str(Path(name).parent) == prefix:
-                    out_path = dest_dir / Path(name).name
-                    with zf.open(name) as src, open(out_path, "wb") as out:
-                        out.write(src.read())
-                    if sys.platform != "win32":
-                        os.chmod(out_path, 0o755)
+                    with zf.open(name) as src:
+                        _place_file(dest_dir, Path(name).name, src.read(),
+                                    make_exec=True)
 
     _create_lib_symlinks(dest_dir)
 
@@ -933,17 +1016,25 @@ def _create_lib_symlinks(dest_dir: Path) -> None:
         if ".dylib" in name:
             m = re.match(r'^(lib[^.]+\.\d+)\.\d+(?:\.\d+)?\.dylib$', name)
             if m:
-                short = m.group(1) + ".dylib"
-                link = dest_dir / short
-                if not link.exists():
-                    link.symlink_to(p.name)
+                _repoint_symlink(dest_dir / (m.group(1) + ".dylib"), p.name)
         elif ".so." in name:
             m = re.match(r'^(lib[^.]+\.so\.\d+)\.\d+(?:\.\d+)?$', name)
             if m:
-                short = m.group(1)
-                link = dest_dir / short
-                if not link.exists():
-                    link.symlink_to(p.name)
+                _repoint_symlink(dest_dir / m.group(1), p.name)
+
+
+def _repoint_symlink(link: Path, target_name: str) -> None:
+    """Create or update a SONAME symlink to point at ``target_name``.
+
+    Always repoints an existing link: after an update the new versioned lib
+    must own the SONAME, otherwise the binary loads a stale (old-version)
+    library via a leftover symlink and crashes."""
+    try:
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(target_name)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------

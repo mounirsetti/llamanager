@@ -482,13 +482,10 @@
     </fieldset>
 
     <div class="lm-install-row">
-      <button type="submit" class="lm-btn lm-btn--primary"
+      <button type="submit" id="install-submit" class="lm-btn lm-btn--primary"
               {% if install.status == 'running' %}disabled{% endif %}>
         {% if install.status == 'running' %}Installing&hellip;{% else %}Install &rarr;{% endif %}
       </button>
-      <p class="lm-install-row__note">
-        Each variant installs into its own directory. Switching never overwrites another.
-      </p>
     </div>
   </form>
 
@@ -584,4 +581,5 @@
   </div>
 </section>
 
+{# Run-at-startup / tray moved to Settings (/ui/settings). #}
 {% endblock %}

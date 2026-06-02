@@ -9,6 +9,10 @@
   <pre class="lm-log" style="max-height: 200px;">{{ install.lines | join('\n') }}</pre>
 </div>
 {% elif install.status == "done" %}
+{# Out-of-band: the Install button lives in the form (outside this polled
+   region), so reset it from "Installing…" back to enabled here. #}
+<button id="install-submit" hx-swap-oob="true" type="submit" form="install-form"
+        class="lm-btn lm-btn--primary">Install &rarr;</button>
 <div id="install-progress" style="margin-top: 20px;"
      hx-get="/ui/setup/_variants" hx-trigger="load"
      hx-target="#installed-variants" hx-swap="outerHTML">
@@ -24,6 +28,8 @@
   </div>
 </div>
 {% elif install.status == "error" %}
+<button id="install-submit" hx-swap-oob="true" type="submit" form="install-form"
+        class="lm-btn lm-btn--primary">Install &rarr;</button>
 <div id="install-progress" style="margin-top: 20px;">
   <div class="lm-error">Install failed: {{ install.error }}</div>
   {% if install.lines %}
