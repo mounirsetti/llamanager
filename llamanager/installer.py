@@ -51,11 +51,28 @@ LAUNCHD_PLIST_TEMPLATE = """\
 def _resolve_binary(binary: str | None) -> str:
     if binary:
         return binary
-    # Prefer the current interpreter's `llamanager` script if installed.
+    # Prefer the `llamanager` console script on PATH.
     candidate = shutil.which("llamanager")
     if candidate:
         return candidate
-    # Fall back to `python -m llamanager` style.
+    # Then the console script next to the running interpreter (e.g.
+    # <venv>/bin/llamanager). This is the common case when the daemon runs
+    # via `python -m llamanager` from a venv that isn't on PATH. We must NOT
+    # fall back to the bare interpreter here: the unit/plist/desktop templates
+    # build `{binary} <subcommand>` (e.g. `{binary} serve`), so a bare python
+    # path would produce a broken `python serve` command. The console script
+    # makes `{binary} serve` / `{binary} tray` correct.
+    # NOTE: don't resolve() — sys.executable is the venv's python (often a
+    # symlink); resolving it follows the link out to /usr/bin and we'd miss
+    # the venv's own `llamanager` script. The script lives in the same bin
+    # dir as the (unresolved) interpreter path.
+    exe = "llamanager.exe" if sys.platform == "win32" else "llamanager"
+    sibling = Path(sys.executable).parent / exe
+    if sibling.exists():
+        return str(sibling)
+    # Last resort: bare interpreter (only correct if the caller's template
+    # uses `-m llamanager`; the autostart templates don't, so this is a
+    # genuine fallback for hosts with neither a script nor a venv layout).
     return f"{sys.executable}"
 
 
