@@ -200,15 +200,18 @@ def ctx_safety(model_path: Path, ctx_size: int | None,
             msg += f" A ctx around {safe:,} keeps comfortable headroom."
     elif need <= total_budget and total_budget > 0:
         level = "warn"
-        msg = (f"ctx {ctx_size:,} needs ~{need:.1f} GB ({base_desc}) — over "
-               f"{vram:.0f} GB VRAM, will spill to RAM and run slowly.")
+        over = (f"over {vram:.0f} GB VRAM" if vram
+                else "may not fit VRAM")          # vram unknown (not detected)
+        msg = (f"ctx {ctx_size:,} needs ~{need:.1f} GB ({base_desc}) — {over}, "
+               f"will spill to RAM and run slowly.")
         if safe:
             msg += f" A ctx around {safe:,} would stay on the GPU."
     else:
         level = "danger"
+        budget_desc = (f"VRAM+RAM ({vram:.0f}+{ram:.0f} GB)" if vram
+                       else f"available memory ({ram:.0f} GB RAM)")
         msg = (f"ctx {ctx_size:,} needs ~{need:.1f} GB ({base_desc}) — more "
-               f"than VRAM+RAM ({vram:.0f}+{ram:.0f} GB). This will exhaust "
-               f"memory and thrash swap.")
+               f"than {budget_desc}. This will exhaust memory and thrash swap.")
         if safe:
             msg += f" Reduce ctx to about {safe:,} or lower."
     return CtxSafety(level=level, kv_gb=kv, weights_gb=w,

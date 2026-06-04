@@ -208,6 +208,7 @@
     }
     .chat-btn:disabled { opacity: 0.4; cursor: not-allowed; }
     .chat-btn--ghost { background: transparent; color: var(--fg-1); border-color: var(--bg-3); }
+    .chat-btn--stop { background: var(--bad); border-color: var(--bad); color: var(--on-accent); }
 
     /* Login */
     .chat-login {
@@ -575,6 +576,8 @@
 
   var apiKey = '';
   var streaming = false;
+  var streamController = null;   // AbortController for the in-flight generation
+  var stopped = false;           // true when the user stopped the current stream
   var statusPoll = null;
   var userScrolledUp = false;
 
@@ -1026,8 +1029,12 @@
     scrollToBottom();
 
     streaming = true;
-    sendBtn.disabled = true;
-    sendBtn.textContent = '...';
+    stopped = false;
+    streamController = new AbortController();
+    // Repurpose the send button as a Stop control while generating.
+    sendBtn.disabled = false;
+    sendBtn.textContent = 'Stop';
+    sendBtn.classList.add('chat-btn--stop');
 
     var assistantEl = buildMsgEl('assistant', '');
     // Show a queue/swap status banner above the thinking dots while
@@ -1094,7 +1101,7 @@
     var streamStart = 0;
     var isThinking = false;
 
-    fetch('/v1/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body) })
+    fetch('/v1/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: streamController.signal })
       .then(function (resp) {
         if (!resp.ok) return resp.text().then(function (t) { throw new Error('HTTP ' + resp.status + ': ' + t); });
         var reader = resp.body.getReader();
@@ -1182,18 +1189,25 @@
       })
       .catch(function (err) {
         clearQStatus();
+        // User-initiated stop (AbortController) — keep what was generated and
+        // don't render it as an error. The server detects the dropped
+        // connection and stops the upstream generation.
+        if (err && (err.name === 'AbortError' || stopped)) { finish(); return; }
         assistantEl.bubble.textContent = 'Error: ' + err.message;
         assistantEl.bubble.style.color = 'var(--bad)';
         finish();
       });
 
     function finish() {
+      if (!streaming) return;          // guard against double-finalize
+      streaming = false;
       var msgStats = null;
       if (streamStart && tokenCount > 0) {
         var elapsed = (Date.now() - streamStart) / 1000;
         msgStats = { tok_s: elapsed > 0 ? tokenCount / elapsed : 0 };
       }
       if (msgStats && reasoningContent) msgStats.reasoning = reasoningContent;
+      if (msgStats && stopped) msgStats.stopped = true;
       if (fullContent || reasoningContent) {
         var storedContent = fullContent;
         if (reasoningContent && !fullContent.trimStart().startsWith('<think>')) {
@@ -1204,18 +1218,33 @@
         var newEl = buildMsgEl('assistant', storedContent, msgStats);
         parent.replaceChild(newEl.el, assistantEl.el);
         saveHistory();
+      } else if (stopped) {
+        assistantEl.bubble.innerHTML = '';
+        assistantEl.bubble.textContent = '(stopped)';
+        assistantEl.bubble.style.color = 'var(--fg-3)';
       }
-      streaming = false;
+      streamController = null;
       sendBtn.disabled = false;
       sendBtn.textContent = 'Send';
+      sendBtn.classList.remove('chat-btn--stop');
       speedEl.style.display = 'none';
       scrollToBottom();
     }
   }
 
-  sendBtn.addEventListener('click', send);
+  // Stop the in-flight generation; the server stops the upstream on disconnect.
+  function stop() {
+    if (!streaming) return;
+    stopped = true;
+    sendBtn.textContent = 'Stopping…';
+    sendBtn.disabled = true;
+    if (streamController) { try { streamController.abort(); } catch (e) {} }
+  }
+
+  sendBtn.addEventListener('click', function () { if (streaming) stop(); else send(); });
   inputEl.addEventListener('keydown', function (e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    else if (e.key === 'Escape' && streaming) { e.preventDefault(); stop(); }
   });
 
   // System prompt change updates active chat

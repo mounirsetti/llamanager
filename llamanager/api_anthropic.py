@@ -37,6 +37,8 @@ from .api_v1 import (
     KEEPALIVE_INTERVAL_S,
     _apply_thinking_to_body,
     _check_model_allowed,
+    _extract_prompt_text,
+    _extract_response_text,
     _profile_thinking,
     _stream_with_keepalives,
     _thinking_from_header,
@@ -596,9 +598,15 @@ class _AnthropicStreamTranslator:
         self.output_tokens = 0
         self.finish_reason: str | None = None
         self.stop_sequence: str | None = None
+        # Accumulated assistant text, for the UI's request-detail view.
+        self.text_parts: list[str] = []
         # SSE chunk-parser state
         self._buf = ""
         self.upstream_error: dict[str, Any] | None = None
+
+    @property
+    def response_text(self) -> str:
+        return "".join(self.text_parts)
 
     # ---- output helpers --------------------------------------------------
 
@@ -748,6 +756,7 @@ class _AnthropicStreamTranslator:
         # ---- text delta -----
         content = delta.get("content")
         if isinstance(content, str) and content:
+            self.text_parts.append(content)
             idx, opening = self._open_text()
             out.extend(opening)
             out.append(_sse_event("content_block_delta", {
@@ -761,6 +770,7 @@ class _AnthropicStreamTranslator:
                 if isinstance(part, dict) and part.get("type") == "text":
                     t = part.get("text")
                     if isinstance(t, str) and t:
+                        self.text_parts.append(t)
                         idx, opening = self._open_text()
                         out.extend(opening)
                         out.append(_sse_event("content_block_delta", {
@@ -914,6 +924,8 @@ async def _blocking_messages(request: Request, qm: QueueManager, qr,
     error: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    prompt_text = _extract_prompt_text(openai_body)
+    response_text: str | None = None
     try:
         await qm.wait_for_slot(qr)
         from ._routing import upstream_base as _upstream
@@ -934,6 +946,7 @@ async def _blocking_messages(request: Request, qm: QueueManager, qr,
         except json.JSONDecodeError:
             raise HTTPException(status_code=502,
                                 detail="upstream returned non-JSON body")
+        response_text = _extract_response_text(upstream)
         anth = _openai_to_anthropic_response(upstream, model_id=response_model_name)
         prompt_tokens = anth["usage"]["input_tokens"] or None
         completion_tokens = anth["usage"]["output_tokens"] or None
@@ -963,12 +976,15 @@ async def _blocking_messages(request: Request, qm: QueueManager, qr,
             qr, error=error, cancelled=(error == "cancelled"),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            prompt_text=prompt_text,
+            response_text=response_text,
         )
 
 
 async def _stream_messages(request: Request, qm: QueueManager, qr,
                             sm: ServerManager, openai_body: dict[str, Any],
                             response_model_name: str) -> StreamingResponse:
+    prompt_text = _extract_prompt_text(openai_body)
     client_disconnected = asyncio.Event()
 
     async def watcher() -> None:
@@ -1030,6 +1046,8 @@ async def _stream_messages(request: Request, qm: QueueManager, qr,
             qm.mark_in_flight_done(
                 qr, error=error, cancelled=cancelled,
                 prompt_tokens=tokens[0], completion_tokens=tokens[1],
+                prompt_text=prompt_text,
+                response_text=translator.response_text,
             )
 
     headers = {

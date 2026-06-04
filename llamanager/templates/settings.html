@@ -82,8 +82,8 @@
         Auto — use all detected GPUs
       </option>
       {% for d in gpu_devices %}
-      <option value="{{ d.name }}" {% if d.name == gpu_device_current %}selected{% endif %}>
-        {{ d.name }}{% if d.mem_free_mib is not none %} — {{ (d.mem_free_mib / 1024) | round(1) }} GB free{% endif %} [{{ d.backend }}{{ d.index }}]
+      <option value="{{ d.value }}" {% if d.value == gpu_device_matched %}selected{% endif %}>
+        {{ d.name }}{% if d.mem_total_mib is not none %} — {{ (d.mem_total_mib / 1024) | round(0) | int }} GB{% endif %}{% if d.mem_free_mib is not none %} ({{ (d.mem_free_mib / 1024) | round(1) }} GB free){% endif %} [{{ d.backend }}]
       </option>
       {% endfor %}
       {% if gpu_pinned_missing %}
@@ -201,5 +201,29 @@
     from free RAM at launch. Changes here take effect the next time the engine
     starts.
   </p>
+</section>
+
+{# ---- Conversation retention ---- #}
+<section class="lm-section" style="margin-top: 28px;">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Conversation retention</span>
+  </header>
+  <p style="color: var(--fg-2); max-width: 62ch; margin-bottom: 12px;">
+    How long to keep the <strong>prompt and response text</strong> shown when
+    you open a request from the dashboard or queue. Set to <code>0</code> to
+    never store conversation content — only token counts and timing are kept.
+    Request history (counts, timing, status) is retained separately for up to
+    90 days regardless.
+  </p>
+  <form method="post" action="/ui/settings/conversation-retention" id="conv-retention-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="lm-field-label">
+      Retention (days)
+      <span class="lm-field-hint">Prompt/response text older than this is cleared daily. <code>0</code> disables capture and wipes any text already stored. Saving a smaller value applies immediately.</span>
+    </label>
+    <input class="lm-input" type="number" name="retention_days" min="0" max="3650" step="1"
+           style="max-width: 14ch;" value="{{ conversation_retention_days }}"
+           onchange="this.form.submit()">
+  </form>
 </section>
 {% endblock %}

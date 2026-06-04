@@ -1,0 +1,68 @@
+{# Request-detail fragment. Loaded into the shared #lm-req-detail dialog
+   (see base.html) when an operator clicks a request row. Renders the
+   prompt that was sent and the response that was generated, plus stats. #}
+{% if not req %}
+<div class="lm-reqd">
+  <header class="lm-reqd__head">
+    <span class="lm-reqd__title">Request</span>
+    <button type="button" class="lm-btn lm-btn--xs" onclick="this.closest('dialog').close()">Close</button>
+  </header>
+  <div class="lm-reqd__body">
+    <p class="lm-empty">This request is no longer available (it may have been pruned).</p>
+  </div>
+</div>
+{% else %}
+<div class="lm-reqd">
+  <header class="lm-reqd__head">
+    <span class="lm-reqd__title">
+      Request
+      <span class="lm-pill lm-pill--{{ req.status }}" style="margin-left: 8px;">{{ req.status }}</span>
+    </span>
+    <button type="button" class="lm-btn lm-btn--xs" onclick="this.closest('dialog').close()">Close</button>
+  </header>
+
+  <div class="lm-reqd__body">
+    <dl class="lm-reqd__meta">
+      <div><dt>When</dt><dd>{{ req.enqueued_at | localdt('%b %d, %Y %H:%M') or '—' }}</dd></div>
+      <div><dt>Origin</dt><dd>{{ req.origin_name or ('#%s' % req.origin_id if req.origin_id else '—') }}</dd></div>
+      <div><dt>Model</dt><dd><code>{{ req.model or '—' }}</code></dd></div>
+      <div><dt>Tokens in / out</dt><dd>
+        {% if req.prompt_tokens is not none %}{{ req.prompt_tokens }}{% else %}-{% endif %}
+        / {% if req.completion_tokens is not none %}{{ req.completion_tokens }}{% else %}-{% endif %}
+      </dd></div>
+      <div><dt>tok/s</dt><dd>
+        {% if req.completion_tokens and req.started_at and req.finished_at and req.finished_at > req.started_at %}
+          {{ '%.1f' % (req.completion_tokens / (req.finished_at - req.started_at)) }}
+        {% else %}—{% endif %}
+      </dd></div>
+      <div><dt>Duration</dt><dd>
+        {% if req.started_at and req.finished_at and req.finished_at >= req.started_at %}
+          {{ '%.1fs' % (req.finished_at - req.started_at) }}
+        {% else %}—{% endif %}
+      </dd></div>
+    </dl>
+
+    {% if req.error %}
+    <div class="lm-reqd__error">{{ req.error }}</div>
+    {% endif %}
+
+    <section class="lm-reqd__section">
+      <div class="lm-reqd__label">Prompt</div>
+      {% if req.prompt_text %}
+      <pre class="lm-reqd__text">{{ req.prompt_text }}</pre>
+      {% else %}
+      <p class="lm-empty">Not recorded.</p>
+      {% endif %}
+    </section>
+
+    <section class="lm-reqd__section">
+      <div class="lm-reqd__label">Response</div>
+      {% if req.response_text %}
+      <pre class="lm-reqd__text">{{ req.response_text }}</pre>
+      {% else %}
+      <p class="lm-empty">Not recorded.</p>
+      {% endif %}
+    </section>
+  </div>
+</div>
+{% endif %}

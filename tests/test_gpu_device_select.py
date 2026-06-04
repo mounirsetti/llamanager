@@ -118,6 +118,48 @@ def test_visible_devices_env_missing_device_is_none(monkeypatch):
     assert gpu_detect.visible_devices_env("llama-server", "Some Other GPU") is None
 
 
+# ---------- robust (backend-agnostic) name matching ----------
+
+def test_clean_gpu_name_strips_driver_and_memory_annotations():
+    from llamanager.gpu_detect import clean_gpu_name
+    assert clean_gpu_name("AMD Radeon AI PRO R9700 (RADV GFX1201)") == \
+        "AMD Radeon AI PRO R9700"
+    assert clean_gpu_name("Intel(R) Graphics (ARL)") == "Intel Graphics"
+
+
+def test_match_device_across_backend_naming():
+    """The real bug: a card pinned under its ROCm name (no codename) must
+    still match the Vulkan/RADV enumeration that appends '(RADV GFXxxxx)'."""
+    from llamanager import gpu_detect
+    devs = gpu_detect.parse_device_list(SAMPLE_LIST)  # Vulkan names w/ codename
+    m = gpu_detect.match_device(devs, "AMD Radeon AI PRO R9700")  # ROCm-style
+    assert m is not None and m.backend == "Vulkan" and m.index == 1
+    # Case / whitespace insensitive too.
+    assert gpu_detect.match_device(devs, "amd  radeon ai pro r9700").index == 1
+    # A genuinely different card does not match.
+    assert gpu_detect.match_device(devs, "NVIDIA GeForce RTX 4090") is None
+
+
+def test_visible_devices_env_matches_suffixless_name(monkeypatch):
+    """End-to-end: the exact pin string that broke in the field now resolves."""
+    from llamanager import gpu_detect
+    _patch_devices(monkeypatch)
+    env = gpu_detect.visible_devices_env("llama-server", "AMD Radeon AI PRO R9700")
+    assert env == {"GGML_VK_VISIBLE_DEVICES": "1"}
+
+
+def test_match_device_vram_tiebreaker_for_identical_names():
+    """Two cards whose names normalise the same are disambiguated by VRAM."""
+    from llamanager import gpu_detect
+    from llamanager.gpu_detect import LlamaDevice
+    devs = [
+        LlamaDevice("CUDA", 0, "NVIDIA RTX 6000", 24564, 24000),
+        LlamaDevice("CUDA", 1, "NVIDIA RTX 6000", 49140, 49000),
+    ]
+    m = gpu_detect.match_device(devs, "NVIDIA RTX 6000", stored_total_mib=49140)
+    assert m is not None and m.index == 1
+
+
 def test_visible_devices_env_backend_mapping(monkeypatch):
     from llamanager import gpu_detect
     monkeypatch.setattr(

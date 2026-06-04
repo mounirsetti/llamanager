@@ -96,7 +96,10 @@
     </thead>
     <tbody>
       {% for r in history %}
-      <tr>
+      <tr class="lm-row-click" style="cursor: pointer;"
+          hx-get="/ui/requests/{{ r.id }}"
+          hx-target="#lm-req-detail-body" hx-swap="innerHTML"
+          title="View prompt & response">
         <td data-label="Id"><code>{{ r.id[:12] }}</code></td>
         <td data-label="Origin">{{ r.origin_name or ('#%s' % r.origin_id if r.origin_id else '—') }}</td>
         <td data-label="Model"><code>{{ r.model or '—' }}</code></td>
@@ -115,7 +118,7 @@
           {% else %}-{% endif %}
         </td>
         <td data-label="Enqueued" style="white-space: nowrap; color: var(--fg-2); font-size: 0.8125rem;">
-          {% if r.enqueued_at %}{{ r.enqueued_at | int | string }}{% endif %}
+          {{ r.enqueued_at | localdt }}
         </td>
       </tr>
       {% endfor %}

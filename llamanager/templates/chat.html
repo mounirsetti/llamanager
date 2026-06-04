@@ -388,6 +388,8 @@
   var speedEl = document.getElementById('chat-speed');
   var apiKey = {{ api_key | tojson }};
   var streaming = false;
+  var streamController = null;   // AbortController for the in-flight generation
+  var stopped = false;           // true when the user stopped the current stream
   var userScrolledUp = false;
 
   // ---- Mobile drawer toggles (no-op on desktop) ----
@@ -814,8 +816,13 @@
     scrollToBottom();
 
     streaming = true;
-    sendBtn.disabled = true;
-    sendBtn.textContent = '...';
+    stopped = false;
+    streamController = new AbortController();
+    // Repurpose the send button as a Stop control while generating.
+    sendBtn.disabled = false;
+    sendBtn.textContent = 'Stop';
+    sendBtn.classList.remove('lm-btn--primary');
+    sendBtn.classList.add('lm-btn--danger');
 
     var assistantEl = buildMsgEl('assistant', '');
     // Show animated thinking dots as initial placeholder, with a small
@@ -887,7 +894,7 @@
     var streamStart = 0;
     var isThinking = false;
 
-    fetch('/v1/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body) })
+    fetch('/v1/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: streamController.signal })
       .then(function (resp) {
         if (!resp.ok) return resp.text().then(function (t) { throw new Error('HTTP ' + resp.status + ': ' + t); });
         var reader = resp.body.getReader();
@@ -976,18 +983,28 @@
       })
       .catch(function (err) {
         clearQStatus();
+        // User-initiated stop (AbortController) — keep whatever was generated,
+        // don't render it as an error. The server detects the dropped
+        // connection and stops the upstream generation.
+        if (err && (err.name === 'AbortError' || stopped)) {
+          finish();
+          return;
+        }
         assistantEl.bubble.textContent = 'Error: ' + err.message;
         assistantEl.bubble.style.color = 'var(--bad)';
         finish();
       });
 
     function finish() {
+      if (!streaming) return;          // guard against double-finalize
+      streaming = false;
       var msgStats = null;
       if (streamStart && tokenCount > 0) {
         var elapsed = (Date.now() - streamStart) / 1000;
         msgStats = { tok_s: elapsed > 0 ? tokenCount / elapsed : 0 };
       }
       if (msgStats && reasoningContent) msgStats.reasoning = reasoningContent;
+      if (msgStats && stopped) msgStats.stopped = true;
       if (fullContent || reasoningContent) {
         var storedContent = fullContent;
         if (reasoningContent && !fullContent.trimStart().startsWith('<think>')) {
@@ -998,17 +1015,41 @@
         var newEl = buildMsgEl('assistant', storedContent, msgStats);
         parent.replaceChild(newEl.el, assistantEl.el);
         saveHistory();
+      } else if (stopped) {
+        // Stopped before any token arrived — leave a clear placeholder
+        // rather than an empty bubble with spinning dots.
+        assistantEl.bubble.innerHTML = '';
+        assistantEl.bubble.textContent = '(stopped)';
+        assistantEl.bubble.style.color = 'var(--fg-3)';
       }
-      streaming = false;
+      streamController = null;
       sendBtn.disabled = false;
       sendBtn.textContent = 'Send';
+      sendBtn.classList.remove('lm-btn--danger');
+      sendBtn.classList.add('lm-btn--primary');
       speedEl.style.display = 'none';
       scrollToBottom();
     }
   }
 
-  sendBtn.addEventListener('click', send);
-  inputEl.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+  // Stop the in-flight generation. Aborting the fetch drops the connection;
+  // the server notices and stops the upstream llama-server (see api_v1.py
+  // client-disconnect handling). Whatever streamed so far is kept.
+  function stop() {
+    if (!streaming) return;
+    stopped = true;
+    sendBtn.textContent = 'Stopping…';
+    sendBtn.disabled = true;
+    if (streamController) { try { streamController.abort(); } catch (e) {} }
+  }
+
+  // The send button doubles as Stop while a response is streaming.
+  sendBtn.addEventListener('click', function () { if (streaming) stop(); else send(); });
+  // Enter sends; Escape stops an in-flight generation.
+  inputEl.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    else if (e.key === 'Escape' && streaming) { e.preventDefault(); stop(); }
+  });
   systemEl.addEventListener('change', function () { if (activeChat) { activeChat.system = systemEl.value; saveHistory(); } });
 
   // Init

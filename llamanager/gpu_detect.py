@@ -213,6 +213,76 @@ def list_llama_devices(
     return parse_device_list((out.stdout or "") + "\n" + (out.stderr or ""))
 
 
+# Robust GPU identity matching
+# -----------------------------
+# We pin a GPU by its *model name* — the stable, human-meaningful identity a
+# user recognises (what GPU-Z/lspci show) — never by a raw index, which
+# reshuffles when devices/cables change. But the exact string llama prints
+# varies by backend and driver: the ROCm build calls a card
+# "AMD Radeon AI PRO R9700" while the Vulkan/RADV build appends the GPU's Mesa
+# codename → "AMD Radeon AI PRO R9700 (RADV GFX1201)". Exact-string matching
+# broke on that. So we compare a *normalised* form (driver/codename and memory
+# annotations stripped) and fall back to substring / token overlap, using total
+# VRAM as a tiebreaker — which matches the same physical card across backends.
+
+def clean_gpu_name(name: str) -> str:
+    """Display name with backend/driver and memory annotations removed.
+
+    e.g. ``AMD Radeon AI PRO R9700 (RADV GFX1201)`` → ``AMD Radeon AI PRO
+    R9700``; ``Intel(R) Graphics (ARL)`` → ``Intel Graphics``. Original casing
+    is preserved (this is what the operator sees and what we store).
+    """
+    s = re.sub(r"\s*\([^()]*\)", "", name or "")   # drop "(...)" groups
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _normalize_gpu_name(name: str) -> str:
+    """Lowercased, punctuation-free form used purely for matching."""
+    s = clean_gpu_name(name)
+    s = re.sub(r"[^\w\s]", " ", s)
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def _name_tokens(name: str) -> set[str]:
+    return {t for t in _normalize_gpu_name(name).split() if len(t) > 1}
+
+
+def match_device(devices: list[LlamaDevice], stored_name: str,
+                 stored_total_mib: int | None = None) -> LlamaDevice | None:
+    """Best device matching a stored model-name selection, or None.
+
+    Tolerant of the naming differences above and of index reordering: scores
+    each device by normalised-name equality → substring → shared-token ratio,
+    with total VRAM as a tiebreaker, and returns the best provided it clears a
+    minimum confidence. A unique exact normalised match always wins outright.
+    """
+    target = _normalize_gpu_name(stored_name)
+    if not target or not devices:
+        return None
+    exact = [d for d in devices if _normalize_gpu_name(d.name) == target]
+    if len(exact) == 1:
+        return exact[0]
+    cands = exact or devices            # if several exact, disambiguate by VRAM
+    ttoks = _name_tokens(stored_name)
+    best, best_score = None, 0.0
+    for d in cands:
+        dn = _normalize_gpu_name(d.name)
+        score = 0.0
+        if dn == target:
+            score += 3.0
+        elif target and (target in dn or dn in target):
+            score += 2.0
+        dtoks = _name_tokens(d.name)
+        if ttoks and dtoks:
+            score += len(ttoks & dtoks) / max(len(ttoks), len(dtoks))
+        if stored_total_mib and d.mem_total_mib and \
+                abs(d.mem_total_mib - stored_total_mib) <= 64:
+            score += 1.0
+        if score > best_score:
+            best, best_score = d, score
+    return best if best_score >= 0.5 else None
+
+
 def visible_devices_env(
     binary: str,
     device_name: str,
@@ -220,26 +290,30 @@ def visible_devices_env(
 ) -> dict[str, str] | None:
     """Resolve a stored device *name* to a ``{VAR: "<index>"}`` pin.
 
-    Returns ``None`` when ``device_name`` is empty (no pin requested) or when
-    the named device isn't currently present (logged — we'd rather run on all
-    GPUs than refuse to start because a card was unplugged or renamed).
+    Matching is robust (see ``match_device``), so a card pinned under one
+    backend's name still resolves under another. Returns ``None`` when no pin
+    is requested or the card genuinely isn't present (logged — we'd rather run
+    on all GPUs than refuse to start because a card was unplugged).
     """
     name = (device_name or "").strip()
     if not name:
         return None
     devices = list_llama_devices(binary, env=env)
-    for d in devices:
-        if d.name == name:
-            var = _VISIBLE_DEVICES_ENV.get(d.backend)
-            if not var:
-                log.warning("no visible-devices env for backend %r", d.backend)
-                return None
-            return {var: str(d.index)}
-    log.warning(
-        "configured GPU %r not found among %s — running on all devices",
-        name, [d.name for d in devices] or "no detected devices",
-    )
-    return None
+    d = match_device(devices, name)
+    if d is None:
+        log.warning(
+            "configured GPU %r not matched among %s — running on all devices",
+            name, [x.name for x in devices] or "no detected devices",
+        )
+        return None
+    var = _VISIBLE_DEVICES_ENV.get(d.backend)
+    if not var:
+        log.warning("no visible-devices env for backend %r", d.backend)
+        return None
+    if _normalize_gpu_name(d.name) != _normalize_gpu_name(name):
+        log.info("GPU pin %r resolved to %r [%s%d]",
+                 name, d.name, d.backend, d.index)
+    return {var: str(d.index)}
 
 
 def render_group_ok(profile: GpuProfile) -> bool:

@@ -287,12 +287,15 @@
   {% if recent %}
   <table class="lm-table">
     <thead>
-      <tr><th>Id</th><th>Origin</th><th>Model</th><th>Status</th><th>Tokens in / out</th><th>tok/s</th></tr>
+      <tr><th>Time</th><th>Origin</th><th>Model</th><th>Status</th><th>Tokens in / out</th><th>tok/s</th></tr>
     </thead>
     <tbody>
     {% for r in recent %}
-    <tr>
-      <td data-label="Id"><code>{{ r.id[:8] }}</code></td>
+    <tr class="lm-row-click" style="cursor: pointer;"
+        hx-get="/ui/requests/{{ r.id }}"
+        hx-target="#lm-req-detail-body" hx-swap="innerHTML"
+        title="View prompt & response">
+      <td data-label="Time" style="white-space: nowrap; color: var(--fg-2);">{{ r.enqueued_at | localdt }}</td>
       <td data-label="Origin">{{ r.origin_name or ('#%s' % r.origin_id if r.origin_id else '—') }}</td>
       <td data-label="Model"><code>{{ r.model or '—' }}</code></td>
       <td data-label="Status"><span class="lm-pill lm-pill--{{ r.status }}">{{ r.status }}</span></td>

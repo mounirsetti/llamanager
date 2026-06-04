@@ -98,6 +98,151 @@ def _is_streaming(body: dict[str, Any]) -> bool:
     return bool(body.get("stream", False))
 
 
+# --------------------------------------------------------------------------
+# Prompt / response capture for the UI's request-detail view.
+# --------------------------------------------------------------------------
+
+def _render_content(content: Any) -> str:
+    """Flatten one OpenAI message ``content`` into readable text.
+
+    Multimodal parts (image_url, input_audio, …) collapse to a short
+    ``[image]`` / ``[audio]`` placeholder so we never persist megabytes of
+    base64 in the requests table.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for p in content:
+            if isinstance(p, dict):
+                t = p.get("type")
+                if t == "text":
+                    parts.append(str(p.get("text") or ""))
+                elif t in ("image_url", "input_image", "image"):
+                    parts.append("[image]")
+                elif t in ("input_audio", "audio"):
+                    parts.append("[audio]")
+                else:
+                    parts.append(f"[{t or 'part'}]")
+            else:
+                parts.append(str(p))
+        return "".join(parts)
+    return str(content)
+
+
+def _extract_prompt_text(body: dict[str, Any]) -> str:
+    """Best-effort human-readable rendering of the request prompt."""
+    msgs = body.get("messages")
+    if isinstance(msgs, list):
+        lines: list[str] = []
+        for m in msgs:
+            if not isinstance(m, dict):
+                continue
+            role = str(m.get("role") or "?")
+            lines.append(f"{role}: {_render_content(m.get('content'))}")
+        return "\n\n".join(lines)
+    prompt = body.get("prompt")
+    if isinstance(prompt, str):
+        return prompt
+    if isinstance(prompt, list):
+        return "\n".join(str(p) for p in prompt)
+    return ""
+
+
+def _extract_response_text(parsed: dict[str, Any]) -> str:
+    """Pull the assistant text out of a non-streaming completion body."""
+    try:
+        choices = parsed.get("choices") or []
+        if not choices:
+            return ""
+        c0 = choices[0] or {}
+        msg = c0.get("message")
+        if isinstance(msg, dict):
+            return _render_content(msg.get("content"))
+        if c0.get("text") is not None:
+            return str(c0.get("text") or "")
+    except Exception:
+        return ""
+    return ""
+
+
+def _parse_sse_data(event: bytes) -> dict[str, Any] | None:
+    """Parse the JSON object from a single SSE event's ``data:`` line.
+
+    Returns None for comments (``:`` keepalives), the ``[DONE]`` sentinel,
+    and anything that doesn't parse as a JSON object.
+    """
+    try:
+        text = event.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    for line in text.split("\n"):
+        line = line.strip()
+        if line.startswith("data:"):
+            payload = line[5:].strip()
+            if payload and payload != "[DONE]":
+                try:
+                    obj = json.loads(payload)
+                except (json.JSONDecodeError, ValueError):
+                    return None
+                return obj if isinstance(obj, dict) else None
+    return None
+
+
+async def _proxy_and_capture(
+    upstream: AsyncIterator[bytes],
+    *,
+    strip_usage_only: bool,
+    response_parts: list[str],
+    usage_holder: dict[str, Any],
+) -> AsyncIterator[bytes]:
+    """Forward an upstream SSE byte stream one complete event at a time,
+    capturing the assistant text into ``response_parts`` and token usage
+    into ``usage_holder`` (both owned by the caller, mutated in place so the
+    caller sees the latest values even if iteration stops early).
+
+    ``strip_usage_only`` drops the synthetic usage-only tail chunk (empty
+    ``choices`` + a ``usage`` object) that llama.cpp emits because we asked
+    for ``include_usage`` — keeping the bytes the client receives identical
+    to a stream we never touched. Buffering raw bytes (never re-encoding)
+    keeps multibyte UTF-8 content intact across chunk boundaries.
+    """
+    pending = b""
+
+    def _absorb(obj: dict[str, Any]) -> bool:
+        """Record usage/text from one parsed event; return True to drop it."""
+        u = obj.get("usage")
+        if u:
+            usage_holder.clear()
+            usage_holder.update(u)
+        choices = obj.get("choices") or []
+        for ch in choices:
+            if not isinstance(ch, dict):
+                continue
+            delta = ch.get("delta")
+            if isinstance(delta, dict) and delta.get("content"):
+                response_parts.append(str(delta["content"]))
+            elif ch.get("text"):
+                response_parts.append(str(ch["text"]))
+        return bool(strip_usage_only and u and not choices)
+
+    async for chunk in upstream:
+        pending += chunk
+        while b"\n\n" in pending:
+            event, pending = pending.split(b"\n\n", 1)
+            obj = _parse_sse_data(event)
+            if obj is not None and _absorb(obj):
+                continue
+            yield event + b"\n\n"
+    # Flush any trailing bytes not terminated by a blank line.
+    if pending:
+        obj = _parse_sse_data(pending)
+        if not (obj is not None and _absorb(obj)):
+            yield pending
+
+
 def _thinking_from_header(request: Request) -> str:
     """Read the per-request reasoning override. Empty when unset.
 
@@ -339,7 +484,26 @@ async def _handle_inference(
     except QueueFull:
         raise HTTPException(status_code=503, detail="queue full")
 
+    # Snapshot the prompt for the request-detail view before we forward.
+    prompt_text = _extract_prompt_text(body)
+
     streaming = _is_streaming(body)
+
+    # llama.cpp omits ``usage`` from the streaming SSE tail unless asked, so
+    # streaming requests would otherwise never show token counts or tok/s in
+    # the dashboard. Ask for it — but only when the caller didn't already, so
+    # we know to strip the extra usage-only chunk back out and keep the bytes
+    # the client receives identical to a vanilla stream.
+    injected_usage = False
+    if streaming:
+        so = body.get("stream_options")
+        client_wants_usage = isinstance(so, dict) and so.get("include_usage") is True
+        if not client_wants_usage:
+            body["stream_options"] = {
+                **(so if isinstance(so, dict) else {}),
+                "include_usage": True,
+            }
+            injected_usage = True
 
     if streaming:
         client_disconnected = asyncio.Event()
@@ -359,25 +523,18 @@ async def _handle_inference(
         async def gen() -> AsyncIterator[bytes]:
             error: str | None = None
             usage: dict[str, Any] = {}
-            buffer = ""
+            response_parts: list[str] = []
             try:
-                async for chunk in _stream_with_keepalives(
+                upstream = _stream_with_keepalives(
                     qm, qr, sm, path, body, client_disconnected
+                )
+                async for chunk in _proxy_and_capture(
+                    upstream,
+                    strip_usage_only=injected_usage,
+                    response_parts=response_parts,
+                    usage_holder=usage,
                 ):
                     yield chunk
-                    # Parse SSE chunks to extract usage from the final event
-                    try:
-                        buffer += chunk.decode("utf-8", errors="replace")
-                        while "\n" in buffer:
-                            line, buffer = buffer.split("\n", 1)
-                            line = line.strip()
-                            if line.startswith("data: ") and line != "data: [DONE]":
-                                parsed = json.loads(line[6:])
-                                u = parsed.get("usage")
-                                if u:
-                                    usage = u
-                    except Exception:
-                        pass
             except Exception as e:
                 error = str(e)
                 log.exception("stream error for %s", qr.request_id)
@@ -393,6 +550,8 @@ async def _handle_inference(
                     cancelled=cancelled,
                     prompt_tokens=usage.get("prompt_tokens"),
                     completion_tokens=usage.get("completion_tokens"),
+                    prompt_text=prompt_text,
+                    response_text="".join(response_parts) or None,
                 )
 
         headers = {
@@ -407,16 +566,18 @@ async def _handle_inference(
     error: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    response_text: str | None = None
     try:
         await qm.wait_for_slot(qr)
         resp = await _proxy_non_streaming(qr, sm, path, body)
-        # Try to extract token usage from the response body for stats.
+        # Try to extract token usage + the response text from the body.
         try:
             if resp.media_type and "json" in resp.media_type:
                 parsed = json.loads(resp.body)
                 usage = parsed.get("usage") or {}
                 prompt_tokens = usage.get("prompt_tokens")
                 completion_tokens = usage.get("completion_tokens")
+                response_text = _extract_response_text(parsed)
         except Exception:
             pass
         return resp
@@ -445,6 +606,8 @@ async def _handle_inference(
             qr, error=error, cancelled=(error == "cancelled"),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            prompt_text=prompt_text,
+            response_text=response_text,
         )
 
 
@@ -842,6 +1005,7 @@ async def _images_blocking(
             qr, error=error,
             cancelled=(error == "cancelled"),
             prompt_tokens=None, completion_tokens=None,
+            prompt_text=image_req.prompt,
         )
 
 
@@ -951,6 +1115,7 @@ async def _images_stream(
                 qr, error=error,
                 cancelled=(error == "cancelled"),
                 prompt_tokens=None, completion_tokens=None,
+                prompt_text=image_req.prompt,
             )
 
     headers = {

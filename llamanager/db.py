@@ -93,6 +93,16 @@ SCHEMA_VERSIONS: list[str] = [
     """
     ALTER TABLE engine_installs ADD COLUMN options_json TEXT;
     """,
+    # v5: persist the prompt sent and the response generated so the UI's
+    # request-detail view can show what actually happened. Both are NULL on
+    # legacy rows and on requests where capture isn't possible (e.g. image
+    # jobs, or the Anthropic streaming path). Stored text is clipped to a
+    # sane cap by the writer (see queue_mgr._clip_text) so a runaway context
+    # can't bloat the row.
+    """
+    ALTER TABLE requests ADD COLUMN prompt_text TEXT;
+    ALTER TABLE requests ADD COLUMN response_text TEXT;
+    """,
 ]
 
 
@@ -196,6 +206,22 @@ class DB:
         # Reclaim disk space
         self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return counts
+
+    def prune_conversations(self, retention_days: int) -> int:
+        """Clear stored prompt/response text past the retention window while
+        keeping the request row (counts/timing). ``retention_days <= 0``
+        wipes all captured text. Returns the number of rows cleared."""
+        where = "prompt_text IS NOT NULL OR response_text IS NOT NULL"
+        params: tuple = ()
+        if retention_days > 0:
+            cutoff = time.time() - (retention_days * 86400)
+            where = f"enqueued_at < ? AND ({where})"
+            params = (cutoff,)
+        cur = self.conn.execute(
+            f"UPDATE requests SET prompt_text=NULL, response_text=NULL WHERE {where}",
+            params,
+        )
+        return cur.rowcount
 
     def close(self) -> None:
         try:

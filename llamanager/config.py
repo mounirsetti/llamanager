@@ -360,6 +360,13 @@ class Config:
     # Runtime-only (never written to config.toml); preserved across reloads.
     vram_total_gb: float | None = None
 
+    # ---- conversation retention ----
+    # How many days to keep the captured prompt/response text shown in the
+    # request-detail view. ``0`` disables capture entirely (only token counts
+    # and timing are stored). Independent of the request-row prune, which
+    # keeps the metadata row up to 90 days regardless.
+    conversation_retention_days: int = 30
+
     data_dir: Path = field(default_factory=lambda: expand("~/.llamanager"))
 
     default_model: str = ""
@@ -668,6 +675,14 @@ def load_config(path: Path | None = None) -> Config:
     cfg.mem_hard_stop_enabled = bool(
         mem.get("hard_stop_enabled", cfg.mem_hard_stop_enabled))
     cfg.mem_ctx_checkpoints = max(0, int(mem.get("ctx_checkpoints", 0) or 0))
+
+    # ---- conversation retention ----
+    conv = raw.get("conversation", {}) if isinstance(raw.get("conversation"), dict) else {}
+    if "retention_days" in conv:
+        try:
+            cfg.conversation_retention_days = max(0, int(conv["retention_days"]))
+        except (TypeError, ValueError):
+            pass  # keep the dataclass default
 
     # ---- new-format models section ----
     for model_id, body in (raw.get("models") or {}).items():
@@ -1194,6 +1209,17 @@ def update_mem_guard(cfg_path: Path, *,
         sect["hard_stop_enabled"] = bool(hard_stop_enabled)
     if ctx_checkpoints is not None:
         sect["ctx_checkpoints"] = max(0, int(ctx_checkpoints))
+    _save_tomlkit(cfg_path, doc)
+
+
+def update_conversation_retention(cfg_path: Path, *, retention_days: int) -> None:
+    """Persist how many days to keep captured prompt/response text under
+    ``[conversation]``. ``0`` disables capture entirely."""
+    import tomlkit
+    doc = _load_tomlkit(cfg_path)
+    if "conversation" not in doc:
+        doc.add("conversation", tomlkit.table())
+    doc["conversation"]["retention_days"] = max(0, int(retention_days))
     _save_tomlkit(cfg_path, doc)
 
 

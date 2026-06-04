@@ -12,7 +12,9 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import (
+    FileResponse, JSONResponse, RedirectResponse, Response,
+)
 
 from .api_admin import router as admin_router
 from .api_anthropic import router as anthropic_router
@@ -174,7 +176,21 @@ def create_app(config_path: Path | None = None,
             except Exception as e:
                 log.warning("autolaunch failed: %s", e)
 
-        # Periodic database maintenance (daily prune of old records)
+        # Periodic database maintenance (daily prune of old records).
+        # Conversation text is cleared on its own (shorter, operator-set)
+        # window; the request rows themselves persist up to 90 days. Run the
+        # conversation pass once at startup too so a lowered retention (or a
+        # config edited while the daemon was down) takes effect promptly.
+        def _prune_conversations_now() -> None:
+            try:
+                cleared = db.prune_conversations(cfg.conversation_retention_days)
+                if cleared:
+                    log.info("conversation prune: cleared text on %d rows", cleared)
+            except Exception as e:
+                log.warning("conversation prune failed: %s", e)
+
+        _prune_conversations_now()
+
         async def _periodic_prune() -> None:
             while True:
                 await asyncio.sleep(86400)  # 24 hours
@@ -184,6 +200,7 @@ def create_app(config_path: Path | None = None,
                         log.info("db prune: deleted %s", counts)
                 except Exception as e:
                     log.warning("db prune failed: %s", e)
+                _prune_conversations_now()
 
         prune_task = asyncio.create_task(_periodic_prune())
 
@@ -293,6 +310,27 @@ def create_app(config_path: Path | None = None,
             db.close()
 
     app = FastAPI(title="llamanager", version=__version__, lifespan=lifespan)
+
+    @app.exception_handler(405)
+    async def _method_not_allowed(request: Request, exc):
+        """A GET landing on a POST-only ``/ui`` action bounces to that section's
+        page instead of showing a raw 405.
+
+        hx-boost turns a form POST (e.g. the model "Reload" button →
+        ``/ui/models/load``) into a navigation and can leave that POST-only URL
+        in the address bar / history. A later browser refresh or back/forward
+        (htmx history restore issues a GET) then hits the POST-only route and
+        405s. Redirecting GET → the section root (``/ui/models/load`` →
+        ``/ui/models``) makes those land somewhere sensible. The API keeps the
+        standard 405.
+        """
+        p = request.url.path
+        if request.method == "GET" and p.startswith("/ui/"):
+            parts = [s for s in p.split("/") if s]   # e.g. ['ui','models','load']
+            section = "/ui/" + parts[1] if len(parts) > 1 else "/ui/"
+            return RedirectResponse(section, status_code=303)
+        return JSONResponse({"detail": "Method Not Allowed"}, status_code=405)
+
     app.state.cfg = cfg
     app.state.db = db
     app.state.auth = auth

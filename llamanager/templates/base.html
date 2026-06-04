@@ -1711,6 +1711,71 @@
     </main>
   </div>
 
+  {# Shared request-detail modal. Lives outside every polled region so the
+     dashboard's 3s refresh can't wipe it while it's open. Rows on the
+     dashboard / queue load their fragment into the body via htmx. #}
+  <dialog id="lm-req-detail" class="lm-req-dialog">
+    <div id="lm-req-detail-body"></div>
+  </dialog>
+  <style>
+    dialog.lm-req-dialog {
+      border: 1px solid var(--bg-3);
+      background: var(--bg-0);
+      color: var(--fg-0);
+      border-radius: 10px;
+      padding: 0;
+      width: 760px;
+      max-width: 92vw;
+      max-height: 84vh;
+      overflow: hidden;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+    }
+    dialog.lm-req-dialog::backdrop {
+      background: rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(2px);
+    }
+    .lm-reqd { display: flex; flex-direction: column; max-height: 84vh; }
+    .lm-reqd__head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; padding: 14px 18px;
+      border-bottom: 1px solid var(--bg-3); flex-shrink: 0;
+    }
+    .lm-reqd__title {
+      font-family: 'Fraunces', serif; font-size: 1.0625rem; color: var(--fg-0);
+      display: flex; align-items: center;
+    }
+    .lm-reqd__body { padding: 16px 18px; overflow-y: auto; }
+    .lm-reqd__meta {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px 18px; margin: 0 0 16px;
+    }
+    .lm-reqd__meta dt {
+      font-size: 0.625rem; letter-spacing: 0.12em; text-transform: uppercase;
+      color: var(--fg-3); margin-bottom: 3px;
+    }
+    .lm-reqd__meta dd { margin: 0; font-size: 0.9375rem; color: var(--fg-0); }
+    .lm-reqd__error {
+      border: 1px solid var(--bad); color: var(--bad);
+      background: var(--bg-1); border-radius: 6px;
+      padding: 8px 12px; margin-bottom: 16px;
+      font-size: 0.8125rem; white-space: pre-wrap; word-break: break-word;
+    }
+    .lm-reqd__section { margin-top: 14px; }
+    .lm-reqd__label {
+      font-size: 0.625rem; letter-spacing: 0.14em; text-transform: uppercase;
+      color: var(--fg-2); margin-bottom: 6px;
+    }
+    .lm-reqd__text {
+      margin: 0; padding: 12px 14px;
+      background: var(--bg-1); border: 1px solid var(--bg-2); border-radius: 6px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.75rem; line-height: 1.6; color: var(--fg-1);
+      white-space: pre-wrap; word-break: break-word;
+      max-height: 38vh; overflow-y: auto;
+    }
+    tr.lm-row-click:hover { background: var(--bg-1); }
+  </style>
+
   <script>
     /* Mobile nav toggle */
     (function () {
@@ -2297,6 +2362,27 @@
         var d = e.detail || {};
         toast(d.message || d.value || '', d.kind || 'ok');
       });
+
+      /* Request-detail modal: a clickable request row swaps its fragment
+         into #lm-req-detail-body; open the dialog once it lands. Clicking
+         the backdrop (target === dialog) or pressing Esc closes it. */
+      var reqDialog = document.getElementById('lm-req-detail');
+      if (reqDialog) {
+        document.body.addEventListener('htmx:afterSwap', function (e) {
+          var t = e.detail && e.detail.target;
+          if (t && t.id === 'lm-req-detail-body'
+              && typeof reqDialog.showModal === 'function' && !reqDialog.open) {
+            reqDialog.showModal();
+          }
+        });
+        reqDialog.addEventListener('click', function (e) {
+          if (e.target === reqDialog) reqDialog.close();
+        });
+        reqDialog.addEventListener('close', function () {
+          var body = document.getElementById('lm-req-detail-body');
+          if (body) body.innerHTML = '';
+        });
+      }
     })();
 
     } /* end __lmChromeInit guard */

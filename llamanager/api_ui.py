@@ -75,6 +75,20 @@ router = APIRouter(prefix="/ui", tags=["ui"])
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
+
+def _localdt(ts: Any, fmt: str = "%b %d %H:%M") -> str:
+    """Format a unix timestamp in the server's local time. Empty for
+    falsy/invalid input so templates can use ``{{ ts | localdt }}`` freely."""
+    try:
+        if not ts:
+            return ""
+        return time.strftime(fmt, time.localtime(float(ts)))
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+templates.env.filters["localdt"] = _localdt
+
 COOKIE_NAME = "llamanager_session"
 REMEMBER_COOKIE = "llamanager_remember"
 SESSION_TTL_S = 60 * 60 * 24 * 7  # 7 days
@@ -1210,10 +1224,15 @@ async def dashboard_partial(request: Request, _: Origin = Depends(require_admin_
     qm: QueueManager = request.app.state.queue
     cfg = request.app.state.cfg
     db = request.app.state.db
+    # JOIN origins so the polled partial keeps showing the readable origin
+    # name. Without this the 3s refresh would fall back to the numeric id
+    # (the full-page render JOINs but this one used to not).
     recent = db.query(
-        "SELECT id, origin_id, model, status, enqueued_at, started_at,"
-        " finished_at, prompt_tokens, completion_tokens FROM requests"
-        " ORDER BY enqueued_at DESC LIMIT 10"
+        "SELECT r.id, r.origin_id, o.name AS origin_name, r.model,"
+        " r.status, r.enqueued_at, r.started_at, r.finished_at,"
+        " r.prompt_tokens, r.completion_tokens"
+        " FROM requests r LEFT JOIN origins o ON r.origin_id = o.id"
+        " ORDER BY r.enqueued_at DESC LIMIT 10"
     )
     sysinfo = _get_system_info(cfg.models_dir)
     image_runner = getattr(request.app.state, "image_runner", None)
@@ -1320,6 +1339,28 @@ async def queue_cancel_ui(request: Request, request_id: str,
     qm.cancel(request_id)
     return templates.TemplateResponse(request, "_queue_partial.html",
                                       _queue_ctx(request))
+
+
+@router.get("/requests/{request_id}", response_class=HTMLResponse)
+async def request_detail(request: Request, request_id: str,
+                         _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """Detail fragment for one request — the prompt sent and the response
+    generated, plus timing/token stats. Loaded into the shared modal when
+    an operator clicks a row on the dashboard or queue history."""
+    db = request.app.state.db
+    row = db.query_one(
+        "SELECT r.id, r.origin_id, o.name AS origin_name, r.model, r.priority,"
+        " r.status, r.enqueued_at, r.started_at, r.finished_at,"
+        " r.prompt_tokens, r.completion_tokens, r.error,"
+        " r.prompt_text, r.response_text"
+        " FROM requests r LEFT JOIN origins o ON r.origin_id = o.id"
+        " WHERE r.id = ?",
+        (request_id,),
+    )
+    return templates.TemplateResponse(
+        request, "_request_detail.html",
+        _ctx(request, req=dict(row) if row else None),
+    )
 
 
 # ---------- models ----------
@@ -2437,27 +2478,41 @@ def _gpu_device_ctx(cfg) -> dict:
     """
     current = getattr(cfg, "llama_gpu_device", "") or ""
     devices: list[dict] = []
+    matched_value = ""           # the option that corresponds to the stored pin
     if (getattr(cfg, "llama_server_engine", "llama") or "llama") == "llama":
         binary = detect_binary(cfg.llama_server_binary)
         if binary:
             try:
-                from .gpu_detect import list_llama_devices
-                for d in list_llama_devices(binary, _engine_env(binary)):
+                from .gpu_detect import (
+                    list_llama_devices, match_device, clean_gpu_name)
+                raw = list_llama_devices(binary, _engine_env(binary))
+                for d in raw:
                     devices.append({
-                        "name": d.name,
+                        # The clean model name is both shown and stored, so the
+                        # pin is backend-agnostic (see gpu_detect.match_device).
+                        "value": clean_gpu_name(d.name),
+                        "name": clean_gpu_name(d.name),
+                        "raw_name": d.name,
                         "backend": d.backend,
                         "index": d.index,
                         "mem_free_mib": d.mem_free_mib,
                         "mem_total_mib": d.mem_total_mib,
                     })
+                # Resolve the stored pin to a live device robustly, so the
+                # right option shows selected even if its name changed form.
+                if current:
+                    m = match_device(raw, current)
+                    if m is not None:
+                        matched_value = clean_gpu_name(m.name)
             except Exception as e:  # noqa: BLE001 — never break settings
                 log.debug("gpu enumeration failed: %s", e)
-    # If the pinned device isn't currently detected, still offer it so the
+    # Pinned but not matched to any live device → still offer it so the
     # operator sees their selection rather than a silent reset to "all".
-    pinned_missing = bool(current) and not any(d["name"] == current for d in devices)
+    pinned_missing = bool(current) and not matched_value
     return {
         "gpu_devices": devices,
         "gpu_device_current": current,
+        "gpu_device_matched": matched_value or current,
         "gpu_pinned_missing": pinned_missing,
     }
 
@@ -2499,6 +2554,8 @@ def _settings_ctx(request: Request, **extra: Any) -> dict:
     )
     ctx.update(_gpu_device_ctx(cfg))
     ctx.update(_mem_guard_ctx(cfg))
+    ctx["conversation_retention_days"] = int(
+        getattr(cfg, "conversation_retention_days", 0) or 0)
     ctx.update(extra)
     return ctx
 
@@ -2656,6 +2713,34 @@ async def settings_mem_guard(request: Request,
                 await wd.stop()
         except Exception as e:  # noqa: BLE001
             log.debug("watchdog toggle failed: %s", e)
+    return RedirectResponse("/ui/settings", status_code=303)
+
+
+@router.post("/settings/conversation-retention", response_class=HTMLResponse)
+async def settings_conversation_retention(
+        request: Request,
+        retention_days: str = Form(""),
+        _: None = Depends(require_csrf)) -> Response:
+    """Persist conversation-text retention (the [conversation] section).
+
+    0 disables prompt/response capture; any positive value keeps text that
+    many days. The change is applied to existing rows immediately so lowering
+    the window (or setting 0) clears stored text now, not just at the next
+    daily prune.
+    """
+    from .config import update_conversation_retention
+    cfg = request.app.state.cfg
+    db = request.app.state.db
+    try:
+        days = max(0, int(retention_days)) if str(retention_days).strip() else 0
+    except (TypeError, ValueError):
+        days = int(getattr(cfg, "conversation_retention_days", 0) or 0)
+    cfg.conversation_retention_days = days
+    update_conversation_retention(cfg.config_path, retention_days=days)
+    try:
+        db.prune_conversations(days)
+    except Exception as e:  # noqa: BLE001
+        log.debug("conversation prune failed: %s", e)
     return RedirectResponse("/ui/settings", status_code=303)
 
 

@@ -39,6 +39,20 @@ class Cancelled(Exception):
     pass
 
 
+# Upper bound on persisted prompt/response text. Generous enough that no
+# real chat turn is ever cut, but a guard against a pathological context
+# (e.g. a megabyte-long paste) bloating the requests table.
+_MAX_STORED_TEXT = 200_000
+
+
+def _clip_text(s: str | None, limit: int = _MAX_STORED_TEXT) -> str | None:
+    if s is None:
+        return None
+    if len(s) <= limit:
+        return s
+    return s[:limit] + f"\n… [truncated {len(s) - limit} more chars]"
+
+
 @dataclass(order=False)
 class QueuedRequest:
     request_id: str
@@ -305,29 +319,48 @@ class QueueManager:
 
     def mark_in_flight_done(self, req: QueuedRequest, *, error: str | None,
                             cancelled: bool, prompt_tokens: int | None,
-                            completion_tokens: int | None) -> None:
+                            completion_tokens: int | None,
+                            prompt_text: str | None = None,
+                            response_text: str | None = None) -> None:
         req.finished_at = time.time()
         # Reset the idle clock so a freshly-drained queue starts counting its
         # quiet window from this completion (see idle_seconds()).
         self._last_busy_monotonic = time.monotonic()
         duration_s = req.finished_at - req.enqueued_at
+        # Persist the prompt/response so the UI's request-detail view can
+        # show them. Only write columns we actually captured — image jobs
+        # and the Anthropic streaming path leave them None, which must not
+        # clobber anything (the row had NULL there anyway). Even a partial
+        # response on a cancel/error is worth keeping. Skip entirely when the
+        # operator set conversation retention to 0 (no content on disk).
+        text_fields: dict[str, Any] = {}
+        if getattr(self.cfg, "conversation_retention_days", 0) > 0:
+            pt = _clip_text(prompt_text)
+            if pt is not None:
+                text_fields["prompt_text"] = pt
+            rt = _clip_text(response_text)
+            if rt is not None:
+                text_fields["response_text"] = rt
         if cancelled or req.cancel.is_set():
             req.status = "cancelled"
             self.db.update_request_status(req.request_id, "cancelled",
                                           finished_at=req.finished_at,
                                           prompt_tokens=prompt_tokens,
-                                          completion_tokens=completion_tokens)
+                                          completion_tokens=completion_tokens,
+                                          **text_fields)
         elif error:
             req.status = "failed"
             self.db.update_request_status(req.request_id, "failed",
                                           finished_at=req.finished_at,
-                                          error=error)
+                                          error=error,
+                                          **text_fields)
         else:
             req.status = "done"
             self.db.update_request_status(req.request_id, "done",
                                           finished_at=req.finished_at,
                                           prompt_tokens=prompt_tokens,
-                                          completion_tokens=completion_tokens)
+                                          completion_tokens=completion_tokens,
+                                          **text_fields)
         # Mirror the terminal status onto the activity feed.
         self.db.log_event("request_done", {
             "id": req.request_id,
