@@ -485,7 +485,13 @@ async def _handle_inference(
         raise HTTPException(status_code=503, detail="queue full")
 
     # Snapshot the prompt for the request-detail view before we forward.
+    # When retention is on, hang it (and a live response buffer) off the
+    # queued request so the detail view can show the conversation *while it
+    # is still running*, not only once it finishes.
     prompt_text = _extract_prompt_text(body)
+    retain = getattr(request.app.state.cfg, "conversation_retention_days", 0) > 0
+    if retain:
+        qr.prompt_text = prompt_text
 
     streaming = _is_streaming(body)
 
@@ -523,7 +529,9 @@ async def _handle_inference(
         async def gen() -> AsyncIterator[bytes]:
             error: str | None = None
             usage: dict[str, Any] = {}
-            response_parts: list[str] = []
+            # Accumulate into the queued request's live buffer (when
+            # retaining) so the detail view streams the partial response.
+            response_parts: list[str] = qr.response_parts if retain else []
             try:
                 upstream = _stream_with_keepalives(
                     qm, qr, sm, path, body, client_disconnected
@@ -906,6 +914,9 @@ async def images_generations(request: Request) -> Response:
         )
     except QueueFull:
         raise HTTPException(status_code=503, detail="queue full")
+
+    if cfg.conversation_retention_days > 0:
+        qr.prompt_text = prompt  # visible in the detail view while generating
 
     # Stage refs to disk *after* enqueue so we have a stable request_id to
     # namespace them by, but *before* the runner kicks off so the adapter

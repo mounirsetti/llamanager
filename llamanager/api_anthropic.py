@@ -926,6 +926,8 @@ async def _blocking_messages(request: Request, qm: QueueManager, qr,
     completion_tokens: int | None = None
     prompt_text = _extract_prompt_text(openai_body)
     response_text: str | None = None
+    if getattr(request.app.state.cfg, "conversation_retention_days", 0) > 0:
+        qr.prompt_text = prompt_text
     try:
         await qm.wait_for_slot(qr)
         from ._routing import upstream_base as _upstream
@@ -985,6 +987,9 @@ async def _stream_messages(request: Request, qm: QueueManager, qr,
                             sm: ServerManager, openai_body: dict[str, Any],
                             response_model_name: str) -> StreamingResponse:
     prompt_text = _extract_prompt_text(openai_body)
+    retain = getattr(request.app.state.cfg, "conversation_retention_days", 0) > 0
+    if retain:
+        qr.prompt_text = prompt_text
     client_disconnected = asyncio.Event()
 
     async def watcher() -> None:
@@ -1002,6 +1007,10 @@ async def _stream_messages(request: Request, qm: QueueManager, qr,
     async def gen() -> AsyncIterator[bytes]:
         error: str | None = None
         translator = _AnthropicStreamTranslator(model_id=response_model_name)
+        # Share the translator's text buffer with the queued request so the
+        # detail view can stream the partial response while it generates.
+        if retain:
+            qr.response_parts = translator.text_parts
         upstream_iter = _stream_with_keepalives(
             qm, qr, sm, "/v1/chat/completions", openai_body, client_disconnected,
         )

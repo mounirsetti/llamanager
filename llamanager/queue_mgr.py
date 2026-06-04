@@ -84,6 +84,13 @@ class QueuedRequest:
     # owns this request's upstream. None means "use the pool default
     # (slot 0)" — which is also the single-slot behaviour.
     slot_id: int | None = None
+    # Live conversation buffers, populated by the request handler so the
+    # request-detail view can show the prompt and the partial response
+    # *while the request is still running*. Runtime-only; the persisted
+    # copy is written at completion by mark_in_flight_done. Left unset when
+    # conversation retention is 0.
+    prompt_text: str | None = None
+    response_parts: list[str] = field(default_factory=list)
 
     def heap_key(self) -> tuple[int, float, int]:
         # higher priority first → negate. Then FIFO by enqueued_at, then seq.

@@ -1346,8 +1346,41 @@ async def request_detail(request: Request, request_id: str,
                          _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     """Detail fragment for one request — the prompt sent and the response
     generated, plus timing/token stats. Loaded into the shared modal when
-    an operator clicks a row on the dashboard or queue history."""
+    an operator clicks a row on the dashboard or queue.
+
+    For a request that's still queued or running we read the live in-memory
+    buffer (prompt + partial response) off the QueueManager so the operator
+    can watch it stream; the fragment then polls itself until the request
+    reaches a terminal state, at which point we serve the persisted DB row.
+    """
+    qm: QueueManager = request.app.state.queue
     db = request.app.state.db
+    retain = getattr(request.app.state.cfg, "conversation_retention_days", 0) > 0
+
+    live = qm.get(request_id)
+    if live is not None and live.status in ("queued", "swapping_model", "running"):
+        partial = "".join(live.response_parts)
+        req = {
+            "id": live.request_id,
+            "origin_id": live.origin.id,
+            "origin_name": live.origin.name,
+            "model": live.model_required,
+            "status": live.status,
+            "enqueued_at": live.enqueued_at,
+            "started_at": live.started_at,
+            "finished_at": None,
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "error": live.error,
+            "prompt_text": live.prompt_text if retain else None,
+            "response_text": (partial if retain else None) or None,
+        }
+        return templates.TemplateResponse(
+            request, "_request_detail.html",
+            # Only self-refresh when there's live content to stream.
+            _ctx(request, req=req, active=retain),
+        )
+
     row = db.query_one(
         "SELECT r.id, r.origin_id, o.name AS origin_name, r.model, r.priority,"
         " r.status, r.enqueued_at, r.started_at, r.finished_at,"
@@ -1359,7 +1392,7 @@ async def request_detail(request: Request, request_id: str,
     )
     return templates.TemplateResponse(
         request, "_request_detail.html",
-        _ctx(request, req=dict(row) if row else None),
+        _ctx(request, req=dict(row) if row else None, active=False),
     )
 
 

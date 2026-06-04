@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 
 from fastapi.testclient import TestClient
 
@@ -254,3 +255,44 @@ def test_request_detail_requires_auth(app):
     client = TestClient(app)
     r = client.get("/ui/requests/whatever", follow_redirects=False)
     assert r.status_code in (302, 303, 401, 403)
+
+
+# --------------------------------------------------------------------------
+# Live (in-flight) view — prompt + partial response while still running
+# --------------------------------------------------------------------------
+
+def _live_request(app, rid="live-1", *, partial=("Par", "tial ", "answer")):
+    from llamanager.auth import Origin
+    from llamanager.queue_mgr import QueuedRequest
+    qm = app.state.queue
+    boot = app.state.auth.get_origin_by_name("bootstrap")
+    origin = Origin(id=boot.id, name=boot.name, priority=50,
+                    allowed_models=["*"], is_admin=True, created_at=0.0)
+    qr = QueuedRequest(request_id=rid, origin=origin, priority=50,
+                       model_required="test/model.gguf",
+                       enqueued_at=time.time(), seq=0)
+    qr.status = "running"
+    qr.started_at = time.time()
+    qr.prompt_text = "user: stream please"
+    qr.response_parts.extend(partial)
+    qm._by_id[rid] = qr
+    return rid
+
+
+def test_request_detail_live_streams_partial(app):
+    rid = _live_request(app)
+    with _admin_client(app) as client:
+        body = client.get(f"/ui/requests/{rid}").text
+        assert "user: stream please" in body      # prompt visible mid-flight
+        assert "Partial answer" in body            # partial response so far
+        assert "streaming" in body                 # live indicator
+        assert 'hx-trigger="every 1500ms"' in body  # self-refresh wired
+
+
+def test_request_detail_live_respects_zero_retention(app):
+    rid = _live_request(app, rid="live-2")
+    app.state.cfg.conversation_retention_days = 0
+    with _admin_client(app) as client:
+        body = client.get(f"/ui/requests/{rid}").text
+        assert "stream please" not in body         # content suppressed
+        assert "hx-trigger" not in body            # no polling either

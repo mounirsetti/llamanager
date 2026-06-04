@@ -241,7 +241,10 @@
     <div class="lm-col-8">
       <div class="lm-eyebrow">In flight</div>
       {% for r in queue.in_flight %}
-      <div style="display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; font-size: 0.9375rem; color: var(--fg-1);{% if not loop.last %} margin-bottom: 8px;{% endif %}">
+      <div class="lm-row-click"
+           hx-get="/ui/requests/{{ r.id }}" hx-target="#lm-req-detail-body" hx-swap="innerHTML"
+           title="View prompt &amp; response"
+           style="cursor: pointer; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; font-size: 0.9375rem; color: var(--fg-1);{% if not loop.last %} margin-bottom: 8px;{% endif %}">
         <code title="{{ r.task_type or 'text' }}">{{ 'I' if r.task_type == 'image' else 'T' }}</code>
         <code>{{ r.id[:8] }}</code>
         <span style="color: var(--fg-2);">from</span>
@@ -262,7 +265,9 @@
     </thead>
     <tbody>
     {% for r in queue.pending %}
-      <tr>
+      <tr class="lm-row-click" style="cursor: pointer;"
+          hx-get="/ui/requests/{{ r.id }}" hx-target="#lm-req-detail-body" hx-swap="innerHTML"
+          title="View prompt &amp; response">
         <td data-label="Type"><code title="{{ r.task_type or 'text' }}">{{ 'I' if r.task_type == 'image' else 'T' }}</code></td>
         <td data-label="Id"><code>{{ r.id[:8] }}</code></td>
         <td data-label="Origin">{{ r.origin }}</td>

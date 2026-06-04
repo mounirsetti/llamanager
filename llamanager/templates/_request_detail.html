@@ -1,6 +1,10 @@
 {# Request-detail fragment. Loaded into the shared #lm-req-detail dialog
    (see base.html) when an operator clicks a request row. Renders the
-   prompt that was sent and the response that was generated, plus stats. #}
+   prompt that was sent and the response that was generated, plus stats.
+
+   When ``active`` (the request is still queued/running) the root div polls
+   itself every 1.5s so the partial response streams in; the poll stops on
+   its own once the request finishes and a non-active fragment is served. #}
 {% if not req %}
 <div class="lm-reqd">
   <header class="lm-reqd__head">
@@ -12,11 +16,16 @@
   </div>
 </div>
 {% else %}
-<div class="lm-reqd">
+{% set is_active = active and req.status in ('queued', 'swapping_model', 'running') %}
+<div class="lm-reqd"
+     {% if is_active %}hx-get="/ui/requests/{{ req.id }}"
+     hx-target="#lm-req-detail-body" hx-swap="innerHTML"
+     hx-trigger="every 1500ms"{% endif %}>
   <header class="lm-reqd__head">
     <span class="lm-reqd__title">
       Request
       <span class="lm-pill lm-pill--{{ req.status }}" style="margin-left: 8px;">{{ req.status }}</span>
+      {% if is_active %}<span class="lm-live" aria-label="live" style="margin-left: 8px;"></span>{% endif %}
     </span>
     <button type="button" class="lm-btn lm-btn--xs" onclick="this.closest('dialog').close()">Close</button>
   </header>
@@ -38,6 +47,7 @@
       <div><dt>Duration</dt><dd>
         {% if req.started_at and req.finished_at and req.finished_at >= req.started_at %}
           {{ '%.1fs' % (req.finished_at - req.started_at) }}
+        {% elif is_active and req.status == 'running' %}running…
         {% else %}—{% endif %}
       </dd></div>
     </dl>
@@ -56,9 +66,13 @@
     </section>
 
     <section class="lm-reqd__section">
-      <div class="lm-reqd__label">Response</div>
+      <div class="lm-reqd__label">
+        Response{% if is_active %} <span style="color: var(--fg-3); text-transform: none; letter-spacing: 0;">· streaming…</span>{% endif %}
+      </div>
       {% if req.response_text %}
-      <pre class="lm-reqd__text">{{ req.response_text }}</pre>
+      <pre class="lm-reqd__text">{{ req.response_text }}{% if is_active %}<span class="lm-caret">▍</span>{% endif %}</pre>
+      {% elif is_active %}
+      <p class="lm-empty">{% if req.status == 'running' %}Waiting for the first tokens…{% else %}Queued — not started yet.{% endif %}</p>
       {% else %}
       <p class="lm-empty">Not recorded.</p>
       {% endif %}

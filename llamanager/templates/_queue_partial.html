@@ -14,14 +14,16 @@
     </thead>
     <tbody>
     {% for r in queue.in_flight %}
-      <tr>
+      <tr class="lm-row-click" style="cursor: pointer;"
+          hx-get="/ui/requests/{{ r.id }}" hx-target="#lm-req-detail-body" hx-swap="innerHTML"
+          title="View prompt &amp; response">
         <td data-label="Type"><code title="{{ r.task_type or 'text' }}">{{ 'I' if r.task_type == 'image' else 'T' }}</code></td>
         <td data-label="Id"><code>{{ r.id[:12] }}</code></td>
         <td data-label="Origin">{{ r.origin }}</td>
         <td data-label="Prio" class="num">{{ r.priority }}</td>
         <td data-label="Model"><code>{{ r.model_required or '(loaded)' }}</code></td>
         <td data-label="Status"><span class="lm-pill lm-pill--{{ r.status }}">{{ r.status }}</span></td>
-        <td class="actions" data-label="">
+        <td class="actions" data-label="" onclick="event.stopPropagation()">
           <form hx-post="/ui/queue/{{ r.id }}/cancel"
                 hx-confirm="Cancel in-flight request?"
                 hx-target="closest div" hx-swap="outerHTML">
@@ -48,14 +50,16 @@
     </thead>
     <tbody>
     {% for r in queue.pending %}
-    <tr>
+    <tr class="lm-row-click" style="cursor: pointer;"
+        hx-get="/ui/requests/{{ r.id }}" hx-target="#lm-req-detail-body" hx-swap="innerHTML"
+        title="View prompt &amp; response">
       <td data-label="Type"><code title="{{ r.task_type or 'text' }}">{{ 'I' if r.task_type == 'image' else 'T' }}</code></td>
       <td data-label="Id"><code>{{ r.id[:12] }}</code></td>
       <td data-label="Origin">{{ r.origin }}</td>
       <td data-label="Prio" class="num">{{ r.priority }}</td>
       <td data-label="Model"><code>{{ r.model_required or 'any' }}</code></td>
       <td data-label="Status"><span class="lm-pill lm-pill--{{ r.status }}">{{ r.status }}</span></td>
-      <td class="actions" data-label="">
+      <td class="actions" data-label="" onclick="event.stopPropagation()">
         <form hx-post="/ui/queue/{{ r.id }}/cancel"
               hx-confirm="Cancel queued request?"
               hx-target="closest div" hx-swap="outerHTML">

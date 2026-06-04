@@ -1774,6 +1774,13 @@
       max-height: 38vh; overflow-y: auto;
     }
     tr.lm-row-click:hover { background: var(--bg-1); }
+    div.lm-row-click { border-radius: 4px; padding: 4px 6px; margin-left: -6px; transition: background 100ms ease; }
+    div.lm-row-click:hover { background: var(--bg-1); }
+    .lm-caret {
+      display: inline-block; color: var(--accent);
+      animation: lm-caret-blink 1s step-start infinite;
+    }
+    @keyframes lm-caret-blink { 50% { opacity: 0; } }
   </style>
 
   <script>
