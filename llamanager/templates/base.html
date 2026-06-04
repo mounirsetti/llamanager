@@ -2064,10 +2064,27 @@
     })();
 
     /* ---- Global request progress bar ----
-       Counts in-flight foreground requests; the bar creeps to ~90% while
-       work is pending and snaps to 100% when the last one settles. The 2 s
-       background polls (hx-trigger="every …") are excluded so it doesn't
-       strobe. */
+       The bar creeps to ~90% while any foreground request is pending and
+       snaps to 100% when the last one settles. The 2 s background polls
+       (hx-trigger="every …") are excluded so it doesn't strobe.
+
+       In-flight requests are tracked by their XHR object in a Set rather
+       than a +1/-1 counter. The counter version leaked: hx-boost replaces
+       the whole <body> innerHTML, and that swap runs *before* htmx fires
+       ``htmx:afterRequest`` on the triggering element. By then the element
+       (e.g. a profile-save <form>) has been detached by the swap, so the
+       event never bubbles up to this document.body listener and the "done"
+       decrement was missed — the bar hung at ~90% forever and every later
+       request only pushed the count higher, so the whole UI looked stuck
+       mid-load even though the request had completed.
+
+       The fix keys off the response's xhr, which is the same object on
+       every lifecycle event. We close out a request on whichever terminal
+       event reaches us first: ``htmx:afterRequest`` for fragment swaps and
+       errors (element stays attached), and ``htmx:afterSettle`` for boosted
+       whole-<body> swaps (fires on <body>, which survives the swap, and
+       carries the same xhr). Set.delete() is a no-op the second time, so
+       receiving both events for one request can't double-count. */
     (function () {
       // Mounted on <html>, above <body>, so hx-boost body swaps can't wipe it.
       var bar = document.createElement('div');
@@ -2076,37 +2093,58 @@
       bar.innerHTML = '<i></i>';
       document.documentElement.appendChild(bar);
       var inner = bar.firstElementChild;
-      var inflight = 0, timer = null, prog = 0;
+      var pending = new Set(), timer = null, prog = 0, hideTimer = null;
       function isPoll(elt) {
         if (!elt || !elt.getAttribute) return false;
         return (elt.getAttribute('hx-trigger') || '').indexOf('every') !== -1;
       }
-      function start() {
-        if (++inflight !== 1) return;
+      function begin() {
+        if (timer) return;                  // already creeping
+        clearTimeout(hideTimer);
         prog = 8;
         bar.classList.add('is-active');
         inner.style.width = prog + '%';
-        clearInterval(timer);
         timer = setInterval(function () {
           prog += (90 - prog) * 0.14;       // ease toward 90%, never reach
           inner.style.width = prog.toFixed(1) + '%';
         }, 240);
       }
-      function done() {
-        inflight = Math.max(0, inflight - 1);
-        if (inflight !== 0) return;
+      function finish() {
         clearInterval(timer); timer = null;
         inner.style.width = '100%';
-        setTimeout(function () {
+        hideTimer = setTimeout(function () {
           bar.classList.remove('is-active');
           setTimeout(function () { inner.style.width = '0%'; }, 240);
         }, 180);
       }
+      function track(xhr) {
+        if (!xhr) return;
+        pending.add(xhr);
+        begin();
+      }
+      function settle(xhr) {
+        // delete() returns false when the xhr wasn't tracked (polls, or a
+        // second terminal event for the same request) → harmless no-op.
+        if (xhr && pending.delete(xhr) && pending.size === 0) finish();
+      }
       document.body.addEventListener('htmx:beforeRequest', function (e) {
-        if (!isPoll(e.detail.elt)) start();
+        if (!isPoll(e.detail.elt)) track(e.detail.xhr);
       });
       document.body.addEventListener('htmx:afterRequest', function (e) {
-        if (!isPoll(e.detail.elt)) done();
+        settle(e.detail.xhr);
+      });
+      document.body.addEventListener('htmx:afterSettle', function (e) {
+        settle(e.detail.xhr);
+      });
+      // Network failure / timeout / abort never reach afterRequest.
+      document.body.addEventListener('htmx:sendError', function (e) {
+        settle(e.detail.xhr);
+      });
+      document.body.addEventListener('htmx:timeout', function (e) {
+        settle(e.detail.xhr);
+      });
+      document.body.addEventListener('htmx:abort', function (e) {
+        settle(e.detail.xhr);
       });
     })();
 

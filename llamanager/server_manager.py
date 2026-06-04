@@ -33,8 +33,8 @@ STOP_GRACE_S = 10.0
 HEALTH_POLL_INTERVAL_S = 0.5
 
 
-def _engine_env(binary: str) -> dict[str, str] | None:
-    """Environment override for the engine subprocess, or None to inherit.
+def _rocm_lib_env(binary: str) -> dict[str, str] | None:
+    """LD_LIBRARY_PATH override for ROCm/HIP builds, or None to inherit.
 
     Only the ROCm/HIP build needs help: the llama.cpp HIP release does not
     bundle the ROCm runtime (no libamdhip64), and distros usually keep ROCm
@@ -61,6 +61,33 @@ def _engine_env(binary: str) -> dict[str, str] | None:
     env = dict(os.environ)
     existing = env.get("LD_LIBRARY_PATH", "")
     env["LD_LIBRARY_PATH"] = rocm_lib + (os.pathsep + existing if existing else "")
+    return env
+
+
+def _engine_env(binary: str, *, gpu_device: str = "") -> dict[str, str] | None:
+    """Environment override for the engine subprocess, or None to inherit.
+
+    Layers two independent concerns onto the inherited environment:
+
+    * ROCm/HIP runtime path (see ``_rocm_lib_env``).
+    * GPU pin: when ``gpu_device`` names a card, set the backend's
+      "visible devices" var so the engine runs on that GPU alone — this is
+      what stops a model being silently split across a fast dGPU and a slow
+      iGPU. The name is resolved against the *enumeration env* (so a ROCm
+      build can actually see its GPUs), and a missing device is non-fatal.
+
+    Returns None only when neither concern applies (plain inherit).
+    """
+    env = _rocm_lib_env(binary)
+    if gpu_device:
+        # Enumerate with the same env the server will run with, so ROCm
+        # builds get their lib path; falls back to the inherited env.
+        from . import gpu_detect
+        base = env if env is not None else dict(os.environ)
+        pin = gpu_detect.visible_devices_env(binary, gpu_device, env=base)
+        if pin:
+            base.update(pin)
+            env = base
     return env
 
 
@@ -465,9 +492,16 @@ class ServerManager:
                     stdout=self._log_fp,
                     stderr=self._log_fp,
                     stdin=asyncio.subprocess.DEVNULL,
-                    # None → inherit (vulkan/cpu/cuda); only hip/rocm gets the
-                    # system ROCm runtime added so it can see the GPU.
-                    env=_engine_env(self.cfg.llama_server_binary),
+                    # None → inherit (vulkan/cpu/cuda); hip/rocm gets the
+                    # system ROCm runtime added so it can see the GPU, and a
+                    # configured GPU pin adds the backend's visible-devices
+                    # var. The pin applies to the llama engine only — mlx
+                    # (Apple) has no --list-devices to resolve against.
+                    env=_engine_env(
+                        self.cfg.llama_server_binary,
+                        gpu_device=(getattr(self.cfg, "llama_gpu_device", "") or "")
+                        if engine == "llama" else "",
+                    ),
                 )
             except FileNotFoundError as e:
                 self._close_log()

@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.3.94-green.svg" alt="Version 0.3.94">
+  <img src="https://img.shields.io/badge/version-0.3.95-green.svg" alt="Version 0.3.95">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -234,7 +234,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.3.94" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.3.95" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -1226,6 +1226,9 @@ The version is defined in one place: the `VERSION` file in the project root. `py
 Edit `VERSION`, then reinstall so package metadata is updated:
 
 ```bash
+# source .venv/bin/activate                  # macos / linux
+# .\.venv\Scripts\Activate.ps1             # windows powershell
+# .\.venv\Scripts\activate.bat             # windows cmd
 pip install -e .
 python -c "import llamanager; print(llamanager.__version__)"
 ```

@@ -66,7 +66,7 @@ from .llama_installer import (
 )
 from .queue_mgr import QueueManager
 from .registry import Registry
-from .server_manager import ServerManager, resolve_spec, ServerError
+from .server_manager import ServerManager, resolve_spec, ServerError, _engine_env
 from .supervisor import Supervisor
 
 router = APIRouter(prefix="/ui", tags=["ui"])
@@ -2385,6 +2385,40 @@ async def about_auto_update_toggle(request: Request,
 # auto-restart). The autostart action shells out to `llamanager autostart`,
 # the same per-platform logic the CLI and tray use.
 
+def _gpu_device_ctx(cfg) -> dict:
+    """Enumerate selectable GPUs for the text engine + the current pin.
+
+    Best-effort: any failure (no engine installed, enumeration error) yields
+    an empty list, and the template degrades to just the stored name. Only
+    meaningful for the llama engine — mlx has no --list-devices.
+    """
+    current = getattr(cfg, "llama_gpu_device", "") or ""
+    devices: list[dict] = []
+    if (getattr(cfg, "llama_server_engine", "llama") or "llama") == "llama":
+        binary = detect_binary(cfg.llama_server_binary)
+        if binary:
+            try:
+                from .gpu_detect import list_llama_devices
+                for d in list_llama_devices(binary, _engine_env(binary)):
+                    devices.append({
+                        "name": d.name,
+                        "backend": d.backend,
+                        "index": d.index,
+                        "mem_free_mib": d.mem_free_mib,
+                        "mem_total_mib": d.mem_total_mib,
+                    })
+            except Exception as e:  # noqa: BLE001 — never break settings
+                log.debug("gpu enumeration failed: %s", e)
+    # If the pinned device isn't currently detected, still offer it so the
+    # operator sees their selection rather than a silent reset to "all".
+    pinned_missing = bool(current) and not any(d["name"] == current for d in devices)
+    return {
+        "gpu_devices": devices,
+        "gpu_device_current": current,
+        "gpu_pinned_missing": pinned_missing,
+    }
+
+
 def _settings_ctx(request: Request, **extra: Any) -> dict:
     cfg = request.app.state.cfg
     supervisor = request.app.state.supervisor
@@ -2395,6 +2429,7 @@ def _settings_ctx(request: Request, **extra: Any) -> dict:
         autorestart=bool(supervisor.enabled),
         update_action_base="/ui/settings",
     )
+    ctx.update(_gpu_device_ctx(cfg))
     ctx.update(extra)
     return ctx
 
@@ -2494,6 +2529,22 @@ async def settings_autorestart(request: Request,
                                enabled: str = Form("off"),
                                _: None = Depends(require_csrf)) -> Response:
     request.app.state.supervisor.enabled = (enabled == "on")
+    return RedirectResponse("/ui/settings", status_code=303)
+
+
+@router.post("/settings/gpu", response_class=HTMLResponse)
+async def settings_gpu(request: Request,
+                       llama_gpu_device: str = Form(""),
+                       _: None = Depends(require_csrf)) -> Response:
+    """Pin the text engine to one GPU (or clear the pin with empty value).
+
+    Stored by device name; takes effect on the next engine start/restart.
+    """
+    from .config import update_server_gpu
+    cfg = request.app.state.cfg
+    name = (llama_gpu_device or "").strip()
+    cfg.llama_gpu_device = name
+    update_server_gpu(cfg.config_path, device_name=name)
     return RedirectResponse("/ui/settings", status_code=303)
 
 

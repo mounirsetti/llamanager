@@ -59,6 +59,56 @@
   </p>
 </section>
 
+{# ---- GPU for text inference ---- #}
+<section class="lm-section" style="margin-top: 28px;">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">GPU for text inference</span>
+  </header>
+  <p style="color: var(--fg-2); max-width: 62ch; margin-bottom: 6px;">
+    Which GPU the text engine runs on. On a machine with more than one GPU
+    (e.g. a discrete card next to an integrated one) llama.cpp may otherwise
+    split the model across both and run far slower — pin it to your fastest
+    card here.
+  </p>
+  <form method="post" action="/ui/settings/gpu">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="lm-field-label" for="gpu-device" style="display:block; margin-bottom:6px;">
+      Device
+    </label>
+    <select id="gpu-device" name="llama_gpu_device" class="lm-input"
+            style="max-width: 62ch; width: 100%;"
+            onchange="this.form.submit()">
+      <option value="" {% if not gpu_device_current %}selected{% endif %}>
+        Auto — use all detected GPUs
+      </option>
+      {% for d in gpu_devices %}
+      <option value="{{ d.name }}" {% if d.name == gpu_device_current %}selected{% endif %}>
+        {{ d.name }}{% if d.mem_free_mib is not none %} — {{ (d.mem_free_mib / 1024) | round(1) }} GB free{% endif %} [{{ d.backend }}{{ d.index }}]
+      </option>
+      {% endfor %}
+      {% if gpu_pinned_missing %}
+      <option value="{{ gpu_device_current }}" selected>
+        {{ gpu_device_current }} — not currently detected
+      </option>
+      {% endif %}
+    </select>
+  </form>
+  {% if not gpu_devices %}
+  <p style="color: var(--fg-3); font-size: 0.8125rem; margin-top: 12px; max-width: 62ch;">
+    No GPUs detected. This needs an installed llama.cpp engine with a GPU
+    backend (Vulkan / ROCm / CUDA). Install one from the Setup page, then
+    reload this page.
+  </p>
+  {% endif %}
+  <p style="color: var(--fg-3); font-size: 0.75rem; margin-top: 12px; max-width: 62ch;">
+    Takes effect the next time the engine starts — restart the running model
+    (Dashboard → swap/restart) to apply now. Pinning sets the backend's
+    visible-devices variable (e.g. <code>GGML_VK_VISIBLE_DEVICES</code>) and is
+    stored by device name, so it survives the device-order changes that make a
+    raw index unreliable.
+  </p>
+</section>
+
 {# ---- Engine behavior ---- #}
 <section class="lm-section" style="margin-top: 28px;">
   <header class="lm-section-head">

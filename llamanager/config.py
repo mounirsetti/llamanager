@@ -324,6 +324,11 @@ class Config:
     # (e.g. when only an id is available without a file on disk).
     llama_server_engine: str = "llama"
     llama_server_port: int = 7201
+    # Name of the GPU the text engine should run on alone (matches a device
+    # reported by ``llama-server --list-devices``). Empty → use all devices.
+    # Resolved to a backend "visible devices" env var at launch; stored by
+    # name because the raw device order isn't stable across launches.
+    llama_gpu_device: str = ""
     data_dir: Path = field(default_factory=lambda: expand("~/.llamanager"))
 
     default_model: str = ""
@@ -564,6 +569,7 @@ def load_config(path: Path | None = None) -> Config:
         llama_server_binary=server.get("llama_server_binary", "llama-server"),
         llama_server_engine=str(server.get("llama_server_engine", "llama")),
         llama_server_port=int(server.get("llama_server_port", 7201)),
+        llama_gpu_device=str(server.get("llama_gpu_device", "") or ""),
         data_dir=expand(server.get("data_dir", "~/.llamanager")),
         default_model=defaults.get("model", ""),
         default_image_model=defaults.get("image_model", ""),
@@ -1091,6 +1097,27 @@ def update_exclusive_mode(cfg_path: Path, *,
         srv["exclusive_grace_seconds"] = float(grace_seconds)
     if heartbeat_seconds is not None:
         srv["exclusive_heartbeat_seconds"] = int(heartbeat_seconds)
+    _save_tomlkit(cfg_path, doc)
+
+
+def update_server_gpu(cfg_path: Path, *, device_name: str | None = None) -> None:
+    """Persist the text-engine GPU pin under ``[server].llama_gpu_device``.
+
+    Pass ``device_name=""`` to clear the pin (run on all devices); a non-empty
+    name pins that GPU. ``None`` leaves the key untouched.
+    """
+    import tomlkit
+    if device_name is None:
+        return
+    doc = _load_tomlkit(cfg_path)
+    if "server" not in doc:
+        doc.add("server", tomlkit.table())
+    srv = doc["server"]
+    if device_name == "":
+        if "llama_gpu_device" in srv:
+            del srv["llama_gpu_device"]
+    else:
+        srv["llama_gpu_device"] = device_name
     _save_tomlkit(cfg_path, doc)
 
 
