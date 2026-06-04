@@ -1,0 +1,169 @@
+"""Tests for the memory guardrails (mem_guard).
+
+Covers the pure sizing math (KV estimate, safe-ctx, ctx-safety verdict), the
+host prompt-cache derivation, the RAM/swap pressure classification, and the
+watchdog's edge-triggered callback. None of it touches a real GPU or model —
+GGUF metadata and memory readings are synthesised.
+"""
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from llamanager import mem_guard as mg
+from llamanager.gguf_meta import GgufMeta
+
+
+# A no-GQA 31B-ish model (head_count_kv == head_count): KV is huge, like the
+# gemma model that triggered the incident. file_size ~20 GB of weights.
+NO_GQA = GgufMeta(architecture="gemma", block_count=60, embedding_length=5376,
+                  head_count=42, head_count_kv=42, context_length=131072,
+                  file_size=int(20.4 * 1024**3))
+# A GQA MoE: head_count_kv much smaller than head_count -> tiny KV.
+GQA = GgufMeta(architecture="qwen", block_count=40, embedding_length=4096,
+               head_count=32, head_count_kv=2, context_length=262144,
+               file_size=int(19.7 * 1024**3))
+
+
+# ---------- sizing math ----------
+
+def test_kv_grows_linearly_with_ctx():
+    a = mg.kv_cache_gb("x", 8192, meta=NO_GQA)
+    b = mg.kv_cache_gb("x", 16384, meta=NO_GQA)
+    assert a and b and abs(b - 2 * a) < 1e-6
+
+
+def test_no_gqa_kv_dwarfs_gqa():
+    """Same ctx, the no-GQA model's KV must be far larger — this is the whole
+    'be considerate of the model, not just the number' point."""
+    big = mg.kv_cache_gb("x", 32768, meta=NO_GQA)
+    small = mg.kv_cache_gb("x", 32768, meta=GQA)
+    assert big > small * 5
+
+
+def test_safe_max_ctx_respects_budget(tmp_path, monkeypatch):
+    # Patch the loader so we don't need a real file on disk.
+    monkeypatch.setattr(mg, "_load_meta", lambda p: NO_GQA)
+    safe = mg.safe_max_ctx("ignored", 32.0)
+    assert safe is not None
+    # weights+KV at the suggested ctx must fit the 88% budget.
+    need = mg.weights_gb("ignored", meta=NO_GQA) + mg.kv_cache_gb("x", safe, meta=NO_GQA)
+    assert need <= mg.usable_vram_gb(32.0) + 0.1
+    assert safe % 256 == 0
+
+
+def test_ctx_safety_levels(monkeypatch):
+    monkeypatch.setattr(mg, "_load_meta", lambda p: NO_GQA)
+    danger = mg.ctx_safety("x", 64384, vram_gb=32.0, ram_gb=61.0)
+    assert danger.level == "danger" and danger.safe_ctx and danger.is_unsafe
+    ok = mg.ctx_safety("x", danger.safe_ctx, vram_gb=32.0, ram_gb=61.0)
+    assert ok.level == "ok" and not ok.is_unsafe
+
+    # The GQA MoE has a tiny KV, so even 262k is never 'danger' (no swap
+    # thrash) — unlike the no-GQA model above. That's the model-aware point.
+    monkeypatch.setattr(mg, "_load_meta", lambda p: GQA)
+    verdict = mg.ctx_safety("x", 262144, vram_gb=32.0, ram_gb=61.0)
+    assert verdict.level != "danger"
+
+
+def test_ctx_safety_without_vram_still_flags_danger(monkeypatch):
+    """The RAM-only danger check must work even when VRAM is unknown."""
+    monkeypatch.setattr(mg, "_load_meta", lambda p: NO_GQA)
+    v = mg.ctx_safety("x", 64384, vram_gb=None, ram_gb=61.0)
+    assert v.level == "danger"
+
+
+def test_mmproj_size_counts_against_the_budget(monkeypatch):
+    """A vision projector occupies VRAM, so passing extra_gb must lower the
+    safe ctx and show up in the breakdown."""
+    monkeypatch.setattr(mg, "_load_meta", lambda p: GQA)  # tiny KV, big weights
+    no_proj = mg.safe_max_ctx("x", 32.0)
+    with_proj = mg.safe_max_ctx("x", 32.0, extra_gb=1.3)
+    assert with_proj is not None and no_proj is not None
+    assert with_proj < no_proj                     # projector eats headroom
+    v = mg.ctx_safety("x", 8192, vram_gb=32.0, ram_gb=61.0, extra_gb=1.3)
+    assert "mmproj 1.3" in v.message               # broken out for the operator
+
+
+def test_file_gb_missing_is_zero(tmp_path):
+    assert mg.file_gb(tmp_path / "nope.gguf") == 0.0
+    p = tmp_path / "proj.gguf"
+    p.write_bytes(b"x" * (1024 * 1024))            # 1 MiB
+    assert 0.0 < mg.file_gb(p) < 0.01
+
+
+# ---------- cache-ram derivation ----------
+
+def test_cache_ram_scales_down_with_pressure():
+    assert mg.derive_cache_ram_mib(40) == 8192      # plentiful -> engine default
+    assert mg.derive_cache_ram_mib(12) == 3072      # 25% of 12 GB
+    assert mg.derive_cache_ram_mib(0.1) == 512      # floor
+
+
+# ---------- pressure classification ----------
+
+def _state(avail_frac, swap_frac, ram=61.0, swap=8.0):
+    return mg.MemState(ram_total_gb=ram, ram_available_gb=ram * avail_frac,
+                       swap_total_gb=swap, swap_used_gb=swap * swap_frac)
+
+
+@pytest.mark.parametrize("avail,swap,expected", [
+    (0.50, 0.00, mg.Pressure.OK),
+    (0.12, 0.10, mg.Pressure.WARN),     # RAM tight
+    (0.05, 0.10, mg.Pressure.CRITICAL), # RAM critical
+    (0.40, 0.30, mg.Pressure.WARN),     # swap warn
+    (0.40, 0.70, mg.Pressure.CRITICAL), # swap critical
+    (0.008, 1.0, mg.Pressure.CRITICAL), # the incident: 0.5/61 GB free, full swap
+])
+def test_classify_pressure(avail, swap, expected):
+    th = mg.MemThresholds()
+    assert mg.classify_pressure(_state(avail, swap), th) is expected
+
+
+def test_no_swap_box_ignores_swap_signal():
+    th = mg.MemThresholds()
+    s = mg.MemState(ram_total_gb=32, ram_available_gb=20, swap_total_gb=0, swap_used_gb=0)
+    assert mg.classify_pressure(s, th) is mg.Pressure.OK
+
+
+# ---------- watchdog ----------
+
+def test_watchdog_edge_triggered(monkeypatch):
+    seq = [_state(0.50, 0.0), _state(0.10, 0.1),
+           _state(0.03, 0.8), _state(0.50, 0.0)]
+    i = {"n": 0}
+
+    def fake_read():
+        s = seq[min(i["n"], len(seq) - 1)]
+        i["n"] += 1
+        return s
+
+    monkeypatch.setattr(mg, "read_mem_state", fake_read)
+    calls = []
+
+    async def cb(level, state):
+        calls.append(level)
+
+    class Cfg:
+        mem_guard_enabled = True
+        mem_guard_interval_s = 0.02
+
+    async def run():
+        wd = mg.MemoryWatchdog(Cfg(), on_pressure=cb, interval_s=0.02)
+        wd.start()
+        await asyncio.sleep(0.2)
+        await wd.stop()
+
+    asyncio.run(run())
+    # Rising edges then the return to OK — not one per tick.
+    assert calls == [mg.Pressure.WARN, mg.Pressure.CRITICAL, mg.Pressure.OK]
+
+
+def test_watchdog_disabled_does_not_start(monkeypatch):
+    class Cfg:
+        mem_guard_enabled = False
+
+    wd = mg.MemoryWatchdog(Cfg(), on_pressure=lambda *a: None)
+    wd.start()
+    assert wd._task is None

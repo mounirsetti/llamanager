@@ -36,7 +36,8 @@ from fastapi.templating import Jinja2Templates
 
 from .auth import AuthManager, Origin
 from .config import (
-    ENGINE_FAMILY, Profile, VALID_RAM_SPILL_POLICIES, VALID_THINKING,
+    ENGINE_FAMILY, Profile, VALID_KV_CACHE_TYPES, VALID_RAM_SPILL_POLICIES,
+    VALID_THINKING,
     delete_profile, detect_engine_for_id, load_config, rename_profile,
     save_profile, set_default_args, set_model_default_profile,
     update_coexistence_policy, update_defaults, update_image_config,
@@ -1437,6 +1438,28 @@ def _models_ctx(request: Request) -> dict:
         d["engine"] = engine
         d["engine_family"] = ENGINE_FAMILY.get(engine, "text")
         d["ctx_max"] = _ctx_max_for(entry.path, engine)
+        # Capacity advice for the profile editor's ctx control: per-model KV
+        # rate (GB per 1k tokens), weight footprint, and the largest ctx that
+        # still fits VRAM. The slider reads these to show a live estimate and
+        # flag a context that would spill to RAM. llama text models only —
+        # KV sizing doesn't apply to mlx/diffusion.
+        d["kv_per_1k_gb"] = None
+        d["safe_ctx"] = None
+        d["weights_gb"] = None
+        if engine == "llama" and d["engine_family"] != "image":
+            try:
+                from . import mem_guard
+                from .gguf_meta import read_gguf_meta
+                _meta = read_gguf_meta(entry.path) if entry.path.is_file() else None
+                if _meta is not None:
+                    kv1k = mem_guard.kv_cache_gb(entry.path, 1024, meta=_meta)
+                    d["kv_per_1k_gb"] = round(kv1k, 4) if kv1k else None
+                    d["weights_gb"] = round(mem_guard.weights_gb(entry.path, meta=_meta), 1)
+                    _vram = getattr(cfg, "vram_total_gb", None)
+                    if _vram:
+                        d["safe_ctx"] = mem_guard.safe_max_ctx(entry.path, _vram, meta=_meta)
+            except Exception as e:  # noqa: BLE001 — advice is best-effort
+                log.debug("ctx advice sizing failed for %s: %s", mid, e)
         # Flag models whose repo ships a projector so the card can hint that
         # it's vision-capable (the projector is wired up via a profile).
         d["has_mmproj"] = bool(_model_dir(mid)) and _model_dir(mid) in mmproj_dirs
@@ -1453,6 +1476,7 @@ def _models_ctx(request: Request) -> dict:
                     "vram_limit_gb": p.vram_limit_gb,
                     "ram_spill_policy": p.ram_spill_policy or "default",
                     "ram_spill_limit_gb": p.ram_spill_limit_gb,
+                    "kv_cache_type": getattr(p, "kv_cache_type", "") or "",
                     "args": p.args,
                     "args_json": json.dumps(p.args, indent=2) if p.args else "{}",
                 })
@@ -1467,19 +1491,36 @@ def _models_ctx(request: Request) -> dict:
     # Combined list kept for any callers that still expect ``models``.
     all_models = text_models + image_models
 
-    # Detect mmproj-style GGUFs on disk so the profile editor can offer
-    # a pickable list instead of a free-text path. Same heuristic the
-    # registry uses internally when auto-seeding profiles (filename
-    # contains "mmproj"). Cross-repo references still work via custom
-    # input — the field is a <datalist>-backed text input, not a select.
+    # Detect mmproj-style GGUFs on disk so the profile editor can offer a
+    # pickable dropdown instead of a free-text path. Same heuristic the
+    # registry uses internally when auto-seeding profiles (filename contains
+    # "mmproj").
     mmproj_options: list[str] = []
+    mmproj_sizes: dict[str, float] = {}   # rel path → GB, for the ctx estimate
     if cfg.models_dir.exists():
         for p in sorted(cfg.models_dir.rglob("*.gguf")):
             if not p.is_file():
                 continue
             if "mmproj" not in p.name.lower():
                 continue
-            mmproj_options.append(p.relative_to(cfg.models_dir).as_posix())
+            rel = p.relative_to(cfg.models_dir).as_posix()
+            mmproj_options.append(rel)
+            try:
+                mmproj_sizes[rel] = round(p.stat().st_size / (1024 ** 3), 2)
+            except OSError:
+                pass
+
+    # Per-model split so each editor's dropdown lists projectors in the
+    # model's own folder first (the overwhelmingly common case) and the rest
+    # under "other folders". Only meaningful for llama text models.
+    import posixpath as _pp
+    for d in all_models:
+        if d.get("engine") != "llama":
+            continue
+        mfolder = _pp.dirname(d.get("model_id") or "")
+        d["mmproj_same"] = [o for o in mmproj_options if _pp.dirname(o) == mfolder]
+        d["mmproj_other"] = [o for o in mmproj_options if _pp.dirname(o) != mfolder]
+        d["mmproj_sizes"] = mmproj_sizes
 
     return _ctx(
         request,
@@ -1496,6 +1537,10 @@ def _models_ctx(request: Request) -> dict:
         ram_spill_policies=VALID_RAM_SPILL_POLICIES,
         ram_total_gb=round(ram_total_gb, 1),
         vram_total_gb=round(float(vram_total_gb), 1),
+        # Actual GPU VRAM (None on CPU-only / not-yet-detected), distinct from
+        # vram_total_gb above which falls back to RAM for the slider max. The
+        # profile editor's ctx advice compares KV against real GPU memory.
+        gpu_vram_gb=getattr(cfg, "vram_total_gb", None),
         mmproj_options=mmproj_options,
     )
 
@@ -1614,15 +1659,13 @@ async def models_pull_ui(request: Request, source: str = Form(...),
         reg.start_pull(source=src, files=file_list, bytes_total=bytes_total)
     except Exception as e:
         return _error_html(f"pull failed: {e}", status_code=400)
-    # Render immediately so the HTMX polling div is present from the start,
-    # and pop a toast so the operator gets explicit confirmation the pull
-    # kicked off (the progress strip is higher up the page).
-    resp = templates.TemplateResponse(request, "models.html", _models_ctx(request))
-    resp.headers["HX-Trigger"] = json.dumps(
-        {"lmToast": {"message": "Download started — progress shows in the "
-                                "models list above.", "kind": "ok"}}
-    )
-    return resp
+    # 303 back to the models page (standard post-redirect-get). The download
+    # progress strip is rendered there, so the pull is visible immediately.
+    # We deliberately do NOT render the full page here with an HX-Trigger
+    # toast: returning a whole document to a boosted POST makes htmx swap the
+    # <body> element and crash mid-swap ("document.body is null") on this page,
+    # because its content wires up `from:body` triggers during the swap.
+    return RedirectResponse("/ui/models", status_code=303)
 
 
 @router.post("/models/set-dir", response_class=HTMLResponse)
@@ -2419,6 +2462,31 @@ def _gpu_device_ctx(cfg) -> dict:
     }
 
 
+def _mem_guard_ctx(cfg) -> dict:
+    """Current memory-guardrail settings + a live capacity snapshot for the
+    Settings page."""
+    from . import mem_guard
+    out = {
+        "mem_guard_enabled": bool(getattr(cfg, "mem_guard_enabled", True)),
+        "mem_clamp_ctx": bool(getattr(cfg, "mem_clamp_ctx", False)),
+        "mem_hard_stop_enabled": bool(getattr(cfg, "mem_hard_stop_enabled", False)),
+        "mem_guard_interval_s": float(getattr(cfg, "mem_guard_interval_s", 5.0)),
+        "mem_ctx_checkpoints": int(getattr(cfg, "mem_ctx_checkpoints", 0) or 0),
+        "mem_vram_total_gb": getattr(cfg, "vram_total_gb", None),
+    }
+    try:
+        st = mem_guard.read_mem_state()
+        out["mem_ram_total_gb"] = round(st.ram_total_gb, 1)
+        out["mem_ram_available_gb"] = round(st.ram_available_gb, 1)
+        out["mem_swap_total_gb"] = round(st.swap_total_gb, 1)
+        out["mem_swap_used_gb"] = round(st.swap_used_gb, 1)
+        out["mem_pressure"] = mem_guard.classify_pressure(
+            st, mem_guard.MemThresholds.from_cfg(cfg)).name.lower()
+    except Exception as e:  # noqa: BLE001 — display-only
+        log.debug("mem state read failed: %s", e)
+    return out
+
+
 def _settings_ctx(request: Request, **extra: Any) -> dict:
     cfg = request.app.state.cfg
     supervisor = request.app.state.supervisor
@@ -2430,6 +2498,7 @@ def _settings_ctx(request: Request, **extra: Any) -> dict:
         update_action_base="/ui/settings",
     )
     ctx.update(_gpu_device_ctx(cfg))
+    ctx.update(_mem_guard_ctx(cfg))
     ctx.update(extra)
     return ctx
 
@@ -2545,6 +2614,48 @@ async def settings_gpu(request: Request,
     name = (llama_gpu_device or "").strip()
     cfg.llama_gpu_device = name
     update_server_gpu(cfg.config_path, device_name=name)
+    return RedirectResponse("/ui/settings", status_code=303)
+
+
+@router.post("/settings/mem-guard", response_class=HTMLResponse)
+async def settings_mem_guard(request: Request,
+                             enabled: str = Form("off"),
+                             clamp_ctx: str = Form("off"),
+                             hard_stop_enabled: str = Form("off"),
+                             ctx_checkpoints: str = Form(""),
+                             _: None = Depends(require_csrf)) -> Response:
+    """Persist the memory-guardrail knobs (the [mem_guard] config section).
+
+    Booleans arrive only when their checkbox is ticked; an unchecked box sends
+    nothing, so the Form default "off" correctly reads as disabled. The whole
+    form posts on any change so each toggle saves immediately.
+    """
+    from .config import update_mem_guard
+    cfg = request.app.state.cfg
+    on_enabled = (enabled == "on")
+    on_clamp = (clamp_ctx == "on")
+    on_hard = (hard_stop_enabled == "on")
+    try:
+        ckpt = max(0, int(ctx_checkpoints)) if str(ctx_checkpoints).strip() else 0
+    except (TypeError, ValueError):
+        ckpt = 0
+    cfg.mem_guard_enabled = on_enabled
+    cfg.mem_clamp_ctx = on_clamp
+    cfg.mem_hard_stop_enabled = on_hard
+    cfg.mem_ctx_checkpoints = ckpt
+    update_mem_guard(cfg.config_path, enabled=on_enabled, clamp_ctx=on_clamp,
+                     hard_stop_enabled=on_hard, ctx_checkpoints=ckpt)
+    # Apply the enable/disable to the live watchdog without a restart.
+    wd = getattr(request.app.state, "mem_watchdog", None)
+    if wd is not None:
+        try:
+            wd.enabled = on_enabled
+            if on_enabled:
+                wd.start()
+            else:
+                await wd.stop()
+        except Exception as e:  # noqa: BLE001
+            log.debug("watchdog toggle failed: %s", e)
     return RedirectResponse("/ui/settings", status_code=303)
 
 
@@ -3560,9 +3671,28 @@ def _reload_config(request: Request) -> None:
     # Preserve models_dir if it was overridden at runtime
     if hasattr(cfg, 'models_dir_override'):
         new_cfg.models_dir_override = cfg.models_dir_override
+    # Preserve runtime-only fields not persisted to config.toml (e.g. the
+    # VRAM total detected once at startup, used by the memory guardrails).
+    new_cfg.vram_total_gb = getattr(cfg, "vram_total_gb", None)
     request.app.state.cfg = new_cfg
     # Update registry to use potentially new models_dir
     request.app.state.registry.models_dir = new_cfg.models_dir
+
+
+def _profile_saved_response(request: Request, model_id: str,
+                            ctx_size: int | None,
+                            mmproj: str = "") -> Response:
+    """Post-save response for the profile editor: a clean 303 back to the
+    models page (standard post-redirect-get, same as every other action).
+
+    We intentionally do NOT render the page directly to attach a warning
+    toast. Returning a full HTML document to a boosted POST bypasses the
+    redirect flow the rest of the UI uses and proved fragile (it could leave
+    the page without its chrome/styles). The oversized-context warning is
+    surfaced live in the editor — the estimate under the ctx slider — and
+    again loudly in the log at launch, so nothing is lost by redirecting.
+    """
+    return RedirectResponse("/ui/models", status_code=303)
 
 
 def _read_log_tail(cfg, lines: int = 15) -> str:
@@ -3773,6 +3903,7 @@ def _build_llm_profile_from_values(
     ram_spill_policy: str = "default",
     ram_spill_limit_gb: float | None = None,
     thinking: str = "",
+    kv_cache_type: str = "",
     args: dict[str, Any] | None = None,
 ) -> Profile:
     """Validate already-typed values and assemble an LLM ``Profile``.
@@ -3795,6 +3926,12 @@ def _build_llm_profile_from_values(
         raise ValueError(
             f"invalid thinking {thinking_val!r}; must be '', 'on', or 'off'"
         )
+    kv_val = (kv_cache_type or "").strip().lower()
+    if kv_val not in VALID_KV_CACHE_TYPES:
+        raise ValueError(
+            f"invalid kv_cache_type {kv_val!r}; "
+            f"must be one of {VALID_KV_CACHE_TYPES}"
+        )
     if args is None:
         args = {}
     if not isinstance(args, dict):
@@ -3807,6 +3944,7 @@ def _build_llm_profile_from_values(
         ram_spill_policy=policy,
         ram_spill_limit_gb=ram_spill_limit_gb,
         thinking=thinking_val,
+        kv_cache_type=kv_val,
         args=args,
     )
 
@@ -3822,6 +3960,7 @@ def _build_profile_from_form(
     ram_spill_limit_gb: str,
     thinking: str,
     args_json: str,
+    kv_cache_type: str = "",
 ) -> Profile:
     """String → typed wrapper around ``_build_llm_profile_from_values``.
 
@@ -3846,6 +3985,7 @@ def _build_profile_from_form(
         ram_spill_policy=ram_spill_policy,
         ram_spill_limit_gb=ram_limit_val,
         thinking=thinking,
+        kv_cache_type=kv_cache_type,
         args=args,
     )
 
@@ -3861,6 +4001,7 @@ async def models_profile_create(request: Request,
                                 ram_spill_policy: str = Form("default"),
                                 ram_spill_limit_gb: str = Form(""),
                                 thinking: str = Form(""),
+                                kv_cache_type: str = Form(""),
                                 args_json: str = Form("{}"),
                                 make_default: str = Form(""),
                                 _: None = Depends(require_csrf)) -> Response:
@@ -3883,6 +4024,7 @@ async def models_profile_create(request: Request,
             ram_spill_policy=ram_spill_policy,
             ram_spill_limit_gb=ram_spill_limit_gb,
             thinking=thinking,
+            kv_cache_type=kv_cache_type,
             args_json=args_json,
         )
         save_profile(cfg.config_path, mid, profile_name, prof)
@@ -3891,7 +4033,7 @@ async def models_profile_create(request: Request,
     if make_default == "on":
         set_model_default_profile(cfg.config_path, mid, profile_name)
     _reload_config(request)
-    return RedirectResponse("/ui/models", status_code=303)
+    return _profile_saved_response(request, mid, prof.ctx_size, prof.mmproj)
 
 
 @router.post("/models/profiles/{profile_name}/update", response_class=HTMLResponse)
@@ -3905,6 +4047,7 @@ async def models_profile_update(request: Request, profile_name: str,
                                 ram_spill_policy: str = Form("default"),
                                 ram_spill_limit_gb: str = Form(""),
                                 thinking: str = Form(""),
+                                kv_cache_type: str = Form(""),
                                 args_json: str = Form("{}"),
                                 _: None = Depends(require_csrf)) -> Response:
     cfg = request.app.state.cfg
@@ -3924,6 +4067,7 @@ async def models_profile_update(request: Request, profile_name: str,
             ram_spill_policy=ram_spill_policy,
             ram_spill_limit_gb=ram_spill_limit_gb,
             thinking=thinking,
+            kv_cache_type=kv_cache_type,
             args_json=args_json,
         )
     except ValueError as e:
@@ -3943,7 +4087,7 @@ async def models_profile_update(request: Request, profile_name: str,
     except ValueError as e:
         return _error_html(str(e), status_code=400)
     _reload_config(request)
-    return RedirectResponse("/ui/models", status_code=303)
+    return _profile_saved_response(request, mid, prof.ctx_size, prof.mmproj)
 
 
 @router.post("/models/profiles/{profile_name}/delete", response_class=HTMLResponse)

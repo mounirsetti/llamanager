@@ -260,6 +260,11 @@ def detect_engine_for_id(model_id: str, models_dir: Path) -> str:
 
 VALID_RAM_SPILL_POLICIES = ("default", "unlimited", "limited", "none")
 VALID_THINKING = ("", "on", "off")
+# KV-cache data type (llama-server --cache-type-k/-v). "" leaves the engine
+# default (f16). Quantizing the KV cache shrinks the per-token context memory
+# independently of the model's weight quant — q8_0 is ~half size, near
+# lossless; q4_0 is ~quarter, with some quality cost.
+VALID_KV_CACHE_TYPES = ("", "f16", "q8_0", "q5_1", "q4_0")
 VALID_EXCLUSIVE_MODES = ("off", "warn", "exclusive", "aggressive")
 
 
@@ -287,6 +292,9 @@ class Profile:
     vram_limit_gb: float | None = None
     ram_spill_policy: str = "default"
     ram_spill_limit_gb: float | None = None
+    # KV-cache data type → --cache-type-k/-v (+ flash-attn when quantized).
+    # "" / "f16" leave the default; "q8_0"/"q4_0"/… shrink the context memory.
+    kv_cache_type: str = ""
     # image-family knobs (ignored by text engines)
     image_model_type: str = ""        # e.g. "dev" | "full" (HiDream)
     image_steps: int | None = None
@@ -329,6 +337,29 @@ class Config:
     # Resolved to a backend "visible devices" env var at launch; stored by
     # name because the raw device order isn't stable across launches.
     llama_gpu_device: str = ""
+
+    # ---- memory guardrails (see mem_guard.py) ----
+    # Background watchdog that watches host RAM/swap and asks the queue to
+    # reset the engine to baseline at the next task boundary when memory gets
+    # tight. Pure monitoring + a non-destructive reload; never kills a live
+    # generation unless ``mem_hard_stop_enabled`` is set.
+    mem_guard_enabled: bool = True
+    mem_guard_interval_s: float = 5.0
+    # When true, the launch guardrail clamps a 'danger' ctx-size down to the
+    # largest size that fits VRAM instead of only warning. Off by default —
+    # warning-only avoids silently overriding a value set on purpose.
+    mem_clamp_ctx: bool = False
+    # Cap on llama-server's context/SWA checkpoints (``--ctx-checkpoints``).
+    # These store past prompts' KV in host RAM for reuse and were a big part
+    # of the runaway-RAM incident. 0 → leave the engine default untouched.
+    mem_ctx_checkpoints: int = 0
+    # Last-resort: let the watchdog stop a running engine when memory stays
+    # CRITICAL. Off by default; the between-task reload is preferred.
+    mem_hard_stop_enabled: bool = False
+    # Detected once at startup; used by the ctx guardrail and UI warnings.
+    # Runtime-only (never written to config.toml); preserved across reloads.
+    vram_total_gb: float | None = None
+
     data_dir: Path = field(default_factory=lambda: expand("~/.llamanager"))
 
     default_model: str = ""
@@ -529,6 +560,9 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
     thinking = str(body.get("thinking", "") or "").strip().lower()
     if thinking not in VALID_THINKING:
         thinking = ""
+    kv_cache_type = str(body.get("kv_cache_type", "") or "").strip().lower()
+    if kv_cache_type not in VALID_KV_CACHE_TYPES:
+        kv_cache_type = ""
     return Profile(
         name=name,
         mmproj=str(body.get("mmproj", "") or ""),
@@ -536,6 +570,7 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
         vram_limit_gb=_coerce_float(body.get("vram_limit_gb")),
         ram_spill_policy=policy,
         ram_spill_limit_gb=_coerce_float(body.get("ram_spill_limit_gb")),
+        kv_cache_type=kv_cache_type,
         image_model_type=str(body.get("image_model_type", "") or ""),
         image_steps=_coerce_int(body.get("image_steps")),
         image_guidance=_coerce_float(body.get("image_guidance")),
@@ -623,6 +658,16 @@ def load_config(path: Path | None = None) -> Config:
 
     if "models_dir" in server:
         cfg.models_dir_override = expand(str(server["models_dir"]))
+
+    # ---- memory guardrails ----
+    mem = raw.get("mem_guard", {}) if isinstance(raw.get("mem_guard"), dict) else {}
+    cfg.mem_guard_enabled = bool(mem.get("enabled", cfg.mem_guard_enabled))
+    cfg.mem_guard_interval_s = float(
+        mem.get("interval_s", cfg.mem_guard_interval_s) or cfg.mem_guard_interval_s)
+    cfg.mem_clamp_ctx = bool(mem.get("clamp_ctx", cfg.mem_clamp_ctx))
+    cfg.mem_hard_stop_enabled = bool(
+        mem.get("hard_stop_enabled", cfg.mem_hard_stop_enabled))
+    cfg.mem_ctx_checkpoints = max(0, int(mem.get("ctx_checkpoints", 0) or 0))
 
     # ---- new-format models section ----
     for model_id, body in (raw.get("models") or {}).items():
@@ -845,6 +890,8 @@ def _profile_to_tomlkit(prof: Profile):
         tbl.add("ram_spill_policy", prof.ram_spill_policy)
     if prof.ram_spill_limit_gb is not None:
         tbl.add("ram_spill_limit_gb", prof.ram_spill_limit_gb)
+    if prof.kv_cache_type:
+        tbl.add("kv_cache_type", prof.kv_cache_type)
     if prof.image_model_type:
         tbl.add("image_model_type", prof.image_model_type)
     if prof.image_steps is not None:
@@ -1118,6 +1165,35 @@ def update_server_gpu(cfg_path: Path, *, device_name: str | None = None) -> None
             del srv["llama_gpu_device"]
     else:
         srv["llama_gpu_device"] = device_name
+    _save_tomlkit(cfg_path, doc)
+
+
+def update_mem_guard(cfg_path: Path, *,
+                     enabled: bool | None = None,
+                     interval_s: float | None = None,
+                     clamp_ctx: bool | None = None,
+                     hard_stop_enabled: bool | None = None,
+                     ctx_checkpoints: int | None = None) -> None:
+    """Persist the memory-guardrail knobs under ``[mem_guard]``.
+
+    Each argument left as ``None`` is untouched. See mem_guard.py for what
+    these do; all have safe defaults so the section is optional in config.toml.
+    """
+    import tomlkit
+    doc = _load_tomlkit(cfg_path)
+    if "mem_guard" not in doc:
+        doc.add("mem_guard", tomlkit.table())
+    sect = doc["mem_guard"]
+    if enabled is not None:
+        sect["enabled"] = bool(enabled)
+    if interval_s is not None:
+        sect["interval_s"] = float(interval_s)
+    if clamp_ctx is not None:
+        sect["clamp_ctx"] = bool(clamp_ctx)
+    if hard_stop_enabled is not None:
+        sect["hard_stop_enabled"] = bool(hard_stop_enabled)
+    if ctx_checkpoints is not None:
+        sect["ctx_checkpoints"] = max(0, int(ctx_checkpoints))
     _save_tomlkit(cfg_path, doc)
 
 

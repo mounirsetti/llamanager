@@ -1981,6 +1981,100 @@
       }
     });
 
+    /* Live context-size advice in the profile editor. Each ctx input carries
+       the model's KV rate + this machine's VRAM/RAM as data-* attributes
+       (see _models_ctx); we estimate weights+KV for the chosen context and
+       colour-code whether it fits the GPU, spills to RAM, or would thrash.
+       The KV rate is per 1024 tokens, so KV(ctx) scales linearly. */
+    function lmUpdateCtxAdvice(ctx) {
+      if (!ctx) return;
+      var panel = ctx.closest('.lm-tab-panel') || ctx.closest('form');
+      var out = panel && panel.querySelector('.lm-ctx-advice');
+      if (!out) return;
+      var kvPer1k = parseFloat(ctx.getAttribute('data-kv-per-1k-gb'));
+      var weights = parseFloat(ctx.getAttribute('data-weights-gb'));
+      var vram = parseFloat(ctx.getAttribute('data-vram-gb'));
+      var ram = parseFloat(ctx.getAttribute('data-ram-gb'));
+      var n = parseFloat(ctx.value);
+      if (isNaN(kvPer1k) || isNaN(n) || n <= 0) { out.textContent = ''; return; }
+      // Factor the chosen KV-cache type: quantizing the cache shrinks it
+      // (~bytes/element vs f16). Read the sibling KV dropdown in this form.
+      var form = ctx.closest('form');
+      var kvSel = form && form.querySelector('.lm-kv-select');
+      var kvType = (kvSel && kvSel.value) || '';
+      var kvScale = ({ '': 1, 'f16': 1, 'q8_0': 0.53, 'q5_1': 0.40, 'q4_0': 0.28 })[kvType] || 1;
+      var kv = kvPer1k * n / 1024 * kvScale;
+      // A selected vision projector (mmproj) also lives in VRAM.
+      var mmSel = form && form.querySelector('.lm-mmproj-select');
+      var mmOpt = mmSel && mmSel.options[mmSel.selectedIndex];
+      var mmproj = mmOpt ? parseFloat(mmOpt.getAttribute('data-mmproj-gb')) : 0;
+      if (isNaN(mmproj)) mmproj = 0;
+      var total = (isNaN(weights) ? 0 : weights) + mmproj + kv;
+      var kvTag = (kvType && kvType !== 'f16') ? ' (' + kvType + ')' : '';
+      var mmTag = mmproj > 0.05 ? ' + mmproj ' + mmproj.toFixed(1) : '';
+      var msg = 'KV ~' + kv.toFixed(1) + ' GB' + kvTag
+              + (isNaN(weights) ? '' : ' · weights' + mmTag + '+KV ~' + total.toFixed(1) + ' GB');
+      var color = 'var(--fg-2)';
+      var V = Math.round(vram);
+      // Engine overhead beyond weights+KV+mmproj: compute buffer + slack.
+      // Mirrors mem_guard.usable_vram_gb (NOT a flat % — the context/KV is
+      // already counted, so this is just the ~fixed forward-pass buffer).
+      var usable = vram - (1.0 + vram * 0.04);
+      if (!isNaN(vram)) {
+        if (total <= usable) {
+          color = 'var(--ok)'; msg += ' · fits your ' + V + ' GB GPU';
+        } else if (total <= vram) {
+          // Fits the raw number but not with much room for the compute
+          // buffers llama allocates on top — genuinely tight, likely a spill.
+          color = 'var(--warn)';
+          msg += ' · tight for ' + V + ' GB (compute buffers go on top) — may spill to RAM';
+        } else if (isNaN(ram) || total <= vram + ram) {
+          color = 'var(--warn)';
+          msg += ' · over your ' + V + ' GB GPU — spills to RAM, slower';
+        } else {
+          color = 'var(--bad)';
+          msg += ' · over VRAM+RAM — will thrash swap, reduce the context';
+        }
+      } else if (!isNaN(ram) && total > ram * 0.88) {
+        color = 'var(--bad)'; msg += ' · over system RAM — reduce the context';
+      }
+      out.textContent = msg;
+      out.style.color = color;
+    }
+    function lmInitCtxAdvice() {
+      document.querySelectorAll('.lm-ctx-input').forEach(lmUpdateCtxAdvice);
+    }
+    if (!window.__lmCtxAdviceInit) {
+      window.__lmCtxAdviceInit = true;
+      document.addEventListener('input', function (e) {
+        var el = e.target;
+        if (!el || !el.closest) return;
+        var pair = el.closest('.lm-slider-pair');
+        if (!pair) return;
+        var ctx = pair.querySelector('.lm-ctx-input');
+        if (ctx) lmUpdateCtxAdvice(ctx);
+      });
+      // Changing the KV-cache type or the projector re-scales the estimate.
+      document.addEventListener('change', function (e) {
+        var el = e.target;
+        if (!el || !el.classList) return;
+        if (!el.classList.contains('lm-kv-select')
+            && !el.classList.contains('lm-mmproj-select')) return;
+        var form = el.closest('form');
+        var ctx = form && form.querySelector('.lm-ctx-input');
+        if (ctx) lmUpdateCtxAdvice(ctx);
+      });
+      // Recompute after htmx re-renders the models list (poll/swap) and when
+      // an editor's <details> is first opened.
+      document.addEventListener('htmx:afterSettle', lmInitCtxAdvice);
+      document.addEventListener('toggle', function (e) {
+        if (e.target && e.target.matches && e.target.matches('details.lm-profile__details')) {
+          lmInitCtxAdvice();
+        }
+      }, true);
+    }
+    lmInitCtxAdvice();
+
     /* Inline file/folder browser: inject the source input's current
        value as the `path` query param before htmx fires. CSP blocks
        hx-vals="js:..." because we don't ship 'unsafe-eval', so the
@@ -2068,23 +2162,20 @@
        snaps to 100% when the last one settles. The 2 s background polls
        (hx-trigger="every …") are excluded so it doesn't strobe.
 
-       In-flight requests are tracked by their XHR object in a Set rather
-       than a +1/-1 counter. The counter version leaked: hx-boost replaces
-       the whole <body> innerHTML, and that swap runs *before* htmx fires
-       ``htmx:afterRequest`` on the triggering element. By then the element
-       (e.g. a profile-save <form>) has been detached by the swap, so the
-       event never bubbles up to this document.body listener and the "done"
-       decrement was missed — the bar hung at ~90% forever and every later
-       request only pushed the count higher, so the whole UI looked stuck
-       mid-load even though the request had completed.
+       Completion is detected on the XHR object's own ``loadend`` event, NOT
+       on htmx's DOM lifecycle events. This is the crux: hx-boost swaps the
+       whole <body>, which DETACHES the triggering <form> before htmx fires
+       its post-response events (htmx fires afterRequest/afterSettle on that
+       element, and a detached node's events don't bubble to this delegated
+       document.body listener — nor to document at all). So every "done"
+       signal routed through the DOM was lost and the bar hung near 90%.
 
-       The fix keys off the response's xhr, which is the same object on
-       every lifecycle event. We close out a request on whichever terminal
-       event reaches us first: ``htmx:afterRequest`` for fragment swaps and
-       errors (element stays attached), and ``htmx:afterSettle`` for boosted
-       whole-<body> swaps (fires on <body>, which survives the swap, and
-       carries the same xhr). Set.delete() is a no-op the second time, so
-       receiving both events for one request can't double-count. */
+       ``xhr.loadend`` fires when the request finishes regardless of DOM
+       state (success, HTTP error, network error, timeout, abort — all of
+       them), so it can't be lost to a swap. We grab the xhr at
+       beforeRequest (which fires while the form is still attached) and bind
+       loadend straight to it. The Set keys on the xhr so concurrent
+       requests count correctly and a stray double-fire is a no-op. */
     (function () {
       // Mounted on <html>, above <body>, so hx-boost body swaps can't wipe it.
       var bar = document.createElement('div');
@@ -2128,23 +2219,13 @@
         if (xhr && pending.delete(xhr) && pending.size === 0) finish();
       }
       document.body.addEventListener('htmx:beforeRequest', function (e) {
-        if (!isPoll(e.detail.elt)) track(e.detail.xhr);
-      });
-      document.body.addEventListener('htmx:afterRequest', function (e) {
-        settle(e.detail.xhr);
-      });
-      document.body.addEventListener('htmx:afterSettle', function (e) {
-        settle(e.detail.xhr);
-      });
-      // Network failure / timeout / abort never reach afterRequest.
-      document.body.addEventListener('htmx:sendError', function (e) {
-        settle(e.detail.xhr);
-      });
-      document.body.addEventListener('htmx:timeout', function (e) {
-        settle(e.detail.xhr);
-      });
-      document.body.addEventListener('htmx:abort', function (e) {
-        settle(e.detail.xhr);
+        if (isPoll(e.detail.elt)) return;
+        var xhr = e.detail.xhr;
+        if (!xhr || !xhr.addEventListener) return;
+        track(xhr);
+        // Bind to the xhr itself — survives the <body> swap that detaches
+        // the triggering element. loadend covers load/error/timeout/abort.
+        xhr.addEventListener('loadend', function () { settle(xhr); });
       });
     })();
 
@@ -2220,9 +2301,17 @@
 
     } /* end __lmChromeInit guard */
 
-    /* Register service worker for PWA install support */
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function () {});
+    /* Service worker cleanup — we no longer use one. A past version
+       intercepted fetches with respondWith(fetch()), which corrupted
+       hx-boost POST→303→GET redirects and stripped the page chrome and
+       styles. That worker keeps running in a browser until it's explicitly
+       removed (a daemon restart can't touch it), so we actively unregister
+       any registration left behind. Runs on every load; it's a no-op once
+       clean. */
+    if ('serviceWorker' in navigator && navigator.serviceWorker.getRegistrations) {
+      navigator.serviceWorker.getRegistrations().then(function (regs) {
+        regs.forEach(function (r) { r.unregister(); });
+      }).catch(function () {});
     }
   </script>
 </body>

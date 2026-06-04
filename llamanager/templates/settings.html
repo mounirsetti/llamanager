@@ -133,4 +133,73 @@
     </form>
   </div>
 </section>
+
+{# ---- Memory guardrails ---- #}
+<section class="lm-section" style="margin-top: 28px;">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Memory guardrails</span>
+  </header>
+  <p style="color: var(--fg-2); max-width: 62ch; margin-bottom: 12px;">
+    Stop a model from exhausting memory <em>during use</em>. A large context
+    or an accumulating prompt cache can creep past VRAM and RAM until the
+    machine thrashes — these limits catch that before it happens.
+  </p>
+
+  {# Live capacity snapshot #}
+  <div style="display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: baseline;
+              padding: 12px 14px; margin-bottom: 16px; border: 1px solid var(--bg-3);
+              border-radius: 4px; background: var(--bg-1); font-size: 0.8125rem;">
+    <span style="color: var(--fg-2);">Capacity now</span>
+    <span><strong style="color: var(--fg-1);">VRAM</strong>
+      {% if mem_vram_total_gb %}{{ mem_vram_total_gb | round(1) }} GB{% else %}<span style="color: var(--fg-3);">detecting…</span>{% endif %}</span>
+    <span><strong style="color: var(--fg-1);">RAM</strong>
+      {{ mem_ram_available_gb }} / {{ mem_ram_total_gb }} GB free</span>
+    {% if mem_swap_total_gb %}
+    <span><strong style="color: var(--fg-1);">swap</strong>
+      {{ mem_swap_used_gb }} / {{ mem_swap_total_gb }} GB used</span>
+    {% endif %}
+    {% if mem_pressure %}
+    <span class="lm-pill {{ 'lm-pill--crashed' if mem_pressure == 'critical' else ('lm-pill--swapping' if mem_pressure == 'warn' else '') }}"
+          style="{% if mem_pressure == 'ok' %}color: var(--ok); border-color: var(--ok);{% endif %}">
+      {{ mem_pressure }}
+    </span>
+    {% endif %}
+  </div>
+
+  <form method="post" action="/ui/settings/mem-guard" id="mem-guard-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div style="display: flex; flex-direction: column; gap: 10px; max-width: 62ch;">
+      <label class="lm-checkbox-row">
+        <input type="checkbox" name="enabled" value="on" {% if mem_guard_enabled %}checked{% endif %}
+               onchange="this.form.submit()">
+        Watch memory and reset the engine to baseline between tasks when it gets tight
+      </label>
+      <label class="lm-checkbox-row">
+        <input type="checkbox" name="clamp_ctx" value="on" {% if mem_clamp_ctx %}checked{% endif %}
+               onchange="this.form.submit()">
+        Auto-reduce a context size that can't physically fit this hardware
+        <span style="color: var(--fg-3);">(otherwise just warn on save &amp; launch)</span>
+      </label>
+      <label class="lm-checkbox-row">
+        <input type="checkbox" name="hard_stop_enabled" value="on" {% if mem_hard_stop_enabled %}checked{% endif %}
+               onchange="this.form.submit()">
+        Last resort: stop the running model if memory stays
+        <strong>critical</strong> <span style="color: var(--fg-3);">(can interrupt a generation)</span>
+      </label>
+
+      <label class="lm-field-label" style="margin-top: 8px;">
+        Context checkpoint cap
+        <span class="lm-field-hint">llama-server <code>--ctx-checkpoints</code> — saved KV snapshots kept in RAM for prompt reuse. Lower uses less RAM; <code>0</code> leaves the engine default.</span>
+      </label>
+      <input class="lm-input" type="number" name="ctx_checkpoints" min="0" max="64" step="1"
+             style="max-width: 14ch;" value="{{ mem_ctx_checkpoints }}"
+             onchange="this.form.submit()">
+    </div>
+  </form>
+  <p style="color: var(--fg-3); font-size: 0.75rem; margin-top: 12px; max-width: 62ch;">
+    The host prompt cache (<code>--cache-ram</code>) is also bounded automatically
+    from free RAM at launch. Changes here take effect the next time the engine
+    starts.
+  </p>
+</section>
 {% endblock %}

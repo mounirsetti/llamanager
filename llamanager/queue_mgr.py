@@ -105,6 +105,16 @@ class QueueManager:
         # enqueue and on each in-flight completion. Read by ``idle_seconds()``
         # for the auto-update-when-idle scheduler (see auto_update.AutoUpdater).
         self._last_busy_monotonic: float = time.monotonic()
+        # Set by the memory watchdog (request_reclaim) when host memory gets
+        # tight. Consumed at the next task boundary in _prepare_and_release to
+        # reset the engine to baseline — a between-task reclaim clears the
+        # accumulated prompt cache / KV checkpoints without interrupting any
+        # live generation. See mem_guard.MemoryWatchdog.
+        self._reclaim_pending: bool = False
+
+    def request_reclaim(self) -> None:
+        """Ask the dispatcher to reset the engine before the next task runs."""
+        self._reclaim_pending = True
 
     # ---- idle detection ----
     def idle_seconds(self) -> float:
@@ -625,6 +635,24 @@ class QueueManager:
             if (loaded != target_spec.model_id
                     or self.sm.runtime.current_profile != target_spec.profile_name):
                 need_swap = True
+
+        # Memory reclaim at the task boundary (requested by the watchdog under
+        # memory pressure). A swap already cold-restarts the engine, so it
+        # resets memory for free — we only need an explicit restart when the
+        # SAME model continues, where the accumulated prompt cache / KV
+        # checkpoints are what's eating RAM. Doing it here (between tasks)
+        # means no live generation is interrupted.
+        if self._reclaim_pending:
+            self._reclaim_pending = False
+            if not need_swap and self.sm.is_running:
+                self.db.log_event("dispatch_mem_reclaim",
+                                  {"req": req.request_id, "model": loaded})
+                log.info("memory reclaim: restarting engine to reset cache "
+                         "before request %s", req.request_id)
+                try:
+                    await self.sm.restart()
+                except Exception as e:  # noqa: BLE001 — reclaim is best-effort
+                    log.warning("memory reclaim restart failed: %s", e)
 
         if need_swap and target_spec is not None:
             req.status = "swapping_model"

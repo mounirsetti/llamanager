@@ -187,6 +187,42 @@ def create_app(config_path: Path | None = None,
 
         prune_task = asyncio.create_task(_periodic_prune())
 
+        # Detect total VRAM once (best-effort, off-thread so the GPU probe
+        # can't stall startup). Feeds the ctx-size guardrail and UI warnings.
+        async def _detect_vram() -> None:
+            try:
+                from .api_ui import _get_system_info
+                info = await asyncio.to_thread(_get_system_info, cfg.models_dir)
+                v = info.get("gpu_vram_total_gb")
+                if v:
+                    cfg.vram_total_gb = float(v)
+                    log.info("memory guard: detected VRAM total %.1f GB", float(v))
+            except Exception as e:  # noqa: BLE001 — best-effort
+                log.debug("VRAM detection failed: %s", e)
+
+        vram_task = asyncio.create_task(_detect_vram())
+
+        # Memory watchdog: watches host RAM/swap and, under pressure, asks the
+        # queue to reset the engine to baseline at the next task boundary. Only
+        # stops a live engine if mem_hard_stop_enabled is set (default off).
+        from .mem_guard import MemoryWatchdog, Pressure
+
+        async def _on_mem_pressure(level, state) -> None:
+            if level >= Pressure.WARN:
+                queue.request_reclaim()
+            if (level == Pressure.CRITICAL
+                    and getattr(app.state.cfg, "mem_hard_stop_enabled", False)):
+                log.error("memory CRITICAL + hard-stop enabled — stopping "
+                          "engine (%s)", state.summary())
+                try:
+                    await sm.stop()
+                except Exception as e:  # noqa: BLE001
+                    log.warning("memory hard-stop failed: %s", e)
+
+        mem_watchdog = MemoryWatchdog(cfg, on_pressure=_on_mem_pressure)
+        mem_watchdog.start()
+        app.state.mem_watchdog = mem_watchdog
+
         # Exclusive-mode heartbeat: re-sweep every N seconds (config knob).
         # Always running; it's the read of cfg.exclusive_mode on each tick
         # that decides whether to actually do anything, so toggling the
@@ -244,11 +280,13 @@ def create_app(config_path: Path | None = None,
             yield
         finally:
             prune_task.cancel()
+            vram_task.cancel()
             boot_sweep_task.cancel()
             excl_stop.set()
             excl_task.cancel()
             au_stop.set()
             au_task.cancel()
+            await mem_watchdog.stop()
             await queue.stop()
             await supervisor.stop()
             await sm.stop()
@@ -382,21 +420,26 @@ def create_app(config_path: Path | None = None,
 
     @app.get("/sw.js", include_in_schema=False)
     async def service_worker():
+        # Self-retiring worker. We no longer ship a service worker (the page
+        # unregisters instead of registering). An earlier version used
+        # `e.respondWith(fetch(e.request))`, which re-issued every request and
+        # corrupted hx-boost POST->303->GET redirects, stripping the page
+        # chrome and styles. A worker keeps running the OLD code in a browser
+        # until it's replaced, so any client still doing an update check on it
+        # fetches THIS script, which installs and immediately unregisters
+        # itself — removing the bad worker for good. ``no-store`` stops the
+        # browser serving a stale (buggy) copy from its HTTP cache.
         sw_js = (
-            "// llamanager service worker — enables PWA install\n"
-            "self.addEventListener('install', e => self.skipWaiting());\n"
-            "self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));\n"
-            "// A registered fetch listener is enough to satisfy PWA install\n"
-            "// criteria. We deliberately do NOT call respondWith(): the old\n"
-            "// `e.respondWith(fetch(e.request))` pass-through re-issued every\n"
-            "// request and corrupted redirect handling for hx-boost POSTs\n"
-            "// (form submit -> 303 -> GET /ui/models), which stripped the page\n"
-            "// chrome and styles. Letting the browser serve requests natively\n"
-            "// preserves those semantics; we add no caching/offline behaviour.\n"
-            "self.addEventListener('fetch', () => {});\n"
+            "// llamanager: service worker retired — this unregisters itself.\n"
+            "self.addEventListener('install', () => self.skipWaiting());\n"
+            "self.addEventListener('activate', (e) => e.waitUntil((async () => {\n"
+            "  try { await self.registration.unregister(); } catch (e) {}\n"
+            "  try { (await caches.keys()).forEach((k) => caches.delete(k)); } catch (e) {}\n"
+            "})()));\n"
         )
         return Response(content=sw_js, media_type="application/javascript",
-                        headers={"Service-Worker-Allowed": "/"})
+                        headers={"Cache-Control": "no-store, max-age=0",
+                                 "Service-Worker-Allowed": "/"})
 
     for _icon_name in ("icon-light-192.png", "icon-light-512.png",
                        "icon-dark-192.png", "icon-dark-512.png"):

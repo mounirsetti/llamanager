@@ -25,6 +25,7 @@ from . import exclusive as _exclusive
 from .config import Config, Profile, detect_engine_for_path
 from .db import DB
 from .gguf_meta import GgufMeta, compute_n_gpu_layers, read_gguf_meta
+from . import mem_guard
 
 log = logging.getLogger(__name__)
 
@@ -249,6 +250,14 @@ def _basic_to_args(prof: Profile, engine: str, model_path: Path) -> dict[str, An
     out: dict[str, Any] = {}
     if prof.ctx_size is not None and engine == "llama":
         out["ctx-size"] = int(prof.ctx_size)
+    # KV-cache quantization (llama only). Shrinks the per-token context memory
+    # independently of the model's weight quant. Quantized KV needs flash
+    # attention, so turn it on too. "" / "f16" leave the engine default.
+    kv = (getattr(prof, "kv_cache_type", "") or "").strip().lower()
+    if engine == "llama" and kv and kv != "f16":
+        out["cache-type-k"] = kv
+        out["cache-type-v"] = kv
+        out["flash-attn"] = "on"
     # VRAM/RAM caps → n-gpu-layers (llama only; mlx ignores it).
     if engine == "llama":
         if (prof.vram_limit_gb is not None
@@ -347,6 +356,69 @@ def resolve_spec(cfg: Config, *, profile: str | None = None,
         profile_name=profile,
         model_id=model,
     )
+
+
+def _apply_launch_guardrails(spec: "StartSpec", cfg: Config, engine: str) -> None:
+    """Inject memory-safety args and log a model-aware ctx warning in place.
+
+    Two best-effort guardrails for the llama engine (mlx is left untouched):
+
+    * **Bound the host prompt cache.** llama-server's ``--cache-ram`` defaults
+      to 8192 MiB of host RAM for caching past prompts' KV. On a memory-tight
+      box already holding a big model that is a lot; we lower it to a fraction
+      of *currently-available* RAM unless the profile set it explicitly. This
+      is what stops the cross-prompt cache accumulation seen in the incident.
+
+    * **Warn on an oversized context.** Using the GGUF metadata we estimate the
+      KV-cache footprint of the configured ``--ctx-size`` and compare it to
+      VRAM (+RAM). A 'danger' verdict means the context cannot fit physical
+      memory and will thrash swap — we log it loudly so it shows up in the
+      activity log next to the launch. (We warn rather than silently clamp:
+      clamping a value the operator set on purpose is its own surprise. Opt
+      into clamping with ``cfg.mem_clamp_ctx = True``.)
+
+    Never raises — a guardrail must not be able to block a launch.
+    """
+    if engine != "llama":
+        return
+    try:
+        args = spec.extra_args
+        # --- host prompt-cache cap ---
+        if not any(k in args for k in ("cache-ram", "cram", "cache_ram")):
+            avail = mem_guard.read_mem_state().ram_available_gb
+            args["cache-ram"] = mem_guard.derive_cache_ram_mib(avail)
+
+        # --- context/SWA checkpoint cap ---
+        ckpt = int(getattr(cfg, "mem_ctx_checkpoints", 0) or 0)
+        if ckpt > 0 and not any(
+                k in args for k in ("ctx-checkpoints", "swa-checkpoints",
+                                    "ctx_checkpoints")):
+            args["ctx-checkpoints"] = ckpt
+
+        # --- oversized-context warning / optional clamp ---
+        ctx = args.get("ctx-size")
+        try:
+            ctx = int(ctx) if ctx is not None else None
+        except (TypeError, ValueError):
+            ctx = None
+        if ctx:
+            vram = getattr(cfg, "vram_total_gb", None)
+            ram = mem_guard.read_mem_state().ram_total_gb
+            # A vision projector also occupies VRAM — count it in the budget.
+            mmproj_gb = (mem_guard.file_gb(spec.mmproj_path)
+                         if spec.mmproj_path else 0.0)
+            verdict = mem_guard.ctx_safety(spec.model_path, ctx, vram, ram,
+                                           extra_gb=mmproj_gb)
+            if verdict and verdict.is_unsafe:
+                log.warning("ctx guardrail [%s]: %s — %s",
+                            verdict.level, spec.model_id, verdict.message)
+                if (getattr(cfg, "mem_clamp_ctx", False)
+                        and verdict.level == "danger" and verdict.safe_ctx):
+                    log.warning("ctx guardrail: clamping ctx-size %d -> %d for %s",
+                                ctx, verdict.safe_ctx, spec.model_id)
+                    args["ctx-size"] = verdict.safe_ctx
+    except Exception as e:  # noqa: BLE001 — guardrails are best-effort
+        log.debug("launch guardrails skipped: %s", e)
 
 
 class ServerError(Exception):
@@ -468,6 +540,7 @@ class ServerManager:
                     "process may be holding it (see exclusive mode)."
                 )
 
+            _apply_launch_guardrails(spec, self.cfg, engine)
             cmd = spec.cmdline(self.cfg.llama_server_binary, port, engine=engine)
             log_path = self.cfg.logs_dir / self._log_name
             log_path.parent.mkdir(parents=True, exist_ok=True)

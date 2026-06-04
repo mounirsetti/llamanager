@@ -2,15 +2,40 @@
 {% set active_downloads = active_downloads + (downloads | selectattr('status', 'equalto', 'pending') | list) %}
 {% set finished_downloads = downloads | selectattr('status', 'in', ['failed', 'cancelled']) | list %}
 
-{# Shared datalist of mmproj-looking GGUFs detected on disk. Both the
-   edit and create profile forms reference it via list="mmproj-options",
-   giving users a dropdown of known files while still allowing a custom
-   path (e.g. a cross-repo reference). #}
-{% if mmproj_options %}
-<datalist id="mmproj-options">
-  {% for opt in mmproj_options %}<option value="{{ opt }}"></option>{% endfor %}
-</datalist>
-{% endif %}
+{# Projector picker — a real dropdown (not free text), with the model's own
+   folder listed first since that's where a matching mmproj almost always
+   lives. ``current`` keeps a previously-set value selected even if the file
+   isn't on disk anymore. Shared by the edit and create profile forms. #}
+{% macro mmproj_select(m, current) %}
+<select class="lm-input lm-input--mono lm-mmproj-select" name="mmproj" {% if m.engine != 'llama' %}disabled{% endif %}>
+  <option value="" data-mmproj-gb="0" {% if not current %}selected{% endif %}>— none —</option>
+  {% if m.mmproj_same %}
+  <optgroup label="In this model's folder">
+    {% for opt in m.mmproj_same %}<option value="{{ opt }}" data-mmproj-gb="{{ (m.mmproj_sizes or {}).get(opt, 0) }}" {% if opt == current %}selected{% endif %}>{{ opt.split('/')|last }}{% if (m.mmproj_sizes or {}).get(opt) %} ({{ m.mmproj_sizes.get(opt) }} GB){% endif %}</option>{% endfor %}
+  </optgroup>
+  {% endif %}
+  {% if m.mmproj_other %}
+  <optgroup label="Other folders">
+    {% for opt in m.mmproj_other %}<option value="{{ opt }}" data-mmproj-gb="{{ (m.mmproj_sizes or {}).get(opt, 0) }}" {% if opt == current %}selected{% endif %}>{{ opt }}{% if (m.mmproj_sizes or {}).get(opt) %} ({{ m.mmproj_sizes.get(opt) }} GB){% endif %}</option>{% endfor %}
+  </optgroup>
+  {% endif %}
+  {% if current and current not in (m.mmproj_same or []) and current not in (m.mmproj_other or []) %}
+  <option value="{{ current }}" data-mmproj-gb="0" selected>{{ current }} (not found on disk)</option>
+  {% endif %}
+</select>
+{% endmacro %}
+
+{# KV-cache data type. Independent of the model's weight quant — it shrinks
+   the per-token context memory. q8_0 is the near-lossless sweet spot. The
+   lm-kv-select class lets the live ctx estimate factor the chosen type. #}
+{% macro kv_cache_select(current) %}
+<select class="lm-input lm-kv-select" name="kv_cache_type">
+  <option value="" {% if (current or '') in ('', 'f16') %}selected{% endif %}>f16 — default, full size</option>
+  <option value="q8_0" {% if current == 'q8_0' %}selected{% endif %}>q8_0 — ~half, near-lossless (recommended)</option>
+  <option value="q5_1" {% if current == 'q5_1' %}selected{% endif %}>q5_1 — ~⅔ size, small quality cost</option>
+  <option value="q4_0" {% if current == 'q4_0' %}selected{% endif %}>q4_0 — ~quarter, some quality cost</option>
+</select>
+{% endmacro %}
 
 {# Backwards-compat for callers that didn't pre-split the list. #}
 {% if text_models is not defined or image_models is not defined %}
@@ -156,17 +181,27 @@
                     <div class="lm-tab-panel" data-panel="basic">
                       {% if m.engine == 'llama' %}
                       <label class="lm-field-label">Context size (tokens)
-                        <span class="lm-field-hint">model max: {{ "{:,}".format(m.ctx_max) }}</span>
+                        <span class="lm-field-hint">model max: {{ "{:,}".format(m.ctx_max) }}{% if m.safe_ctx %} · fits {{ gpu_vram_gb | round(0) | int }} GB GPU up to ~{{ "{:,}".format(m.safe_ctx) }}{% endif %}</span>
                       </label>
                       <div class="lm-slider-pair">
                         <input type="range" class="lm-slider"
                                min="128" max="{{ m.ctx_max }}" step="128"
                                value="{{ prof.ctx_size if prof.ctx_size is not none else 4096 }}">
-                        <input class="lm-input lm-slider-pair__num" type="number"
+                        <input class="lm-input lm-slider-pair__num lm-ctx-input" type="number"
                                name="ctx_size" min="128" max="{{ m.ctx_max }}" step="128"
                                value="{{ prof.ctx_size if prof.ctx_size is not none else '' }}"
-                               placeholder="e.g. 4096">
+                               placeholder="e.g. 4096"
+                               {% if m.kv_per_1k_gb is not none %}data-kv-per-1k-gb="{{ m.kv_per_1k_gb }}"{% endif %}
+                               {% if m.weights_gb is not none %}data-weights-gb="{{ m.weights_gb }}"{% endif %}
+                               {% if m.safe_ctx %}data-safe-ctx="{{ m.safe_ctx }}"{% endif %}
+                               {% if gpu_vram_gb %}data-vram-gb="{{ gpu_vram_gb }}"{% endif %}
+                               data-ram-gb="{{ ram_total_gb }}">
                       </div>
+                      {# Live KV/memory estimate for the chosen context. Filled
+                         by the delegated script below; stays empty when we
+                         couldn't size the model (no GGUF metadata). #}
+                      <p class="lm-ctx-advice lm-help" aria-live="polite"
+                         style="margin-top: 6px; min-height: 1.1em;"></p>
                       {% elif m.engine == 'mlx' %}
                       <label class="lm-field-label">Context size (read-only — fixed by the MLX model)</label>
                       <input class="lm-input" type="text" disabled
@@ -178,8 +213,15 @@
                       <input type="hidden" name="ctx_size" value="">
                       {% endif %}
 
+                      {% if m.engine == 'llama' %}
+                      <label class="lm-field-label">KV cache type
+                        <span class="lm-field-hint">shrinks context memory, independent of the model's weight quant — q8_0 ≈ half, near-lossless (turns on flash-attn)</span>
+                      </label>
+                      {{ kv_cache_select(prof.kv_cache_type) }}
+                      {% endif %}
+
                       <label class="lm-field-label">VRAM limit (GB)
-                        <span class="lm-field-hint">system: {{ vram_total_gb }} GB</span>
+                        <span class="lm-field-hint">cap the VRAM this model may use — layers that don't fit run on the CPU (slower). Leave <em>no cap</em> to use all {{ vram_total_gb }} GB. Lower it only to keep VRAM free for other apps.</span>
                       </label>
                       <div class="lm-slider-pair">
                         <input type="range" class="lm-slider"
@@ -219,13 +261,10 @@
                         <span class="lm-field-hint" style="white-space:nowrap;">/ {{ ram_total_gb }} GB</span>
                       </div>
 
-                      <label class="lm-field-label">mmproj (optional, GGUF multimodal)
-                        {% if mmproj_options %}<span class="lm-field-hint">{{ mmproj_options|length }} detected on disk &mdash; click to pick</span>{% endif %}
+                      <label class="lm-field-label">mmproj (vision projector, optional)
+                        <span class="lm-field-hint">projectors in this model's folder are listed first</span>
                       </label>
-                      <input class="lm-input lm-input--mono" type="text" name="mmproj" value="{{ prof.mmproj or '' }}"
-                             list="mmproj-options"
-                             placeholder="repo/mmproj.gguf"
-                             {% if m.engine != 'llama' %}disabled{% endif %}>
+                      {{ mmproj_select(m, prof.mmproj) }}
 
                       <label class="lm-field-label">Reasoning / thinking
                         <span class="lm-field-hint">injected as <code>chat_template_kwargs.enable_thinking</code> on /v1/chat/completions</span>
@@ -308,15 +347,22 @@
                 <div class="lm-tab-panel" data-panel="basic">
                   {% if m.engine == 'llama' %}
                   <label class="lm-field-label">Context size (tokens)
-                    <span class="lm-field-hint">model max: {{ "{:,}".format(m.ctx_max) }}</span>
+                    <span class="lm-field-hint">model max: {{ "{:,}".format(m.ctx_max) }}{% if m.safe_ctx %} · fits {{ gpu_vram_gb | round(0) | int }} GB GPU up to ~{{ "{:,}".format(m.safe_ctx) }}{% endif %}</span>
                   </label>
                   <div class="lm-slider-pair">
                     <input type="range" class="lm-slider"
                            min="128" max="{{ m.ctx_max }}" step="128" value="4096">
-                    <input class="lm-input lm-slider-pair__num" type="number"
+                    <input class="lm-input lm-slider-pair__num lm-ctx-input" type="number"
                            name="ctx_size" min="128" max="{{ m.ctx_max }}" step="128"
-                           value="4096">
+                           value="4096"
+                           {% if m.kv_per_1k_gb is not none %}data-kv-per-1k-gb="{{ m.kv_per_1k_gb }}"{% endif %}
+                           {% if m.weights_gb is not none %}data-weights-gb="{{ m.weights_gb }}"{% endif %}
+                           {% if m.safe_ctx %}data-safe-ctx="{{ m.safe_ctx }}"{% endif %}
+                           {% if gpu_vram_gb %}data-vram-gb="{{ gpu_vram_gb }}"{% endif %}
+                           data-ram-gb="{{ ram_total_gb }}">
                   </div>
+                  <p class="lm-ctx-advice lm-help" aria-live="polite"
+                     style="margin-top: 6px; min-height: 1.1em;"></p>
                   {% elif m.engine == 'mlx' %}
                   <label class="lm-field-label">Context size (read-only — fixed by the MLX model)</label>
                   <input class="lm-input" type="text" disabled value="defined by model config.json">
@@ -326,8 +372,15 @@
                   <input type="hidden" name="ctx_size" value="">
                   {% endif %}
 
+                  {% if m.engine == 'llama' %}
+                  <label class="lm-field-label">KV cache type
+                    <span class="lm-field-hint">shrinks context memory, independent of the model's weight quant — q8_0 ≈ half, near-lossless (turns on flash-attn)</span>
+                  </label>
+                  {{ kv_cache_select('') }}
+                  {% endif %}
+
                   <label class="lm-field-label">VRAM limit (GB)
-                    <span class="lm-field-hint">system: {{ vram_total_gb }} GB</span>
+                    <span class="lm-field-hint">cap the VRAM this model may use — layers that don't fit run on the CPU (slower). Leave <em>no cap</em> to use all {{ vram_total_gb }} GB. Lower it only to keep VRAM free for other apps.</span>
                   </label>
                   <div class="lm-slider-pair">
                     <input type="range" class="lm-slider"
@@ -361,13 +414,10 @@
                     <span class="lm-field-hint" style="white-space:nowrap;">/ {{ ram_total_gb }} GB</span>
                   </div>
 
-                  <label class="lm-field-label">mmproj (optional)
-                    {% if mmproj_options %}<span class="lm-field-hint">{{ mmproj_options|length }} detected on disk &mdash; click to pick</span>{% endif %}
+                  <label class="lm-field-label">mmproj (vision projector, optional)
+                    <span class="lm-field-hint">projectors in this model's folder are listed first</span>
                   </label>
-                  <input class="lm-input lm-input--mono" type="text" name="mmproj"
-                         list="mmproj-options"
-                         placeholder="repo/mmproj.gguf"
-                         {% if m.engine != 'llama' %}disabled{% endif %}>
+                  {{ mmproj_select(m, '') }}
 
                   <label class="lm-field-label">Reasoning / thinking
                     <span class="lm-field-hint">injected as <code>chat_template_kwargs.enable_thinking</code> on /v1/chat/completions</span>
