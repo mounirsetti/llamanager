@@ -147,6 +147,32 @@ def build_command(
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUTF8": "1",
     }
+    # AMD ROCm: the lightweight torch wheels dlopen system ROCm libs
+    # (libroctx64, libroctracer, …) that live under /opt/rocm/core-*/lib,
+    # which isn't on the default linker path. Prepend the ROCm lib dirs so
+    # ``import torch`` succeeds and sees the GPU. No-op on non-AMD hosts
+    # (rocm_lib_dirs() returns []).
+    from ..gpu_detect import rocm_lib_dirs
+    rocm_dirs = rocm_lib_dirs()
+    if rocm_dirs:
+        import os as _os
+        prior = _os.environ.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = _os.pathsep.join(
+            rocm_dirs + ([prior] if prior else []))
+        # MIOpen safety on AMD: use the heuristic ("FAST") kernel finder
+        # instead of an exhaustive search (which is slow and, on brand-new
+        # archs like gfx1201, unstable), and give it a writable cache so
+        # whatever it does compile persists across runs. Only matters when
+        # the VAE decode runs on the GPU (--vae-device cuda); the default
+        # ROCm path keeps the conv decode on CPU.
+        env.setdefault("MIOPEN_FIND_MODE", "FAST")
+        cache = cfg.data_dir / "cache" / "miopen"
+        try:
+            cache.mkdir(parents=True, exist_ok=True)
+            env.setdefault("MIOPEN_USER_DB_PATH", str(cache))
+            env.setdefault("MIOPEN_CUSTOM_CACHE_DIR", str(cache))
+        except OSError:
+            pass
     return argv, env
 
 

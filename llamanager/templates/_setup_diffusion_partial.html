@@ -61,6 +61,21 @@
       <form method="post" action="/ui/setup-diffusion/engine/{{ engine }}/install-deps"
             style="display: inline-block;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {% set auto_be = {'amd':'ROCm','nvidia':'CUDA','apple':'CPU','cpu':'CPU'}.get(gpu.kind, 'CPU') %}
+        <label style="display: flex; align-items: center; gap: 8px;
+                      margin: 6px 0 10px; font-size: 0.8125rem; max-width: 60ch;">
+          <span>PyTorch build</span>
+          <select name="torch_backend" class="lm-input lm-input--mono"
+                  style="padding: 4px 6px; font-size: 0.8125rem;">
+            <option value="auto" selected>Auto-detect ({{ auto_be }})</option>
+            <option value="rocm">AMD ROCm</option>
+            <option value="cuda">NVIDIA CUDA</option>
+            <option value="cpu">CPU only</option>
+          </select>
+          <span style="color: var(--fg-3); font-size: 0.75rem;">
+            {% if gpu.kind == 'amd' %}GPU: AMD{% if gpu.rocm_arch %} {{ gpu.rocm_arch }}{% endif %}{% elif gpu.kind == 'nvidia' %}GPU: NVIDIA{% elif gpu.kind == 'apple' %}Apple Silicon{% else %}No GPU detected{% endif %}
+          </span>
+        </label>
         {% if plan.supports_flash_attn_patch %}
         <label style="display: flex; align-items: flex-start; gap: 8px;
                       margin: 6px 0 10px; font-size: 0.8125rem; max-width: 60ch;">
@@ -88,6 +103,26 @@
         {% elif install.status == 'cancelled' %}
         <span style="margin-left: 10px; font-size: 0.75rem; color: var(--fg-3);">◌ last install was cancelled</span>
         {% endif %}
+      {% endif %}
+
+      {# Keep the captured log reachable after the install finishes — the
+         live progress box only renders while running, so without this the
+         operator has no way to review what was installed (or why a verify
+         warned). #}
+      {% if install and install.status in ('done', 'failed', 'cancelled') and install.log %}
+      <details style="margin-top: 10px;">
+        <summary style="cursor: pointer; font-size: 0.75rem; color: var(--fg-2);">
+          View install log ({{ install.status }})
+        </summary>
+        {% if 'cuda_available False' in install.log or 'torch import check failed' in install.log %}
+        <p class="lm-engine-section__note" style="color: var(--warn); margin: 6px 0;">
+          ⚠ torch didn't import cleanly during verification. On AMD/ROCm this is
+          usually a system-library path issue that llamanager now sets at runtime —
+          try generating an image first; only reinstall if it still fails.
+        </p>
+        {% endif %}
+        <div class="lm-progress__log" style="max-height: 240px;">{{ install.log[-6000:] }}</div>
+      </details>
       {% endif %}
     {% endif %}
 

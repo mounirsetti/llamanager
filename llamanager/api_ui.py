@@ -3285,19 +3285,25 @@ async def install_engine_deps(request: Request, engine: str,
                               patch_flash_attn: str = Form(""),
                               diffusers_version: str = Form(""),
                               reset_diffusers: str = Form(""),
+                              torch_backend: str = Form("auto"),
                               _: None = Depends(require_csrf)) -> Response:
     """Kick off an opinionated venv + pip install for one engine.
 
     ``diffusers_version`` pins a specific diffusers (upgrade/downgrade) and
     persists as an override; ``reset_diffusers`` clears the override and
-    reinstalls the shipped pin."""
+    reinstalls the shipped pin. ``torch_backend`` (auto/rocm/cuda/cpu)
+    chooses which torch build to install."""
     from .config import set_diffusers_override
+    from .engine_installer import TORCH_BACKENDS
     cfg = request.app.state.cfg
     installer = request.app.state.engine_installer
     options: dict[str, Any] = {}
     # Checkbox values arrive as "on" when checked, "" when not.
     if patch_flash_attn:
         options["patch_flash_attn"] = True
+    tb = (torch_backend or "auto").strip().lower()
+    if tb in TORCH_BACKENDS and tb != "auto":
+        options["torch_backend"] = tb
     chosen = (diffusers_version or "").strip()
     if reset_diffusers:
         set_diffusers_override(cfg.config_path, engine, None)

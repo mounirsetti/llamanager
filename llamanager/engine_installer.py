@@ -38,7 +38,7 @@ import httpx
 
 from .config import Config
 from .db import DB
-from .gpu_detect import GpuProfile, detect_gpu, render_group_ok
+from .gpu_detect import GpuProfile, detect_gpu, render_group_ok, rocm_lib_dirs
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +58,16 @@ DIFFUSERS_PIN = "0.38.0"
 # this prefix matching the current Python ABI.
 AMD_ROCM_REL = "rocm-rel-7.2.1"
 AMD_ROCM_INDEX = f"https://repo.radeon.com/rocm/manylinux/{AMD_ROCM_REL}/"
+
+# PyTorch's CPU-only wheel index. Used when the operator explicitly picks
+# the "cpu" torch backend (or on a CPU-only machine) so we install the
+# slim CPU build instead of pip's default CUDA wheel.
+CPU_TORCH_INDEX = "https://download.pytorch.org/whl/cpu"
+
+# Engines whose AMD path we know how to wire to repo.radeon.com wheels.
+AMD_WHEEL_ENGINES = {"hidream", "z_image"}
+# Valid values for the UI/CLI torch-backend selector.
+TORCH_BACKENDS = ("auto", "rocm", "cuda", "cpu")
 
 # Hard-pinned fallback wheels per Python ABI. Used when the index
 # scrape fails (network down, AMD changed page layout, etc.). Bump
@@ -106,6 +116,11 @@ class ResolvedPlan:
     packages: list[str] = field(default_factory=list)
     wheel_urls: list[str] = field(default_factory=list)
     extra_index_url: str | None = None
+    # When set, torch is installed in a dedicated step from this index
+    # (``pip install torch --index-url ...``) before the regular packages,
+    # and ``torch`` is dropped from ``packages``. Used for the CPU build,
+    # which pip's default index won't select.
+    torch_index_url: str = ""
     # The hidream-source pipeline.py defaults use_flash_attn=True. On
     # AMD (no flash_attn wheel) we need to flip it. The installer only
     # applies this when ``options['patch_flash_attn']`` is set AND
@@ -133,9 +148,10 @@ ENGINE_PLANS: dict[str, EnginePackages] = {
         notes=(
             f"Installs diffusers {DIFFUSERS_PIN} (the tested release, which "
             "ships ZImagePipeline) plus torch and the Z-Image "
-            "tokenizer/text-encoder deps. On NVIDIA, the default torch wheel "
-            "is CUDA 12.x; on AMD/ROCm or Apple Silicon you should build the "
-            "venv yourself and skip this button."
+            "tokenizer/text-encoder deps. Auto-detects the GPU: AMD gets the "
+            "official ROCm torch wheels from repo.radeon.com, NVIDIA the CUDA "
+            "wheel, otherwise a CPU build. Override with the PyTorch-build "
+            "selector."
         ),
     ),
     "hidream": EnginePackages(
@@ -290,16 +306,40 @@ def _resolve_amd_wheel_set(abi: str, emit, target_release: str = "") -> list[str
     return fallback
 
 
+def _effective_backend(backend: str | None, gpu: GpuProfile) -> str:
+    """Resolve the requested torch backend against the detected GPU.
+
+    ``backend`` is one of TORCH_BACKENDS. "auto" maps the detected GPU
+    family to a concrete backend; anything else is honoured verbatim so
+    the operator can force a build (e.g. CPU on a flaky GPU, or ROCm
+    before the render-group fix lands)."""
+    b = (backend or "auto").lower()
+    if b not in TORCH_BACKENDS:
+        b = "auto"
+    if b != "auto":
+        return b
+    return {"amd": "rocm", "nvidia": "cuda",
+            "apple": "cpu", "cpu": "cpu"}.get(gpu.kind, "cpu")
+
+
+def _is_torch_pkg(spec: str) -> bool:
+    """True if a pip requirement names torch/torchvision/torchaudio."""
+    name = re.split(r"[=<>!~ \[]", spec, 1)[0].strip().lower()
+    return name in {"torch", "torchvision", "torchaudio"}
+
+
 def resolve_plan(engine: str, gpu: GpuProfile, emit=None,
-                 cfg: Config | None = None) -> ResolvedPlan | None:
-    """Tailor the install plan to the detected GPU.
+                 cfg: Config | None = None,
+                 backend: str = "auto") -> ResolvedPlan | None:
+    """Tailor the install plan to the detected GPU and chosen torch backend.
 
     Returns None if the engine has no plan at all (callers treat that as
     "no auto-install path for this engine"). ``emit`` is the install
     log line emitter; when None, fall back to a no-op so resolve_plan
     can be called from the UI for pre-install previews too. ``cfg``
     enables operator overrides like ``hidream_target_rocm_release``;
-    omit it for pure-detection previews.
+    omit it for pure-detection previews. ``backend`` is the operator's
+    torch-build choice from the UI (auto/rocm/cuda/cpu).
     """
     if emit is None:
         emit = lambda _line: None  # noqa: E731
@@ -309,50 +349,73 @@ def resolve_plan(engine: str, gpu: GpuProfile, emit=None,
         return None
 
     abi = _python_abi()
+    eff = _effective_backend(backend, gpu)
+    chosen_caption = "" if (backend or "auto") == "auto" else " (operator choice)"
 
-    if engine == "hidream" and gpu.kind == "amd":
+    # ---- AMD ROCm wheels (repo.radeon.com) -----------------------------
+    if eff == "rocm" and engine in AMD_WHEEL_ENGINES:
         target_release = ""
         if cfg is not None:
             target_release = getattr(cfg, "hidream_target_rocm_release", "") or ""
         rel = (target_release or AMD_ROCM_REL).strip()
         wheels = _resolve_amd_wheel_set(abi, emit, target_release)
-        pkgs = [
-            "transformers==4.57.1",
-            "accelerate==1.13.0",
-            f"diffusers=={DIFFUSERS_PIN}",
-            "huggingface_hub", "safetensors", "Pillow",
-            "einops", "sentencepiece",
-        ]
+        # Keep the engine's own pinned HF stack, but let the ROCm wheels
+        # provide torch/torchvision (installed first, with --no-deps).
+        pkgs = [p for p in base.packages if not _is_torch_pkg(p)]
         arch_caption = f", arch {gpu.rocm_arch}" if gpu.rocm_arch else ""
         override_caption = (
             " (operator override)" if target_release
             and target_release != AMD_ROCM_REL else ""
         )
+        notes = (
+            f"AMD ROCm path (target {rel}{override_caption}{arch_caption})"
+            f"{chosen_caption}. Installs official AMD torch/torchvision/triton "
+            "wheels from repo.radeon.com, then the HuggingFace stack."
+        )
+        if engine == "hidream":
+            notes += " Recommend enabling the pipeline.py flash-attn patch below."
+        if not wheels:
+            notes += (" NOTE: no ROCm wheels resolved for this Python ABI — "
+                      "pip will fall back to a generic torch, which won't use "
+                      "the GPU.")
         return ResolvedPlan(
             engine=engine,
             label=base.label,
-            notes=(
-                f"AMD ROCm path (target {rel}{override_caption}{arch_caption}). "
-                "Installs official AMD torch/torchvision/triton wheels "
-                "from repo.radeon.com, then pins the HuggingFace stack "
-                "to a known-compatible set. Recommend enabling the "
-                "pipeline.py flash-attn patch below."
-            ),
+            notes=notes,
             space_mb=9000,
             target=f"amd-{rel.replace('-', '')}",
             packages=pkgs,
             wheel_urls=wheels,
-            supports_flash_attn_patch=True,
+            supports_flash_attn_patch=(engine == "hidream"),
         )
 
-    # NVIDIA / Apple / CPU — preserve the original generic plan, just
-    # in the new shape.
+    if eff == "rocm":
+        emit(f"[plan] engine {engine!r} has no AMD wheel recipe; "
+             f"falling back to generic torch")
+
+    # ---- CPU-only build ------------------------------------------------
+    if eff == "cpu":
+        return ResolvedPlan(
+            engine=engine,
+            label=base.label,
+            notes=(f"CPU-only torch build{chosen_caption} (from "
+                   f"{CPU_TORCH_INDEX}). Image generation will be slow; "
+                   "pick a GPU backend if you have one."),
+            space_mb=base.space_mb,
+            target="cpu",
+            packages=[p for p in base.packages if not _is_torch_pkg(p)],
+            torch_index_url=CPU_TORCH_INDEX,
+            supports_flash_attn_patch=(engine == "hidream"),
+        )
+
+    # ---- NVIDIA CUDA / generic fallback --------------------------------
     return ResolvedPlan(
         engine=engine,
         label=base.label,
-        notes=base.notes,
+        notes=base.notes + (
+            f" Torch build: CUDA{chosen_caption}." if eff == "cuda" else ""),
         space_mb=base.space_mb,
-        target=gpu.kind,
+        target=eff,
         packages=list(base.packages),
         wheel_urls=[],
         extra_index_url=base.extra_index_url,
@@ -603,9 +666,11 @@ class EngineInstaller:
                  + (f" arch={gpu.rocm_arch}" if gpu.rocm_arch else "")
                  + (f" render_gid={gpu.render_gid}" if gpu.render_gid is not None else ""))
 
-            plan = resolve_plan(engine, gpu, emit, cfg=self.cfg)
+            backend = str(options.get("torch_backend") or "auto")
+            plan = resolve_plan(engine, gpu, emit, cfg=self.cfg, backend=backend)
             if plan is None:
                 raise RuntimeError(f"no resolvable plan for engine {engine!r}")
+            emit(f"[plan] torch backend = {backend}")
 
             # Optional explicit diffusers version (UI/CLI version picker —
             # upgrade or downgrade). Rewrite the diffusers== entry in-place;
@@ -676,6 +741,23 @@ class EngineInstaller:
                 if rc != 0:
                     raise RuntimeError(f"GPU wheel install failed (exit {rc})")
 
+            # Step A2: dedicated torch index (CPU build). pip's default
+            # index serves the CUDA wheel under the same version, so the
+            # CPU build can only be pinned via its own --index-url.
+            if plan.torch_index_url:
+                set_progress(
+                    30, f"Installing torch from {plan.torch_index_url}")
+                argv = [
+                    str(python_path), "-m", "pip", "install", "--upgrade",
+                    "--progress-bar", "off",
+                    "--index-url", plan.torch_index_url, "torch",
+                ]
+                rc = await self._run_subprocess(argv, cancel, emit)
+                if cancel.is_set():
+                    raise asyncio.CancelledError()
+                if rc != 0:
+                    raise RuntimeError(f"CPU torch install failed (exit {rc})")
+
             # Step B: regular pypi packages.
             set_progress(
                 60,
@@ -696,12 +778,21 @@ class EngineInstaller:
                 raise RuntimeError(f"pip install failed (exit {rc})")
 
             set_progress(90, "Verifying torch imports")
+            # On AMD, the torch process needs the system ROCm libs on its
+            # path (same as the runtime spawn env) or the import fails with
+            # a misleading "not runnable" warning even though the GPU works.
+            verify_env: dict[str, str] | None = None
+            rocm_dirs = rocm_lib_dirs()
+            if rocm_dirs:
+                prior = os.environ.get("LD_LIBRARY_PATH", "")
+                verify_env = {"LD_LIBRARY_PATH": os.pathsep.join(
+                    rocm_dirs + ([prior] if prior else []))}
             rc = await self._run_subprocess(
                 [str(python_path), "-c",
                  "import torch; print('torch', torch.__version__, "
                  "'hip', getattr(torch.version, 'hip', None), "
                  "'cuda_available', torch.cuda.is_available())"],
-                cancel, emit,
+                cancel, emit, env=verify_env,
             )
             if rc != 0:
                 emit("[warn] torch import check failed — installed packages "
@@ -750,14 +841,16 @@ class EngineInstaller:
             self._tasks.pop(install_id, None)
 
     async def _run_subprocess(self, argv: list[str], cancel: asyncio.Event,
-                              emit) -> int:
+                              emit, env: dict[str, str] | None = None) -> int:
         """Run a subprocess, streaming each stdout/stderr line into the log.
         Honours ``cancel`` by terminating the child. Returns the exit code."""
         emit(f"$ {' '.join(argv)}")
+        full_env = {**os.environ, **env} if env else None
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            env=full_env,
         )
 
         async def reader() -> None:

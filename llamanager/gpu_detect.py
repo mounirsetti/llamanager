@@ -76,6 +76,43 @@ def _rocm_smi_arch() -> str | None:
     return m.group(1).lower() if m else None
 
 
+def rocm_lib_dirs() -> list[str]:
+    """Return existing ROCm shared-library directories, newest layout first.
+
+    The lightweight AMD torch wheels (``+rocmX.Y.lw``) don't bundle the
+    full ROCm runtime — they dlopen libs like ``libroctx64.so`` from the
+    system install. Those live under ``/opt/rocm`` but, on recent ROCm,
+    in versioned ``core-*/lib`` subdirs that aren't on the default linker
+    path. We collect them so callers can prepend them to
+    ``LD_LIBRARY_PATH`` when spawning a torch process. Returns [] when no
+    ROCm install is found (non-AMD hosts), so callers can apply it
+    unconditionally."""
+    import glob
+    roots: list[str] = []
+    env_root = os.environ.get("ROCM_PATH")
+    if env_root:
+        roots.append(env_root)
+    roots += sorted(glob.glob("/opt/rocm*"), reverse=True)
+
+    dirs: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        # core-*/lib holds libroctx64/libroctracer on ROCm 7.x; plain
+        # lib/lib64 hold the math libs; llvm/lib has the device libs.
+        candidates = sorted(glob.glob(os.path.join(root, "core-*/lib")),
+                            reverse=True)
+        candidates += [
+            os.path.join(root, "lib"),
+            os.path.join(root, "lib64"),
+            os.path.join(root, "lib", "llvm", "lib"),
+        ]
+        for d in candidates:
+            if d not in seen and os.path.isdir(d):
+                seen.add(d)
+                dirs.append(d)
+    return dirs
+
+
 def detect_gpu() -> GpuProfile:
     """Return the GPU profile for this host.
 
