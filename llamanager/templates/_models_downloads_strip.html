@@ -15,7 +15,11 @@
      hx-get="/ui/models/_downloads_strip"
      hx-trigger="every 2s"
      hx-swap="morph"
-     {% endif %}>
+     {% endif %}
+     {# Don't let the cancel/remove forms inside inherit hx-swap="morph":
+        a boosted form would otherwise morph the whole <body> (boost targets
+        body) and crash htmx ("document.body is null"). #}
+     hx-disinherit="hx-swap">
 {% if active_downloads %}
 <table class="lm-table" style="margin-bottom: 18px;">
   <tbody>

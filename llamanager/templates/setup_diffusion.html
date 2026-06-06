@@ -177,7 +177,12 @@
      hx-get="/ui/setup-diffusion/_partial"
      hx-trigger="every 2s"
      hx-swap="morph"
-     {% endif %}>
+     {% endif %}
+     {# The install/download/setup forms inside must NOT inherit
+        hx-swap="morph": a boosted form submit targets <body> (hx-boost), so an
+        inherited morph would morph the whole body and crash htmx
+        ("document.body is null"). Keep their swaps as the boosted default. #}
+     hx-disinherit="hx-swap">
 
   {% include "_setup_diffusion_partial.html" %}
 

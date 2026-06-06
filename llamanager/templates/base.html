@@ -41,7 +41,11 @@
      re-rendered (e.g. the 2s polls on /ui/models and /ui/setup-diffusion).
      Without this, a poll that re-renders the wrapper would wipe any
      in-flight profile-edit form the operator had open. #}
-  <script src="https://unpkg.com/idiomorph@0.3.0/dist/idiomorph-ext.min.js"
+  {# Pinned to 0.7.3: 0.3.0 crashed when a swap morphed the <body> (the
+     boosted-form inheritance bug) and its ext mis-handled non-morph swap
+     styles (isInlineSwap threw). 0.7.3 morphs the body in place and guards
+     those, so it's a safe net even if some container forgets hx-disinherit. #}
+  <script src="https://unpkg.com/idiomorph@0.7.3/dist/idiomorph-ext.min.js"
           crossorigin="anonymous"
           referrerpolicy="no-referrer"></script>
 

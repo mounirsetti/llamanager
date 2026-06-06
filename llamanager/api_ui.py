@@ -1724,7 +1724,7 @@ async def models_load_ui(request: Request, model_id: str = Form(...),
             await sm.start(spec)
     except (ServerError, ValueError) as e:
         return _error_html(f"load failed: {e}", status_code=400)
-    return RedirectResponse("/ui/models", status_code=303)
+    return _models_redirect(request)
 
 
 @router.post("/models/delete", response_class=HTMLResponse)
@@ -1740,7 +1740,7 @@ async def models_delete_ui(request: Request, model_id: str = Form(...),
     ok, err = reg.delete(model_id, currently_loaded=loaded, force=force)
     if not ok:
         return _error_html(f"delete failed: {err}", status_code=400)
-    return RedirectResponse("/ui/models", status_code=303)
+    return _models_redirect(request)
 
 
 @router.post("/models/add-existing", response_class=HTMLResponse)
@@ -1764,7 +1764,7 @@ async def models_add_existing(request: Request,
         # Symlinks may fail on some Windows setups; fall back to copy
         import shutil
         shutil.copy2(src, dest)
-    return RedirectResponse("/ui/models", status_code=303)
+    return _models_redirect(request)
 
 
 @router.post("/models/pull", response_class=HTMLResponse)
@@ -1795,7 +1795,7 @@ async def models_pull_ui(request: Request, source: str = Form(...),
     # toast: returning a whole document to a boosted POST makes htmx swap the
     # <body> element and crash mid-swap ("document.body is null") on this page,
     # because its content wires up `from:body` triggers during the swap.
-    return RedirectResponse("/ui/models", status_code=303)
+    return _models_redirect(request)
 
 
 @router.post("/models/set-dir", response_class=HTMLResponse)
@@ -1826,7 +1826,7 @@ async def models_set_dir(request: Request,
         else:
             text = text.rstrip("\n") + f"\n\n[server]\n{new_line}\n"
     config_path.write_text(text, encoding="utf-8")
-    return RedirectResponse("/ui/models", status_code=303)
+    return _models_redirect(request)
 
 
 @router.post("/downloads/{download_id}/cancel", response_class=HTMLResponse)
@@ -1834,7 +1834,7 @@ async def download_cancel_ui(request: Request, download_id: str,
                               _: None = Depends(require_csrf)) -> Response:
     reg: Registry = request.app.state.registry
     reg.cancel_pull(download_id)
-    return RedirectResponse("/ui/models", status_code=303)
+    return _models_redirect(request)
 
 
 @router.post("/downloads/{download_id}/delete", response_class=HTMLResponse)
@@ -1842,7 +1842,7 @@ async def download_delete_ui(request: Request, download_id: str,
                               _: None = Depends(require_csrf)) -> Response:
     reg: Registry = request.app.state.registry
     reg.delete_download(download_id)
-    return RedirectResponse("/ui/models", status_code=303)
+    return _models_redirect(request)
 
 
 def _open_path(path: str) -> None:
@@ -1910,7 +1910,7 @@ async def models_open_dir(request: Request,
                           _: None = Depends(require_csrf)) -> Response:
     cfg = request.app.state.cfg
     _open_path(str(cfg.models_dir))
-    return RedirectResponse("/ui/models", status_code=303)
+    return _models_redirect(request)
 
 
 @router.post("/models/locate", response_class=HTMLResponse)
@@ -1921,7 +1921,7 @@ async def models_locate(request: Request,
     m = reg.get(model_id)
     if m:
         _open_path(str(m.path))
-    return RedirectResponse("/ui/models", status_code=303)
+    return _models_redirect(request)
 
 
 # ---------- local filesystem browser (for path inputs) ----------
@@ -3911,20 +3911,31 @@ def _reload_config(request: Request) -> None:
     request.app.state.registry.models_dir = new_cfg.models_dir
 
 
+def _models_redirect(request: Request) -> Response:
+    """Post-mutation response for /ui/models actions.
+
+    For htmx (boosted) requests we send an ``HX-Redirect`` header, which makes
+    htmx do a real client-side navigation (``location.href``) to the models
+    page — a fresh full render, exactly like clicking the nav link. We do NOT
+    return a 303 here: htmx would follow it with an XHR and swap the full page
+    into ``<body>``, and that boosted whole-page swap proved persistently
+    fragile for the models page (repeated "UI breaks on save", with and
+    without a console error). A genuine navigation sidesteps the swap entirely.
+    Non-htmx clients (rare) get the normal 303 so plain form posts still work.
+    """
+    if _wants_htmx(request):
+        resp = Response(status_code=204)
+        resp.headers["HX-Redirect"] = "/ui/models"
+        return resp
+    return RedirectResponse("/ui/models", status_code=303)
+
+
 def _profile_saved_response(request: Request, model_id: str,
                             ctx_size: int | None,
                             mmproj: str = "") -> Response:
-    """Post-save response for the profile editor: a clean 303 back to the
-    models page (standard post-redirect-get, same as every other action).
-
-    We intentionally do NOT render the page directly to attach a warning
-    toast. Returning a full HTML document to a boosted POST bypasses the
-    redirect flow the rest of the UI uses and proved fragile (it could leave
-    the page without its chrome/styles). The oversized-context warning is
-    surfaced live in the editor — the estimate under the ctx slider — and
-    again loudly in the log at launch, so nothing is lost by redirecting.
-    """
-    return RedirectResponse("/ui/models", status_code=303)
+    """Post-save response for the profile editor. See ``_models_redirect``:
+    a real navigation back to the models page, not a boosted body swap."""
+    return _models_redirect(request)
 
 
 def _read_log_tail(cfg, lines: int = 15) -> str:
@@ -4343,7 +4354,7 @@ async def models_profile_delete(request: Request, profile_name: str,
     mid = model_id.strip()
     delete_profile(cfg.config_path, mid, profile_name)
     _reload_config(request)
-    return RedirectResponse("/ui/models", status_code=303)
+    return _models_redirect(request)
 
 
 @router.post("/models/profiles/set-model-default", response_class=HTMLResponse)
@@ -4365,7 +4376,7 @@ async def models_set_model_default(request: Request,
             )
     set_model_default_profile(cfg.config_path, mid, pname)
     _reload_config(request)
-    return RedirectResponse("/ui/models", status_code=303)
+    return _models_redirect(request)
 
 
 @router.post("/models/default-args/save", response_class=HTMLResponse)
@@ -4387,7 +4398,7 @@ async def models_default_args_save(request: Request,
         return _error_html("args must be a JSON object", status_code=400)
     set_default_args(cfg.config_path, eng, args)
     _reload_config(request)
-    return RedirectResponse("/ui/models", status_code=303)
+    return _models_redirect(request)
 
 
 @router.post("/models/set-default", response_class=HTMLResponse)
@@ -4398,7 +4409,7 @@ async def models_set_default(request: Request,
     cfg = request.app.state.cfg
     update_defaults(cfg.config_path, default_model=model_id.strip())
     _reload_config(request)
-    return RedirectResponse("/ui/models", status_code=303)
+    return _models_redirect(request)
 
 
 # ---- Top-bar (sticky model selector) routes ----

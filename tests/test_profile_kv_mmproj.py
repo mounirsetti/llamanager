@@ -54,6 +54,45 @@ def test_models_page_has_kv_and_mmproj_controls(app):
         assert 'list="mmproj-options"' not in body  # old datalist input gone
 
 
+def test_profile_save_navigates_not_swaps(app):
+    """A boosted (htmx) profile save must respond with HX-Redirect — a real
+    navigation back to the models page — NOT a 303 that htmx would follow and
+    swap into <body>. The boosted whole-page body swap of the models page was
+    persistently fragile ('UI breaks on save'); a navigation sidesteps it.
+    Non-htmx posts still get a 303 so plain form submits work. Regression
+    guard for the recurring save breakage."""
+    _seed_model(app)
+    with _admin_client(app) as client:
+        tok = _csrf(client.get("/ui/models").text)
+        data = {"csrf_token": tok, "model_id": "test/model.gguf",
+                "new_name": "test", "ctx_size": "4096",
+                "ram_spill_policy": "default", "args_json": "{}"}
+        # htmx request → HX-Redirect, empty body (no swap)
+        r = client.post("/ui/models/profiles/test/update", data=data,
+                        headers={"HX-Request": "true"}, follow_redirects=False)
+        assert r.status_code == 204
+        assert r.headers.get("HX-Redirect") == "/ui/models"
+        assert r.content == b""
+        # plain request → standard 303
+        r2 = client.post("/ui/models/profiles/test/update", data=data,
+                         follow_redirects=False)
+        assert r2.status_code == 303
+        assert r2.headers["location"] == "/ui/models"
+
+
+def test_models_cards_disinherits_swap(app):
+    """The morph container holding the profile/model forms must carry
+    hx-disinherit="hx-swap". Without it a boosted form submit inherits
+    hx-swap="morph" + hx-boost's body target → htmx morphs <body> and crashes
+    with 'document.body is null' (htmx:swapError). Regression guard."""
+    _seed_model(app)
+    with _admin_client(app) as client:
+        body = client.get("/ui/models").text
+        m = re.search(r'<div id="models-cards"[^>]*>', body)
+        assert m, "#models-cards not rendered"
+        assert 'hx-disinherit="hx-swap"' in m.group(0)
+
+
 def test_kv_cache_type_saves_and_translates(app):
     with _admin_client(app) as client:
         body = client.get("/ui/models").text

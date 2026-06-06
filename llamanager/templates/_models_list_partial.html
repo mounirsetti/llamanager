@@ -500,7 +500,15 @@
      hx-get="/ui/models/_list"
      hx-trigger="lmDownloadsIdle from:body"
      hx-select="#models-cards"
-     hx-swap="morph">
+     hx-swap="morph"
+     {# CRITICAL: the model-card / profile-editor forms live inside here. Without
+        this, a boosted form submit (load, set-default, delete, profile save…)
+        would INHERIT hx-swap="morph" while hx-boost targets <body> — htmx would
+        then morph the whole <body>, which nulls document.body mid-swap and
+        throws "document.body is null" (htmx:swapError), breaking the UI. The
+        disinherit keeps those forms on the normal boosted body swap; only this
+        div's own poll uses morph. #}
+     hx-disinherit="hx-swap">
 
 {# ---- LLMs (text engines) ---- #}
 {% if show_text %}

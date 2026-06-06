@@ -335,6 +335,8 @@
       </div>
       <div style="display: flex; align-items: center; gap: 6px;">
         <label style="font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2);">System</label>
+
+
         <input id="chat-system" type="text" class="lm-input" value="You are a helpful assistant."
                style="font-size: 0.8125rem; padding: 4px 8px; min-width: 200px; max-width: 360px; border-bottom-width: 1px;">
       </div>
@@ -1051,6 +1053,23 @@
     else if (e.key === 'Escape' && streaming) { e.preventDefault(); stop(); }
   });
   systemEl.addEventListener('change', function () { if (activeChat) { activeChat.system = systemEl.value; saveHistory(); } });
+
+  // Copy code button handler
+  messagesEl.addEventListener('click', function (e) {
+    var btn = e.target.closest('.chat-copy-btn');
+    if (btn) {
+      var code = btn.getAttribute('data-code');
+      navigator.clipboard.writeText(code).then(function () {
+        var original = btn.textContent;
+        btn.textContent = 'Copied!';
+        btn.style.color = 'var(--accent)';
+        setTimeout(function () {
+          btn.textContent = original;
+          btn.style.color = '';
+        }, 1500);
+      });
+    }
+  });
 
   // Init
   loadHistory();
