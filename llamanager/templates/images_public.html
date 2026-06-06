@@ -58,16 +58,13 @@
     }
     ::selection { background: var(--accent-soft); color: var(--fg-0); }
 
-    /* Login overlay (kept identical in spirit to the previous design) */
+    /* Login overlay */
     .img-login {
       position: fixed; inset: 0; background: var(--bg-0);
       display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 24px;
-      z-index: 10;
+      align-items: center; justify-content: center; gap: 24px; z-index: 100;
     }
-    .img-login-box {
-      width: 320px; display: flex; flex-direction: column; gap: 10px;
-    }
+    .img-login-box { width: 320px; display: flex; flex-direction: column; gap: 10px; }
     .img-login-box input {
       width: 100%; padding: 10px 12px; background: var(--bg-1);
       border: 1px solid var(--bg-3); color: var(--fg-0); font-size: 0.9375rem;
@@ -77,7 +74,7 @@
     .login-logo--light { display: none; }
     [data-theme="light"] .login-logo--light { display: inline; }
     [data-theme="light"] .login-logo--dark { display: none; }
-    .login-theme { display: flex; gap: 4px; }
+    .theme-btns { display: flex; gap: 4px; }
     .theme-btns button {
       background: transparent; border: 1px solid var(--bg-3); color: var(--fg-2);
       padding: 4px 10px; font-size: 0.6875rem; letter-spacing: 0.08em;
@@ -85,231 +82,194 @@
     }
     .theme-btns button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 
-    /* Buttons + inputs (shared with admin look) */
+    /* Buttons + inputs (shared look with admin) */
     .lm-btn {
-      display: inline-flex; align-items: center; gap: 6px;
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
       background: var(--bg-2); border: 1px solid var(--bg-3); color: var(--fg-0);
-      padding: 6px 12px; font-size: 0.8125rem; cursor: pointer;
-      font-family: inherit;
+      padding: 6px 12px; font-size: 0.8125rem; cursor: pointer; font-family: inherit;
+      border-radius: 6px;
     }
     .lm-btn:hover { border-color: var(--fg-2); }
-    .lm-btn--primary {
-      background: var(--accent); color: var(--on-accent); border-color: var(--accent);
-    }
+    .lm-btn--primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
     .lm-btn--ghost { background: transparent; }
     .lm-btn--danger { color: var(--bad); border-color: var(--bad); background: transparent; }
     .lm-btn--xs { padding: 3px 8px; font-size: 0.6875rem; }
+    .lm-btn--sm { padding: 5px 10px; font-size: 0.75rem; }
     .lm-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .lm-input {
       background: var(--bg-0); border: 1px solid var(--bg-3); color: var(--fg-0);
       padding: 6px 8px; font-size: 0.8125rem; font-family: inherit;
-      width: 100%; box-sizing: border-box;
+      width: 100%; box-sizing: border-box; border-radius: 4px;
     }
 
-    /* App shell — three panes + promptbar across the bottom-right.
-       Mirrors the admin /ui/images layout; same class names so the JS
-       is identical. */
+    /* ---- Feed shell (mirrors /ui/images) ---- */
     .lm-img-form { display: contents; }
-    .lm-img-shell {
-      display: grid;
-      grid-template-columns: 260px 1fr 360px;
-      grid-template-rows: 1fr auto;
-      grid-template-areas:
-        "gallery viewer composer"
-        "gallery prompt  prompt";
-      gap: 12px;
-      height: 100vh;
-      padding: 12px;
-      box-sizing: border-box;
+    .gen-shell {
+      display: flex; flex-direction: column;
+      height: 100vh; padding: 12px; gap: 0; box-sizing: border-box;
     }
-    .lm-img-pane {
-      border: 1px solid var(--bg-3); background: var(--bg-1);
-      display: flex; flex-direction: column; min-width: 0; min-height: 0;
+    .gen-topbar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 2px 10px; gap: 12px;
     }
-    .lm-img-pane--gallery  { grid-area: gallery; }
-    .lm-img-pane--viewer   { grid-area: viewer; }
-    .lm-img-pane--composer { grid-area: composer; }
-    .lm-img-pane__head {
-      padding: 6px 12px; border-bottom: 1px solid var(--bg-3);
-      font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.12em;
-      color: var(--fg-2);
-      display: flex; justify-content: space-between; align-items: center;
-      gap: 8px;
+    .gen-topbar__brand { display: flex; align-items: center; gap: 8px; }
+    .gen-topbar__brand img { height: 22px; }
+    .gen-topbar__brand span {
+      font-size: 0.625rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg-3);
     }
-    .lm-img-pane__head-close {
-      display: none;  /* shown only on mobile */
-      background: transparent; border: none; color: var(--fg-2);
-      font-size: 1.1rem; cursor: pointer; padding: 4px 6px;
-    }
-    .lm-img-pane__body { flex: 1; overflow-y: auto; padding: 8px 12px; }
-    .lm-img-gallery {
-      display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
-    }
-    .lm-img-gallery__tile {
-      aspect-ratio: 1; background: var(--bg-0); border: 1px solid var(--bg-3);
-      cursor: pointer; overflow: hidden; position: relative;
-      transition: border-color 120ms ease, box-shadow 120ms ease;
-    }
-    .lm-img-gallery__tile:hover { border-color: var(--fg-2); }
-    .lm-img-gallery__tile.is-active {
-      border-color: var(--accent);
-      box-shadow: inset 0 0 0 2px var(--accent-soft);
-    }
-    .lm-img-gallery__tile.is-active::after {
-      content: ""; position: absolute; left: 6px; top: 6px;
-      width: 6px; height: 6px; border-radius: 50%;
-      background: var(--accent);
-      box-shadow: 0 0 0 2px var(--bg-0);
-    }
-    .lm-img-gallery__tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
-    .lm-img-gallery__empty { color: var(--fg-3); font-size: 0.8125rem; padding: 14px 4px; text-align: center; }
-    .lm-img-gallery__loadmore { grid-column: 1 / -1; margin-top: 8px; }
+    .gen-topbar__actions { display: flex; align-items: center; gap: 8px; }
 
-    .lm-img-viewer { display: flex; flex-direction: column; gap: 12px; height: 100%; }
-    .lm-img-viewer__image {
-      flex: 1; display: flex; align-items: center; justify-content: center;
-      background: var(--bg-0); border: 1px solid var(--bg-3); min-height: 360px;
+    .gen-feed { flex: 1; overflow-y: auto; padding: 4px 2px 8px; scroll-behavior: smooth; }
+    .gen-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 10px; align-content: start;
     }
-    .lm-img-viewer__image img { max-width: 100%; max-height: 100%; object-fit: contain; }
-    .lm-img-viewer__empty {
-      color: var(--fg-3);
-      font-family: 'Fraunces', serif; font-style: italic;
-      font-variation-settings: 'opsz' 48, 'SOFT' 24;
-      font-size: 1rem;
-      text-align: center;
-      padding: 48px 24px;
-      line-height: 1.5;
+    .gen-card {
+      position: relative; aspect-ratio: 1; background: var(--bg-0);
+      border: 1px solid var(--bg-3); border-radius: 6px; overflow: hidden;
+      cursor: pointer; transition: border-color 120ms ease, transform 120ms ease;
     }
-    .lm-img-viewer__empty::before,
-    .lm-img-viewer__empty::after {
-      content: ""; display: block;
-      width: 32px; height: 1px;
-      margin: 0 auto 16px;
-      background: var(--bg-3);
+    .gen-card:hover { border-color: var(--fg-2); transform: translateY(-1px); }
+    .gen-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .gen-card__cap {
+      position: absolute; left: 0; right: 0; bottom: 0; padding: 16px 8px 6px;
+      font-size: 0.6875rem; color: #fff;
+      background: linear-gradient(to top, oklch(0 0 0 / 0.72), transparent);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      opacity: 0; transition: opacity 120ms ease;
     }
-    .lm-img-viewer__empty::after { margin: 16px auto 0; }
-    .lm-img-meta {
-      background: var(--bg-0); border: 1px solid var(--bg-3);
-      padding: 10px 12px; font-size: 0.8125rem; color: var(--fg-1);
+    .gen-card:hover .gen-card__cap { opacity: 1; }
+    .gen-card--live {
+      cursor: default; border-color: var(--accent);
+      display: flex; flex-direction: column; justify-content: center; gap: 12px; padding: 16px;
+      background: linear-gradient(110deg, var(--bg-1) 30%, var(--bg-2) 50%, var(--bg-1) 70%) 0 0 / 200% 100%;
+      animation: gen-shimmer 1.4s linear infinite;
     }
-    .lm-img-meta__row { display: flex; gap: 8px; margin-bottom: 4px; line-height: 1.4; }
-    .lm-img-meta__label {
-      color: var(--fg-2); min-width: 88px;
-      text-transform: uppercase; letter-spacing: 0.08em;
-      font-size: 0.6875rem; padding-top: 2px;
+    @keyframes gen-shimmer { to { background-position: -200% 0; } }
+    .gen-live__phase { font-size: 0.75rem; color: var(--fg-1); text-align: center; font-variant-numeric: tabular-nums; }
+    .gen-live__bar { height: 5px; background: var(--bg-3); border-radius: 3px; overflow: hidden; }
+    .gen-live__fill { height: 100%; width: 0%; background: var(--accent); transition: width 250ms ease; }
+    .gen-live__prompt {
+      font-size: 0.6875rem; color: var(--fg-3); line-height: 1.4;
+      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
     }
-    .lm-img-meta__prompt {
-      margin: 8px 0 0; padding: 8px 10px; background: var(--bg-1);
-      border-left: 2px solid var(--accent); font-size: 0.8125rem;
-      line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+    .gen-live__spinner {
+      width: 20px; height: 20px; margin: 0 auto;
+      border: 2px solid var(--bg-3); border-top-color: var(--accent);
+      border-radius: 50%; animation: gen-spin 0.8s linear infinite;
     }
-    .lm-img-meta__actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+    @keyframes gen-spin { to { transform: rotate(360deg); } }
+    .gen-empty {
+      grid-column: 1 / -1; color: var(--fg-3); text-align: center;
+      font-family: 'Fraunces', serif; font-style: italic; font-size: 1.05rem;
+      padding: 64px 24px; line-height: 1.6;
+    }
+    .gen-loadmore { margin: 14px auto 4px; display: block; }
 
-    .lm-img-composer { display: flex; flex-direction: column; gap: 12px; }
-    .lm-img-composer__head { display: flex; justify-content: space-between; align-items: baseline; }
+    /* Prompt dock */
+    .gen-dock { flex-shrink: 0; margin-top: 10px; position: relative; }
+    .gen-bar {
+      display: flex; align-items: flex-end; gap: 8px;
+      background: var(--bg-1); border: 1px solid var(--bg-3); border-radius: 12px;
+      padding: 8px 8px 8px 10px; box-shadow: 0 2px 14px oklch(0 0 0 / 0.18);
+    }
+    .gen-bar:focus-within { border-color: var(--accent); }
+    .gen-modelbtn {
+      flex-shrink: 0; align-self: stretch; display: flex; flex-direction: column;
+      justify-content: center; gap: 1px; padding: 4px 12px; min-width: 120px; max-width: 200px;
+      background: var(--bg-2); border: 1px solid var(--bg-3); border-radius: 8px;
+      cursor: pointer; color: var(--fg-1); text-align: left;
+    }
+    .gen-modelbtn:hover { border-color: var(--fg-2); }
+    .gen-modelbtn.is-open { border-color: var(--accent); }
+    .gen-modelbtn__eyebrow { font-size: 0.5625rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-3); }
+    .gen-modelbtn__name { font-size: 0.8125rem; color: var(--fg-0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .gen-prompt {
+      flex: 1; resize: none; min-height: 42px; max-height: 180px;
+      border: none; background: transparent; color: var(--fg-0);
+      font-family: inherit; font-size: 0.9375rem; line-height: 1.5; padding: 10px 4px; outline: none;
+    }
+    .gen-bar__actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+    .gen-iconbtn {
+      width: 38px; height: 38px; flex-shrink: 0; display: inline-flex; align-items: center;
+      justify-content: center; background: var(--bg-2); border: 1px solid var(--bg-3);
+      border-radius: 8px; color: var(--fg-1); cursor: pointer; font-size: 1rem;
+    }
+    .gen-iconbtn:hover { border-color: var(--fg-2); color: var(--fg-0); }
+    .gen-generate { height: 40px; padding: 0 20px; border-radius: 8px; white-space: nowrap; }
+    .gen-dock__hint { font-size: 0.6875rem; color: var(--fg-3); text-align: right; padding: 4px 6px 0; }
+    .gen-error {
+      margin-top: 8px; color: var(--bad); font-size: 0.8125rem;
+      padding: 8px 10px; border: 1px solid var(--bad); border-radius: 6px;
+      background: oklch(from var(--bad) l c h / 0.08);
+    }
+    .gen-pop {
+      position: absolute; left: 0; right: 0; bottom: calc(100% + 8px);
+      background: var(--bg-1); border: 1px solid var(--bg-3); border-radius: 12px;
+      padding: 14px 16px; box-shadow: 0 8px 28px oklch(0 0 0 / 0.32);
+      max-height: 60vh; overflow-y: auto; z-index: 20;
+    }
+    .gen-pop[hidden] { display: none; }
+    .gen-pop--history { padding: 8px; }
+    .gen-history__item {
+      display: block; width: 100%; text-align: left; padding: 8px 10px; border: none;
+      background: transparent; color: var(--fg-1); cursor: pointer; border-radius: 6px;
+      font-size: 0.8125rem; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .gen-history__item:hover { background: var(--bg-2); color: var(--fg-0); }
+    .gen-history__empty { color: var(--fg-3); font-size: 0.8125rem; padding: 10px; text-align: center; }
+    .gen-settings__foot { grid-column: 1 / -1; display: flex; justify-content: flex-end; border-top: 1px solid var(--bg-3); margin-top: 4px; padding-top: 10px; }
+
+    /* Composer (consumed by _image_composer.html) */
+    .lm-img-composer { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+    .lm-img-composer__head { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: baseline; }
     .lm-img-composer__title { font-size: 0.875rem; color: var(--fg-0); }
-    .lm-img-composer__hint  {
-      font-size: 0.6875rem; color: var(--fg-3);
-      text-transform: uppercase; letter-spacing: 0.1em;
-    }
+    .lm-img-composer__hint { font-size: 0.6875rem; color: var(--fg-3); text-transform: uppercase; letter-spacing: 0.1em; }
     .lm-img-field { display: flex; flex-direction: column; gap: 4px; }
-    .lm-img-field__label {
-      font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.1em;
-      color: var(--fg-2);
-    }
+    .lm-img-field__label { font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-2); }
     .lm-img-field__help { font-size: 0.6875rem; color: var(--fg-3); }
-    .lm-img-overrides { display: flex; flex-direction: column; gap: 10px; }
-    .lm-img-row { display: flex; gap: 8px; }
+    .lm-img-overrides { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+    .lm-img-row { grid-column: 1 / -1; display: flex; gap: 12px; }
     .lm-img-seed-row { display: flex; gap: 6px; align-items: stretch; }
     .lm-img-seed-row input { flex: 1; }
 
-    /* Prompt bar — bottom strip with the textarea + Generate + status */
-    .lm-img-promptbar {
-      grid-area: prompt;
-      background: var(--bg-1);
-      border: 1px solid var(--bg-3);
-      padding: 10px 12px;
-      display: flex; flex-direction: column; gap: 8px;
+    /* Lightbox */
+    .gen-lightbox {
+      position: fixed; inset: 0; z-index: 60; background: oklch(0 0 0 / 0.78);
+      display: flex; align-items: center; justify-content: center; padding: 24px;
     }
-    .lm-img-promptbar__row {
-      display: flex; gap: 8px; align-items: flex-end;
+    .gen-lightbox[hidden] { display: none; }
+    .gen-lightbox__panel {
+      display: flex; max-width: 1100px; width: 100%; max-height: 90vh;
+      background: var(--bg-1); border: 1px solid var(--bg-3); border-radius: 10px; overflow: hidden;
     }
-    .lm-img-prompt {
-      flex: 1; resize: vertical; min-height: 44px; max-height: 200px;
-      font-family: inherit;
+    .gen-lightbox__imgwrap {
+      flex: 1; min-width: 0; background: var(--bg-0);
+      display: flex; align-items: center; justify-content: center; padding: 12px;
     }
-    .lm-img-actions { display: flex; gap: 8px; }
-    .lm-img-actions .lm-btn { white-space: nowrap; }
-    .lm-img-status {
-      display: flex; align-items: center; gap: 10px;
-      font-size: 0.8125rem; color: var(--fg-1);
+    .gen-lightbox__imgwrap img { max-width: 100%; max-height: 86vh; object-fit: contain; }
+    .gen-lightbox__side {
+      width: 320px; flex-shrink: 0; border-left: 1px solid var(--bg-3);
+      padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
     }
-    .lm-img-status progress { flex: 1; height: 6px; }
-    .lm-img-error {
-      color: var(--bad); font-size: 0.8125rem;
-      padding: 8px 10px; border: 1px solid var(--bad);
-      background: oklch(from var(--bad) l c h / 0.08);
-    }
-
-    /* Mobile toolbar + drawer backdrop (hidden on desktop) */
-    .lm-img-toolbar { display: none; }
-    .lm-img-backdrop {
-      display: none; position: fixed; inset: 0;
-      background: oklch(0 0 0 / 0.45); z-index: 45;
-    }
-    .lm-img-shell.is-drawer-open .lm-img-backdrop { display: block; }
-
-    @media (max-width: 900px) {
-      .lm-img-shell {
-        grid-template-columns: 1fr;
-        grid-template-rows: 1fr;
-        grid-template-areas: "viewer";
-        gap: 0; padding: 0;
-        height: auto; min-height: 100vh;
-        padding-bottom: 168px;
-      }
-      .lm-img-pane--gallery,
-      .lm-img-pane--composer {
-        position: fixed; top: 0; bottom: 0;
-        width: min(360px, 88vw);
-        z-index: 50;
-        transition: transform 200ms ease;
-        box-shadow: 0 0 24px oklch(0 0 0 / 0.35);
-      }
-      .lm-img-pane--gallery  { left: 0;  transform: translateX(-100%); }
-      .lm-img-pane--composer { right: 0; transform: translateX(100%); }
-      .lm-img-shell.is-gallery-open  .lm-img-pane--gallery  { transform: translateX(0); }
-      .lm-img-shell.is-composer-open .lm-img-pane--composer { transform: translateX(0); }
-      .lm-img-pane__head-close { display: inline-flex; }
-
-      .lm-img-pane--viewer { border-left: none; border-right: none; }
-
-      .lm-img-toolbar {
-        display: flex; gap: 8px; padding: 8px 12px;
-        border-bottom: 1px solid var(--bg-3);
-        background: var(--bg-0);
-        position: sticky; top: 0; z-index: 30;
-      }
-      .lm-img-toolbar .lm-btn { flex: 1; }
-
-      .lm-img-promptbar {
-        position: fixed; left: 0; right: 0; bottom: 0;
-        border-left: none; border-right: none; border-bottom: none;
-        z-index: 40;
-      }
-      .lm-img-prompt { min-height: 56px; max-height: 32vh; }
-      .lm-img-actions .lm-btn--primary { padding: 10px 14px; }
-
-      .lm-img-viewer__empty { padding: 24px 12px; }
-      .lm-img-meta__row     { flex-wrap: wrap; }
-      .lm-img-meta__label   { min-width: 72px; }
+    .gen-lb-meta__row { display: flex; gap: 8px; font-size: 0.8125rem; line-height: 1.4; }
+    .gen-lb-meta__label { color: var(--fg-2); min-width: 78px; text-transform: uppercase; letter-spacing: 0.07em; font-size: 0.625rem; padding-top: 3px; }
+    .gen-lb-prompt { padding: 8px 10px; background: var(--bg-0); border-left: 2px solid var(--accent); font-size: 0.8125rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+    .gen-lb-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; padding-top: 8px; }
+    .gen-lightbox__close {
+      position: absolute; top: 16px; right: 20px; background: var(--bg-2);
+      border: 1px solid var(--bg-3); border-radius: 6px; color: var(--fg-1);
+      cursor: pointer; font-size: 1.1rem; width: 36px; height: 36px;
     }
 
-    .public-foot {
-      position: fixed; right: 12px; bottom: 8px;
-      display: flex; gap: 8px; align-items: center;
-      color: var(--fg-3); font-size: 0.6875rem;
-      letter-spacing: 0.08em; text-transform: uppercase;
+    @media (max-width: 760px) {
+      .gen-shell { padding: 8px; }
+      .gen-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px; }
+      .gen-modelbtn { min-width: 90px; max-width: 120px; padding: 4px 8px; }
+      .gen-generate { padding: 0 14px; }
+      .lm-img-composer, .lm-img-overrides { grid-template-columns: 1fr; }
+      .gen-lightbox__panel { flex-direction: column; }
+      .gen-lightbox__side { width: auto; border-left: none; border-top: 1px solid var(--bg-3); max-height: 40vh; }
     }
   </style>
 </head>
@@ -324,134 +284,104 @@
     </div>
     <div class="img-login-box">
       <input id="login-key" type="password" placeholder="Paste your API key" autofocus>
-      <button id="login-btn" class="lm-btn lm-btn--primary" style="width: 100%; justify-content: center;">Connect</button>
+      <button id="login-btn" class="lm-btn lm-btn--primary" style="width: 100%;">Connect</button>
       <div id="login-error" class="img-login-error"></div>
     </div>
-    <div class="theme-btns login-theme" role="group">
-      <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
-      <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
-    </div>
-  </div>
-
-  <!-- App screen — wrapped in a form so the prompt bar can live outside
-       the composer drawer but still submit together with model/profile
-       selections. The login flow toggles display between 'none' and the
-       grid-aware value of '' (CSS provides the grid display). -->
-  <form id="lm-img-composer" class="lm-img-form" autocomplete="off" style="display: none;">
-    <div class="lm-img-toolbar">
-      <button type="button" class="lm-btn lm-btn--ghost"
-              data-lm-img-toggle="gallery">Gallery</button>
-      <button type="button" class="lm-btn lm-btn--ghost"
-              data-lm-img-toggle="composer">Settings</button>
-    </div>
-
-    <div class="lm-img-shell" id="lm-img-shell">
-      <aside class="lm-img-pane lm-img-pane--gallery">
-        <div class="lm-img-pane__head">
-          <span>Gallery</span>
-          <span style="display:flex; align-items:center; gap:8px;">
-            <span id="lm-img-gallery-count">0</span>
-            <button type="button" class="lm-img-pane__head-close"
-                    data-lm-img-toggle="gallery" aria-label="Close gallery">✕</button>
-          </span>
-        </div>
-        <div class="lm-img-pane__body">
-          <div id="lm-img-gallery" class="lm-img-gallery">
-            <p class="lm-img-gallery__empty" id="lm-img-gallery-empty">
-              No images yet. Generate one to populate the gallery.
-            </p>
-          </div>
-          <button type="button" id="lm-img-gallery-loadmore"
-                  class="lm-btn lm-btn--ghost lm-btn--xs lm-img-gallery__loadmore"
-                  hidden>
-            Load older images
-          </button>
-        </div>
-      </aside>
-
-      <section class="lm-img-pane lm-img-pane--viewer">
-        <div class="lm-img-pane__head">
-          <span>Viewer</span>
-          <a id="lm-img-viewer-download" hidden href="#" download
-             class="lm-btn lm-btn--ghost lm-btn--xs">Download PNG</a>
-        </div>
-        <div class="lm-img-pane__body">
-          <div class="lm-img-viewer">
-            <div class="lm-img-viewer__image" id="lm-img-viewer-image-wrap">
-              <p class="lm-img-viewer__empty" id="lm-img-viewer-empty">
-                Select an image from the gallery or generate a new one.
-              </p>
-            </div>
-            <div class="lm-img-meta" id="lm-img-meta" hidden></div>
-          </div>
-        </div>
-      </section>
-
-      <aside class="lm-img-pane lm-img-pane--composer">
-        <div class="lm-img-pane__head">
-          <span>Compose</span>
-          <span style="display:flex; align-items:center; gap:6px;">
-            <button id="logout-btn" type="button" class="lm-btn lm-btn--ghost lm-btn--xs">Sign out</button>
-            <button type="button" class="lm-img-pane__head-close"
-                    data-lm-img-toggle="composer" aria-label="Close settings">✕</button>
-          </span>
-        </div>
-        <div class="lm-img-pane__body">
-          {% include "_image_composer.html" %}
-        </div>
-      </aside>
-
-      <div class="lm-img-promptbar">
-        <div class="lm-img-promptbar__row">
-          <textarea id="lm-img-prompt" class="lm-input lm-img-prompt" rows="2"
-                    placeholder="A misty cliffside in oil paint, dawn light, a single lantern"></textarea>
-          <div class="lm-img-actions">
-            <button type="submit" id="lm-img-generate" class="lm-btn lm-btn--primary">
-              Generate
-            </button>
-            <button type="button" id="lm-img-cancel"
-                    class="lm-btn lm-btn--danger" hidden>
-              Cancel
-            </button>
-          </div>
-        </div>
-        <div class="lm-img-status" id="lm-img-status" hidden>
-          <progress id="lm-img-progress" max="100" value="0"></progress>
-          <span id="lm-img-status-text">Queued…</span>
-        </div>
-        <div id="lm-img-error" class="lm-img-error" hidden></div>
-      </div>
-
-      <div class="lm-img-backdrop" id="lm-img-backdrop"
-           data-lm-img-toggle="close" aria-hidden="true"></div>
-    </div>
-  </form>
-
-  <div class="public-foot">
     <div class="theme-btns" role="group">
       <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
       <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
     </div>
   </div>
 
+  <!-- App -->
+  <form id="lm-img-composer" class="lm-img-form" autocomplete="off" style="display: none;">
+    <div class="gen-shell">
+
+      <div class="gen-topbar">
+        <div class="gen-topbar__brand">
+          <img src="/logo-dark.svg" alt="llamanager" class="login-logo--dark">
+          <img src="/logo.svg" alt="llamanager" class="login-logo--light">
+          <span>images</span>
+        </div>
+        <div class="gen-topbar__actions">
+          <div class="theme-btns" role="group">
+            <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
+            <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="gen-feed" id="gen-feed">
+        <div class="gen-grid" id="gen-grid">
+          <p class="gen-empty" id="gen-empty">
+            Nothing here yet.<br>Describe an image below and hit Generate.
+          </p>
+        </div>
+        <button type="button" id="gen-loadmore" class="lm-btn lm-btn--ghost lm-btn--sm gen-loadmore" hidden>
+          Load older
+        </button>
+      </div>
+
+      <div class="gen-dock">
+        <div class="gen-pop" id="gen-settings" hidden>
+          {% include "_image_composer.html" %}
+          <div class="gen-settings__foot">
+            <button id="logout-btn" type="button" class="lm-btn lm-btn--ghost lm-btn--xs">Sign out</button>
+          </div>
+        </div>
+        <div class="gen-pop gen-pop--history" id="gen-history" hidden>
+          <div id="gen-history-list"></div>
+        </div>
+        <div id="lm-img-error" class="gen-error" hidden></div>
+        <div class="gen-bar">
+          <button type="button" class="gen-modelbtn" id="gen-modelbtn" title="Model & settings">
+            <span class="gen-modelbtn__eyebrow">Model · ⚙</span>
+            <span class="gen-modelbtn__name" id="gen-modelbtn-name">—</span>
+          </button>
+          <textarea id="lm-img-prompt" class="gen-prompt" rows="1"
+                    placeholder="Describe the image you want… (⌘/Ctrl+Enter to generate)"></textarea>
+          <div class="gen-bar__actions">
+            <button type="button" class="gen-iconbtn" id="gen-history-btn" title="Prompt history">🕘</button>
+            <button type="button" class="gen-iconbtn" id="lm-img-cancel" title="Cancel" hidden>✕</button>
+            <button type="submit" class="lm-btn lm-btn--primary gen-generate" id="lm-img-generate">Generate</button>
+          </div>
+        </div>
+        <div class="gen-dock__hint" id="gen-hint">&nbsp;</div>
+      </div>
+
+    </div>
+  </form>
+
+  <!-- Lightbox -->
+  <div class="gen-lightbox" id="gen-lightbox" hidden>
+    <button type="button" class="gen-lightbox__close" id="gen-lb-close" aria-label="Close">✕</button>
+    <div class="gen-lightbox__panel">
+      <div class="gen-lightbox__imgwrap"><img id="gen-lb-img" src="" alt=""></div>
+      <div class="gen-lightbox__side">
+        <div id="gen-lb-meta"></div>
+        <p class="gen-lb-prompt" id="gen-lb-prompt" hidden></p>
+        <div class="gen-lb-actions" id="gen-lb-actions"></div>
+      </div>
+    </div>
+  </div>
+
   <script>
-    // Server-side rendered context — same shape as the admin page.
     window.LM_IMAGES_CFG = {
       imageModels: {{ image_models_json | safe }},
       profiles: {{ profiles_json | safe }},
       enginesSchema: {{ engines_schema_json | safe }},
+      defaultModel: {{ default_image_model | tojson }},
+      defaultProfile: {{ default_image_profile | tojson }},
       apiKey: "",
       galleryUrl: "/images/gallery",
       fileUrlPrefix: "/images/file/",
       generationsUrl: "/v1/images/generations",
-      // Bearer comes from localStorage; the storage key is namespaced
-      // so other public pages (/chat) don't collide.
       storageKey: "lm-images-api-key"
     };
   </script>
 
   <script>
-  // Theme toggle handlers (mirrors what the admin base.html does).
+  // Theme toggle (standalone — no base.html here).
   (function() {
     function setTheme(theme) {
       document.documentElement.setAttribute('data-theme', theme);
@@ -472,7 +402,7 @@
   </script>
 
   <script>
-  // Login → bootstrap composer with the captured key.
+  // Login → boot the feed with the captured key.
   (function() {
     const cfg = window.LM_IMAGES_CFG;
     const login = document.getElementById('login-screen');
@@ -480,26 +410,12 @@
     const keyInput = document.getElementById('login-key');
     const loginBtn = document.getElementById('login-btn');
     const loginErr = document.getElementById('login-error');
-    const logoutBtn = document.getElementById('logout-btn');
 
-    function showApp() {
-      login.style.display = 'none';
-      // The form has display:contents from the lm-img-form class; clear
-      // the inline 'none' to let CSS take over.
-      app.style.display = '';
-    }
-    function showLogin() {
-      app.style.display = 'none';
-      login.style.display = 'flex';
-      keyInput.focus();
-    }
+    function showApp() { login.style.display = 'none'; app.style.display = ''; }
+    function showLogin() { app.style.display = 'none'; login.style.display = 'flex'; keyInput.focus(); }
 
     async function tryConnect(key) {
-      // Validate the key by hitting the gallery once. The gallery
-      // endpoint requires bearer auth and returns 401 on bad keys.
-      const r = await fetch(cfg.galleryUrl + '?limit=1', {
-        headers: {'Authorization': 'Bearer ' + key},
-      });
+      const r = await fetch(cfg.galleryUrl + '?limit=1', { headers: {'Authorization': 'Bearer ' + key} });
       if (r.status === 401 || r.status === 403) throw new Error('Invalid API key');
       if (!r.ok) throw new Error('Could not reach server (' + r.status + ')');
       return r;
@@ -512,338 +428,226 @@
       try {
         await tryConnect(k);
         try { localStorage.setItem(cfg.storageKey, k); } catch (e) {}
-        cfg.apiKey = k;
-        showApp();
-        bootComposer();
-      } catch (e) {
-        loginErr.textContent = e.message;
-      }
+        cfg.apiKey = k; showApp(); bootFeed();
+      } catch (e) { loginErr.textContent = e.message; }
     });
-    keyInput.addEventListener('keydown', e => {
-      if (e.key === 'Enter') loginBtn.click();
-    });
-    logoutBtn.addEventListener('click', () => {
-      try { localStorage.removeItem(cfg.storageKey); } catch (e) {}
-      cfg.apiKey = '';
-      showLogin();
-    });
+    keyInput.addEventListener('keydown', e => { if (e.key === 'Enter') loginBtn.click(); });
 
-    // Auto-login if a key is in localStorage and it still works.
+    window.__lmShowLogin = showLogin;
+
     (async () => {
       let stored = '';
       try { stored = localStorage.getItem(cfg.storageKey) || ''; } catch (e) {}
       if (!stored) return;
-      try {
-        await tryConnect(stored);
-        cfg.apiKey = stored;
-        showApp();
-        bootComposer();
-      } catch (e) {
-        // Invalid stored key — surface login.
-      }
+      try { await tryConnect(stored); cfg.apiKey = stored; showApp(); bootFeed(); } catch (e) {}
     })();
   })();
 
-  // Composer JS — identical logic to /ui/images, but the configured
-  // gallery URL is /images/gallery and the bearer is held in cfg.apiKey
-  // (set by the login flow above).
-  function bootComposer() {
+  // Feed logic — same UX as /ui/images, but every image/gallery/generation
+  // request carries the bearer in cfg.apiKey, and gallery PNGs are fetched
+  // as blobs (the file endpoint is bearer-gated, so no direct <img src>).
+  function bootFeed() {
     const cfg = window.LM_IMAGES_CFG;
-    if (bootComposer._done) return;
-    bootComposer._done = true;
-
+    if (bootFeed._done) return; bootFeed._done = true;
     const $ = (id) => document.getElementById(id);
-    const state = { selected: null, nextBefore: null, inFlight: false, abort: null };
+    const HISTORY_KEY = "lm_img_prompt_history";
+    const AUTH = () => ({"Authorization": "Bearer " + cfg.apiKey});
+    const state = { nextBefore: null, inFlight: false, abort: null, seenUrls: new Set() };
 
-    // Mobile drawer toggles (no-op classes on desktop where the
-    // side panes are part of the grid).
-    const shell = document.getElementById("lm-img-shell");
-    function openDrawer(which) {
-      if (which !== "gallery" && which !== "composer") return;
-      shell.classList.remove("is-gallery-open", "is-composer-open");
-      shell.classList.add(`is-${which}-open`, "is-drawer-open");
-    }
-    function closeDrawers() {
-      shell.classList.remove("is-gallery-open", "is-composer-open", "is-drawer-open");
-    }
-    document.querySelectorAll("[data-lm-img-toggle]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const target = btn.dataset.lmImgToggle;
-        if (target === "close") { closeDrawers(); return; }
-        const openClass = `is-${target}-open`;
-        if (shell.classList.contains(openClass)) closeDrawers();
-        else openDrawer(target);
-      });
-    });
-    function isMobile() {
-      return window.matchMedia("(max-width: 900px)").matches;
+    const modelSel = $("lm-img-model"), profileSel = $("lm-img-profile"), overrides = $("lm-img-overrides");
+    const promptEl = $("lm-img-prompt"), seedEl = $("lm-img-seed"), seedDice = $("lm-img-seed-dice"), nEl = $("lm-img-n");
+    const form = $("lm-img-composer"), submitBtn = $("lm-img-generate"), cancelBtn = $("lm-img-cancel");
+    const errorEl = $("lm-img-error"), engineHint = $("lm-img-engine-hint");
+    const grid = $("gen-grid"), emptyEl = $("gen-empty"), loadMore = $("gen-loadmore");
+    const modelBtn = $("gen-modelbtn"), modelBtnName = $("gen-modelbtn-name");
+    const settingsPop = $("gen-settings"), historyPop = $("gen-history");
+    const historyBtn = $("gen-history-btn"), historyList = $("gen-history-list"), hintEl = $("gen-hint");
+    const lightbox = $("gen-lightbox"), lbImg = $("gen-lb-img"), lbMeta = $("gen-lb-meta");
+    const lbPrompt = $("gen-lb-prompt"), lbActions = $("gen-lb-actions");
+    let liveCard = null;
+
+    function shortName(id) { const p = id.split("/"); return p[p.length - 1]; }
+    // Bearer-gated PNG → object URL, cached on the item to avoid refetch.
+    async function authObjectUrl(item) {
+      if (item._blobUrl) return item._blobUrl;
+      const r = await fetch(item.url, {headers: AUTH()});
+      if (!r.ok) throw new Error(String(r.status));
+      item._blobUrl = URL.createObjectURL(await r.blob());
+      return item._blobUrl;
     }
 
-    const modelSel    = $("lm-img-model");
-    const profileSel  = $("lm-img-profile");
-    const overrides   = $("lm-img-overrides");
-    const promptEl    = $("lm-img-prompt");
-    const seedEl      = $("lm-img-seed");
-    const seedDice    = $("lm-img-seed-dice");
-    const nEl         = $("lm-img-n");
-    const form        = $("lm-img-composer");
-    const submitBtn   = $("lm-img-generate");
-    const cancelBtn   = $("lm-img-cancel");
-    const statusBox   = $("lm-img-status");
-    const statusText  = $("lm-img-status-text");
-    const progressEl  = $("lm-img-progress");
-    const errorEl     = $("lm-img-error");
-    const galleryEl   = $("lm-img-gallery");
-    const galleryEmpty= $("lm-img-gallery-empty");
-    const galleryCount= $("lm-img-gallery-count");
-    const loadMoreBtn = $("lm-img-gallery-loadmore");
-    const viewerEmpty = $("lm-img-viewer-empty");
-    const viewerWrap  = $("lm-img-viewer-image-wrap");
-    const viewerMeta  = $("lm-img-meta");
-    const dlLink      = $("lm-img-viewer-download");
-    const engineHint  = $("lm-img-engine-hint");
-
+    // ---- Settings / model ----
     function populateModelDropdown() {
       modelSel.innerHTML = "";
       if (!cfg.imageModels.length) {
-        const opt = document.createElement("option");
-        opt.value = ""; opt.textContent = "(no image models installed)";
-        opt.disabled = true; modelSel.appendChild(opt); return;
+        const o = document.createElement("option"); o.value = ""; o.textContent = "(no image models)"; o.disabled = true;
+        modelSel.appendChild(o); modelBtnName.textContent = "no models"; return;
       }
       cfg.imageModels.forEach(m => {
-        const opt = document.createElement("option");
-        opt.value = m.model_id; opt.dataset.engine = m.engine;
-        opt.textContent = `${m.model_id}  ·  ${m.engine}`;
-        modelSel.appendChild(opt);
+        const o = document.createElement("option"); o.value = m.model_id; o.dataset.engine = m.engine;
+        o.textContent = `${shortName(m.model_id)}  ·  ${m.engine}`; modelSel.appendChild(o);
       });
+      if (cfg.defaultModel && cfg.imageModels.some(m => m.model_id === cfg.defaultModel)) modelSel.value = cfg.defaultModel;
     }
-    function currentEngine() {
-      const opt = modelSel.selectedOptions[0];
-      return opt ? opt.dataset.engine : null;
-    }
-    function populateProfileDropdown() {
+    function currentEngine() { const o = modelSel.selectedOptions[0]; return o ? o.dataset.engine : null; }
+    function updateModelBtn() { modelBtnName.textContent = modelSel.value ? shortName(modelSel.value) : "pick model"; }
+    function populateProfileDropdown(preferred) {
       profileSel.innerHTML = "";
       const mid = modelSel.value;
-      const profiles = cfg.profiles.filter(p => p.model === mid);
-      const none = document.createElement("option");
-      none.value = ""; none.textContent = "(use engine defaults)";
-      profileSel.appendChild(none);
-      profiles.forEach(p => {
-        const opt = document.createElement("option");
-        opt.value = p.name; opt.textContent = p.name;
-        profileSel.appendChild(opt);
+      const none = document.createElement("option"); none.value = ""; none.textContent = "(use engine defaults)"; profileSel.appendChild(none);
+      cfg.profiles.filter(p => p.model === mid).forEach(p => {
+        const o = document.createElement("option"); o.value = p.name; o.textContent = p.name; profileSel.appendChild(o);
       });
+      if (preferred && cfg.profiles.some(p => p.model === mid && p.name === preferred)) profileSel.value = preferred;
     }
     function renderOverrides() {
       const engine = currentEngine();
       overrides.innerHTML = "";
-      engineHint.textContent = engine ? `engine: ${engine}` : "";
+      if (engineHint) engineHint.textContent = engine ? `engine: ${engine}` : "";
       if (!engine || !cfg.enginesSchema[engine]) return;
-      const profileName = profileSel.value;
-      const profile = cfg.profiles.find(
-        p => p.name === profileName && p.model === modelSel.value);
+      const profile = cfg.profiles.find(p => p.name === profileSel.value && p.model === modelSel.value);
       const pf = profile ? (profile.fields || {}) : {};
       cfg.enginesSchema[engine].forEach(f => {
         const wrap = document.createElement("div"); wrap.className = "lm-img-field";
-        const label = document.createElement("label"); label.className = "lm-img-field__label";
-        label.textContent = f.label; wrap.appendChild(label);
-        const placeholder = pf[f.key] != null ? String(pf[f.key])
-                          : (f.default != null ? String(f.default) : "");
+        const label = document.createElement("label"); label.className = "lm-img-field__label"; label.textContent = f.label; wrap.appendChild(label);
+        const placeholder = pf[f.key] != null ? String(pf[f.key]) : (f.default != null ? String(f.default) : "");
         let input;
         if (f.kind === "select") {
           input = document.createElement("select"); input.className = "lm-input lm-input--mono";
-          const blank = document.createElement("option");
-          blank.value = "";
-          blank.textContent = placeholder ? `— inherit (${placeholder}) —` : "— inherit —";
-          input.appendChild(blank);
-          (f.options || []).forEach(opt => {
-            const o = document.createElement("option");
-            o.value = opt; o.textContent = opt; input.appendChild(o);
-          });
+          const blank = document.createElement("option"); blank.value = "";
+          blank.textContent = placeholder ? `— inherit (${placeholder}) —` : "— inherit —"; input.appendChild(blank);
+          (f.options || []).forEach(o => { const op = document.createElement("option"); op.value = o; op.textContent = o; input.appendChild(op); });
         } else {
           input = document.createElement("input"); input.className = "lm-input lm-input--mono";
           input.type = (f.kind === "int" || f.kind === "float") ? "number" : "text";
-          if (f.kind === "int") input.step = "1";
-          if (f.kind === "float") input.step = "any";
+          if (f.kind === "int") input.step = "1"; if (f.kind === "float") input.step = "any";
           input.placeholder = placeholder || "";
         }
-        input.name = f.key; input.dataset.kind = f.kind;
+        input.name = f.key; input.dataset.kind = f.kind; input.setAttribute("form", "lm-img-composer");
         wrap.appendChild(input);
-        if (f.help) {
-          const h = document.createElement("span"); h.className = "lm-img-field__help";
-          h.textContent = f.help; wrap.appendChild(h);
-        }
+        if (f.help) { const h = document.createElement("span"); h.className = "lm-img-field__help"; h.textContent = f.help; wrap.appendChild(h); }
         overrides.appendChild(wrap);
       });
     }
-
-    modelSel.addEventListener("change", () => { populateProfileDropdown(); renderOverrides(); });
+    modelSel.addEventListener("change", () => { updateModelBtn(); populateProfileDropdown(); renderOverrides(); });
     profileSel.addEventListener("change", renderOverrides);
-    seedDice.addEventListener("click", () => {
-      seedEl.value = String(Math.floor(Math.random() * 4294967295));
+    if (seedDice) seedDice.addEventListener("click", () => { seedEl.value = String(Math.floor(Math.random() * 4294967295)); });
+
+    // ---- Popovers ----
+    function closePops() { settingsPop.hidden = true; historyPop.hidden = true; modelBtn.classList.remove("is-open"); }
+    modelBtn.addEventListener("click", (e) => {
+      e.stopPropagation(); const willOpen = settingsPop.hidden; closePops();
+      settingsPop.hidden = !willOpen; modelBtn.classList.toggle("is-open", willOpen);
     });
+    historyBtn.addEventListener("click", (e) => {
+      e.stopPropagation(); const willOpen = historyPop.hidden; closePops();
+      if (willOpen) { renderHistory(); historyPop.hidden = false; }
+    });
+    document.addEventListener("click", (e) => {
+      if (!e.target.closest(".gen-pop") && !e.target.closest("#gen-modelbtn") && !e.target.closest("#gen-history-btn")) closePops();
+    });
+
+    // ---- Prompt history ----
+    function getHistory() { try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]"); } catch { return []; } }
+    function pushHistory(p) { if (!p) return; let h = getHistory().filter(x => x !== p); h.unshift(p); h = h.slice(0, 50); try { localStorage.setItem(HISTORY_KEY, JSON.stringify(h)); } catch {} }
+    function renderHistory() {
+      const h = getHistory(); historyList.innerHTML = "";
+      if (!h.length) { const e = document.createElement("div"); e.className = "gen-history__empty"; e.textContent = "No prompts yet."; historyList.appendChild(e); return; }
+      h.forEach(p => {
+        const b = document.createElement("button"); b.type = "button"; b.className = "gen-history__item"; b.textContent = p; b.title = p;
+        b.addEventListener("click", () => { promptEl.value = p; autosize(); closePops(); promptEl.focus(); });
+        historyList.appendChild(b);
+      });
+    }
+
+    // ---- Feed ----
+    function cardFor(item) {
+      const div = document.createElement("div"); div.className = "gen-card"; div.dataset.url = item.url;
+      authObjectUrl(item).then(url => {
+        const img = document.createElement("img"); img.loading = "lazy"; img.src = url; div.appendChild(img);
+      }).catch(() => {});
+      const sc = item.sidecar || {};
+      if (sc.prompt) { const cap = document.createElement("div"); cap.className = "gen-card__cap"; cap.textContent = sc.prompt; div.appendChild(cap); }
+      div.addEventListener("click", () => openLightbox(item));
+      return div;
+    }
+    function appendItems(items) {
+      items.forEach(it => { if (state.seenUrls.has(it.url)) return; state.seenUrls.add(it.url); grid.appendChild(cardFor(it)); });
+      updateEmpty();
+    }
+    function prependItems(items) {
+      const anchor = liveCard ? liveCard.nextSibling : grid.firstChild;
+      items.forEach(it => { if (state.seenUrls.has(it.url)) return; state.seenUrls.add(it.url); grid.insertBefore(cardFor(it), anchor); });
+      updateEmpty();
+    }
+    function updateEmpty() { emptyEl.hidden = !!grid.querySelector(".gen-card") || !!liveCard; }
 
     async function fetchGallery({reset=false} = {}) {
       const params = new URLSearchParams({limit: "60"});
       if (!reset && state.nextBefore != null) params.set("before", String(state.nextBefore));
-      const r = await fetch(`${cfg.galleryUrl}?${params.toString()}`, {
-        headers: {"Authorization": "Bearer " + cfg.apiKey},
-      });
+      const r = await fetch(`${cfg.galleryUrl}?${params.toString()}`, {headers: AUTH()});
       if (!r.ok) throw new Error(`gallery list failed: ${r.status}`);
       return r.json();
     }
-
-    function tileFor(item) {
-      const div = document.createElement("div");
-      div.className = "lm-img-gallery__tile";
-      div.dataset.url = item.url; div.dataset.name = item.name;
-      div.title = (item.sidecar && item.sidecar.prompt) ? item.sidecar.prompt : item.name;
-      // Public gallery PNGs are bearer-gated; fetch with header and load
-      // as object URL so we don't leak the key in image src queries.
-      fetch(item.url, {headers: {"Authorization": "Bearer " + cfg.apiKey}})
-        .then(r => r.ok ? r.blob() : null)
-        .then(blob => {
-          if (!blob) return;
-          const img = document.createElement("img");
-          img.loading = "lazy";
-          img.src = URL.createObjectURL(blob);
-          div.appendChild(img);
-        });
-      div.addEventListener("click", () => {
-        selectImage(item);
-        if (isMobile()) closeDrawers();
-      });
-      return div;
+    async function loadInitial() {
+      try { const p = await fetchGallery({reset: true}); appendItems(p.items); state.nextBefore = p.next_before; loadMore.hidden = state.nextBefore == null; }
+      catch (e) { showError(`Could not load gallery: ${e.message}`); }
     }
-
-    function appendItems(items) {
-      if (galleryEmpty.parentNode) galleryEmpty.remove();
-      items.forEach(it => galleryEl.appendChild(tileFor(it)));
-      galleryCount.textContent = String(galleryEl.querySelectorAll(".lm-img-gallery__tile").length);
-    }
-    function prependItems(items) {
-      if (galleryEmpty.parentNode) galleryEmpty.remove();
-      items.forEach(it => {
-        const tile = tileFor(it);
-        galleryEl.insertBefore(tile, galleryEl.firstChild);
-      });
-      galleryCount.textContent = String(galleryEl.querySelectorAll(".lm-img-gallery__tile").length);
-    }
-    async function loadInitialGallery() {
-      try {
-        const payload = await fetchGallery({reset: true});
-        appendItems(payload.items);
-        state.nextBefore = payload.next_before;
-        loadMoreBtn.hidden = state.nextBefore == null;
-        if (payload.items.length) selectImage(payload.items[0]);
-      } catch (e) { showError(`Could not load gallery: ${e.message}`); }
-    }
-    loadMoreBtn.addEventListener("click", async () => {
-      try {
-        const payload = await fetchGallery({reset: false});
-        appendItems(payload.items);
-        state.nextBefore = payload.next_before;
-        loadMoreBtn.hidden = state.nextBefore == null;
-      } catch (e) { showError(`Could not load more: ${e.message}`); }
+    loadMore.addEventListener("click", async () => {
+      try { const p = await fetchGallery({reset: false}); appendItems(p.items); state.nextBefore = p.next_before; loadMore.hidden = state.nextBefore == null; }
+      catch (e) { showError(`Could not load more: ${e.message}`); }
     });
 
-    function selectImage(item) {
-      state.selected = item;
-      document.querySelectorAll(".lm-img-gallery__tile.is-active")
-        .forEach(t => t.classList.remove("is-active"));
-      const tile = galleryEl.querySelector(`.lm-img-gallery__tile[data-url="${CSS.escape(item.url)}"]`);
-      if (tile) tile.classList.add("is-active");
-      viewerEmpty.hidden = true;
-      viewerWrap.innerHTML = "";
-      // Fetch PNG with bearer; use a blob URL so the IMG element stays
-      // free of credentials in the src attribute.
-      fetch(item.url, {headers: {"Authorization": "Bearer " + cfg.apiKey}})
-        .then(r => r.ok ? r.blob() : Promise.reject(`${r.status}`))
-        .then(blob => {
-          const img = document.createElement("img");
-          img.src = URL.createObjectURL(blob);
-          viewerWrap.appendChild(img);
-          dlLink.hidden = false;
-          dlLink.href = img.src;
-          dlLink.download = item.name;
-        })
-        .catch(() => {});
-      renderMeta(item);
-    }
-    function renderMeta(item) {
+    // ---- Lightbox ----
+    function openLightbox(item) {
       const sc = item.sidecar || {};
-      viewerMeta.hidden = false; viewerMeta.innerHTML = "";
+      lbImg.src = ""; authObjectUrl(item).then(url => { lbImg.src = url; }).catch(() => {});
+      lbMeta.innerHTML = "";
       const rows = [
-        ["Model",    sc.model_id || sc.model || ""],
-        ["Profile",  sc.profile || ""],
-        ["Engine",   sc.engine || ""],
-        ["Size",     (sc.width && sc.height) ? `${sc.width}×${sc.height}` : ""],
-        ["Steps",    sc.steps != null ? String(sc.steps) : ""],
-        ["Guidance", sc.guidance != null ? String(sc.guidance) : ""],
-        ["Seed",     sc.seed != null ? String(sc.seed) : ""],
-        ["Duration", sc.duration_s != null ? `${(+sc.duration_s).toFixed(2)} s` : ""],
-        ["Saved",    new Date(item.mtime * 1000).toLocaleString()],
+        ["Model", sc.model_id || sc.model || ""], ["Profile", sc.profile || ""], ["Engine", sc.engine || ""],
+        ["Size", (sc.width && sc.height) ? `${sc.width}×${sc.height}` : ""],
+        ["Steps", sc.steps != null ? String(sc.steps) : ""], ["Guidance", sc.guidance != null ? String(sc.guidance) : ""],
+        ["Seed", sc.seed != null ? String(sc.seed) : ""], ["Duration", sc.duration_s != null ? `${(+sc.duration_s).toFixed(1)} s` : ""],
+        ["Saved", item.mtime ? new Date(item.mtime * 1000).toLocaleString() : ""],
       ];
       rows.forEach(([k, v]) => {
         if (!v) return;
-        const r = document.createElement("div"); r.className = "lm-img-meta__row";
-        const l = document.createElement("span"); l.className = "lm-img-meta__label";
-        l.textContent = k;
-        const val = document.createElement("span"); val.textContent = v;
-        r.appendChild(l); r.appendChild(val); viewerMeta.appendChild(r);
+        const r = document.createElement("div"); r.className = "gen-lb-meta__row";
+        const l = document.createElement("span"); l.className = "gen-lb-meta__label"; l.textContent = k;
+        const val = document.createElement("span"); val.textContent = v; r.appendChild(l); r.appendChild(val); lbMeta.appendChild(r);
       });
-      if (sc.prompt) {
-        const p = document.createElement("p"); p.className = "lm-img-meta__prompt";
-        p.textContent = sc.prompt; viewerMeta.appendChild(p);
-      }
-      const actions = document.createElement("div"); actions.className = "lm-img-meta__actions";
-      if (sc.prompt) {
-        const reuse = document.createElement("button");
-        reuse.type = "button"; reuse.className = "lm-btn lm-btn--ghost lm-btn--xs";
-        reuse.textContent = "Reuse prompt";
-        reuse.addEventListener("click", () => { promptEl.value = sc.prompt; promptEl.focus(); });
-        actions.appendChild(reuse);
-      }
-      if (sc.seed != null) {
-        const re = document.createElement("button");
-        re.type = "button"; re.className = "lm-btn lm-btn--ghost lm-btn--xs";
-        re.textContent = "Reuse seed";
-        re.addEventListener("click", () => { seedEl.value = String(sc.seed); });
-        actions.appendChild(re);
-      }
-      viewerMeta.appendChild(actions);
+      lbPrompt.hidden = !sc.prompt; lbPrompt.textContent = sc.prompt || "";
+      lbActions.innerHTML = "";
+      const mkBtn = (label, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = "lm-btn lm-btn--ghost lm-btn--xs"; b.textContent = label; b.addEventListener("click", fn); lbActions.appendChild(b); };
+      // Download: reuse the already-fetched blob URL.
+      authObjectUrl(item).then(url => {
+        const dl = document.createElement("a"); dl.className = "lm-btn lm-btn--ghost lm-btn--xs"; dl.textContent = "Download";
+        dl.href = url; dl.download = item.name || "image.png"; lbActions.insertBefore(dl, lbActions.firstChild);
+      }).catch(() => {});
+      if (sc.prompt) mkBtn("Reuse prompt", () => { promptEl.value = sc.prompt; autosize(); closeLightbox(); promptEl.focus(); });
+      if (sc.seed != null) mkBtn("Reuse seed", () => { seedEl.value = String(sc.seed); closeLightbox(); });
+      lightbox.hidden = false;
     }
+    function closeLightbox() { lightbox.hidden = true; lbImg.src = ""; }
+    $("gen-lb-close").addEventListener("click", closeLightbox);
+    lightbox.addEventListener("click", (e) => { if (e.target === lightbox) closeLightbox(); });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeLightbox(); closePops(); } });
 
+    // ---- Generation ----
     function showError(msg) { errorEl.hidden = false; errorEl.textContent = msg; }
     function clearError() { errorEl.hidden = true; errorEl.textContent = ""; }
     function collectOverrides() {
       const out = {};
       overrides.querySelectorAll("input, select").forEach(el => {
-        const v = (el.value || "").trim();
-        if (v === "") return;
+        const v = (el.value || "").trim(); if (v === "") return;
         const kind = el.dataset.kind;
-        if (kind === "int") out[el.name] = parseInt(v, 10);
-        else if (kind === "float") out[el.name] = parseFloat(v);
-        else out[el.name] = v;
+        if (kind === "int") out[el.name] = parseInt(v, 10); else if (kind === "float") out[el.name] = parseFloat(v); else out[el.name] = v;
       });
       return out;
     }
-    function setBusy(busy) {
-      state.inFlight = busy;
-      submitBtn.disabled = busy;
-      cancelBtn.hidden = !busy;
-      statusBox.hidden = !busy;
-      if (!busy) { progressEl.value = 0; statusText.textContent = "Queued…"; }
-    }
-    cancelBtn.addEventListener("click", () => { if (state.abort) state.abort.abort(); });
     function buildRequestBody() {
-      const body = {
-        model: modelSel.value,
-        prompt: promptEl.value.trim(),
-        n: Math.max(1, parseInt(nEl.value || "1", 10) || 1),
-        stream: true,
-        response_format: "b64_json",
-      };
+      const body = { model: modelSel.value, prompt: promptEl.value.trim(),
+        n: Math.max(1, parseInt(nEl.value || "1", 10) || 1), stream: true, response_format: "b64_json" };
       if (profileSel.value) body.profile = profileSel.value;
       if (seedEl.value !== "") body.seed = parseInt(seedEl.value, 10);
       const o = collectOverrides();
@@ -855,157 +659,95 @@
       if (o.image_editing_scheduler) body.editing_scheduler = o.image_editing_scheduler;
       return body;
     }
-    async function generate() {
-      clearError();
-      if (!modelSel.value) { showError("Pick a model first."); return; }
-      if (!promptEl.value.trim()) { showError("Prompt is empty."); return; }
-      // On mobile, hide any open drawer so progress is visible.
-      closeDrawers();
-      setBusy(true);
-      stage.phase = ""; stage.pos = -1; stage.step = null; stage.total = null;
-      statusText.textContent = "Sending…";
-      const body = buildRequestBody();
-      const ctrl = new AbortController();
-      state.abort = ctrl;
-      try {
-        const r = await fetch(cfg.generationsUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + cfg.apiKey,
-          },
-          body: JSON.stringify(body),
-          signal: ctrl.signal,
-        });
-        if (!r.ok) {
-          const text = await r.text();
-          throw new Error(`HTTP ${r.status}: ${text.slice(0, 240)}`);
-        }
-        const reader = r.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = "";
-        while (true) {
-          const {done, value} = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, {stream: true});
-          let idx;
-          while ((idx = buf.indexOf("\n\n")) !== -1) {
-            const block = buf.slice(0, idx);
-            buf = buf.slice(idx + 2);
-            handleSseBlock(block);
-          }
-        }
-      } catch (e) {
-        if (e.name === "AbortError") statusText.textContent = "Cancelled.";
-        else showError(`Generation failed: ${e.message}`);
-      } finally {
-        setBusy(false); state.abort = null;
-      }
+    function makeLiveCard(prompt) {
+      const div = document.createElement("div"); div.className = "gen-card gen-card--live";
+      div.innerHTML = `<div class="gen-live__spinner"></div><div class="gen-live__phase">Queued…</div>
+        <div class="gen-live__bar"><div class="gen-live__fill"></div></div><div class="gen-live__prompt"></div>`;
+      div.querySelector(".gen-live__prompt").textContent = prompt;
+      grid.insertBefore(div, grid.firstChild); emptyEl.hidden = true; return div;
     }
-    // Stage tracker for the bottom status line. Driven by SSE
-    // comment lines `: status=...`, `: queue_pos=...`, `: step=N/M`,
-    // plus the final `data:` payload.
+    function updateLive(txt, pct) { if (!liveCard) return; liveCard.querySelector(".gen-live__phase").textContent = txt; if (pct != null) liveCard.querySelector(".gen-live__fill").style.width = `${pct}%`; }
+    function removeLive() { if (liveCard) { liveCard.remove(); liveCard = null; } updateEmpty(); }
+    function setBusy(busy) { state.inFlight = busy; submitBtn.disabled = busy; cancelBtn.hidden = !busy; hintEl.innerHTML = busy ? "Generating — you can keep browsing the feed." : "&nbsp;"; }
+    cancelBtn.addEventListener("click", () => { if (state.abort) state.abort.abort(); });
+
     const stage = { phase: "", pos: -1, step: null, total: null };
-    function renderStatus() {
-      let txt = "Sending…";
-      if (stage.phase === "queued") {
-        if (stage.pos === 0) txt = "Next in line…";
-        else if (stage.pos > 0) txt = `Queued · ${stage.pos} ahead`;
-        else txt = "Queued…";
-      } else if (stage.phase === "swapping_model") {
-        txt = "Loading model…";
-      } else if (stage.phase === "running") {
-        if (stage.step != null && stage.total != null) {
-          txt = `Step ${stage.step} / ${stage.total}`;
-        } else {
-          txt = "Generating…";
-        }
-      } else if (stage.phase === "saving") {
-        txt = "Saving…";
-      } else if (stage.phase) {
-        txt = stage.phase;
-      }
-      statusText.textContent = txt;
+    function renderStage() {
+      let txt = "Sending…", pct = null;
+      if (stage.phase === "queued") txt = stage.pos > 0 ? `Queued · ${stage.pos} ahead` : (stage.pos === 0 ? "Next in line…" : "Queued…");
+      else if (stage.phase === "swapping_model") txt = "Loading model…";
+      else if (stage.phase === "running") { if (stage.step != null && stage.total != null) { txt = `Step ${stage.step} / ${stage.total}`; if (stage.total > 0) pct = Math.round(100 * stage.step / stage.total); } else txt = "Generating…"; }
+      else if (stage.phase === "saving") { txt = "Saving…"; pct = 100; }
+      else if (stage.phase) txt = stage.phase;
+      updateLive(txt, pct);
     }
     function handleSseBlock(block) {
       let event = "message", data = "";
       block.split("\n").forEach(line => {
         if (!line) return;
         if (line.startsWith(":")) {
-          const body = line.slice(1).trim();
-          if (body.startsWith("status=")) {
-            stage.phase = body.slice(7);
-            if (stage.phase !== "queued") stage.pos = -1;
-            renderStatus();
-          } else if (body.startsWith("queue_pos=")) {
-            const n = parseInt(body.slice(10), 10);
-            if (!isNaN(n)) stage.pos = n;
-            renderStatus();
-          } else if (body.startsWith("step=")) {
-            const m = body.slice(5).match(/^(\d+)\s*\/\s*(\d+)$/);
-            if (m) {
-              stage.step = parseInt(m[1], 10);
-              stage.total = parseInt(m[2], 10);
-              if (stage.total > 0) {
-                progressEl.value = Math.round(
-                  100 * stage.step / stage.total);
-              }
-              stage.phase = "running";
-              renderStatus();
-            }
-          }
+          const b = line.slice(1).trim();
+          if (b.startsWith("status=")) { stage.phase = b.slice(7); if (stage.phase !== "queued") stage.pos = -1; renderStage(); }
+          else if (b.startsWith("queue_pos=")) { const n = parseInt(b.slice(10), 10); if (!isNaN(n)) stage.pos = n; renderStage(); }
+          else if (b.startsWith("step=")) { const m = b.slice(5).match(/^(\d+)\s*\/\s*(\d+)$/); if (m) { stage.step = +m[1]; stage.total = +m[2]; stage.phase = "running"; renderStage(); } }
           return;
         }
         if (line.startsWith("event:")) event = line.slice(6).trim();
         else if (line.startsWith("data:")) data += line.slice(5).trim();
       });
       if (!data) return;
-      let payload;
-      try { payload = JSON.parse(data); } catch { return; }
-      if (event === "progress") {
-        if (payload.percent != null) progressEl.value = payload.percent;
-        else if (payload.step != null && payload.total_steps != null) {
-          progressEl.value = Math.round(100 * payload.step / payload.total_steps);
-        }
-        stage.step = payload.step != null ? payload.step : stage.step;
-        stage.total = payload.total_steps != null ? payload.total_steps : stage.total;
-        stage.phase = "running";
-        renderStatus();
-      } else if (event === "error" || payload.error) {
-        const msg = (payload.error && (payload.error.message || payload.error))
-                 || payload.message || JSON.stringify(payload);
+      let payload; try { payload = JSON.parse(data); } catch { return; }
+      if (event === "error" || payload.error) {
+        const msg = (payload.error && (payload.error.message || payload.error)) || payload.message || JSON.stringify(payload);
         showError(msg);
-      } else {
-        progressEl.value = 100;
-        stage.phase = "saving";
-        renderStatus();
-        refreshFront();
-      }
+      } else { stage.phase = "saving"; renderStage(); refreshFront(); }
     }
     async function refreshFront() {
       try {
-        const r = await fetch(`${cfg.galleryUrl}?limit=4`, {
-          headers: {"Authorization": "Bearer " + cfg.apiKey},
-        });
+        const r = await fetch(`${cfg.galleryUrl}?limit=12`, {headers: AUTH()});
         if (!r.ok) return;
-        const payload = await r.json();
-        const have = new Set(
-          Array.from(galleryEl.querySelectorAll(".lm-img-gallery__tile")).map(t => t.dataset.url));
-        const fresh = payload.items.filter(it => !have.has(it.url));
-        if (fresh.length) {
-          prependItems(fresh);
-          selectImage(fresh[0]);
-        }
+        const p = await r.json();
+        const fresh = p.items.filter(it => !state.seenUrls.has(it.url));
+        if (fresh.length) prependItems(fresh);
       } catch (e) { console.warn("front refresh failed", e); }
     }
-    form.addEventListener("submit", ev => { ev.preventDefault(); generate(); });
-
-    populateModelDropdown();
-    if (modelSel.options.length) {
-      populateProfileDropdown();
-      renderOverrides();
+    async function generate() {
+      clearError(); closePops();
+      if (!modelSel.value) { showError("Pick a model first."); return; }
+      if (!promptEl.value.trim()) { showError("Prompt is empty."); return; }
+      const promptText = promptEl.value.trim(); pushHistory(promptText);
+      setBusy(true); stage.phase = ""; stage.pos = -1; stage.step = null; stage.total = null;
+      liveCard = makeLiveCard(promptText); updateLive("Sending…", 0); $("gen-feed").scrollTop = 0;
+      const body = buildRequestBody(); const ctrl = new AbortController(); state.abort = ctrl;
+      try {
+        const r = await fetch(cfg.generationsUrl, { method: "POST",
+          headers: { "Content-Type": "application/json", ...AUTH() }, body: JSON.stringify(body), signal: ctrl.signal });
+        if (!r.ok) { const t = await r.text(); throw new Error(`HTTP ${r.status}: ${t.slice(0, 240)}`); }
+        const reader = r.body.getReader(); const decoder = new TextDecoder(); let buf = "";
+        while (true) {
+          const {done, value} = await reader.read(); if (done) break;
+          buf += decoder.decode(value, {stream: true}); let idx;
+          while ((idx = buf.indexOf("\n\n")) !== -1) { handleSseBlock(buf.slice(0, idx)); buf = buf.slice(idx + 2); }
+        }
+      } catch (e) { if (e.name !== "AbortError") showError(`Generation failed: ${e.message}`); }
+      finally { setBusy(false); state.abort = null; removeLive(); }
     }
-    loadInitialGallery();
+    form.addEventListener("submit", (ev) => { ev.preventDefault(); generate(); });
+    promptEl.addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); generate(); } });
+    function autosize() { promptEl.style.height = "auto"; promptEl.style.height = Math.min(promptEl.scrollHeight, 180) + "px"; }
+    promptEl.addEventListener("input", autosize);
+
+    // Sign out (logout button lives inside the settings popover).
+    const logoutBtn = $("logout-btn");
+    if (logoutBtn) logoutBtn.addEventListener("click", () => {
+      try { localStorage.removeItem(cfg.storageKey); } catch (e) {}
+      cfg.apiKey = ""; if (window.__lmShowLogin) window.__lmShowLogin();
+    });
+
+    // ---- Init ----
+    populateModelDropdown();
+    if (modelSel.options.length) { updateModelBtn(); populateProfileDropdown(cfg.defaultProfile); renderOverrides(); }
+    loadInitial(); autosize();
   }
   </script>
 </body>

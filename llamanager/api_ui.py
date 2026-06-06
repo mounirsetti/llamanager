@@ -2859,11 +2859,21 @@ def _build_image_page_context(cfg, reg) -> dict[str, Any]:
             "name": p.name, "model": mid, "fields": fields,
         })
 
+    # Preselect the operator's configured default image model/profile so the
+    # composer opens on it instead of whatever happens to be first in the
+    # registry (which is why the page used to default to HiDream).
+    default_model = cfg.default_image_model or ""
+    if default_model not in image_model_ids:
+        default_model = image_models[0]["model_id"] if image_models else ""
+    default_profile = cfg.default_image_profile or ""
+
     return {
         "image_models": image_models,
         "image_models_json": json.dumps(image_models),
         "profiles_json": json.dumps(profiles_with_fields),
         "engines_schema_json": json.dumps(engines_schema),
+        "default_image_model": default_model,
+        "default_image_profile": default_profile,
     }
 
 
