@@ -216,6 +216,11 @@ def profile_schema() -> list[ProfileField]:
     ]
 
 
+def capabilities() -> dict[str, Any]:
+    """Z-Image's base pipeline is text-to-image only (no reference inputs)."""
+    return {"ref_images_max": 0}
+
+
 def default_profiles() -> dict[str, dict[str, Any]]:
     return {
         "z-image-fast": {

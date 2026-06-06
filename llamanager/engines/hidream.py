@@ -264,6 +264,21 @@ def profile_schema() -> list[ProfileField]:
     ]
 
 
+def capabilities() -> dict[str, Any]:
+    """HiDream accepts reference images for editing and composition.
+
+    One ref triggers editing semantics; multiple refs drive multi-subject
+    composition (up to 8). ``keep_original_aspect`` is meaningful only with
+    exactly one ref (it locks the output to the ref's aspect ratio).
+    """
+    return {
+        "ref_images_max": 8,
+        "ref_label": "Reference images",
+        "ref_help": "1 image = edit · multiple = composition / multi-subject (up to 8).",
+        "keep_original_aspect": True,
+    }
+
+
 def default_profiles() -> dict[str, dict[str, Any]]:
     """Two opinionated profiles auto-created on detection."""
     return {

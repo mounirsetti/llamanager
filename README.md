@@ -735,9 +735,11 @@ curl -N http://localhost:7200/v1/chat/completions \
   }'
 ```
 
-By default, requests use whichever model is loaded (or the configured default if nothing is running). To request a different model, add the `X-Llamanager-Model` header. llamanager hot-swaps if needed.
+To pick a model, name it the standard OpenAI way — the **`model`** field in the request body, set to a model ID (the path relative to the models directory). When the body names a model llamanager knows (a configured model or one currently loaded), the queue routes to it and hot-swaps if needed; its default profile is used. So stock clients like the Continue VS Code extension or the `openai` SDK work with no extra configuration.
 
-By model ID (the path relative to the models directory):
+A request that names a model llamanager can't honour — an uninstalled id, a generic `"gpt-4"` / `"any"` placeholder, or one the origin isn't permitted to use — **falls back to the default model** rather than erroring. When that happens the response carries an `x-llamanager-model-fallback` header explaining why, and the reason is logged. Model choice never returns a 403 on the text endpoints; it degrades to the default. (The image endpoints still 403, since they require an explicit model and have no default to fall back to.)
+
+The **`X-Llamanager-Model`** header takes precedence over the body field, and **`X-Llamanager-Profile`** selects a non-default profile. Use the headers when you need to override the body, pin a specific profile, or route to an on-disk model that has no config entry:
 
 ```bash
 curl -N http://localhost:7200/v1/chat/completions \
@@ -748,7 +750,7 @@ curl -N http://localhost:7200/v1/chat/completions \
   -d '{"model": "any", "messages": [{"role": "user", "content": "Hi!"}]}'
 ```
 
-Each origin's `allowed_models` setting restricts which models it can request. Set to `*` for any model, `default` for the default only, or a comma-separated list of specific model IDs.
+Each origin's `allowed_models` setting restricts which models it can request. New origins **allow all models (`*`) by default**; edit an origin on the Origins page (or `llamanager origins update`) to restrict it to a picked set of installed models. The legacy `default` token (default model only) is still honoured. A request for a model outside the list doesn't error — it falls back to the default model, as above.
 
 While a request is queued or a model swap is happening, llamanager emits SSE comment lines (`: status=swapping_model`, `: keepalive`) every 10 seconds so client connections don't time out.
 
@@ -799,7 +801,7 @@ Supported features:
 - **Vision.** `image` content blocks with `source.type` of `base64` or `url` are forwarded to the multimodal model.
 - **System prompts** as either a string or a list of `{"type":"text"}` blocks.
 - **Sampling controls** — `temperature`, `top_p`, `top_k`, `stop_sequences`, and the required `max_tokens`.
-- **Model selection** — the body's `model` field is informational (the response echoes it back); the actual served model is picked via `X-Llamanager-Model` / `X-Llamanager-Profile` headers, same as the OpenAI side. The `X-Llamanager-Thinking` header also works here.
+- **Model selection** — same as the OpenAI side: the body's `model` field routes when it names a known, permitted model (it's also echoed back), the `X-Llamanager-Model` / `X-Llamanager-Profile` headers override it, and an unknown or not-permitted model falls back to the default rather than erroring. The `X-Llamanager-Thinking` header also works here.
 
 Not implemented: `document` content blocks (PDFs), Anthropic server-side tools, prompt caching markers, and the Batches API.
 

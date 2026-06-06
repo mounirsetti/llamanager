@@ -56,25 +56,54 @@ async def _origin_from_request(req: Request) -> Origin:
     return origin
 
 
-def _check_model_allowed(origin: Origin, model_id: str) -> None:
+def _model_allowed(origin: Origin, model_id: str) -> bool:
+    """Whether ``origin`` may use ``model_id`` per its allowlist.
+
+    ``["*"]`` allows everything; the special token ``"default"`` allows the
+    operator's configured default model; otherwise the id must be listed.
+    """
     allowed = origin.allowed_models
     if "*" in allowed:
-        return
+        return True
     if model_id == "default" and "default" in allowed:
-        return
-    if model_id in allowed:
-        return
-    raise HTTPException(
-        status_code=403,
-        detail=f"origin '{origin.name}' is not allowed to use model '{model_id}'",
-    )
+        return True
+    return model_id in allowed
+
+
+def _check_model_allowed(origin: Origin, model_id: str) -> None:
+    """Raising form of :func:`_model_allowed`.
+
+    Used where a hard 403 is the right answer — the image endpoints, which
+    require an explicit model id and have no graceful default to fall back to.
+    The text inference path uses the non-raising predicate instead and degrades
+    to the default model.
+    """
+    if not _model_allowed(origin, model_id):
+        raise HTTPException(
+            status_code=403,
+            detail=f"origin '{origin.name}' is not allowed to use model '{model_id}'",
+        )
+
+
+def _model_known(cfg: Config, sm: ServerManager, model_id: str) -> bool:
+    """Whether ``model_id`` names a model llamanager can serve: a configured
+    model, or one currently loaded in a slot. Kept cheap (no disk scan) for the
+    request hot path; mirrors what ``/v1/models`` surfaces from config + slots.
+    """
+    if cfg.get_model(model_id) is not None:
+        return True
+    if hasattr(sm, "slots"):
+        return any(getattr(sv, "model", None) == model_id for sv in sm.slots())
+    return getattr(sm.runtime, "current_model", None) == model_id
 
 
 def _model_required(req: Request, origin: Origin) -> tuple[str | None, str | None]:
     """Return (model_id, profile_name) from the request headers.
 
-    The legacy ``X-Llamanager-Model: profile:foo`` shorthand is rejected with
-    a 400 pointing callers at the new two-header contract.
+    No allowlist enforcement happens here — :func:`_resolve_request_model`
+    applies the allow/known checks with a graceful fall back to the default
+    model. The legacy ``X-Llamanager-Model: profile:foo`` shorthand is still
+    rejected with a 400 pointing callers at the two-header contract.
     """
     model = req.headers.get("x-llamanager-model")
     profile = req.headers.get("x-llamanager-profile")
@@ -87,11 +116,56 @@ def _model_required(req: Request, origin: Origin) -> tuple[str | None, str | Non
                 "X-Llamanager-Profile: <name> as separate headers."
             ),
         )
-    # ``X-Llamanager-Profile`` without a model is allowed: the dispatcher
-    # resolves it against the default (or currently-loaded) model.
-    if model:
-        _check_model_allowed(origin, model)
     return (model or None), (profile or None)
+
+
+def _model_from_body(body: dict[str, Any]) -> str | None:
+    """The OpenAI ``model`` field from the request body as a routing hint.
+
+    Stock OpenAI clients (Continue, the ``openai`` SDK, …) name the model in
+    the body, not the ``X-Llamanager-Model`` header. Returns the trimmed id,
+    or ``None`` for empty / ``"default"`` / non-string values. Existence and
+    allowlist checks happen in :func:`_resolve_request_model`.
+    """
+    m = body.get("model")
+    if not isinstance(m, str):
+        return None
+    m = m.strip()
+    if not m or m == "default":
+        return None
+    return m
+
+
+def _resolve_request_model(
+    req: Request, origin: Origin, body: dict[str, Any],
+    cfg: Config, sm: ServerManager,
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve ``(model_id, profile, fallback_reason)`` for an inference request.
+
+    Precedence: the ``X-Llamanager-Model`` header wins; otherwise the OpenAI
+    ``model`` field in the body. The resolved model is honoured only when it is
+    *known* (a configured model or one currently loaded) **and** *allowed* for
+    the origin. When nothing usable is requested — no model named, an unknown
+    id, or one the origin isn't permitted to use — we fall back to the
+    configured default model (returned as ``None`` so the dispatcher picks
+    ``cfg.default_model``) and report a human-readable reason. Model choice
+    never raises 403 here; it degrades to the default.
+    """
+    model, profile = _model_required(req, origin)  # header only (may 400 on shorthand)
+    if model is None:
+        model = _model_from_body(body)
+    if not model or model == "default":
+        return None, profile, None
+    if not _model_known(cfg, sm, model):
+        return None, profile, (
+            f"requested model '{model}' is not installed; using the default model"
+        )
+    if not _model_allowed(origin, model):
+        return None, profile, (
+            f"origin '{origin.name}' is not permitted to use model '{model}'; "
+            "using the default model"
+        )
+    return model, profile, None
 
 
 def _is_streaming(body: dict[str, Any]) -> bool:
@@ -456,14 +530,21 @@ async def _handle_inference(
 
     qm: QueueManager = request.app.state.queue
     sm: ServerManager = request.app.state.sm
+    cfg: Config = request.app.state.cfg
 
-    model_required, profile_required = _model_required(request, origin)
+    # Resolve the model from the X-Llamanager-Model header or the OpenAI
+    # ``model`` field in the body. A request for an unknown or not-permitted
+    # model degrades to the configured default rather than erroring.
+    model_required, profile_required, model_fallback = _resolve_request_model(
+        request, origin, body, cfg, sm
+    )
+    if model_fallback:
+        log.info("origin %s: %s", origin.name, model_fallback)
 
     # Apply reasoning default/override. Header wins over profile; both
     # only touch /v1/chat/completions (the bare /completions endpoint
     # doesn't render the chat template that consumes the kwarg).
     if path == "/v1/chat/completions":
-        cfg: Config = request.app.state.cfg
         header_thinking = _thinking_from_header(request)
         if header_thinking:
             _apply_thinking_to_body(body, header_thinking, forced=True)
@@ -567,6 +648,8 @@ async def _handle_inference(
             "cache-control": "no-cache",
             "x-accel-buffering": "no",
         }
+        if model_fallback:
+            headers["x-llamanager-model-fallback"] = model_fallback
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers=headers)
 
@@ -588,6 +671,8 @@ async def _handle_inference(
                 response_text = _extract_response_text(parsed)
         except Exception:
             pass
+        if model_fallback:
+            resp.headers["x-llamanager-model-fallback"] = model_fallback
         return resp
     except Cancelled:
         error = "cancelled"
@@ -1089,20 +1174,30 @@ async def _images_stream(
                     cancel_event=qr.cancel,
                 )
             )
+            # Poll the progress queue often (so per-step events reach the
+            # client live) but only emit a keepalive after a real lull —
+            # otherwise the bound to KEEPALIVE_INTERVAL_S would batch
+            # progress 10s at a time and a fast run would show none at all.
+            last_out = time.monotonic()
             while not run_task.done():
                 done, _ = await asyncio.wait(
                     {run_task},
-                    timeout=KEEPALIVE_INTERVAL_S,
+                    timeout=0.4,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                # Drain progress events.
+                emitted = False
                 while not progress_queue.empty():
                     kind, payload = progress_queue.get_nowait()
                     if kind == "step":
                         step, total = payload
                         yield f": step={step}/{total}\n\n".encode("utf-8")
-                if not done:
+                        emitted = True
+                now = time.monotonic()
+                if emitted:
+                    last_out = now
+                elif not done and (now - last_out) >= KEEPALIVE_INTERVAL_S:
                     yield b": keepalive\n\n"
+                    last_out = now
 
             try:
                 result = run_task.result()

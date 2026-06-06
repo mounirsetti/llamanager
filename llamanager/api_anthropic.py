@@ -36,9 +36,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .api_v1 import (
     KEEPALIVE_INTERVAL_S,
     _apply_thinking_to_body,
-    _check_model_allowed,
     _extract_prompt_text,
     _extract_response_text,
+    _model_allowed,
+    _model_known,
     _profile_thinking,
     _stream_with_keepalives,
     _thinking_from_header,
@@ -81,14 +82,19 @@ async def _origin_from_request(req: Request) -> Origin:
     return origin
 
 
-def _model_and_profile(req: Request, origin: Origin,
-                       body_model: str | None) -> tuple[str | None, str | None]:
-    """Pick the requested model + profile.
+def _model_and_profile(
+    req: Request, origin: Origin, body_model: str | None,
+    cfg: Config, sm: ServerManager,
+) -> tuple[str | None, str | None, str | None]:
+    """Pick ``(model, profile, fallback_reason)`` for an Anthropic request.
 
     Precedence: body ``model`` field → ``X-Llamanager-Model`` header.
-    Profile is taken from ``X-Llamanager-Profile`` only (Anthropic has
-    no profile concept). Bare model id is checked against the origin's
-    allowlist; ``None`` means "let the dispatcher use whatever is loaded".
+    Profile is taken from ``X-Llamanager-Profile`` only (Anthropic has no
+    profile concept). The resolved model is honoured only when it is *known*
+    and *allowed* for the origin; otherwise we degrade to the configured
+    default model (``None``) and report a reason — same graceful behaviour as
+    the OpenAI surface, no 403 for model choice. ``None`` means "let the
+    dispatcher use the default / whatever is loaded".
     """
     model = (body_model or req.headers.get("x-llamanager-model") or "").strip()
     profile = (req.headers.get("x-llamanager-profile") or "").strip()
@@ -98,9 +104,18 @@ def _model_and_profile(req: Request, origin: Origin,
             detail=("the 'profile:<name>' shorthand is not supported here; "
                     "send X-Llamanager-Profile separately"),
         )
-    if model:
-        _check_model_allowed(origin, model)
-    return (model or None), (profile or None)
+    if not model or model == "default":
+        return None, (profile or None), None
+    if not _model_known(cfg, sm, model):
+        return None, (profile or None), (
+            f"requested model '{model}' is not installed; using the default model"
+        )
+    if not _model_allowed(origin, model):
+        return None, (profile or None), (
+            f"origin '{origin.name}' is not permitted to use model '{model}'; "
+            "using the default model"
+        )
+    return model, (profile or None), None
 
 
 # --------------------------------------------------------------------------
@@ -880,9 +895,11 @@ async def messages(request: Request) -> Response:
     sm: ServerManager = request.app.state.sm
 
     requested_model = body.get("model") if isinstance(body.get("model"), str) else None
-    model_required, profile_required = _model_and_profile(
-        request, origin, requested_model,
+    model_required, profile_required, model_fallback = _model_and_profile(
+        request, origin, requested_model, cfg, sm,
     )
+    if model_fallback:
+        log.info("origin %s: %s", origin.name, model_fallback)
     openai_body = _build_openai_body(body)
 
     # Apply reasoning default/override the same way the OpenAI handler does
@@ -1091,7 +1108,12 @@ async def count_tokens(request: Request) -> Response:
         raise HTTPException(status_code=400, detail="body must be a JSON object")
 
     requested_model = body.get("model") if isinstance(body.get("model"), str) else None
-    _ = _model_and_profile(request, origin, requested_model)
+    # Validates the profile-shorthand contract; model choice itself degrades
+    # to the default rather than erroring, so the result is unused here.
+    _ = _model_and_profile(
+        request, origin, requested_model,
+        request.app.state.cfg, request.app.state.sm,
+    )
 
     # Render to a single string so /tokenize sees something representative.
     parts: list[str] = []

@@ -106,7 +106,7 @@
     .lm-img-form { display: contents; }
     .gen-shell {
       display: flex; flex-direction: column;
-      height: 100vh; padding: 12px; gap: 0; box-sizing: border-box;
+      height: 100dvh; padding: 12px; gap: 0; box-sizing: border-box;
     }
     .gen-topbar {
       display: flex; align-items: center; justify-content: space-between;
@@ -203,6 +203,20 @@
       padding: 8px 10px; border: 1px solid var(--bad); border-radius: 6px;
       background: oklch(from var(--bad) l c h / 0.08);
     }
+    .gen-refs {
+      display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px;
+      background: var(--bg-1); border: 1px solid var(--bg-3); border-radius: 10px; padding: 8px 10px;
+    }
+    .gen-refs[hidden] { display: none; }
+    .gen-refs__thumbs { display: flex; flex-wrap: wrap; gap: 8px; }
+    .gen-ref { position: relative; width: 56px; height: 56px; border-radius: 6px; overflow: hidden; border: 1px solid var(--bg-3); background: var(--bg-0); }
+    .gen-ref img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .gen-ref__rm { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; border-radius: 50%; border: none; background: oklch(0 0 0 / 0.6); color: #fff; cursor: pointer; font-size: 0.7rem; line-height: 1; display: flex; align-items: center; justify-content: center; }
+    .gen-refs__opts { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; font-size: 0.75rem; color: var(--fg-2); }
+    .gen-refopt { display: inline-flex; align-items: center; gap: 6px; }
+    .gen-refopt input[type=range] { width: 120px; }
+    .gen-refs__hint { font-size: 0.6875rem; color: var(--fg-3); margin-left: auto; }
+    .gen-dock.is-dragover .gen-bar { border-color: var(--accent); border-style: dashed; }
     .gen-pop {
       position: absolute; left: 0; right: 0; bottom: calc(100% + 8px);
       background: var(--bg-1); border: 1px solid var(--bg-3); border-radius: 12px;
@@ -264,12 +278,23 @@
 
     @media (max-width: 760px) {
       .gen-shell { padding: 8px; }
-      .gen-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px; }
-      .gen-modelbtn { min-width: 90px; max-width: 120px; padding: 4px 8px; }
-      .gen-generate { padding: 0 14px; }
+      .gen-topbar { padding-bottom: 8px; }
+      .gen-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+      .gen-bar { flex-wrap: wrap; }
+      .gen-modelbtn {
+        order: -1; flex: 1 1 100%; max-width: none; flex-direction: row;
+        align-items: center; justify-content: space-between; padding: 9px 12px;
+      }
+      .gen-prompt { flex: 1 1 55%; min-height: 40px; }
+      .gen-generate { flex: 1 1 auto; height: 44px; }
+      .gen-iconbtn { width: 44px; height: 44px; }
+      .gen-pop { max-height: 64dvh; }
       .lm-img-composer, .lm-img-overrides { grid-template-columns: 1fr; }
-      .gen-lightbox__panel { flex-direction: column; }
-      .gen-lightbox__side { width: auto; border-left: none; border-top: 1px solid var(--bg-3); max-height: 40vh; }
+      .gen-lightbox { padding: 0; }
+      .gen-lightbox__panel { flex-direction: column; max-height: 100dvh; border-radius: 0; }
+      .gen-lightbox__imgwrap img { max-height: 58dvh; }
+      .gen-lightbox__side { width: auto; border-left: none; border-top: 1px solid var(--bg-3); max-height: 40dvh; }
+      .gen-lightbox__close { top: 10px; right: 12px; }
     }
   </style>
 </head>
@@ -333,6 +358,23 @@
           <div id="gen-history-list"></div>
         </div>
         <div id="lm-img-error" class="gen-error" hidden></div>
+
+        <div class="gen-refs" id="gen-refs" hidden>
+          <div class="gen-refs__thumbs" id="gen-refs-thumbs"></div>
+          <div class="gen-refs__opts">
+            <label class="gen-refopt" id="gen-strength-wrap" hidden>
+              Strength
+              <input type="range" id="gen-strength" min="0" max="1" step="0.05" value="0.6">
+              <span id="gen-strength-val">0.60</span>
+            </label>
+            <label class="gen-refopt" id="gen-keepaspect-wrap" hidden>
+              <input type="checkbox" id="gen-keepaspect"> Keep reference aspect ratio
+            </label>
+            <span class="gen-refs__hint" id="gen-refs-hint"></span>
+          </div>
+        </div>
+        <input type="file" id="gen-file" accept="image/png,image/jpeg,image/webp" multiple hidden>
+
         <div class="gen-bar">
           <button type="button" class="gen-modelbtn" id="gen-modelbtn" title="Model & settings">
             <span class="gen-modelbtn__eyebrow">Model · ⚙</span>
@@ -341,6 +383,7 @@
           <textarea id="lm-img-prompt" class="gen-prompt" rows="1"
                     placeholder="Describe the image you want… (⌘/Ctrl+Enter to generate)"></textarea>
           <div class="gen-bar__actions">
+            <button type="button" class="gen-iconbtn" id="gen-attach" title="Attach reference image" hidden>📎</button>
             <button type="button" class="gen-iconbtn" id="gen-history-btn" title="Prompt history">🕘</button>
             <button type="button" class="gen-iconbtn" id="lm-img-cancel" title="Cancel" hidden>✕</button>
             <button type="submit" class="lm-btn lm-btn--primary gen-generate" id="lm-img-generate">Generate</button>
@@ -370,6 +413,7 @@
       imageModels: {{ image_models_json | safe }},
       profiles: {{ profiles_json | safe }},
       enginesSchema: {{ engines_schema_json | safe }},
+      enginesCaps: {{ engines_caps_json | safe }},
       defaultModel: {{ default_image_model | tojson }},
       defaultProfile: {{ default_image_profile | tojson }},
       apiKey: "",
@@ -452,7 +496,7 @@
     const $ = (id) => document.getElementById(id);
     const HISTORY_KEY = "lm_img_prompt_history";
     const AUTH = () => ({"Authorization": "Bearer " + cfg.apiKey});
-    const state = { nextBefore: null, inFlight: false, abort: null, seenUrls: new Set() };
+    const state = { nextBefore: null, inFlight: false, abort: null, seenUrls: new Set(), refs: [] };
 
     const modelSel = $("lm-img-model"), profileSel = $("lm-img-profile"), overrides = $("lm-img-overrides");
     const promptEl = $("lm-img-prompt"), seedEl = $("lm-img-seed"), seedDice = $("lm-img-seed-dice"), nEl = $("lm-img-n");
@@ -464,6 +508,11 @@
     const historyBtn = $("gen-history-btn"), historyList = $("gen-history-list"), hintEl = $("gen-hint");
     const lightbox = $("gen-lightbox"), lbImg = $("gen-lb-img"), lbMeta = $("gen-lb-meta");
     const lbPrompt = $("gen-lb-prompt"), lbActions = $("gen-lb-actions");
+    const dock = document.querySelector(".gen-dock");
+    const refsWrap = $("gen-refs"), refsThumbs = $("gen-refs-thumbs"), refsHint = $("gen-refs-hint");
+    const attachBtn = $("gen-attach"), fileInput = $("gen-file");
+    const strengthWrap = $("gen-strength-wrap"), strengthEl = $("gen-strength"), strengthVal = $("gen-strength-val");
+    const keepAspWrap = $("gen-keepaspect-wrap"), keepAspEl = $("gen-keepaspect");
     let liveCard = null;
 
     function shortName(id) { const p = id.split("/"); return p[p.length - 1]; }
@@ -529,7 +578,7 @@
         overrides.appendChild(wrap);
       });
     }
-    modelSel.addEventListener("change", () => { updateModelBtn(); populateProfileDropdown(); renderOverrides(); });
+    modelSel.addEventListener("change", () => { updateModelBtn(); populateProfileDropdown(); renderOverrides(); applyCaps(); });
     profileSel.addEventListener("change", renderOverrides);
     if (seedDice) seedDice.addEventListener("click", () => { seedEl.value = String(Math.floor(Math.random() * 4294967295)); });
 
@@ -559,6 +608,57 @@
         historyList.appendChild(b);
       });
     }
+
+    // ---- Reference images ----
+    function caps() { return (cfg.enginesCaps && cfg.enginesCaps[currentEngine()]) || {ref_images_max: 0}; }
+    function applyCaps() {
+      const c = caps(); const max = c.ref_images_max || 0;
+      attachBtn.hidden = max < 1;
+      if (state.refs.length > max) state.refs = state.refs.slice(0, max);
+      strengthWrap.hidden = !c.strength;
+      keepAspWrap.hidden = !c.keep_original_aspect;
+      if (c.strength && c.strength_default != null && !strengthEl.dataset.touched) {
+        strengthEl.value = String(c.strength_default); strengthVal.textContent = (+c.strength_default).toFixed(2);
+      }
+      renderRefs();
+    }
+    function renderRefs() {
+      const c = caps(); const max = c.ref_images_max || 0;
+      refsThumbs.innerHTML = "";
+      state.refs.forEach((r, i) => {
+        const cell = document.createElement("div"); cell.className = "gen-ref";
+        const img = document.createElement("img"); img.src = r.dataUrl; cell.appendChild(img);
+        const rm = document.createElement("button"); rm.type = "button"; rm.className = "gen-ref__rm"; rm.textContent = "✕"; rm.title = "Remove";
+        rm.addEventListener("click", () => { state.refs.splice(i, 1); renderRefs(); });
+        cell.appendChild(rm); refsThumbs.appendChild(cell);
+      });
+      refsHint.textContent = state.refs.length ? `${state.refs.length}/${max} image${max > 1 ? "s" : ""}` : "";
+      refsWrap.hidden = state.refs.length === 0;
+    }
+    function addRefDataUrl(dataUrl, name) {
+      const c = caps(); const max = c.ref_images_max || 0;
+      if (max < 1) return false;
+      if (state.refs.length >= max) { showError(`This engine accepts at most ${max} reference image${max > 1 ? "s" : ""}.`); return false; }
+      state.refs.push({dataUrl, name: name || "image"}); renderRefs(); return true;
+    }
+    function addFiles(fileList) {
+      const c = caps(); if ((c.ref_images_max || 0) < 1) return;
+      clearError();
+      Array.from(fileList || []).forEach(f => {
+        if (!/^image\/(png|jpeg|webp)$/.test(f.type)) { showError("Reference images must be PNG, JPEG or WebP."); return; }
+        const reader = new FileReader(); reader.onload = () => addRefDataUrl(reader.result, f.name); reader.readAsDataURL(f);
+      });
+    }
+    attachBtn.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", () => { addFiles(fileInput.files); fileInput.value = ""; });
+    strengthEl.addEventListener("input", () => { strengthEl.dataset.touched = "1"; strengthVal.textContent = (+strengthEl.value).toFixed(2); });
+    ["dragenter", "dragover"].forEach(ev => dock.addEventListener(ev, (e) => { if ((caps().ref_images_max || 0) < 1) return; e.preventDefault(); dock.classList.add("is-dragover"); }));
+    ["dragleave", "drop"].forEach(ev => dock.addEventListener(ev, (e) => { if (ev === "drop" && e.dataTransfer && e.dataTransfer.files.length) { e.preventDefault(); addFiles(e.dataTransfer.files); } dock.classList.remove("is-dragover"); }));
+    promptEl.addEventListener("paste", (e) => {
+      const items = (e.clipboardData && e.clipboardData.items) || [];
+      const imgs = Array.from(items).filter(it => it.kind === "file" && it.type.startsWith("image/")).map(it => it.getAsFile());
+      if (imgs.length) { e.preventDefault(); addFiles(imgs); }
+    });
 
     // ---- Feed ----
     function cardFor(item) {
@@ -626,6 +726,15 @@
       }).catch(() => {});
       if (sc.prompt) mkBtn("Reuse prompt", () => { promptEl.value = sc.prompt; autosize(); closeLightbox(); promptEl.focus(); });
       if (sc.seed != null) mkBtn("Reuse seed", () => { seedEl.value = String(sc.seed); closeLightbox(); });
+      if ((caps().ref_images_max || 0) > 0) mkBtn("Use as reference", async () => {
+        try {
+          const r = await fetch(item.url, {headers: AUTH()});
+          const blob = await r.blob();
+          const reader = new FileReader();
+          reader.onload = () => { if (addRefDataUrl(reader.result, item.name)) closeLightbox(); };
+          reader.readAsDataURL(blob);
+        } catch (e) { showError("Could not load that image as a reference."); }
+      });
       lightbox.hidden = false;
     }
     function closeLightbox() { lightbox.hidden = true; lbImg.src = ""; }
@@ -657,6 +766,12 @@
       if (o.image_seed != null && body.seed == null) body.seed = o.image_seed;
       if (o.image_model_type) body.model_type = o.image_model_type;
       if (o.image_editing_scheduler) body.editing_scheduler = o.image_editing_scheduler;
+      if (state.refs.length) {
+        const c = caps();
+        body.images = state.refs.map(r => r.dataUrl);
+        if (c.strength) body.strength = parseFloat(strengthEl.value);
+        if (c.keep_original_aspect && keepAspEl.checked) body.keep_original_aspect = true;
+      }
       return body;
     }
     function makeLiveCard(prompt) {
@@ -680,6 +795,7 @@
       else if (stage.phase === "saving") { txt = "Saving…"; pct = 100; }
       else if (stage.phase) txt = stage.phase;
       updateLive(txt, pct);
+      if (state.inFlight) hintEl.textContent = (pct != null ? `${txt} · ${pct}%` : txt);
     }
     function handleSseBlock(block) {
       let event = "message", data = "";
@@ -746,7 +862,7 @@
 
     // ---- Init ----
     populateModelDropdown();
-    if (modelSel.options.length) { updateModelBtn(); populateProfileDropdown(cfg.defaultProfile); renderOverrides(); }
+    if (modelSel.options.length) { updateModelBtn(); populateProfileDropdown(cfg.defaultProfile); renderOverrides(); applyCaps(); }
     loadInitial(); autosize();
   }
   </script>

@@ -215,6 +215,21 @@ def profile_schema() -> list[ProfileField]:
     ]
 
 
+def capabilities() -> dict[str, Any]:
+    """FLUX 2 accepts exactly one reference image for img2img.
+
+    ``strength`` controls how much of the init image is kept (0 = keep it
+    exactly, 1 = full regeneration).
+    """
+    return {
+        "ref_images_max": 1,
+        "ref_label": "Init image (img2img)",
+        "ref_help": "One image to transform. Lower strength keeps more of it.",
+        "strength": True,
+        "strength_default": 0.6,
+    }
+
+
 def default_profiles() -> dict[str, dict[str, Any]]:
     return {
         "flux2-fast": {

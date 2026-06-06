@@ -2137,12 +2137,31 @@ async def models_browse(request: Request, repo: str = "",
 
 # ---------- origins ----------
 
+def _all_model_ids(request: Request) -> list[str]:
+    """Installed model ids, for the origin allow-list picker."""
+    reg: Registry = request.app.state.registry
+    return sorted(m.model_id for m in reg.list())
+
+
+def _parse_allowed_models(allow_all: bool, allowed_models: list[str]) -> list[str]:
+    """Turn the create/edit form's picker into an allow-list.
+
+    ``allow_all`` (or an empty selection) means every model (``["*"]``);
+    otherwise only the explicitly selected ids are permitted.
+    """
+    if allow_all:
+        return ["*"]
+    picked = [a.strip() for a in allowed_models if a.strip()]
+    return picked or ["*"]
+
+
 @router.get("/origins", response_class=HTMLResponse)
 async def origins_view(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     am: AuthManager = request.app.state.auth
     return templates.TemplateResponse(request, "origins.html", _ctx(
         request,
         origins=[o.to_public() for o in am.list_origins()],
+        all_model_ids=_all_model_ids(request),
         new_key=None,
     ))
 
@@ -2150,7 +2169,8 @@ async def origins_view(request: Request, _: Origin = Depends(require_admin_ui)) 
 @router.post("/origins/create", response_class=HTMLResponse)
 async def origins_create_ui(request: Request, name: str = Form(...),
                             priority: int = Form(50),
-                            allowed_models: str = Form("default"),
+                            allow_all: bool = Form(False),
+                            allowed_models: list[str] = Form([]),
                             is_admin: bool = Form(False),
                             _: None = Depends(require_csrf)) -> HTMLResponse:
     am: AuthManager = request.app.state.auth
@@ -2159,17 +2179,32 @@ async def origins_create_ui(request: Request, name: str = Form(...),
         return templates.TemplateResponse(request, "origins.html", _ctx(
             request,
             origins=[o.to_public() for o in am.list_origins()],
+            all_model_ids=_all_model_ids(request),
             new_key=None,
             error=f"origin '{name}' already exists",
         ), status_code=409)
-    al = [a.strip() for a in allowed_models.split(",") if a.strip()] or ["default"]
+    al = _parse_allowed_models(allow_all, allowed_models)
     origin, key = am.create_origin(name=name, priority=priority,
                                    allowed_models=al, is_admin=is_admin)
     return templates.TemplateResponse(request, "origins.html", _ctx(
         request,
         origins=[o.to_public() for o in am.list_origins()],
+        all_model_ids=_all_model_ids(request),
         new_key={"name": origin.name, "key": key},
     ))
+
+
+@router.post("/origins/{origin_id}/allowed-models", response_class=HTMLResponse)
+async def origins_allowed_models_ui(request: Request, origin_id: int,
+                                    allow_all: bool = Form(False),
+                                    allowed_models: list[str] = Form([]),
+                                    _: None = Depends(require_csrf)) -> Response:
+    """Edit an existing origin's allow-list (the only field create couldn't
+    change afterwards). Mirrors the create-form picker."""
+    am: AuthManager = request.app.state.auth
+    am.update_origin(origin_id,
+                     allowed_models=_parse_allowed_models(allow_all, allowed_models))
+    return RedirectResponse("/ui/origins", status_code=303)
 
 
 @router.post("/origins/{origin_id}/priority", response_class=HTMLResponse)
@@ -2199,6 +2234,7 @@ async def origins_rotate_ui(request: Request, origin_id: int,
     return templates.TemplateResponse(request, "origins.html", _ctx(
         request,
         origins=[o.to_public() for o in am.list_origins()],
+        all_model_ids=_all_model_ids(request),
         new_key={"name": origin.name if origin else f"#{origin_id}", "key": key},
     ))
 
@@ -2867,11 +2903,17 @@ def _build_image_page_context(cfg, reg) -> dict[str, Any]:
         default_model = image_models[0]["model_id"] if image_models else ""
     default_profile = cfg.default_image_profile or ""
 
+    # Per-engine reference-image capabilities, so the composer can show the
+    # right attach / strength / keep-aspect controls for the chosen model.
+    engines_caps = {eng: image_engines.capabilities(eng)
+                    for eng in engines_in_use}
+
     return {
         "image_models": image_models,
         "image_models_json": json.dumps(image_models),
         "profiles_json": json.dumps(profiles_with_fields),
         "engines_schema_json": json.dumps(engines_schema),
+        "engines_caps_json": json.dumps(engines_caps),
         "default_image_model": default_model,
         "default_image_profile": default_profile,
     }

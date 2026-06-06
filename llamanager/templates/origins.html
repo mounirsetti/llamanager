@@ -49,7 +49,31 @@
           <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Save</button>
         </form>
       </td>
-      <td data-label="Allowed models"><code>{{ o.allowed_models | join(', ') }}</code></td>
+      <td data-label="Allowed models">
+        <details class="lm-allowlist-edit">
+          <summary><code>{{ '★ all' if '*' in o.allowed_models else o.allowed_models | join(', ') }}</code></summary>
+          <form method="post" action="/ui/origins/{{ o.id }}/allowed-models"
+                class="lm-allowlist" style="margin-top: 8px;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label class="lm-checkbox-row">
+              <input type="checkbox" name="allow_all" value="true"
+                     class="lm-allowlist__all" {% if '*' in o.allowed_models %}checked{% endif %}>
+              Allow all models
+            </label>
+            <select class="lm-input lm-input--mono lm-allowlist__select" multiple
+                    name="allowed_models" size="5"
+                    {% if '*' in o.allowed_models %}disabled{% endif %}>
+              {% for mid in all_model_ids %}
+              <option value="{{ mid }}" {% if mid in o.allowed_models %}selected{% endif %}>{{ mid }}</option>
+              {% endfor %}
+              {% for cid in o.allowed_models %}{% if cid not in ('*',) and cid not in all_model_ids %}
+              <option value="{{ cid }}" selected>{{ cid }}{% if cid != 'default' %} (not installed){% endif %}</option>
+              {% endif %}{% endfor %}
+            </select>
+            <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs" style="margin-top: 6px;">Save models</button>
+          </form>
+        </details>
+      </td>
       <td data-label="Admin">
         {% if o.is_admin %}<span class="lm-pill lm-pill--running">admin</span>{% else %}<span style="color: var(--fg-3);">no</span>{% endif %}
       </td>
@@ -93,11 +117,25 @@
                value="50" min="0" max="100"
                style="font-variant-numeric: tabular-nums;">
       </div>
-      <div class="lm-field">
-        <label class="lm-field-label" for="origin-allowed">Allowed models</label>
-        <input id="origin-allowed" class="lm-input lm-input--mono" type="text"
-               name="allowed_models" value="default"
-               placeholder='comma-separated; "default", "*", or paths'>
+      <div class="lm-field" style="flex: 1 1 100%;">
+        <label class="lm-field-label">Allowed models</label>
+        <div class="lm-allowlist">
+          <label class="lm-checkbox-row">
+            <input type="checkbox" name="allow_all" value="true"
+                   class="lm-allowlist__all" checked>
+            Allow all models
+          </label>
+          <select class="lm-input lm-input--mono lm-allowlist__select" multiple
+                  name="allowed_models" size="5" disabled>
+            {% for mid in all_model_ids %}
+            <option value="{{ mid }}">{{ mid }}</option>
+            {% endfor %}
+          </select>
+          <span class="lm-field-hint">
+            Uncheck to restrict this key to specific models. A request for any
+            other (or an uninstalled) model falls back to the default model.
+          </span>
+        </div>
       </div>
     </div>
     <div class="lm-form-row" style="align-items: center; gap: 28px;">
@@ -109,4 +147,18 @@
     </div>
   </form>
 </section>
+
+<script>
+  // "Allow all models" disables the per-key model picker (a disabled <select>
+  // submits nothing → the handler stores ["*"]). Wire every allow-list block,
+  // including the per-row edit disclosures.
+  document.querySelectorAll('.lm-allowlist').forEach(function (box) {
+    var all = box.querySelector('.lm-allowlist__all');
+    var sel = box.querySelector('.lm-allowlist__select');
+    if (!all || !sel) return;
+    var sync = function () { sel.disabled = all.checked; };
+    all.addEventListener('change', sync);
+    sync();
+  });
+</script>
 {% endblock %}

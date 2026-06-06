@@ -311,6 +311,88 @@ def test_v1_accepts_profile_header_without_model(app):
     assert profile == "test"
 
 
+class _StubRequest:
+    def __init__(self, headers: dict[str, str]) -> None:
+        self.headers = headers
+
+
+def _origin(allowed):
+    from llamanager.auth import Origin
+    return Origin(id=1, name="test", priority=50, allowed_models=allowed,
+                  is_admin=False, created_at=0.0)
+
+
+def test_resolve_request_model_body_routing(app):
+    """Stock OpenAI clients (Continue, openai SDK) put the model in the body.
+    A known + allowed body model routes; the header still wins over the body."""
+    from llamanager.api_v1 import _resolve_request_model
+    cfg, sm = app.state.cfg, app.state.sm
+    o = _origin(["*"])
+
+    # Known + allowed body model → routed, no fallback.
+    m, p, fb = _resolve_request_model(
+        _StubRequest({}), o, {"model": "test/model.gguf"}, cfg, sm)
+    assert (m, p, fb) == ("test/model.gguf", None, None)
+
+    # Header wins over body.
+    m, _, _ = _resolve_request_model(
+        _StubRequest({"x-llamanager-model": "test/model.gguf"}),
+        o, {"model": "ignored"}, cfg, sm)
+    assert m == "test/model.gguf"
+
+    # Whitespace tolerated.
+    m, _, _ = _resolve_request_model(
+        _StubRequest({}), o, {"model": "  test/model.gguf  "}, cfg, sm)
+    assert m == "test/model.gguf"
+
+
+def test_resolve_request_model_falls_back_to_default(app):
+    """Unknown, placeholder, or not-permitted models degrade to the default
+    (model_id None) with a reason — never a 403."""
+    from llamanager.api_v1 import _resolve_request_model
+    cfg, sm = app.state.cfg, app.state.sm
+
+    # No model named → default, no fallback reason.
+    m, p, fb = _resolve_request_model(_StubRequest({}), _origin(["*"]), {}, cfg, sm)
+    assert (m, p, fb) == (None, None, None)
+
+    # Unknown / placeholder ids → default + "not installed" reason.
+    for bad in ("gpt-4", "any"):
+        m, _, fb = _resolve_request_model(
+            _StubRequest({}), _origin(["*"]), {"model": bad}, cfg, sm)
+        assert m is None and fb and "not installed" in fb
+
+    # "default" / empty / non-string → default, silently.
+    for val in ("default", "", 123):
+        m, _, fb = _resolve_request_model(
+            _StubRequest({}), _origin(["*"]), {"model": val}, cfg, sm)
+        assert (m, fb) == (None, None)
+
+    # Known but NOT permitted for this origin → default + "not permitted".
+    m, _, fb = _resolve_request_model(
+        _StubRequest({}), _origin(["other/model.gguf"]),
+        {"model": "test/model.gguf"}, cfg, sm)
+    assert m is None and fb and "not permitted" in fb
+
+
+def test_model_allowed_predicate():
+    from llamanager.api_v1 import _model_allowed
+    assert _model_allowed(_origin(["*"]), "anything") is True
+    assert _model_allowed(_origin(["default"]), "default") is True
+    assert _model_allowed(_origin(["default"]), "a/b.gguf") is False
+    assert _model_allowed(_origin(["a/b.gguf"]), "a/b.gguf") is True
+    assert _model_allowed(_origin(["a/b.gguf"]), "c/d.gguf") is False
+
+
+def test_parse_allowed_models():
+    from llamanager.api_ui import _parse_allowed_models
+    assert _parse_allowed_models(True, []) == ["*"]
+    assert _parse_allowed_models(True, ["a/b.gguf"]) == ["*"]  # checkbox wins
+    assert _parse_allowed_models(False, []) == ["*"]           # empty → allow all
+    assert _parse_allowed_models(False, ["a/b.gguf", " c/d.gguf "]) == \
+        ["a/b.gguf", "c/d.gguf"]
+
+
 def test_priority_queue_ordering(app):
     """Two queued requests at different priorities: the higher one comes out first."""
     import asyncio

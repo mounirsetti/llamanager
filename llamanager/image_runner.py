@@ -393,38 +393,61 @@ class ImageTaskRunner:
         last_progress_update = 0.0
         last_event: ProgressEvent | None = None
 
-        async def _drain(stream, prefix: str) -> None:
-            """Pump one subprocess pipe → engine log + parse progress."""
+        async def _handle_line(line: str) -> None:
+            """Parse one output line for progress and (throttled) publish it."""
             nonlocal last_progress_update, last_event
+            ev = adapter.parse_progress(line)
+            if ev is None:
+                return
+            last_event = ev
+            now = time.time()
+            if now - last_progress_update < PROGRESS_THROTTLE_S:
+                return
+            last_progress_update = now
+            state.image.step = ev.step
+            state.image.total_steps = ev.total
+            state.image.last_event_at = now
+            rt.save(self.cfg.runtime_path, state)
+            if progress_cb is not None:
+                try:
+                    res = progress_cb(ev)
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception:
+                    log.debug("progress_cb raised", exc_info=True)
+
+        async def _drain(stream, prefix: str) -> None:
+            """Pump one subprocess pipe → engine log + parse progress.
+
+            diffusers/tqdm refresh the progress line *in place* with
+            carriage returns (``\\r``) and only emit a newline when the bar
+            finishes, so a plain ``readline()`` would block until the end
+            and the UI would show no live progress. We read in chunks and
+            treat both ``\\r`` and ``\\n`` as line breaks, so every tqdm
+            refresh ("N/M") is parsed as it happens.
+            """
+            buf = ""
             with open(log_path, "ab") as log_fp:
                 while True:
-                    raw = await stream.readline()
-                    if not raw:
+                    chunk = await stream.read(4096)
+                    if not chunk:
+                        rest = buf.strip("\r\n")
+                        if rest:
+                            await _handle_line(rest)
                         return
-                    log_fp.write(raw)
+                    log_fp.write(chunk)
                     try:
-                        line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                        buf += chunk.decode("utf-8", errors="replace")
                     except Exception:
+                        buf = ""
                         continue
-                    ev = adapter.parse_progress(line)
-                    if ev is None:
-                        continue
-                    last_event = ev
-                    now = time.time()
-                    if now - last_progress_update < PROGRESS_THROTTLE_S:
-                        continue
-                    last_progress_update = now
-                    state.image.step = ev.step
-                    state.image.total_steps = ev.total
-                    state.image.last_event_at = now
-                    rt.save(self.cfg.runtime_path, state)
-                    if progress_cb is not None:
-                        try:
-                            res = progress_cb(ev)
-                            if asyncio.iscoroutine(res):
-                                await res
-                        except Exception:
-                            log.debug("progress_cb raised", exc_info=True)
+                    # Treat CR as a line break so in-place tqdm refreshes
+                    # parse live; keep the trailing partial for next chunk.
+                    segments = buf.replace("\r", "\n").split("\n")
+                    buf = segments.pop()
+                    for seg in segments:
+                        if seg:
+                            await _handle_line(seg)
 
         drain_out = asyncio.create_task(_drain(proc.stdout, "out"))
         drain_err = asyncio.create_task(_drain(proc.stderr, "err"))
