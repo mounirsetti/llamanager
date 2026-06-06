@@ -250,6 +250,11 @@ def _basic_to_args(prof: Profile, engine: str, model_path: Path) -> dict[str, An
     out: dict[str, Any] = {}
     if prof.ctx_size is not None and engine == "llama":
         out["ctx-size"] = int(prof.ctx_size)
+    # Thinking-token cap → --reasoning-budget (llama only). Forces the model
+    # to stop reasoning and answer once the budget is hit, so a runaway think
+    # loop can't burn the whole output window with empty content.
+    if getattr(prof, "reasoning_budget", None) is not None and engine == "llama":
+        out["reasoning-budget"] = int(prof.reasoning_budget)
     # KV-cache quantization (llama only). Shrinks the per-token context memory
     # independently of the model's weight quant. Quantized KV needs flash
     # attention, so turn it on too. "" / "f16" leave the engine default.

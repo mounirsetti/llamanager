@@ -312,6 +312,12 @@ class Profile:
     # ``chat_template_kwargs.enable_thinking`` into the upstream body for
     # /v1/chat/completions; "" leaves the model/template default alone.
     thinking: str = ""
+    # Cap on thinking tokens → llama-server --reasoning-budget. When the
+    # budget is hit, llama.cpp forces the end-of-thinking tag so the model
+    # stops reasoning and produces its answer (prevents runaway thinking that
+    # exhausts max_tokens with empty content). None = unbounded (model
+    # default); 0 = no thinking. llama-engine only.
+    reasoning_budget: int | None = None
     args: dict[str, Any] = field(default_factory=dict)
 
 
@@ -586,6 +592,7 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
         image_editing_scheduler=str(body.get("image_editing_scheduler", "") or ""),
         image_strength=_coerce_float(body.get("image_strength")),
         thinking=thinking,
+        reasoning_budget=_coerce_int(body.get("reasoning_budget")),
         args=dict(body.get("args") or {}),
     )
 
@@ -923,6 +930,8 @@ def _profile_to_tomlkit(prof: Profile):
         tbl.add("image_strength", prof.image_strength)
     if prof.thinking:
         tbl.add("thinking", prof.thinking)
+    if prof.reasoning_budget is not None:
+        tbl.add("reasoning_budget", prof.reasoning_budget)
     if prof.args:
         tbl.add("args", _dict_to_tomlkit(prof.args))
     return tbl

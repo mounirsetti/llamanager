@@ -2371,25 +2371,35 @@
       });
 
       /* Request-detail modal: a clickable request row swaps its fragment
-         into #lm-req-detail-body; open the dialog once it lands. Clicking
-         the backdrop (target === dialog) or pressing Esc closes it. */
-      var reqDialog = document.getElementById('lm-req-detail');
-      if (reqDialog) {
-        document.body.addEventListener('htmx:afterSwap', function (e) {
-          var t = e.detail && e.detail.target;
-          if (t && t.id === 'lm-req-detail-body'
-              && typeof reqDialog.showModal === 'function' && !reqDialog.open) {
-            reqDialog.showModal();
-          }
-        });
-        reqDialog.addEventListener('click', function (e) {
-          if (e.target === reqDialog) reqDialog.close();
-        });
-        reqDialog.addEventListener('close', function () {
+         into #lm-req-detail-body; open the dialog once it lands.
+
+         The <dialog> lives in <body>, which hx-boost REPLACES on every
+         navigation — so we must never cache a reference to it (a stale,
+         detached node throws "Dialog element is not connected" on
+         showModal). Look it up by id each time, and delegate on
+         document(.body) so the handlers survive body swaps. */
+      document.body.addEventListener('htmx:afterSwap', function (e) {
+        var t = e.detail && e.detail.target;
+        if (!t || t.id !== 'lm-req-detail-body') return;
+        var dlg = document.getElementById('lm-req-detail');
+        if (dlg && dlg.isConnected && typeof dlg.showModal === 'function'
+            && !dlg.open) {
+          try { dlg.showModal(); } catch (_) { /* not connected yet */ }
+        }
+      });
+      // Backdrop click (the event target is the dialog box itself) closes it.
+      document.addEventListener('click', function (e) {
+        var dlg = document.getElementById('lm-req-detail');
+        if (dlg && e.target === dlg) dlg.close();
+      });
+      // On close, clear the body so an active-request poll stops and stale
+      // content doesn't linger. ('close' doesn't bubble — capture it.)
+      document.addEventListener('close', function (e) {
+        if (e.target && e.target.id === 'lm-req-detail') {
           var body = document.getElementById('lm-req-detail-body');
           if (body) body.innerHTML = '';
-        });
-      }
+        }
+      }, true);
     })();
 
     } /* end __lmChromeInit guard */

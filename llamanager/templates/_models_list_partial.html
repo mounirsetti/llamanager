@@ -37,6 +37,27 @@
 </select>
 {% endmacro %}
 
+{# Reasoning-budget control (llama text models only). `current` is the saved
+   value (or none for the create form). Advice uses the model's measured decode
+   throughput so the suggestion is hardware-specific, not a magic number. #}
+{% macro reasoning_budget_field(m, current) %}
+{% if m.engine == 'llama' and m.engine_family != 'image' %}
+<div class="lm-rb-wrap">
+  <label class="lm-field-label">Reasoning budget (max thinking tokens)
+    <span class="lm-field-hint">llama-server <code>--reasoning-budget</code>: caps thinking, then forces the answer so a runaway think loop can't eat the whole output. Blank = unbounded · 0 = no thinking.</span>
+  </label>
+  <input class="lm-input" type="number" name="reasoning_budget" min="0" step="250"
+         value="{{ current if current is not none else '' }}"
+         placeholder="{{ m.rec_reasoning_budget or 'unbounded' }}"
+         {% if m.decode_tok_s %}data-tok-s="{{ m.decode_tok_s }}"
+         oninput="var e=this.closest('.lm-rb-wrap').querySelector('.lm-rb-estimate'); if(e){e.textContent=this.value?(' → ≈'+Math.round(this.value/{{ m.decode_tok_s }})+'s of thinking'):'';}"{% endif %}>
+  <span class="lm-field-hint">
+    {% if m.decode_tok_s %}Measured ~{{ m.decode_tok_s }} tok/s on your hardware → suggested <strong>{{ m.rec_reasoning_budget }}</strong> (≈20s of thinking per step).<span class="lm-rb-estimate"></span>{% else %}No throughput samples yet — run a few requests and a hardware-based suggestion will appear here.{% endif %}
+  </span>
+</div>
+{% endif %}
+{% endmacro %}
+
 {# Backwards-compat for callers that didn't pre-split the list. #}
 {% if text_models is not defined or image_models is not defined %}
   {% set _text = [] %}
@@ -274,6 +295,8 @@
                         <option value="on" {% if prof.thinking == 'on' %}selected{% endif %}>on</option>
                         <option value="off" {% if prof.thinking == 'off' %}selected{% endif %}>off (skip the &lt;think&gt; preamble)</option>
                       </select>
+
+                      {{ reasoning_budget_field(m, prof.reasoning_budget) }}
                     </div>
 
                     <div class="lm-tab-panel" data-panel="advanced" hidden>
@@ -427,6 +450,8 @@
                     <option value="on">on</option>
                     <option value="off">off (skip the &lt;think&gt; preamble)</option>
                   </select>
+
+                  {{ reasoning_budget_field(m, none) }}
                 </div>
 
                 <div class="lm-tab-panel" data-panel="advanced" hidden>

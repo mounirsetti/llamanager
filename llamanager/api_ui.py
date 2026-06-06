@@ -1447,6 +1447,48 @@ def _model_dir(model_id: str) -> str:
     return model_id.rsplit("/", 1)[0] if "/" in model_id else ""
 
 
+def _decode_rates_by_model(db) -> dict[str, float]:
+    """Estimate decode throughput (tokens/sec) per model from recent finished
+    requests, for advising a reasoning budget. A thinking-token budget is
+    spent at decode speed, so we approximate that with a high percentile of
+    completion_tokens/duration over generation-substantial requests — the
+    fastest samples are the most generation-dominant (least prefill overhead),
+    so they best reflect pure decode. Best-effort; returns {} on any trouble.
+    """
+    try:
+        rows = db.query(
+            "SELECT model, completion_tokens AS ct, started_at AS s, "
+            "finished_at AS f FROM requests WHERE status='done' "
+            "AND completion_tokens IS NOT NULL AND completion_tokens >= 80 "
+            "AND started_at IS NOT NULL AND finished_at IS NOT NULL "
+            "ORDER BY enqueued_at DESC LIMIT 1000"
+        )
+    except Exception as e:  # noqa: BLE001 — advice is best-effort
+        log.debug("decode-rate query failed: %s", e)
+        return {}
+    buckets: dict[str, list[float]] = {}
+    for r in rows:
+        dur = (r["f"] or 0) - (r["s"] or 0)
+        ct = r["ct"] or 0
+        if dur <= 0 or ct <= 0 or not r["model"]:
+            continue
+        buckets.setdefault(r["model"], []).append(ct / dur)
+    out: dict[str, float] = {}
+    for mid, rates in buckets.items():
+        rates.sort()
+        out[mid] = rates[min(int(len(rates) * 0.9), len(rates) - 1)]
+    return out
+
+
+def _recommended_reasoning_budget(tok_s: float | None) -> int | None:
+    """A reasoning budget that keeps thinking to ~20s of wall-clock at the
+    model's measured decode rate — a sane interactive default. Rounded to 250.
+    """
+    if not tok_s or tok_s <= 0:
+        return None
+    return max(500, int(round((tok_s * 20) / 250.0) * 250))
+
+
 def _models_ctx(request: Request) -> dict:
     import sys as _sys
     import psutil as _psutil
@@ -1475,6 +1517,9 @@ def _models_ctx(request: Request) -> dict:
     # without poking dataclasses.
     text_models: list[dict] = []
     image_models: list[dict] = []
+
+    # Measured decode throughput per model, for the reasoning-budget advice.
+    decode_rates = _decode_rates_by_model(request.app.state.db)
 
     entries = reg.list()
     # Pre-pass: which repo dirs ship a vision projector (so the model in that
@@ -1537,6 +1582,15 @@ def _models_ctx(request: Request) -> dict:
         # Flag models whose repo ships a projector so the card can hint that
         # it's vision-capable (the projector is wired up via a profile).
         d["has_mmproj"] = bool(_model_dir(mid)) and _model_dir(mid) in mmproj_dirs
+        # Reasoning-budget advice: measured decode rate + a suggested budget
+        # (~20s of thinking at that rate). llama text models only.
+        rate = decode_rates.get(mid)
+        if engine == "llama" and d["engine_family"] != "image":
+            d["decode_tok_s"] = round(rate, 1) if rate else None
+            d["rec_reasoning_budget"] = _recommended_reasoning_budget(rate)
+        else:
+            d["decode_tok_s"] = None
+            d["rec_reasoning_budget"] = None
         m = cfg.get_model(entry.model_id)
         prof_entries: list[dict] = []
         default_profile = ""
@@ -1551,6 +1605,8 @@ def _models_ctx(request: Request) -> dict:
                     "ram_spill_policy": p.ram_spill_policy or "default",
                     "ram_spill_limit_gb": p.ram_spill_limit_gb,
                     "kv_cache_type": getattr(p, "kv_cache_type", "") or "",
+                    "thinking": getattr(p, "thinking", "") or "",
+                    "reasoning_budget": getattr(p, "reasoning_budget", None),
                     "args": p.args,
                     "args_json": json.dumps(p.args, indent=2) if p.args else "{}",
                 })
@@ -4079,6 +4135,7 @@ def _build_llm_profile_from_values(
     ram_spill_policy: str = "default",
     ram_spill_limit_gb: float | None = None,
     thinking: str = "",
+    reasoning_budget: int | None = None,
     kv_cache_type: str = "",
     args: dict[str, Any] | None = None,
 ) -> Profile:
@@ -4108,6 +4165,10 @@ def _build_llm_profile_from_values(
             f"invalid kv_cache_type {kv_val!r}; "
             f"must be one of {VALID_KV_CACHE_TYPES}"
         )
+    if reasoning_budget is not None and reasoning_budget < 0:
+        raise ValueError(
+            "reasoning_budget must be >= 0 (0 = no thinking; blank = unbounded)"
+        )
     if args is None:
         args = {}
     if not isinstance(args, dict):
@@ -4120,6 +4181,7 @@ def _build_llm_profile_from_values(
         ram_spill_policy=policy,
         ram_spill_limit_gb=ram_spill_limit_gb,
         thinking=thinking_val,
+        reasoning_budget=reasoning_budget,
         kv_cache_type=kv_val,
         args=args,
     )
@@ -4137,6 +4199,7 @@ def _build_profile_from_form(
     thinking: str,
     args_json: str,
     kv_cache_type: str = "",
+    reasoning_budget: str = "",
 ) -> Profile:
     """String → typed wrapper around ``_build_llm_profile_from_values``.
 
@@ -4147,6 +4210,7 @@ def _build_profile_from_form(
         vram_val = (None if vram_unlimited == "on"
                     else _parse_optional_float(vram_limit_gb))
         ram_limit_val = _parse_optional_float(ram_spill_limit_gb)
+        reasoning_budget_val = _parse_optional_int(reasoning_budget)
     except ValueError as e:
         raise ValueError(str(e))
     try:
@@ -4161,6 +4225,7 @@ def _build_profile_from_form(
         ram_spill_policy=ram_spill_policy,
         ram_spill_limit_gb=ram_limit_val,
         thinking=thinking,
+        reasoning_budget=reasoning_budget_val,
         kv_cache_type=kv_cache_type,
         args=args,
     )
@@ -4177,6 +4242,7 @@ async def models_profile_create(request: Request,
                                 ram_spill_policy: str = Form("default"),
                                 ram_spill_limit_gb: str = Form(""),
                                 thinking: str = Form(""),
+                                reasoning_budget: str = Form(""),
                                 kv_cache_type: str = Form(""),
                                 args_json: str = Form("{}"),
                                 make_default: str = Form(""),
@@ -4200,6 +4266,7 @@ async def models_profile_create(request: Request,
             ram_spill_policy=ram_spill_policy,
             ram_spill_limit_gb=ram_spill_limit_gb,
             thinking=thinking,
+            reasoning_budget=reasoning_budget,
             kv_cache_type=kv_cache_type,
             args_json=args_json,
         )
@@ -4223,6 +4290,7 @@ async def models_profile_update(request: Request, profile_name: str,
                                 ram_spill_policy: str = Form("default"),
                                 ram_spill_limit_gb: str = Form(""),
                                 thinking: str = Form(""),
+                                reasoning_budget: str = Form(""),
                                 kv_cache_type: str = Form(""),
                                 args_json: str = Form("{}"),
                                 _: None = Depends(require_csrf)) -> Response:
@@ -4243,6 +4311,7 @@ async def models_profile_update(request: Request, profile_name: str,
             ram_spill_policy=ram_spill_policy,
             ram_spill_limit_gb=ram_spill_limit_gb,
             thinking=thinking,
+            reasoning_budget=reasoning_budget,
             kv_cache_type=kv_cache_type,
             args_json=args_json,
         )

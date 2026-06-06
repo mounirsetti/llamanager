@@ -823,6 +823,8 @@ curl -N http://localhost:7200/v1/chat/completions \
 
 Precedence (highest wins): `X-Llamanager-Thinking` header → caller's own `chat_template_kwargs.enable_thinking` in the body → profile's `thinking` setting → upstream/template default. The merge only fires on `/v1/chat/completions` (the bare `/v1/completions` endpoint doesn't render the chat template that consumes the kwarg). The kwarg is silently ignored by templates that don't reference it, so setting it on a non-reasoning model is harmless.
 
+**Reasoning budget — bound thinking without disabling it.** When you *want* thinking but not a runaway loop, set a **Reasoning budget** on the profile (UI: LLM models → edit profile → *Basic* tab; or `reasoning_budget = N` in `config.toml`). It maps to llama-server's `--reasoning-budget`: once the model has spent N thinking tokens, llama.cpp forces the end-of-thinking tag so it stops reasoning and produces its answer. This prevents the failure where a model thinks until it exhausts `max_tokens` and returns *empty content* (a reasoning model can otherwise "finish" with nothing for the client to use). Blank = unbounded; `0` = no thinking. The profile editor suggests a value from the model's **measured decode throughput** — roughly 20s of thinking at the speed that model actually runs on your hardware — so the number isn't a guess. llama-engine models only.
+
 ## Chat in the browser
 
 A built-in chat UI lives at <http://localhost:7200/chat>. Any user with a valid origin API key can use it; no admin access required.
@@ -893,6 +895,11 @@ schtasks /Create /XML "$env:USERPROFILE\.llamanager\llamanager.task.xml" /TN lla
 
 `install-tray` / `remove-tray` remain as aliases for `autostart --mode tray+service` / `--mode off`. For a system-wide Linux service, copy the generated unit to `/etc/systemd/system/` and use `sudo systemctl ...`.
 </details>
+
+### Quick restart
+```bash
+systemctl --user restart llamanager
+```
 
 ## Uninstall
 
@@ -1139,7 +1146,8 @@ default_profile = "balanced"
 
 [models."your-model.gguf".profiles.balanced]
 ctx_size = 4096
-thinking = "off"      # optional; "on" / "off" / omit. See "Reasoning / thinking control" above.
+thinking = "off"        # optional; "on" / "off" / omit. See "Reasoning / thinking control" above.
+reasoning_budget = 2000 # optional; cap thinking tokens (→ --reasoning-budget). Blank = unbounded, 0 = off.
 args = { temp = 0.7 }
 ```
 
