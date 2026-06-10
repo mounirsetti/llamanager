@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.3.99-green.svg" alt="Version 0.3.99">
+  <img src="https://img.shields.io/badge/version-0.3.991-green.svg" alt="Version 0.3.991">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -34,6 +34,13 @@
 llamanager runs on a single host you already own. It installs the inference engines, downloads model weights from Hugging Face, supervises the processes, queues requests with per-origin priorities, and exposes everything behind one OpenAI-compatible (and Anthropic-compatible) endpoint. Text and image families share the same dashboard, the same queue, and the same auth.
 
 The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silicon. The image side runs three diffusion stacks: HiDream-O1-Image, FLUX 2 via `sd.cpp`, and Z-Image (Tongyi-MAI), with Z-Anime supported as a Z-Image fine-tune. New engines plug in as small adapter modules.
+
+<p align="center">
+  <img src="assets/screenshot-llm-models.png" alt="llamanager LLM models page — installed models with sizes and per-model profiles, the loaded model highlighted, and the sticky text + image model picker across the top" width="900">
+</p>
+<p align="center">
+  <sub>The <strong>LLM models</strong> page: every installed model with its size and engine, expandable per-model profiles, and the sticky model picker for both the text and image families up top.</sub>
+</p>
 
 > **New in 0.3.9 · beta.** **Multi-slot LLM** lets you keep multiple language models warm at the same time, each on its own port. Routing is by model id — no swap penalty when the requested model is already loaded. Off by default; enable from the **Slots (beta)** page or `llamanager slots enable`. See [Multi-slot LLM (beta)](#multi-slot-llm-beta).
 
@@ -234,7 +241,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.3.99" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.3.991" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
