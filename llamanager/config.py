@@ -318,6 +318,11 @@ class Profile:
     # exhausts max_tokens with empty content). None = unbounded (model
     # default); 0 = no thinking. llama-engine only.
     reasoning_budget: int | None = None
+    # Concurrent request slots → llama-server --parallel. Each slot reserves
+    # its own compute/KV headroom, so a high count can push layers off the GPU
+    # (set 1 for a single-user box to free VRAM). None = engine default (auto).
+    # llama-engine only.
+    parallel: int | None = None
     args: dict[str, Any] = field(default_factory=dict)
 
 
@@ -593,6 +598,7 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
         image_strength=_coerce_float(body.get("image_strength")),
         thinking=thinking,
         reasoning_budget=_coerce_int(body.get("reasoning_budget")),
+        parallel=_coerce_int(body.get("parallel")),
         args=dict(body.get("args") or {}),
     )
 
@@ -932,6 +938,8 @@ def _profile_to_tomlkit(prof: Profile):
         tbl.add("thinking", prof.thinking)
     if prof.reasoning_budget is not None:
         tbl.add("reasoning_budget", prof.reasoning_budget)
+    if prof.parallel is not None:
+        tbl.add("parallel", prof.parallel)
     if prof.args:
         tbl.add("args", _dict_to_tomlkit(prof.args))
     return tbl

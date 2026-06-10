@@ -1576,7 +1576,12 @@ def _models_ctx(request: Request) -> dict:
                     d["weights_gb"] = round(mem_guard.weights_gb(entry.path, meta=_meta), 1)
                     _vram = getattr(cfg, "vram_total_gb", None)
                     if _vram:
-                        d["safe_ctx"] = mem_guard.safe_max_ctx(entry.path, _vram, meta=_meta)
+                        # Conservative ceiling for the slider hint: f16 KV and
+                        # the engine's auto slot count (the live JS estimate
+                        # refines this per-profile as the operator edits).
+                        d["safe_ctx"] = mem_guard.safe_max_ctx(
+                            entry.path, _vram, meta=_meta,
+                            n_parallel=mem_guard.DEFAULT_PARALLEL_SLOTS)
             except Exception as e:  # noqa: BLE001 — advice is best-effort
                 log.debug("ctx advice sizing failed for %s: %s", mid, e)
         # Flag models whose repo ships a projector so the card can hint that
@@ -1607,6 +1612,7 @@ def _models_ctx(request: Request) -> dict:
                     "kv_cache_type": getattr(p, "kv_cache_type", "") or "",
                     "thinking": getattr(p, "thinking", "") or "",
                     "reasoning_budget": getattr(p, "reasoning_budget", None),
+                    "parallel": getattr(p, "parallel", None),
                     "args": p.args,
                     "args_json": json.dumps(p.args, indent=2) if p.args else "{}",
                 })
@@ -4148,6 +4154,7 @@ def _build_llm_profile_from_values(
     thinking: str = "",
     reasoning_budget: int | None = None,
     kv_cache_type: str = "",
+    parallel: int | None = None,
     args: dict[str, Any] | None = None,
 ) -> Profile:
     """Validate already-typed values and assemble an LLM ``Profile``.
@@ -4180,6 +4187,10 @@ def _build_llm_profile_from_values(
         raise ValueError(
             "reasoning_budget must be >= 0 (0 = no thinking; blank = unbounded)"
         )
+    if parallel is not None and parallel < 1:
+        raise ValueError(
+            "parallel must be >= 1 (number of concurrent slots; blank = auto)"
+        )
     if args is None:
         args = {}
     if not isinstance(args, dict):
@@ -4194,6 +4205,7 @@ def _build_llm_profile_from_values(
         thinking=thinking_val,
         reasoning_budget=reasoning_budget,
         kv_cache_type=kv_val,
+        parallel=parallel,
         args=args,
     )
 
@@ -4211,6 +4223,7 @@ def _build_profile_from_form(
     args_json: str,
     kv_cache_type: str = "",
     reasoning_budget: str = "",
+    parallel: str = "",
 ) -> Profile:
     """String → typed wrapper around ``_build_llm_profile_from_values``.
 
@@ -4222,6 +4235,7 @@ def _build_profile_from_form(
                     else _parse_optional_float(vram_limit_gb))
         ram_limit_val = _parse_optional_float(ram_spill_limit_gb)
         reasoning_budget_val = _parse_optional_int(reasoning_budget)
+        parallel_val = _parse_optional_int(parallel)
     except ValueError as e:
         raise ValueError(str(e))
     try:
@@ -4238,6 +4252,7 @@ def _build_profile_from_form(
         thinking=thinking,
         reasoning_budget=reasoning_budget_val,
         kv_cache_type=kv_cache_type,
+        parallel=parallel_val,
         args=args,
     )
 
@@ -4255,6 +4270,7 @@ async def models_profile_create(request: Request,
                                 thinking: str = Form(""),
                                 reasoning_budget: str = Form(""),
                                 kv_cache_type: str = Form(""),
+                                parallel: str = Form(""),
                                 args_json: str = Form("{}"),
                                 make_default: str = Form(""),
                                 _: None = Depends(require_csrf)) -> Response:
@@ -4279,6 +4295,7 @@ async def models_profile_create(request: Request,
             thinking=thinking,
             reasoning_budget=reasoning_budget,
             kv_cache_type=kv_cache_type,
+            parallel=parallel,
             args_json=args_json,
         )
         save_profile(cfg.config_path, mid, profile_name, prof)
@@ -4303,6 +4320,7 @@ async def models_profile_update(request: Request, profile_name: str,
                                 thinking: str = Form(""),
                                 reasoning_budget: str = Form(""),
                                 kv_cache_type: str = Form(""),
+                                parallel: str = Form(""),
                                 args_json: str = Form("{}"),
                                 _: None = Depends(require_csrf)) -> Response:
     cfg = request.app.state.cfg
@@ -4324,6 +4342,7 @@ async def models_profile_update(request: Request, profile_name: str,
             thinking=thinking,
             reasoning_budget=reasoning_budget,
             kv_cache_type=kv_cache_type,
+            parallel=parallel,
             args_json=args_json,
         )
     except ValueError as e:

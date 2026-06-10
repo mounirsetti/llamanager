@@ -2092,10 +2092,14 @@
               + (isNaN(weights) ? '' : ' · weights' + mmTag + '+KV ~' + total.toFixed(1) + ' GB');
       var color = 'var(--fg-2)';
       var V = Math.round(vram);
-      // Engine overhead beyond weights+KV+mmproj: compute buffer + slack.
-      // Mirrors mem_guard.usable_vram_gb (NOT a flat % — the context/KV is
-      // already counted, so this is just the ~fixed forward-pass buffer).
-      var usable = vram - (1.0 + vram * 0.04);
+      // Engine overhead beyond weights+KV+mmproj: a ~per-slot compute buffer
+      // plus allocator slack. Mirrors mem_guard._gpu_overhead_gb — the compute
+      // buffer scales with --parallel (blank = engine auto, assume 4 to match
+      // mem_guard.DEFAULT_PARALLEL_SLOTS); context/KV is counted separately.
+      var parInput = form && form.querySelector('input[name="parallel"]');
+      var P = parInput ? parseInt(parInput.value, 10) : NaN;
+      if (isNaN(P) || P < 1) P = 4;
+      var usable = vram - (1.0 * P + vram * 0.04);
       if (!isNaN(vram)) {
         if (total <= usable) {
           color = 'var(--ok)'; msg += ' · fits your ' + V + ' GB GPU';
@@ -2125,6 +2129,14 @@
       document.addEventListener('input', function (e) {
         var el = e.target;
         if (!el || !el.closest) return;
+        // The parallel field lives outside the ctx slider-pair but changes the
+        // per-slot compute-buffer reservation, so re-estimate on its input too.
+        if (el.name === 'parallel') {
+          var pform = el.closest('form');
+          var pctx = pform && pform.querySelector('.lm-ctx-input');
+          if (pctx) lmUpdateCtxAdvice(pctx);
+          return;
+        }
         var pair = el.closest('.lm-slider-pair');
         if (!pair) return;
         var ctx = pair.querySelector('.lm-ctx-input');

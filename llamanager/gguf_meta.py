@@ -58,6 +58,11 @@ class GgufMeta:
     embedding_length: int | None = None
     head_count: int | None = None
     head_count_kv: int | None = None
+    # Explicit per-head K/V dimension. Some architectures decouple this from
+    # embedding_length // head_count (e.g. a head_dim of 256 on a 5120-wide,
+    # 24-head model), so we must read it rather than derive it for KV sizing.
+    key_length: int | None = None
+    value_length: int | None = None
     context_length: int | None = None
     file_size: int = 0
 
@@ -142,6 +147,8 @@ def read_gguf_meta(path: Path, *, max_header_bytes: int = 4 * 1024 * 1024) -> Gg
             if key.endswith(".block_count") or key.endswith(".embedding_length") \
                     or key.endswith(".attention.head_count") \
                     or key.endswith(".attention.head_count_kv") \
+                    or key.endswith(".attention.key_length") \
+                    or key.endswith(".attention.value_length") \
                     or key.endswith(".context_length"):
                 val, off = _read_value(buf, off, vtype)
                 pending[key] = val
@@ -156,6 +163,9 @@ def read_gguf_meta(path: Path, *, max_header_bytes: int = 4 * 1024 * 1024) -> Gg
         meta.head_count = pending.get(f"{arch}.attention.head_count")
         meta.head_count_kv = (pending.get(f"{arch}.attention.head_count_kv")
                               or meta.head_count)
+        meta.key_length = pending.get(f"{arch}.attention.key_length")
+        meta.value_length = (pending.get(f"{arch}.attention.value_length")
+                             or meta.key_length)
         meta.context_length = pending.get(f"{arch}.context_length")
     return meta
 
@@ -170,29 +180,53 @@ _DEFAULT_VRAM_OVERHEAD_FRACTION = 0.12
 # Minimum reserve in GB regardless of model size.
 _MIN_VRAM_OVERHEAD_GB = 0.5
 
+# Bytes per KV-cache element for each cache dtype. f16 is the engine default;
+# the quantized types shrink the per-token context memory independently of the
+# model's weight quant. Values are the real llama.cpp block bit-widths / 8
+# (q8_0 = 8.5 bpw, q5_1 = 6.0, q4_0 = 4.5).
+_KV_CACHE_BYTES_PER_ELEM: dict[str, float] = {
+    "": 2.0, "f16": 2.0, "f32": 4.0,
+    "q8_0": 8.5 / 8, "q5_1": 6.0 / 8, "q4_0": 4.5 / 8,
+}
 
-def _kv_cache_gb(meta: GgufMeta, ctx_size: int | None) -> float | None:
-    """Estimate KV cache size in GB given a context size.
 
-    KV cache (fp16): 2 * n_layers * ctx * n_kv_heads * head_dim * 2 bytes
-                   = 4 * n_layers * ctx * embedding_per_head_kv (bytes)
+def kv_bytes_per_elem(kv_cache_type: str | None) -> float:
+    """Bytes per KV-cache element for a cache dtype. Unknown/blank → f16,
+    the engine default and the conservative (largest) choice."""
+    return _KV_CACHE_BYTES_PER_ELEM.get((kv_cache_type or "").strip().lower(), 2.0)
+
+
+def _kv_cache_gb(meta: GgufMeta, ctx_size: int | None,
+                 *, bytes_per_elem: float = 2.0) -> float | None:
+    """Estimate KV cache size in GB for ``ctx_size`` tokens.
+
+    KV cache holds, per layer and token, an n_kv_heads × head_dim K vector and
+    the same-shaped V vector. ``bytes_per_elem`` is the cache dtype's element
+    size (2.0 = f16; see ``kv_bytes_per_elem`` for the quantized types).
+
+    head_dim comes from the model's explicit ``attention.key_length`` /
+    ``value_length`` when present (some archs decouple it from
+    embedding_length // head_count); otherwise we fall back to that ratio.
 
     Returns None if any required field is missing.
     """
-    if not ctx_size or not meta.block_count or not meta.embedding_length:
+    if not ctx_size or not meta.block_count:
         return None
     n_layers = meta.block_count
-    embed = meta.embedding_length
-    # head_count gives us head_dim = embed / head_count.
+    embed = meta.embedding_length or 0
     head_count = meta.head_count or 0
     head_count_kv = meta.head_count_kv or head_count or 0
-    if not head_count or not head_count_kv:
-        # Fallback: assume full attention (KV uses same embedding).
-        kv_per_token = embed
+    fallback_dim = (embed // head_count) if (head_count and embed) else 0
+    k_dim = meta.key_length or fallback_dim
+    v_dim = meta.value_length or meta.key_length or fallback_dim
+    if head_count_kv and (k_dim or v_dim):
+        per_token_elems = head_count_kv * (k_dim + v_dim)
+    elif embed:
+        # Last resort: assume full attention over the embedding (K + V).
+        per_token_elems = 2 * embed
     else:
-        head_dim = embed // head_count
-        kv_per_token = head_dim * head_count_kv
-    bytes_total = 2 * n_layers * ctx_size * kv_per_token * 2  # K + V, fp16
+        return None
+    bytes_total = n_layers * ctx_size * per_token_elems * bytes_per_elem
     return bytes_total / (1024 ** 3)
 
 
@@ -203,6 +237,7 @@ def compute_n_gpu_layers(
     ram_spill_policy: str,
     ram_spill_limit_gb: float | None,
     ctx_size: int | None,
+    kv_cache_type: str = "",
 ) -> int | None:
     """Translate the basic VRAM/RAM-spill budget into ``--n-gpu-layers``.
 
@@ -235,7 +270,8 @@ def compute_n_gpu_layers(
     per_layer_gb = file_gb / n_layers
 
     # KV cache budget — subtract from VRAM before we count layers.
-    kv_gb = _kv_cache_gb(meta, ctx_size) or 0.0
+    kv_gb = _kv_cache_gb(
+        meta, ctx_size, bytes_per_elem=kv_bytes_per_elem(kv_cache_type)) or 0.0
     overhead_gb = max(_MIN_VRAM_OVERHEAD_GB,
                       (vram_limit_gb or file_gb) * _DEFAULT_VRAM_OVERHEAD_FRACTION)
 

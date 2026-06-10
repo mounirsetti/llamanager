@@ -255,6 +255,11 @@ def _basic_to_args(prof: Profile, engine: str, model_path: Path) -> dict[str, An
     # loop can't burn the whole output window with empty content.
     if getattr(prof, "reasoning_budget", None) is not None and engine == "llama":
         out["reasoning-budget"] = int(prof.reasoning_budget)
+    # Concurrent request slots → --parallel (llama only). Each slot reserves
+    # its own compute/KV headroom; lowering it (e.g. to 1) frees VRAM that can
+    # otherwise push layers onto the CPU. Left unset, llama.cpp picks auto.
+    if getattr(prof, "parallel", None) is not None and engine == "llama":
+        out["parallel"] = int(prof.parallel)
     # KV-cache quantization (llama only). Shrinks the per-token context memory
     # independently of the model's weight quant. Quantized KV needs flash
     # attention, so turn it on too. "" / "f16" leave the engine default.
@@ -282,6 +287,7 @@ def _basic_to_args(prof: Profile, engine: str, model_path: Path) -> dict[str, An
                 ram_spill_policy=prof.ram_spill_policy,
                 ram_spill_limit_gb=prof.ram_spill_limit_gb,
                 ctx_size=prof.ctx_size,
+                kv_cache_type=kv,
             )
             if n is not None:
                 out["n-gpu-layers"] = n
@@ -412,8 +418,20 @@ def _apply_launch_guardrails(spec: "StartSpec", cfg: Config, engine: str) -> Non
             # A vision projector also occupies VRAM — count it in the budget.
             mmproj_gb = (mem_guard.file_gb(spec.mmproj_path)
                          if spec.mmproj_path else 0.0)
+            # Mirror the run's actual KV quant and slot count so the verdict
+            # matches what will really be allocated. --parallel left unset means
+            # llama-server auto-picks (assume DEFAULT_PARALLEL_SLOTS); KV type
+            # comes from the --cache-type-k flag _basic_to_args emitted.
+            kv_type = str(args.get("cache-type-k") or "")
+            try:
+                n_par = int(args.get("parallel")
+                            or mem_guard.DEFAULT_PARALLEL_SLOTS)
+            except (TypeError, ValueError):
+                n_par = mem_guard.DEFAULT_PARALLEL_SLOTS
             verdict = mem_guard.ctx_safety(spec.model_path, ctx, vram, ram,
-                                           extra_gb=mmproj_gb)
+                                           extra_gb=mmproj_gb,
+                                           kv_cache_type=kv_type,
+                                           n_parallel=n_par)
             if verdict and verdict.is_unsafe:
                 log.warning("ctx guardrail [%s]: %s — %s",
                             verdict.level, spec.model_id, verdict.message)

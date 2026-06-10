@@ -1148,6 +1148,7 @@ default_profile = "balanced"
 ctx_size = 4096
 thinking = "off"        # optional; "on" / "off" / omit. See "Reasoning / thinking control" above.
 reasoning_budget = 2000 # optional; cap thinking tokens (→ --reasoning-budget). Blank = unbounded, 0 = off.
+parallel = 1            # optional; concurrent request slots (→ --parallel). Blank = auto. Lower to free VRAM.
 args = { temp = 0.7 }
 ```
 

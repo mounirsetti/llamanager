@@ -429,6 +429,39 @@ def test_reasoning_budget_form_to_launch_arg():
     assert reparsed.reasoning_budget == 2000
 
 
+def test_parallel_form_to_launch_arg():
+    """Parallel slots flow form → Profile → --parallel, survive a TOML
+    round-trip, and the blank/invalid edges behave."""
+    from pathlib import Path
+    from llamanager.api_ui import _build_profile_from_form
+    from llamanager.server_manager import _basic_to_args
+    from llamanager.config import _profile_to_tomlkit, _parse_profile
+    import tomlkit
+
+    def build(par):
+        return _build_profile_from_form(
+            "p", mmproj="", ctx_size="", vram_limit_gb="", vram_unlimited="on",
+            ram_spill_policy="default", ram_spill_limit_gb="", thinking="",
+            args_json="{}", kv_cache_type="", reasoning_budget="", parallel=par)
+
+    prof = build("1")
+    assert prof.parallel == 1
+    assert _basic_to_args(prof, "llama", Path("/x.gguf"))["parallel"] == 1
+    # blank → auto (no arg emitted)
+    assert build("").parallel is None
+    assert "parallel" not in _basic_to_args(build(""), "llama", Path("/x.gguf"))
+    # < 1 rejected
+    import pytest
+    with pytest.raises(ValueError):
+        build("0")
+    # mlx ignores it (llama-only basic arg)
+    assert "parallel" not in _basic_to_args(prof, "mlx", Path("/x.gguf"))
+    # TOML round-trip
+    tbl = _profile_to_tomlkit(prof)
+    reparsed = _parse_profile("p", tomlkit.loads(tomlkit.dumps({"x": tbl}))["x"])
+    assert reparsed.parallel == 1
+
+
 def test_recommended_reasoning_budget():
     from llamanager.api_ui import _recommended_reasoning_budget
     assert _recommended_reasoning_budget(None) is None

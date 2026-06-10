@@ -42,6 +42,61 @@ def test_no_gqa_kv_dwarfs_gqa():
     assert big > small * 5
 
 
+# A model that declares an explicit head_dim (key_length/value_length) decoupled
+# from embedding_length // head_count — like Qwen3.6-27B (head_dim 256, not
+# 5120//24=213). KV sizing must read it rather than derive the wrong 213.
+EXPLICIT_HEAD_DIM = GgufMeta(architecture="qwen35", block_count=64,
+                             embedding_length=5120, head_count=24,
+                             head_count_kv=4, key_length=256, value_length=256,
+                             context_length=262144, file_size=int(20.6 * 1024**3))
+
+
+def test_kv_uses_explicit_head_dim_not_embed_ratio():
+    """When the model declares key_length/value_length, KV must use it, not
+    embedding_length // head_count (which would be 213 vs the real 256)."""
+    derived = GgufMeta(architecture="qwen35", block_count=64,
+                       embedding_length=5120, head_count=24, head_count_kv=4,
+                       context_length=262144, file_size=int(20.6 * 1024**3))
+    explicit = mg.kv_cache_gb("x", 110336, meta=EXPLICIT_HEAD_DIM)
+    fallback = mg.kv_cache_gb("x", 110336, meta=derived)
+    # 256/213 larger than the embed//head_count fallback.
+    assert explicit and fallback and explicit > fallback
+    assert abs(explicit / fallback - 256 / 213) < 0.02
+    # Sanity: ~26.9 GiB f16 at 110k for this model.
+    assert 26.0 < explicit < 28.0
+
+
+def test_kv_cache_type_scales_footprint():
+    """Quantizing the KV cache shrinks it by the dtype's bit-width vs f16."""
+    f16 = mg.kv_cache_gb("x", 110336, meta=EXPLICIT_HEAD_DIM)
+    q8 = mg.kv_cache_gb("x", 110336, meta=EXPLICIT_HEAD_DIM, kv_cache_type="q8_0")
+    q5 = mg.kv_cache_gb("x", 110336, meta=EXPLICIT_HEAD_DIM, kv_cache_type="q5_1")
+    q4 = mg.kv_cache_gb("x", 110336, meta=EXPLICIT_HEAD_DIM, kv_cache_type="q4_0")
+    assert f16 > q8 > q5 > q4
+    assert abs(q8 / f16 - 8.5 / 16) < 0.01     # q8_0 = 8.5 bpw
+    assert abs(q5 / f16 - 6.0 / 16) < 0.01     # q5_1 = 6.0 bpw
+    assert abs(q4 / f16 - 4.5 / 16) < 0.01     # q4_0 = 4.5 bpw
+    # Blank, "f16", and unknown types all fall back to the full f16 size.
+    assert mg.kv_cache_gb("x", 110336, meta=EXPLICIT_HEAD_DIM, kv_cache_type="f16") == f16
+    assert mg.kv_cache_gb("x", 110336, meta=EXPLICIT_HEAD_DIM, kv_cache_type="bogus") == f16
+
+
+def test_parallel_raises_overhead_and_lowers_safe_ctx(monkeypatch):
+    """More request slots reserve more compute buffer, so usable VRAM and the
+    safe ctx both drop as --parallel grows."""
+    monkeypatch.setattr(mg, "_load_meta", lambda p: EXPLICIT_HEAD_DIM)
+    assert mg.usable_vram_gb(32.0, 1) > mg.usable_vram_gb(32.0, 4)
+    one = mg.safe_max_ctx("x", 31.7, kv_cache_type="q5_1", n_parallel=1)
+    four = mg.safe_max_ctx("x", 31.7, kv_cache_type="q5_1", n_parallel=4)
+    assert one and four and one > four
+    # The real case: 110k at q5_1 + 4 slots is unsafe on a 32 GB card, and the
+    # suggested safe ctx is well below it.
+    v = mg.ctx_safety("x", 110336, vram_gb=31.7, ram_gb=64.0,
+                      kv_cache_type="q5_1", n_parallel=4)
+    assert v.is_unsafe and v.safe_ctx and v.safe_ctx < 110336
+    assert "q5_1" in v.message
+
+
 def test_safe_max_ctx_respects_budget(tmp_path, monkeypatch):
     # Patch the loader so we don't need a real file on disk.
     monkeypatch.setattr(mg, "_load_meta", lambda p: NO_GQA)

@@ -58,6 +58,20 @@
 {% endif %}
 {% endmacro %}
 
+{# Parallel-slots control (llama text models only). `current` is the saved
+   value (or none for the create form). Each slot reserves its own compute/KV
+   headroom, so a high count can push layers off the GPU onto the CPU. #}
+{% macro parallel_field(m, current) %}
+{% if m.engine == 'llama' and m.engine_family != 'image' %}
+<label class="lm-field-label">Parallel slots
+  <span class="lm-field-hint">llama-server <code>--parallel</code>: number of concurrent request slots. Each slot reserves its own compute/KV headroom, so a high count can spill layers to the CPU (slow). Blank = engine default (auto) · set <strong>1</strong> for a single-user box to free VRAM.</span>
+</label>
+<input class="lm-input" type="number" name="parallel" min="1" step="1"
+       value="{{ current if current is not none else '' }}"
+       placeholder="auto">
+{% endif %}
+{% endmacro %}
+
 {# Backwards-compat for callers that didn't pre-split the list. #}
 {% if text_models is not defined or image_models is not defined %}
   {% set _text = [] %}
@@ -297,6 +311,8 @@
                       </select>
 
                       {{ reasoning_budget_field(m, prof.reasoning_budget) }}
+
+                      {{ parallel_field(m, prof.parallel) }}
                     </div>
 
                     <div class="lm-tab-panel" data-panel="advanced" hidden>
@@ -452,6 +468,8 @@
                   </select>
 
                   {{ reasoning_budget_field(m, none) }}
+
+                  {{ parallel_field(m, none) }}
                 </div>
 
                 <div class="lm-tab-panel" data-panel="advanced" hidden>

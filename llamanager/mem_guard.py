@@ -35,7 +35,7 @@ from pathlib import Path
 
 import psutil
 
-from .gguf_meta import GgufMeta, _kv_cache_gb, read_gguf_meta
+from .gguf_meta import GgufMeta, _kv_cache_gb, kv_bytes_per_elem, read_gguf_meta
 
 log = logging.getLogger(__name__)
 
@@ -53,8 +53,13 @@ log = logging.getLogger(__name__)
 # fragmentation fraction, NOT a flat percentage of the card. (The old flat
 # 12% over-reserved big cards: ~3.8 GB on a 32 GB GPU vs the ~1-2 GB really
 # used, which wrongly flagged models that comfortably fit.)
-_GPU_OVERHEAD_BASE_GB = 1.0          # compute/activation buffer (≈ fixed)
+_GPU_OVERHEAD_BASE_GB = 1.0          # compute/activation buffer, per slot
 _GPU_FRAGMENTATION_FRACTION = 0.04   # allocator slack; scales mildly with size
+# llama-server picks --parallel automatically (typically 4) when the operator
+# doesn't pin it. Each slot reserves its own compute buffer, so for a fit
+# estimate we assume this many slots unless a profile sets --parallel. Kept in
+# sync with the live JS estimate in templates/base.html.
+DEFAULT_PARALLEL_SLOTS = 4
 # RAM kept free for the OS when judging whether a model fits VRAM+RAM at all
 # (below this it would thrash swap = "danger").
 _HOST_RESERVE_GB = 4.0
@@ -63,14 +68,21 @@ _HOST_RESERVE_GB = 4.0
 _MIN_SUGGESTED_CTX = 2048
 
 
-def _gpu_overhead_gb(vram_gb: float) -> float:
-    """Non-weight, non-KV VRAM the engine reserves (compute buffer + slack)."""
-    return _GPU_OVERHEAD_BASE_GB + max(0.0, vram_gb) * _GPU_FRAGMENTATION_FRACTION
+def _gpu_overhead_gb(vram_gb: float, n_parallel: int = 1) -> float:
+    """Non-weight, non-KV VRAM the engine reserves (compute buffer + slack).
+
+    The compute/activation buffer is roughly one per request slot, so it scales
+    with ``--parallel``; the fragmentation slack scales mildly with card size.
+    This is a conservative approximation, not an exact llama.cpp accounting.
+    """
+    slots = max(1, int(n_parallel or 1))
+    return (_GPU_OVERHEAD_BASE_GB * slots
+            + max(0.0, vram_gb) * _GPU_FRAGMENTATION_FRACTION)
 
 
-def usable_vram_gb(vram_gb: float) -> float:
+def usable_vram_gb(vram_gb: float, n_parallel: int = 1) -> float:
     """VRAM available for weights + KV + projector, after engine overhead."""
-    return max(0.0, vram_gb - _gpu_overhead_gb(vram_gb))
+    return max(0.0, vram_gb - _gpu_overhead_gb(vram_gb, n_parallel))
 
 
 def _load_meta(model_path: Path) -> GgufMeta | None:
@@ -83,12 +95,18 @@ def _load_meta(model_path: Path) -> GgufMeta | None:
 
 
 def kv_cache_gb(model_path: Path, ctx_size: int,
-                meta: GgufMeta | None = None) -> float | None:
-    """Estimated fp16 KV-cache size (GB) for ``ctx_size`` tokens, or None."""
+                meta: GgufMeta | None = None,
+                kv_cache_type: str = "") -> float | None:
+    """Estimated KV-cache size (GB) for ``ctx_size`` tokens, or None.
+
+    ``kv_cache_type`` ("" / "f16" / "q8_0" / "q5_1" / "q4_0") scales the
+    per-element size; blank means the f16 default.
+    """
     meta = meta or _load_meta(model_path)
     if meta is None:
         return None
-    return _kv_cache_gb(meta, ctx_size)
+    return _kv_cache_gb(meta, ctx_size,
+                        bytes_per_elem=kv_bytes_per_elem(kv_cache_type))
 
 
 def weights_gb(model_path: Path, meta: GgufMeta | None = None) -> float:
@@ -113,22 +131,25 @@ def file_gb(path: Path | str) -> float:
 
 def safe_max_ctx(model_path: Path, budget_gb: float,
                  meta: GgufMeta | None = None,
-                 extra_gb: float = 0.0) -> int | None:
+                 extra_gb: float = 0.0,
+                 kv_cache_type: str = "",
+                 n_parallel: int = 1) -> int | None:
     """Largest ctx whose weights+KV (+``extra_gb``) fit in ``budget_gb``.
 
     ``extra_gb`` is any fixed footprint beyond the weights that also lives in
-    the budget — most often a vision projector (mmproj). Returns None when we
-    lack the metadata to compute KV per token. The result is rounded down to a
-    multiple of 256 (llama's ctx granularity) and floored at
-    ``_MIN_SUGGESTED_CTX``.
+    the budget — most often a vision projector (mmproj). ``kv_cache_type``
+    scales the KV per token; ``n_parallel`` scales the engine compute-buffer
+    reservation. Returns None when we lack the metadata to compute KV per
+    token. The result is rounded down to a multiple of 256 (llama's ctx
+    granularity) and floored at ``_MIN_SUGGESTED_CTX``.
     """
     meta = meta or _load_meta(model_path)
     if meta is None:
         return None
-    per_tok_gb = kv_cache_gb(model_path, 1, meta=meta)
+    per_tok_gb = kv_cache_gb(model_path, 1, meta=meta, kv_cache_type=kv_cache_type)
     if not per_tok_gb or per_tok_gb <= 0:
         return None
-    budget = (usable_vram_gb(budget_gb)
+    budget = (usable_vram_gb(budget_gb, n_parallel)
               - weights_gb(model_path, meta=meta) - max(0.0, extra_gb))
     if budget <= 0:
         return _MIN_SUGGESTED_CTX
@@ -153,7 +174,9 @@ class CtxSafety:
 
 def ctx_safety(model_path: Path, ctx_size: int | None,
                vram_gb: float | None, ram_gb: float | None,
-               extra_gb: float = 0.0) -> CtxSafety | None:
+               extra_gb: float = 0.0,
+               kv_cache_type: str = "",
+               n_parallel: int = 1) -> CtxSafety | None:
     """Classify a ctx choice against the GPU (or, if larger, GPU+RAM) budget.
 
     ``danger`` — weights+KV won't even fit GPU+RAM (will spill to swap/OOM).
@@ -162,6 +185,8 @@ def ctx_safety(model_path: Path, ctx_size: int | None,
 
     ``extra_gb`` is added to the weight footprint — pass the vision projector
     (mmproj) size here when the profile uses one, since it also occupies VRAM.
+    ``kv_cache_type`` scales the KV footprint; ``n_parallel`` scales the engine
+    compute-buffer reservation.
 
     Returns None when ctx or metadata is missing (nothing to say).
     """
@@ -170,7 +195,7 @@ def ctx_safety(model_path: Path, ctx_size: int | None,
     meta = _load_meta(model_path)
     if meta is None:
         return None
-    kv = kv_cache_gb(model_path, ctx_size, meta=meta)
+    kv = kv_cache_gb(model_path, ctx_size, meta=meta, kv_cache_type=kv_cache_type)
     if kv is None:
         return None
     extra = max(0.0, extra_gb)
@@ -179,12 +204,16 @@ def ctx_safety(model_path: Path, ctx_size: int | None,
     vram = vram_gb or 0.0
     ram = ram_gb or 0.0
     need = base + kv
-    vram_budget = usable_vram_gb(vram)                      # after engine overhead
-    total_budget = usable_vram_gb(vram) + max(0.0, ram - _HOST_RESERVE_GB)
-    safe = safe_max_ctx(model_path, vram, meta=meta, extra_gb=extra) if vram else None
-    # Spell out the projector in the breakdown only when there is one.
-    base_desc = (f"weights {w:.1f} + mmproj {extra:.1f} + KV {kv:.1f}"
-                 if extra > 0.05 else f"weights {w:.1f} + KV {kv:.1f}")
+    vram_budget = usable_vram_gb(vram, n_parallel)          # after engine overhead
+    total_budget = usable_vram_gb(vram, n_parallel) + max(0.0, ram - _HOST_RESERVE_GB)
+    safe = (safe_max_ctx(model_path, vram, meta=meta, extra_gb=extra,
+                         kv_cache_type=kv_cache_type, n_parallel=n_parallel)
+            if vram else None)
+    # Spell out the projector and KV quant in the breakdown when present.
+    kv_desc = f"KV {kv:.1f}" + (f" ({kv_cache_type})"
+                               if kv_cache_type and kv_cache_type != "f16" else "")
+    base_desc = (f"weights {w:.1f} + mmproj {extra:.1f} + {kv_desc}"
+                 if extra > 0.05 else f"weights {w:.1f} + {kv_desc}")
 
     if vram and need <= vram_budget:
         level = "ok"
