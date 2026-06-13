@@ -2279,6 +2279,18 @@ async def origins_priority_ui(request: Request, origin_id: int,
     return HTMLResponse(f"<span>priority: {int(priority)}</span>")
 
 
+@router.post("/origins/{origin_id}/enabled", response_class=HTMLResponse)
+async def origins_enabled_ui(request: Request, origin_id: int,
+                             enabled: str = Form("off"),
+                             _: None = Depends(require_csrf)) -> Response:
+    """Enable/disable an origin. A disabled origin authenticates but can't
+    submit inference/image requests (rejected with 403). Takes effect on the
+    next request (the auth cache is cleared)."""
+    am: AuthManager = request.app.state.auth
+    am.set_enabled(origin_id, enabled == "on")
+    return RedirectResponse("/ui/origins", status_code=303)
+
+
 @router.post("/origins/{origin_id}/delete", response_class=HTMLResponse)
 async def origins_delete_ui(request: Request, origin_id: int,
                             _: None = Depends(require_csrf)) -> Response:
@@ -2687,6 +2699,7 @@ def _settings_ctx(request: Request, **extra: Any) -> dict:
     ctx.update(_mem_guard_ctx(cfg))
     ctx["conversation_retention_days"] = int(
         getattr(cfg, "conversation_retention_days", 0) or 0)
+    ctx["lock_model_loading"] = bool(getattr(cfg, "lock_model_loading", False))
     ctx.update(extra)
     return ctx
 
@@ -2786,6 +2799,24 @@ async def settings_autorestart(request: Request,
                                enabled: str = Form("off"),
                                _: None = Depends(require_csrf)) -> Response:
     request.app.state.supervisor.enabled = (enabled == "on")
+    return RedirectResponse("/ui/settings", status_code=303)
+
+
+@router.post("/settings/lock-model-loading", response_class=HTMLResponse)
+async def settings_lock_model_loading(request: Request,
+                                      enabled: str = Form("off"),
+                                      _: None = Depends(require_csrf)) -> Response:
+    """Toggle the operator lock that forbids request-triggered model loads.
+
+    Takes effect immediately (the dispatcher reads ``cfg.lock_model_loading``
+    on each dispatch) and is persisted to the [queue] section so it survives
+    a restart."""
+    from .config import update_queue_settings
+    cfg = request.app.state.cfg
+    on = (enabled == "on")
+    cfg.lock_model_loading = on
+    update_queue_settings(cfg.config_path, lock_model_loading=on)
+    log.info("lock_model_loading set to %s via UI", on)
     return RedirectResponse("/ui/settings", status_code=303)
 
 

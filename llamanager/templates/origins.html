@@ -32,7 +32,7 @@
 
   <table class="lm-table">
     <thead>
-      <tr><th>Id</th><th>Name</th><th>Priority</th><th>Allowed models</th><th>Admin</th><th></th></tr>
+      <tr><th>Id</th><th>Name</th><th>Priority</th><th>Allowed models</th><th>Admin</th><th>Status</th><th></th></tr>
     </thead>
     <tbody>
     {% for o in origins %}
@@ -76,6 +76,17 @@
       </td>
       <td data-label="Admin">
         {% if o.is_admin %}<span class="lm-pill lm-pill--running">admin</span>{% else %}<span style="color: var(--fg-3);">no</span>{% endif %}
+      </td>
+      <td data-label="Status">
+        <form method="post" action="/ui/origins/{{ o.id }}/enabled">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label class="lm-checkbox-row" title="When off, this origin can authenticate but not submit requests."
+                 style="gap: 6px;">
+            <input type="checkbox" name="enabled" value="on" {% if o.enabled %}checked{% endif %}
+                   onchange="this.form.submit()">
+            {% if o.enabled %}enabled{% else %}<span style="color: var(--warn, var(--fg-2));">disabled</span>{% endif %}
+          </label>
+        </form>
       </td>
       <td class="actions" data-label="">
         <form method="post" action="/ui/origins/{{ o.id }}/rotate"

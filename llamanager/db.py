@@ -103,6 +103,12 @@ SCHEMA_VERSIONS: list[str] = [
     ALTER TABLE requests ADD COLUMN prompt_text TEXT;
     ALTER TABLE requests ADD COLUMN response_text TEXT;
     """,
+    # v6: per-origin on/off switch. When 0, the origin authenticates fine but
+    # may not submit work (inference/image requests are rejected with 403).
+    # Existing origins default to enabled so the migration is non-disruptive.
+    """
+    ALTER TABLE origins ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
+    """,
 ]
 
 
@@ -221,6 +227,40 @@ class DB:
             f"UPDATE requests SET prompt_text=NULL, response_text=NULL WHERE {where}",
             params,
         )
+        return cur.rowcount
+
+    # Non-terminal request states. A row left in one of these by a previous
+    # process is orphaned: the in-memory QueueManager that owned it is gone,
+    # so it will never be dispatched, completed, or cancelled on its own.
+    NONTERMINAL_REQUEST_STATES = ("queued", "swapping_model", "running")
+
+    def reconcile_orphaned_requests(self, *, error: str) -> int:
+        """Mark request rows stuck in a non-terminal state as failed.
+
+        Called once at startup. The previous process may have crashed or been
+        restarted mid-flight, leaving ``queued``/``swapping_model``/``running``
+        rows that the fresh QueueManager has no record of — so the dashboard
+        shows them as "running" forever and ``cancel`` (which looks up the
+        in-memory request) can't touch them. Resolve them to ``failed`` so the
+        UI is truthful and the rows stop masquerading as live work.
+
+        Returns the number of rows reconciled.
+        """
+        placeholders = ",".join("?" for _ in self.NONTERMINAL_REQUEST_STATES)
+        rows = self.query(
+            f"SELECT id FROM requests WHERE status IN ({placeholders})",
+            tuple(self.NONTERMINAL_REQUEST_STATES),
+        )
+        if not rows:
+            return 0
+        now = time.time()
+        cur = self.conn.execute(
+            f"UPDATE requests SET status='failed', error=?, finished_at=?"
+            f" WHERE status IN ({placeholders})",
+            (error, now, *self.NONTERMINAL_REQUEST_STATES),
+        )
+        self.log_event("requests_reconciled", {"count": cur.rowcount,
+                                               "error": error})
         return cur.rowcount
 
     def close(self) -> None:

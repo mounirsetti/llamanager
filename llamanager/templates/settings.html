@@ -131,6 +131,19 @@
         Auto-restart the engine on crash (retries with increasing cooldowns)
       </label>
     </form>
+    <form method="post" action="/ui/settings/lock-model-loading">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label class="lm-checkbox-row">
+        <input type="checkbox" name="enabled" value="on" {% if lock_model_loading %}checked{% endif %}
+               onchange="this.form.submit()">
+        Lock model loading — reject requests that would load or swap a model
+      </label>
+    </form>
+    <p style="color: var(--fg-3); font-size: 0.8125rem; max-width: 62ch; margin: -2px 0 0 26px;">
+      When on, an incoming request can't start the engine or switch models.
+      Requests the currently-loaded model can serve still run; others are
+      rejected until you load the model manually or turn this off.
+    </p>
   </div>
 </section>
 

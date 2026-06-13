@@ -38,6 +38,7 @@ from .api_v1 import (
     _apply_thinking_to_body,
     _cancelable_post,
     _extract_prompt_text,
+    _require_origin_enabled,
     _extract_response_text,
     _model_allowed,
     _model_known,
@@ -80,6 +81,7 @@ async def _origin_from_request(req: Request) -> Origin:
     origin = await am.verify(key)
     if not origin:
         raise HTTPException(status_code=401, detail="invalid api key")
+    _require_origin_enabled(origin)
     return origin
 
 

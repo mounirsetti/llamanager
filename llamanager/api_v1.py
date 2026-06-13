@@ -54,7 +54,20 @@ async def _origin_from_request(req: Request) -> Origin:
     origin = await am.verify(key)
     if not origin:
         raise HTTPException(status_code=401, detail="invalid api key")
+    _require_origin_enabled(origin)
     return origin
+
+
+def _require_origin_enabled(origin: Origin) -> None:
+    """Reject a disabled origin from submitting work. Auth still succeeds (so
+    the caller gets a clear 403, not a misleading 401); the operator toggle
+    lives on the origin row (see auth.set_enabled)."""
+    if not origin.enabled:
+        raise HTTPException(
+            status_code=403,
+            detail=(f"origin '{origin.name}' is disabled and may not submit "
+                    f"requests; ask an administrator to re-enable it."),
+        )
 
 
 def _model_allowed(origin: Origin, model_id: str) -> bool:

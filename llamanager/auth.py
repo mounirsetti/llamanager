@@ -54,9 +54,16 @@ class Origin:
     allowed_models: list[str]
     is_admin: bool
     created_at: float
+    # Operator on/off switch. A disabled origin still authenticates but may
+    # not submit work — the inference/image paths reject it with 403.
+    enabled: bool = True
 
     @classmethod
     def from_row(cls, row: Any) -> "Origin":
+        # ``enabled`` arrives via the v6 migration; guard the lookup so the
+        # class still loads against an older row shape in tests.
+        keys = row.keys() if hasattr(row, "keys") else ()
+        enabled = bool(row["enabled"]) if "enabled" in keys else True
         return cls(
             id=row["id"],
             name=row["name"],
@@ -64,6 +71,7 @@ class Origin:
             allowed_models=json.loads(row["allowed_models_json"]),
             is_admin=bool(row["is_admin"]),
             created_at=row["created_at"],
+            enabled=enabled,
         )
 
     def to_public(self) -> dict[str, Any]:
@@ -74,6 +82,7 @@ class Origin:
             "allowed_models": self.allowed_models,
             "is_admin": self.is_admin,
             "created_at": self.created_at,
+            "enabled": self.enabled,
         }
 
 
@@ -256,6 +265,20 @@ class AuthManager:
             f"UPDATE origins SET {', '.join(sets)} WHERE id=?", tuple(vals)
         )
         self.db.log_event("origin_updated", {"id": origin_id})
+        self._cache.clear()
+        return self.get_origin(origin_id)
+
+    def set_enabled(self, origin_id: int, enabled: bool) -> Origin | None:
+        """Flip an origin's on/off switch. A disabled origin still
+        authenticates but is refused at the task-submission paths."""
+        if not self.get_origin(origin_id):
+            return None
+        self.db.execute(
+            "UPDATE origins SET enabled=? WHERE id=?",
+            (1 if enabled else 0, origin_id),
+        )
+        self.db.log_event("origin_enabled_changed",
+                          {"id": origin_id, "enabled": bool(enabled)})
         self._cache.clear()
         return self.get_origin(origin_id)
 

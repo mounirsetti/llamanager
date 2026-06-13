@@ -96,6 +96,10 @@ max_concurrent = 1
 max_queue_depth = 200
 max_wait_s = 300
 queue_timeout_s = 300
+# When true, an incoming request may not start the engine or load/swap a
+# model — requests needing a model that isn't already loaded are rejected.
+# Toggle live from Settings → Engine behavior.
+lock_model_loading = false
 
 [image]
 # Image-engine paths. Both stacks have hardware-pinned dependency chains
@@ -403,6 +407,13 @@ class Config:
     max_queue_depth: int = 200
     max_wait_s: int = 300
     queue_timeout_s: int = 300
+    # Operator lock: when true, an incoming request may NOT trigger a model
+    # load or swap. A request that needs the engine started, a different
+    # model loaded, or a profile swap is rejected instead of loading. Requests
+    # that the already-loaded model can serve still run. Lets the operator
+    # freeze the engine on a chosen model (e.g. while debugging or to protect
+    # a warm cache) without pausing the queue entirely.
+    lock_model_loading: bool = False
 
     # New: profiles nest under their parent model.
     models: dict[str, ModelConfig] = field(default_factory=dict)
@@ -640,6 +651,7 @@ def load_config(path: Path | None = None) -> Config:
         max_queue_depth=int(q.get("max_queue_depth", 200)),
         max_wait_s=int(q.get("max_wait_s", 300)),
         queue_timeout_s=int(q.get("queue_timeout_s", 300)),
+        lock_model_loading=bool(q.get("lock_model_loading", False)),
         hidream_python=str(image_cfg.get("hidream_python", "") or ""),
         hidream_repo=str(image_cfg.get("hidream_repo", "") or ""),
         hidream_target_rocm_release=str(
@@ -1259,6 +1271,19 @@ def update_coexistence_policy(cfg_path: Path, *,
         sect["allow_concurrent"] = bool(allow_concurrent)
     if allow_diffusion_with_slots is not None:
         sect["allow_diffusion_with_slots"] = bool(allow_diffusion_with_slots)
+    _save_tomlkit(cfg_path, doc)
+
+
+def update_queue_settings(cfg_path: Path, *,
+                          lock_model_loading: bool | None = None) -> None:
+    """Update toggles in the [queue] section of config.toml."""
+    import tomlkit
+    doc = _load_tomlkit(cfg_path)
+    if "queue" not in doc:
+        doc.add("queue", tomlkit.table())
+    sect = doc["queue"]
+    if lock_model_loading is not None:
+        sect["lock_model_loading"] = bool(lock_model_loading)
     _save_tomlkit(cfg_path, doc)
 
 

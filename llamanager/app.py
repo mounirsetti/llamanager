@@ -150,6 +150,19 @@ def create_app(config_path: Path | None = None,
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[override]
+        # Resolve any request rows the previous process left mid-flight before
+        # the queue starts. Otherwise they linger as phantom "running"/"queued"
+        # rows that the dashboard shows forever and cancel can't reach (the
+        # in-memory request that owned them is gone). See db.reconcile_*.
+        try:
+            n = db.reconcile_orphaned_requests(
+                error="interrupted by daemon restart")
+            if n:
+                log.info("startup: reconciled %d orphaned request row(s) "
+                         "left running by a previous process", n)
+        except Exception:  # noqa: BLE001 — best-effort, never block startup
+            log.exception("startup: orphaned-request reconciliation failed")
+
         queue.start()
         supervisor.start()
 

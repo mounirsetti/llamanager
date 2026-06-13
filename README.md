@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.3.992-green.svg" alt="Version 0.3.992">
+  <img src="https://img.shields.io/badge/version-0.3.993-green.svg" alt="Version 0.3.993">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -92,7 +92,8 @@ What you get out of the box:
 - **Crash supervisor** with a 3-in-5-minutes restart cap, applied to text servers and image engines alike.
 - **Sticky model picker** at the top of every page: pick the loaded LLM, save default LLM and default diffusion model, with a live "loaded" indicator.
 - **HTMX web UI** that works from a phone over Tailscale or any LAN.
-- **Bearer-token auth.** One key per origin, argon2id-hashed at rest.
+- **Bearer-token auth.** One key per origin, argon2id-hashed at rest. Each origin has an operator on/off switch — a disabled origin still authenticates but is refused at the submission paths with a 403, so you can park a client without rotating or deleting its key.
+- **Model-loading lock.** A single Settings toggle freezes the engine on whatever's currently loaded: requests the loaded model can serve still run, but any request that would start the engine, swap models, or change profile is rejected instead. Protects a warm cache or a debugging session from being yanked out from under you.
 
 Full design notes are in [`llamanager-spec.md`](llamanager-spec.md).
 
@@ -241,7 +242,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.3.992" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.3.993" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -761,6 +762,11 @@ Each origin's `allowed_models` setting restricts which models it can request. Ne
 
 While a request is queued or a model swap is happening, llamanager emits SSE comment lines (`: status=swapping_model`, `: keepalive`) every 10 seconds so client connections don't time out.
 
+Two operator switches can refuse a request outright (distinct from the soft model-fallback above):
+
+- **Disabled origin.** If an admin has flipped the origin's Status to *disabled* on the Origins page (`/ui/origins`), every submission from that key returns **403** (`origin '<name>' is disabled …`). The key still authenticates — this is a deliberate park-the-client switch, not a revocation.
+- **Model-loading lock.** When the lock is on (Settings → *Lock model loading*), a request the loaded model can serve runs normally, but one that would start the engine, swap models, or change profile resolves to a `failed` status with a `model loading is locked: …` error telling you to load the model manually or turn the lock off. It takes effect immediately and persists across restarts (`[queue].lock_model_loading`).
+
 ### Anthropic-compatible API
 
 llamanager also speaks the Anthropic Messages API, mounted under `/anthropic/v1/` so it sits beside the OpenAI surface without colliding on the `/v1/models` envelope. The official `anthropic` SDK works out of the box — just point `base_url` at llamanager:
@@ -1111,6 +1117,13 @@ image_profile = ""
 # Set to a non-zero GB value to cap the cumulative size of the models dir.
 max_disk_gb = 0
 
+[queue]
+# Operator lock. When true, a request that would start the engine, swap
+# models, or change profile is rejected (status=failed) instead of loading;
+# requests the already-loaded model can serve still run. Toggle live from
+# Settings → Lock model loading. Off by default.
+lock_model_loading = false
+
 [image]
 # Per-engine paths. Each is filled either by clicking Install dependencies
 # on the engine card (auto), or by pasting an existing install path.
@@ -1218,6 +1231,10 @@ On Windows, `~` resolves to `%USERPROFILE%`, e.g. `C:\Users\<you>\.llamanager`.
 **Web UI says "invalid admin key" but the key is admin.** The verification cache is per-process. If you just rotated the key, restart the service or wait 5 minutes for the cache TTL.
 
 **Crash loop, `state: crashed` and 503s.** The 3-in-5 restart policy gave up. Check `~/.llamanager/logs/llama-server.log` (or `hidream.log` / `flux2.log` / `z_image.log` for the image engines), fix the cause, then `POST /admin/server/start` (or use the UI).
+
+**A request shows "running" or "queued" forever after a restart.** If the service crashed or was restarted mid-flight, its in-memory queue is gone but the database rows survive. llamanager now reconciles these at startup — any row left `queued`/`swapping_model`/`running` by a previous process is resolved to `failed` (`interrupted by daemon restart`) before the queue starts, so the dashboard is truthful. A row that still lingers in-session can be cleared with `llamanager queue cancel <request_id>`; cancel now force-clears a stale row even when no live handler backs it.
+
+**Requests fail with `model loading is locked`.** The model-loading lock is on (Settings → *Lock model loading*). Either load the model the request wants manually (top-bar **Load**, or `llamanager server swap`), or turn the lock off. See [Calling the API](#calling-the-api).
 
 **Z-Image `Install dependencies` finishes but `pipe(...)` fails at runtime.** The Z-Image auto-install picks a generic torch wheel. For AMD ROCm, Apple Silicon, or specific CUDA versions, build the venv yourself with the vendor wheels and point the engine at it, then skip the install button. (HiDream's auto-installer does this for you on AMD — that path is generic only for Z-Image and FLUX 2 today.)
 

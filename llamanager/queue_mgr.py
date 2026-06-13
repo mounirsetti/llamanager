@@ -220,10 +220,29 @@ class QueueManager:
             self._cv.notify_all()
         return req
 
+    def _cancel_stale_db_row(self, request_id: str) -> bool:
+        """Force a non-terminal DB row to ``cancelled`` when no in-memory
+        request backs it. Lets the operator clear a phantom "running"/"queued"
+        row (orphaned by a crash, or already cleaned up in memory) that
+        ``cancel`` would otherwise 404 on. Returns False for unknown or
+        already-terminal rows so the caller can still surface a 404."""
+        row = self.db.query_one(
+            "SELECT status FROM requests WHERE id=?", (request_id,))
+        if not row or row["status"] not in self.db.NONTERMINAL_REQUEST_STATES:
+            return False
+        self.db.update_request_status(request_id, "cancelled",
+                                      finished_at=time.time())
+        self.db.log_event("request_cancelled",
+                          {"id": request_id, "stale": True})
+        log.info("cancelled stale request row %s (no live handler)", request_id)
+        return True
+
     def cancel(self, request_id: str) -> bool:
         req = self._by_id.get(request_id)
         if not req:
-            return False
+            # Not tracked in memory — fall back to clearing a stale DB row so
+            # phantom "running" rows are still cancellable.
+            return self._cancel_stale_db_row(request_id)
         if req.cancel.is_set():
             return True
         was_queued = req.status == "queued"
@@ -568,6 +587,28 @@ class QueueManager:
                 log.exception("dispatcher loop crashed; sleeping 1s and continuing")
                 await asyncio.sleep(1.0)
 
+    def _cancelled_before_running(self, req: QueuedRequest) -> bool:
+        """True if ``req`` was cancelled before we could mark it running.
+
+        Guards the dispatcher against a resurrection race: a cancel arriving
+        during a model swap wakes the handler (``cancel()`` sets ``ready``),
+        which runs ``mark_in_flight_done`` and refunds the slot *while we're
+        still awaiting the swap*. Without this check the post-swap code would
+        re-add the request to ``_in_flight`` as "running" with no handler left
+        to ever clean it up — a zombie that shows as running forever and can't
+        be cancelled (and whose refunded slot briefly lets a second request
+        run, so the dashboard shows two in flight).
+        """
+        if not req.cancel.is_set():
+            return False
+        if req.status != "cancelled":
+            req.status = "cancelled"
+        # The handler observes cancel via ``ready``; make sure it's awake so
+        # its finally-block bookkeeping (slot refund, registry cleanup) runs.
+        if not req.ready.is_set():
+            req.ready.set()
+        return True
+
     async def _prepare_and_release(self, req: QueuedRequest) -> None:
         """Ensure the right model is loaded, then signal the handler.
 
@@ -580,6 +621,9 @@ class QueueManager:
         via ServerManager.yield_to_image() at dispatch time. We just mark
         the slot in-flight and let the handler invoke the runner.
         """
+        # Cancelled between dispatch and now — don't load anything.
+        if self._cancelled_before_running(req):
+            return
         wanted = req.model_required
         wanted_profile = getattr(req, "profile_required", None)
         loaded = self.sm.runtime.current_model
@@ -635,6 +679,24 @@ class QueueManager:
             target_spec = resolve_spec(self.cfg, model=wanted,
                                        profile=wanted_profile)
             if slot_sm.runtime.current_profile != target_spec.profile_name:
+                if self.cfg.lock_model_loading:
+                    req.error = (
+                        f"model loading is locked: serving this request would "
+                        f"swap slot {slot_sm.slot_id} to profile "
+                        f"{target_spec.profile_name!r}, but request-triggered "
+                        f"model loading is disabled. Turn off the lock in "
+                        f"Settings, then retry."
+                    )
+                    req.status = "failed"
+                    self.db.log_event("dispatch_load_locked",
+                                      {"req": req.request_id,
+                                       "slot": slot_sm.slot_id,
+                                       "to_profile": target_spec.profile_name})
+                    self.db.update_request_status(req.request_id, "failed",
+                                                  error=req.error,
+                                                  finished_at=time.time())
+                    req.ready.set()
+                    return
                 req.status = "swapping_model"
                 self.db.update_request_status(req.request_id, "swapping_model")
                 self.db.log_event("dispatch_slot_swap",
@@ -651,6 +713,10 @@ class QueueManager:
                                                   finished_at=time.time())
                     req.ready.set()
                     return
+            # A cancel may have landed while we were swapping the slot; if so,
+            # bail before marking running (see _cancelled_before_running).
+            if self._cancelled_before_running(req):
+                return
             req.slot_id = slot_sm.slot_id
             self._in_flight[req.request_id] = req
             req.status = "running"
@@ -694,6 +760,24 @@ class QueueManager:
                 except Exception as e:  # noqa: BLE001 — reclaim is best-effort
                     log.warning("memory reclaim restart failed: %s", e)
 
+        if need_swap and self.cfg.lock_model_loading:
+            target_name = target_spec.model_id if target_spec else "a model"
+            req.error = (
+                f"model loading is locked: serving this request would load "
+                f"{target_name!r} (currently loaded: {loaded or 'none'}), but "
+                f"request-triggered model loading is disabled. Load the model "
+                f"manually or turn off the lock in Settings, then retry."
+            )
+            req.status = "failed"
+            self.db.log_event("dispatch_load_locked",
+                              {"req": req.request_id, "from": loaded,
+                               "to": target_name})
+            self.db.update_request_status(req.request_id, "failed",
+                                          error=req.error,
+                                          finished_at=time.time())
+            req.ready.set()
+            return
+
         if need_swap and target_spec is not None:
             req.status = "swapping_model"
             self.db.update_request_status(req.request_id, "swapping_model")
@@ -718,6 +802,13 @@ class QueueManager:
                               {"req": req.request_id,
                                "to": target_spec.model_id,
                                "duration_s": round(time.time() - t0, 2)})
+
+        # A cancel may have landed during the swap/restart above (which can
+        # take many seconds for a large model). Bail before marking running
+        # so we don't resurrect a request whose handler has already finished
+        # and refunded its slot (see _cancelled_before_running).
+        if self._cancelled_before_running(req):
+            return
 
         # Mark in-flight and signal handler. The ``model`` column is
         # snapshotted to the resolved model id (either what the client
