@@ -36,6 +36,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .api_v1 import (
     KEEPALIVE_INTERVAL_S,
     _apply_thinking_to_body,
+    _cancelable_post,
     _extract_prompt_text,
     _extract_response_text,
     _model_allowed,
@@ -951,7 +952,7 @@ async def _blocking_messages(request: Request, qm: QueueManager, qr,
         url = f"{_upstream(sm, qr)}/v1/chat/completions"
         try:
             async with httpx.AsyncClient(timeout=None) as client:
-                r = await client.post(url, json=openai_body)
+                r = await _cancelable_post(client, url, openai_body, qr)
         except httpx.HTTPError as e:
             raise HTTPException(status_code=502, detail=f"upstream error: {e}")
         if r.status_code >= 400:

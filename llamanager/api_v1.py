@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import time
@@ -377,6 +378,76 @@ def _apply_thinking_to_body(body: dict[str, Any], thinking: str,
         kwargs["enable_thinking"] = enable
 
 
+async def _cancelable_post(
+    client: httpx.AsyncClient, url: str, body: dict[str, Any], qr: QueuedRequest
+) -> httpx.Response:
+    """``client.post`` that aborts the moment ``qr.cancel`` fires.
+
+    A bare ``await client.post(..., timeout=None)`` blocks until the upstream
+    returns the *entire* completion, so a cancel arriving mid-generation is
+    ignored and llama-server keeps generating to the end. We race the POST
+    against the cancel event; if cancel wins we abort the request task — which
+    closes the underlying connection so the engine stops — and raise
+    ``Cancelled``. Upstream transport errors surface unchanged for the caller's
+    ``httpx.HTTPError`` handling.
+    """
+    post_task = asyncio.ensure_future(client.post(url, json=body))
+    cancel_task = asyncio.ensure_future(qr.cancel.wait())
+    try:
+        await asyncio.wait(
+            {post_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        # Cancel wins ties: if the flag is set, treat as cancelled even if the
+        # POST also happened to finish in the same loop step.
+        if qr.cancel.is_set():
+            raise Cancelled()
+        return post_task.result()
+    finally:
+        for t in (post_task, cancel_task):
+            if not t.done():
+                t.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await post_task
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await cancel_task
+
+
+async def _iter_until_cancel(
+    aiter: AsyncIterator[bytes], cancel: asyncio.Event
+) -> AsyncIterator[bytes]:
+    """Yield from ``aiter`` but stop promptly when ``cancel`` fires.
+
+    The upstream byte iterator blocks in ``__anext__`` while the engine
+    prefills a long prompt — no bytes flow yet, so a per-chunk cancel check
+    never gets a turn. Racing each fetch against ``cancel`` makes prefill
+    interruptible: when cancel wins we abort the pending read (closing the
+    connection) and stop iterating. Genuine upstream errors propagate.
+    """
+    it = aiter.__aiter__()
+    cancel_task = asyncio.ensure_future(cancel.wait())
+    try:
+        while True:
+            nxt = asyncio.ensure_future(it.__anext__())
+            await asyncio.wait(
+                {nxt, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if cancel.is_set():
+                if not nxt.done():
+                    nxt.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await nxt
+                return
+            try:
+                yield nxt.result()
+            except StopAsyncIteration:
+                return
+    finally:
+        if not cancel_task.done():
+            cancel_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await cancel_task
+
+
 async def _proxy_non_streaming(
     qr: QueuedRequest, sm: ServerManager, path: str, body: dict[str, Any]
 ) -> Response:
@@ -384,7 +455,7 @@ async def _proxy_non_streaming(
     url = f"{_upstream(sm, qr)}{path}"
     async with httpx.AsyncClient(timeout=None) as client:
         try:
-            r = await client.post(url, json=body)
+            r = await _cancelable_post(client, url, body, qr)
         except httpx.HTTPError as e:
             raise HTTPException(status_code=502, detail=f"upstream error: {e}")
     headers = {
@@ -485,13 +556,19 @@ async def _stream_with_keepalives(
                         yield f"data: {json.dumps(payload)}\n\n".encode("utf-8")
                         yield b"data: [DONE]\n\n"
                         return
-                    async for chunk in r.aiter_bytes():
+                    async for chunk in _iter_until_cancel(
+                            r.aiter_bytes(), qr.cancel):
                         if qr.cancel.is_set():
                             cancelled_flag["value"] = True
                             return
                         if not chunk:
                             continue
                         yield chunk
+                    # _iter_until_cancel returns (rather than raising) when
+                    # cancel fires during a prefill stall — catch that here.
+                    if qr.cancel.is_set():
+                        cancelled_flag["value"] = True
+                        return
         except httpx.RequestError as e:
             # Connect / read / write failure talking to the upstream
             # engine — most commonly: the engine crashed or exited between
