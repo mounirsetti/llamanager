@@ -102,6 +102,101 @@ def test_cancel_during_swap_does_not_resurrect_running(tmp_path):
         db.close()
 
 
+def test_handler_unwind_during_swap_no_cancel_does_not_resurrect(tmp_path):
+    """The 'running task that cannot be cancelled' bug: a non-streaming
+    request whose client disconnects / times out *during* a model swap. The
+    handler coroutine unwinds and runs mark_in_flight_done WITHOUT ever
+    setting qr.cancel. The dispatcher must still not resurrect it as running.
+    """
+    cfg = _make_cfg(tmp_path)
+    db = DB(cfg.db_path)
+    try:
+        sm = ServerManager(cfg, db)
+        sm.proc = _FakeProc()
+        sm.runtime.current_model = "other.gguf"
+        sm.runtime.current_profile = ""
+        swap_entered = asyncio.Event()
+        release_swap = asyncio.Event()
+
+        async def blocking_swap(spec):
+            swap_entered.set()
+            await release_swap.wait()
+            sm.runtime.current_model = spec.model_id
+            return 0
+
+        sm.swap = blocking_swap  # type: ignore[assignment]
+        qm = QueueManager(cfg, db, sm)
+
+        async def go():
+            _plant_text_model(cfg)
+            qm.start()
+            try:
+                req = await qm.enqueue(origin=_make_origin(),
+                                       model_required="tiny.gguf")
+                await asyncio.wait_for(swap_entered.wait(), timeout=2.0)
+
+                # Handler unwinds (client gone) — finalizes WITHOUT cancel.
+                assert req.cancel.is_set() is False
+                qm.mark_in_flight_done(
+                    req, error="client disconnected", cancelled=False,
+                    prompt_tokens=None, completion_tokens=None,
+                )
+                assert req.request_id not in qm._by_id  # handler cleaned up
+
+                release_swap.set()
+                await asyncio.sleep(0.1)
+
+                assert req.request_id not in qm._in_flight, \
+                    "finalized request was resurrected into _in_flight"
+                assert qm._in_flight_count["text"] == 0
+                # And it shows as failed, not a phantom 'running'.
+                row = db.query_one("SELECT status FROM requests WHERE id=?",
+                                   (req.request_id,))
+                assert row["status"] == "failed"
+            finally:
+                await qm.stop()
+
+        asyncio.run(go())
+    finally:
+        db.close()
+
+
+def test_snapshot_pending_excludes_finalized_heap_entry(tmp_path):
+    """A 'pending task marked as done' must never appear: a heap entry whose
+    request was finalized (done/failed) without being dispatched is a stale
+    tombstone, not pending work."""
+    cfg = _make_cfg(tmp_path)
+    db = DB(cfg.db_path)
+    try:
+        sm = ServerManager(cfg, db)
+        qm = QueueManager(cfg, db, sm)
+
+        async def go():
+            # Enqueue but never start the dispatcher, so it stays in the heap.
+            req = await qm.enqueue(origin=_make_origin(), model_required=None)
+            assert qm.snapshot()["pending"], "should be pending before finalize"
+
+            # Simulate an early-abort finalize (e.g. pre-dispatch error) that
+            # marks it done/failed and drops it from _by_id but leaves the
+            # heap tombstone behind.
+            qm.mark_in_flight_done(req, error=None, cancelled=False,
+                                   prompt_tokens=None, completion_tokens=None)
+            assert req.status == "done"
+            assert req.request_id not in qm._by_id
+
+            snap = qm.snapshot()
+            assert snap["pending"] == [], \
+                "finalized heap tombstone leaked into pending"
+            assert snap["depth"] == 0
+
+            # _pop_next must also drain it rather than re-dispatch it.
+            assert qm._pop_next() is None
+
+        asyncio.run(go())
+    finally:
+        db.close()
+
+
 # --------------------------------------------------------------------------
 # Model-loading lock.
 # --------------------------------------------------------------------------

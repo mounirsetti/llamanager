@@ -226,15 +226,29 @@ class QueueManager:
         row (orphaned by a crash, or already cleaned up in memory) that
         ``cancel`` would otherwise 404 on. Returns False for unknown or
         already-terminal rows so the caller can still surface a 404."""
+        # Also purge any zombie left in ``_in_flight`` with no backing
+        # ``_by_id`` entry (a request whose handler already unwound). Its slot
+        # was refunded by that handler, so we drop the dict entry only — no
+        # counter change — and wake the dispatcher in case it frees a view.
+        zombie = (request_id in self._in_flight
+                  and request_id not in self._by_id)
+        if zombie:
+            self._in_flight.pop(request_id, None)
         row = self.db.query_one(
             "SELECT status FROM requests WHERE id=?", (request_id,))
         if not row or row["status"] not in self.db.NONTERMINAL_REQUEST_STATES:
-            return False
+            # Nothing left to fix in the DB, but if we cleared a zombie the
+            # cancel still did something worth reporting as success.
+            if zombie:
+                self._wake_dispatcher_soon()
+            return zombie
         self.db.update_request_status(request_id, "cancelled",
                                       finished_at=time.time())
         self.db.log_event("request_cancelled",
                           {"id": request_id, "stale": True})
         log.info("cancelled stale request row %s (no live handler)", request_id)
+        if zombie:
+            self._wake_dispatcher_soon()
         return True
 
     def cancel(self, request_id: str) -> bool:
@@ -285,11 +299,26 @@ class QueueManager:
         async with self._cv:
             self._cv.notify_all()
 
+    def _heap_entry_dead(self, req: QueuedRequest) -> bool:
+        """A heap entry that no longer represents pending work.
+
+        A request leaves "pending" the instant the dispatcher pops it (it's
+        physically removed from the heap then), so any heap entry should be a
+        live ``queued`` request still tracked in ``_by_id``. Anything else is a
+        stale tombstone — cancelled, already finalized by its handler
+        (``done``/``failed``), or dropped from ``_by_id`` — that must not be
+        dispatched again nor shown as pending. Heap removal of these is lazy
+        (heapq has no random-delete), so callers skip them explicitly.
+        """
+        return (req.cancel.is_set()
+                or req.status != "queued"
+                or req.request_id not in self._by_id)
+
     # ---- introspection ----
     def snapshot(self) -> dict[str, Any]:
         pending: list[dict[str, Any]] = []
         for _, req in sorted(self._heap):
-            if req.status == "cancelled":
+            if self._heap_entry_dead(req):
                 continue
             pending.append(_request_public(req))
         in_flight = [_request_public(r) for r in self._in_flight.values()]
@@ -494,13 +523,11 @@ class QueueManager:
         now = time.time()
         max_wait = self.cfg.max_wait_s
 
-        # First pass: drain any cancelled entries from the top of the heap
-        # so they don't keep us awake. (Mid-heap cancellations are removed
-        # lazily when we eventually pop them.)
-        while self._heap and (
-            self._heap[0][1].cancel.is_set()
-            or self._heap[0][1].status == "cancelled"
-        ):
+        # First pass: drain any dead entries (cancelled, or finalized by a
+        # handler that unwound mid-flight) from the top of the heap so they
+        # don't keep us awake. Mid-heap tombstones are removed lazily when we
+        # eventually pop them.
+        while self._heap and self._heap_entry_dead(self._heap[0][1]):
             heapq.heappop(self._heap)
             self._cancelled_in_heap = max(0, self._cancelled_in_heap - 1)
 
@@ -512,7 +539,7 @@ class QueueManager:
             starved_idx: int | None = None
             starved_at: float = now
             for i, (_, r) in enumerate(self._heap):
-                if r.cancel.is_set() or r.status == "cancelled":
+                if self._heap_entry_dead(r):
                     continue
                 if not self._can_dispatch(r):
                     continue
@@ -534,7 +561,7 @@ class QueueManager:
         # handful pending) this is fine; heap operations elsewhere
         # dominate.
         for i, (_, r) in enumerate(sorted(self._heap)):
-            if r.cancel.is_set() or r.status == "cancelled":
+            if self._heap_entry_dead(r):
                 continue
             if self._can_dispatch(r):
                 # Remove this entry from the heap (linear scan to find it
@@ -587,21 +614,33 @@ class QueueManager:
                 log.exception("dispatcher loop crashed; sleeping 1s and continuing")
                 await asyncio.sleep(1.0)
 
-    def _cancelled_before_running(self, req: QueuedRequest) -> bool:
-        """True if ``req`` was cancelled before we could mark it running.
+    def _abandon_before_running(self, req: QueuedRequest) -> bool:
+        """True if the dispatcher must NOT mark ``req`` running after a swap.
 
-        Guards the dispatcher against a resurrection race: a cancel arriving
-        during a model swap wakes the handler (``cancel()`` sets ``ready``),
-        which runs ``mark_in_flight_done`` and refunds the slot *while we're
-        still awaiting the swap*. Without this check the post-swap code would
-        re-add the request to ``_in_flight`` as "running" with no handler left
-        to ever clean it up — a zombie that shows as running forever and can't
-        be cancelled (and whose refunded slot briefly lets a second request
-        run, so the dashboard shows two in flight).
+        Guards against a resurrection race. While we ``await`` a model swap the
+        request's handler can finish independently and run
+        ``mark_in_flight_done`` (which refunds the slot and drops the request
+        from ``_by_id``/``_in_flight``). That happens two ways:
+
+          * an explicit cancel — ``cancel()`` sets ``ready`` so the waiter wakes
+            and unwinds; or
+          * the client disconnects / the request times out — Starlette cancels
+            the handler coroutine, whose ``finally`` runs ``mark_in_flight_done``
+            *without* ever setting ``req.cancel`` (the non-streaming path has no
+            disconnect→cancel watcher).
+
+        Either way, if we then re-add the request to ``_in_flight`` as
+        "running" it becomes a zombie: shown running forever, with no handler
+        left to clear it, and uncancellable. We detect both by checking the
+        cancel flag AND whether the handler has already finalized the request
+        (no longer tracked in ``_by_id``).
         """
-        if not req.cancel.is_set():
+        finalized = req.request_id not in self._by_id
+        if not req.cancel.is_set() and not finalized:
             return False
-        if req.status != "cancelled":
+        # Don't clobber a terminal status the handler already wrote (done/
+        # failed/cancelled); only stamp one when we got here via a bare cancel.
+        if req.status not in ("cancelled", "done", "failed"):
             req.status = "cancelled"
         # The handler observes cancel via ``ready``; make sure it's awake so
         # its finally-block bookkeeping (slot refund, registry cleanup) runs.
@@ -622,7 +661,7 @@ class QueueManager:
         the slot in-flight and let the handler invoke the runner.
         """
         # Cancelled between dispatch and now — don't load anything.
-        if self._cancelled_before_running(req):
+        if self._abandon_before_running(req):
             return
         wanted = req.model_required
         wanted_profile = getattr(req, "profile_required", None)
@@ -714,8 +753,8 @@ class QueueManager:
                     req.ready.set()
                     return
             # A cancel may have landed while we were swapping the slot; if so,
-            # bail before marking running (see _cancelled_before_running).
-            if self._cancelled_before_running(req):
+            # bail before marking running (see _abandon_before_running).
+            if self._abandon_before_running(req):
                 return
             req.slot_id = slot_sm.slot_id
             self._in_flight[req.request_id] = req
@@ -806,8 +845,8 @@ class QueueManager:
         # A cancel may have landed during the swap/restart above (which can
         # take many seconds for a large model). Bail before marking running
         # so we don't resurrect a request whose handler has already finished
-        # and refunded its slot (see _cancelled_before_running).
-        if self._cancelled_before_running(req):
+        # and refunded its slot (see _abandon_before_running).
+        if self._abandon_before_running(req):
             return
 
         # Mark in-flight and signal handler. The ``model`` column is
