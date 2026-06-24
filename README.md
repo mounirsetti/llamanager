@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.3.993-green.svg" alt="Version 0.3.993">
+  <img src="https://img.shields.io/badge/version-0.3.994-green.svg" alt="Version 0.3.994">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -242,7 +242,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.3.993" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.3.994" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -911,8 +911,12 @@ schtasks /Create /XML "$env:USERPROFILE\.llamanager\llamanager.task.xml" /TN lla
 
 ### Quick restart
 ```bash
-systemctl --user restart llamanager
+systemctl --user restart llamanager.service
 ```
+Bounces the manager/proxy. Use it to pick up new code after updating a
+source / editable (`pip install -e .`) checkout, or after editing the unit —
+no reinstall needed. Any model already loaded keeps its old launch args until
+you reload it.
 
 ## Uninstall
 
