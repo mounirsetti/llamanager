@@ -72,6 +72,28 @@
 {% endif %}
 {% endmacro %}
 
+{# Multi-Token Prediction (llama text models only). Only works on models
+   trained with MTP draft heads (e.g. unsloth *-MTP-GGUF packs); enabling it
+   on a plain model makes llama-server refuse to start. `enabled`/`n_max` are
+   the saved values (or false/none on the create form). MTP is single-slot and
+   can't co-exist with a vision projector — the server pins --parallel 1 and
+   the form rejects an mmproj when this is on. #}
+{% macro mtp_field(m, enabled, n_max) %}
+{% if m.engine == 'llama' and m.engine_family != 'image' %}
+<label class="lm-field-label" style="display:flex; align-items:center; gap:.5rem;">
+  <input type="checkbox" name="mtp" value="on" {% if enabled %}checked{% endif %}>
+  Multi-Token Prediction (MTP)
+</label>
+<span class="lm-field-hint">llama-server <code>--spec-type draft-mtp</code>: built-in speculative decoding off the model's own MTP heads — <strong>no separate draft model</strong>. ~1.5–2× faster on MTP-trained models (e.g. <code>*-MTP-GGUF</code>). Forces a single slot and is incompatible with an mmproj. Enabling it on a non-MTP model will fail to launch.</span>
+<label class="lm-field-label" style="margin-top:.4rem;">Drafted tokens per step
+  <span class="lm-field-hint">llama-server <code>--spec-draft-n-max</code>. Blank = 2 (the unsloth default).</span>
+</label>
+<input class="lm-input" type="number" name="mtp_n_max" min="1" step="1"
+       value="{{ n_max if n_max is not none else '' }}"
+       placeholder="2">
+{% endif %}
+{% endmacro %}
+
 {# Backwards-compat for callers that didn't pre-split the list. #}
 {% if text_models is not defined or image_models is not defined %}
   {% set _text = [] %}
@@ -313,6 +335,8 @@
                       {{ reasoning_budget_field(m, prof.reasoning_budget) }}
 
                       {{ parallel_field(m, prof.parallel) }}
+
+                      {{ mtp_field(m, prof.mtp, prof.mtp_n_max) }}
                     </div>
 
                     <div class="lm-tab-panel" data-panel="advanced" hidden>
@@ -470,6 +494,8 @@
                   {{ reasoning_budget_field(m, none) }}
 
                   {{ parallel_field(m, none) }}
+
+                  {{ mtp_field(m, false, none) }}
                 </div>
 
                 <div class="lm-tab-panel" data-panel="advanced" hidden>

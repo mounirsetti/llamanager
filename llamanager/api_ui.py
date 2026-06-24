@@ -1613,6 +1613,8 @@ def _models_ctx(request: Request) -> dict:
                     "thinking": getattr(p, "thinking", "") or "",
                     "reasoning_budget": getattr(p, "reasoning_budget", None),
                     "parallel": getattr(p, "parallel", None),
+                    "mtp": getattr(p, "mtp", False),
+                    "mtp_n_max": getattr(p, "mtp_n_max", None),
                     "args": p.args,
                     "args_json": json.dumps(p.args, indent=2) if p.args else "{}",
                 })
@@ -4186,6 +4188,8 @@ def _build_llm_profile_from_values(
     reasoning_budget: int | None = None,
     kv_cache_type: str = "",
     parallel: int | None = None,
+    mtp: bool = False,
+    mtp_n_max: int | None = None,
     args: dict[str, Any] | None = None,
 ) -> Profile:
     """Validate already-typed values and assemble an LLM ``Profile``.
@@ -4222,6 +4226,26 @@ def _build_llm_profile_from_values(
         raise ValueError(
             "parallel must be >= 1 (number of concurrent slots; blank = auto)"
         )
+    if mtp_n_max is not None and mtp_n_max < 1:
+        raise ValueError(
+            "mtp_n_max must be >= 1 (drafted tokens per step; blank = 2)"
+        )
+    if mtp:
+        # MTP self-speculation can't share the model with a vision projector
+        # or run across multiple slots (llama.cpp restriction). The launcher
+        # pins --parallel 1 when MTP is on; reject an explicit slot count > 1
+        # so the saved profile matches what actually runs.
+        if (mmproj or "").strip():
+            raise ValueError(
+                "MTP cannot be combined with an mmproj (vision projector); "
+                "llama.cpp does not support --mmproj with --spec-type draft-mtp"
+            )
+        if parallel is not None and parallel > 1:
+            raise ValueError(
+                "MTP runs single-slot only; set parallel to 1 or leave it blank"
+            )
+    if not mtp:
+        mtp_n_max = None
     if args is None:
         args = {}
     if not isinstance(args, dict):
@@ -4237,6 +4261,8 @@ def _build_llm_profile_from_values(
         reasoning_budget=reasoning_budget,
         kv_cache_type=kv_val,
         parallel=parallel,
+        mtp=bool(mtp),
+        mtp_n_max=mtp_n_max,
         args=args,
     )
 
@@ -4255,6 +4281,8 @@ def _build_profile_from_form(
     kv_cache_type: str = "",
     reasoning_budget: str = "",
     parallel: str = "",
+    mtp: str = "",
+    mtp_n_max: str = "",
 ) -> Profile:
     """String → typed wrapper around ``_build_llm_profile_from_values``.
 
@@ -4267,8 +4295,10 @@ def _build_profile_from_form(
         ram_limit_val = _parse_optional_float(ram_spill_limit_gb)
         reasoning_budget_val = _parse_optional_int(reasoning_budget)
         parallel_val = _parse_optional_int(parallel)
+        mtp_n_max_val = _parse_optional_int(mtp_n_max)
     except ValueError as e:
         raise ValueError(str(e))
+    mtp_val = (mtp == "on")
     try:
         args = json.loads(args_json.strip() or "{}")
     except json.JSONDecodeError as e:
@@ -4284,6 +4314,8 @@ def _build_profile_from_form(
         reasoning_budget=reasoning_budget_val,
         kv_cache_type=kv_cache_type,
         parallel=parallel_val,
+        mtp=mtp_val,
+        mtp_n_max=mtp_n_max_val,
         args=args,
     )
 
@@ -4302,6 +4334,8 @@ async def models_profile_create(request: Request,
                                 reasoning_budget: str = Form(""),
                                 kv_cache_type: str = Form(""),
                                 parallel: str = Form(""),
+                                mtp: str = Form(""),
+                                mtp_n_max: str = Form(""),
                                 args_json: str = Form("{}"),
                                 make_default: str = Form(""),
                                 _: None = Depends(require_csrf)) -> Response:
@@ -4327,6 +4361,8 @@ async def models_profile_create(request: Request,
             reasoning_budget=reasoning_budget,
             kv_cache_type=kv_cache_type,
             parallel=parallel,
+            mtp=mtp,
+            mtp_n_max=mtp_n_max,
             args_json=args_json,
         )
         save_profile(cfg.config_path, mid, profile_name, prof)
@@ -4352,6 +4388,8 @@ async def models_profile_update(request: Request, profile_name: str,
                                 reasoning_budget: str = Form(""),
                                 kv_cache_type: str = Form(""),
                                 parallel: str = Form(""),
+                                mtp: str = Form(""),
+                                mtp_n_max: str = Form(""),
                                 args_json: str = Form("{}"),
                                 _: None = Depends(require_csrf)) -> Response:
     cfg = request.app.state.cfg
@@ -4374,6 +4412,8 @@ async def models_profile_update(request: Request, profile_name: str,
             reasoning_budget=reasoning_budget,
             kv_cache_type=kv_cache_type,
             parallel=parallel,
+            mtp=mtp,
+            mtp_n_max=mtp_n_max,
             args_json=args_json,
         )
     except ValueError as e:

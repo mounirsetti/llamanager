@@ -319,7 +319,12 @@ class AdminClient:
                        vram_limit_gb: float | None = None,
                        ram_spill_policy: str = "default",
                        ram_spill_limit_gb: float | None = None,
+                       kv_cache_type: str = "",
                        thinking: str = "",
+                       reasoning_budget: int | None = None,
+                       parallel: int | None = None,
+                       mtp: bool = False,
+                       mtp_n_max: int | None = None,
                        args: dict[str, Any] | None = None,
                        make_default: bool = False) -> dict[str, Any]:
         return self._post("/admin/profiles", {
@@ -328,7 +333,12 @@ class AdminClient:
             "vram_limit_gb": vram_limit_gb,
             "ram_spill_policy": ram_spill_policy,
             "ram_spill_limit_gb": ram_spill_limit_gb,
-            "thinking": thinking, "args": args or {},
+            "kv_cache_type": kv_cache_type,
+            "thinking": thinking,
+            "reasoning_budget": reasoning_budget,
+            "parallel": parallel,
+            "mtp": mtp, "mtp_n_max": mtp_n_max,
+            "args": args or {},
             "make_default": make_default,
         })
 
@@ -338,7 +348,12 @@ class AdminClient:
                        vram_limit_gb: float | None = None,
                        ram_spill_policy: str | None = None,
                        ram_spill_limit_gb: float | None = None,
+                       kv_cache_type: str | None = None,
                        thinking: str | None = None,
+                       reasoning_budget: int | None = None,
+                       parallel: int | None = None,
+                       mtp: bool | None = None,
+                       mtp_n_max: int | None = None,
                        args: dict[str, Any] | None = None,
                        new_name: str | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {"model_id": model_id}
@@ -347,7 +362,12 @@ class AdminClient:
         if vram_limit_gb is not None: body["vram_limit_gb"] = vram_limit_gb
         if ram_spill_policy is not None: body["ram_spill_policy"] = ram_spill_policy
         if ram_spill_limit_gb is not None: body["ram_spill_limit_gb"] = ram_spill_limit_gb
+        if kv_cache_type is not None: body["kv_cache_type"] = kv_cache_type
         if thinking is not None: body["thinking"] = thinking
+        if reasoning_budget is not None: body["reasoning_budget"] = reasoning_budget
+        if parallel is not None: body["parallel"] = parallel
+        if mtp is not None: body["mtp"] = mtp
+        if mtp_n_max is not None: body["mtp_n_max"] = mtp_n_max
         if args is not None: body["args"] = args
         if new_name is not None: body["new_name"] = new_name
         return self._request("PATCH", f"/admin/profiles/{name}",

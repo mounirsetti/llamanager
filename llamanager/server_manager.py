@@ -260,6 +260,15 @@ def _basic_to_args(prof: Profile, engine: str, model_path: Path) -> dict[str, An
     # otherwise push layers onto the CPU. Left unset, llama.cpp picks auto.
     if getattr(prof, "parallel", None) is not None and engine == "llama":
         out["parallel"] = int(prof.parallel)
+    # Multi-Token Prediction (llama only). The MTP draft heads ship inside the
+    # main model, so this is self-speculation — no separate draft model file.
+    # llama.cpp can't run MTP with more than one slot, so we pin --parallel 1
+    # here (overriding any slot count above); the profile validator already
+    # blocks an explicit parallel>1 + mmproj alongside MTP.
+    if getattr(prof, "mtp", False) and engine == "llama":
+        out["spec-type"] = "draft-mtp"
+        out["spec-draft-n-max"] = int(prof.mtp_n_max) if prof.mtp_n_max else 2
+        out["parallel"] = 1
     # KV-cache quantization (llama only). Shrinks the per-token context memory
     # independently of the model's weight quant. Quantized KV needs flash
     # attention, so turn it on too. "" / "f16" leave the engine default.

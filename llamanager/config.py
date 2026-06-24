@@ -327,6 +327,14 @@ class Profile:
     # (set 1 for a single-user box to free VRAM). None = engine default (auto).
     # llama-engine only.
     parallel: int | None = None
+    # Multi-Token Prediction. When the model was trained with MTP draft heads
+    # (e.g. unsloth's *-MTP-GGUF packs), this turns on llama-server's built-in
+    # speculative decoding off those heads — no separate draft model file.
+    # Emits --spec-type draft-mtp (+ --spec-draft-n-max). MTP cannot run with
+    # multiple slots or an mmproj, so enabling it forces --parallel 1 and is
+    # rejected alongside a vision projector. llama-engine only.
+    mtp: bool = False
+    mtp_n_max: int | None = None     # --spec-draft-n-max (drafted tokens/step); None → 2
     args: dict[str, Any] = field(default_factory=dict)
 
 
@@ -610,6 +618,8 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
         thinking=thinking,
         reasoning_budget=_coerce_int(body.get("reasoning_budget")),
         parallel=_coerce_int(body.get("parallel")),
+        mtp=bool(body.get("mtp", False)),
+        mtp_n_max=_coerce_int(body.get("mtp_n_max")),
         args=dict(body.get("args") or {}),
     )
 
@@ -952,6 +962,10 @@ def _profile_to_tomlkit(prof: Profile):
         tbl.add("reasoning_budget", prof.reasoning_budget)
     if prof.parallel is not None:
         tbl.add("parallel", prof.parallel)
+    if prof.mtp:
+        tbl.add("mtp", prof.mtp)
+    if prof.mtp_n_max is not None:
+        tbl.add("mtp_n_max", prof.mtp_n_max)
     if prof.args:
         tbl.add("args", _dict_to_tomlkit(prof.args))
     return tbl

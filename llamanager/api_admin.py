@@ -1153,9 +1153,10 @@ async def diffusion_materialize_defaults(request: Request,
 # ---------- LLM profiles ----------
 #
 # Mirrors `/ui/models/profiles/*` over JSON so the CLI can manage LLM
-# profiles (mmproj, ctx_size, vram_limit_gb, ram-spill policy, thinking,
-# args) without going through the browser. Uses the shared validator in
-# api_ui so UI and CLI reject the same junk.
+# profiles (mmproj, ctx_size, vram_limit_gb, ram-spill policy, kv_cache_type,
+# thinking, reasoning_budget, parallel, MTP, args) without going through the
+# browser. Uses the shared validator in api_ui so UI and CLI reject the same
+# junk.
 
 @router.get("/profiles")
 async def llm_profiles_list(request: Request,
@@ -1177,7 +1178,12 @@ async def llm_profiles_list(request: Request,
                 "vram_limit_gb": p.vram_limit_gb,
                 "ram_spill_policy": p.ram_spill_policy or "default",
                 "ram_spill_limit_gb": p.ram_spill_limit_gb,
+                "kv_cache_type": p.kv_cache_type or "",
                 "thinking": p.thinking or "",
+                "reasoning_budget": p.reasoning_budget,
+                "parallel": p.parallel,
+                "mtp": p.mtp,
+                "mtp_n_max": p.mtp_n_max,
                 "args": p.args or {},
             })
     engine = detect_engine_for_id(model, cfg.models_dir)
@@ -1202,7 +1208,12 @@ class LlmProfileBody(BaseModel):
     vram_limit_gb: float | None = None
     ram_spill_policy: str = "default"
     ram_spill_limit_gb: float | None = None
+    kv_cache_type: str = ""
     thinking: str = ""
+    reasoning_budget: int | None = None
+    parallel: int | None = None
+    mtp: bool = False
+    mtp_n_max: int | None = None
     args: dict[str, Any] = Field(default_factory=dict)
     make_default: bool = False
 
@@ -1228,7 +1239,13 @@ async def llm_profile_create(request: Request,
             vram_limit_gb=body.vram_limit_gb,
             ram_spill_policy=body.ram_spill_policy,
             ram_spill_limit_gb=body.ram_spill_limit_gb,
-            thinking=body.thinking, args=body.args,
+            kv_cache_type=body.kv_cache_type,
+            thinking=body.thinking,
+            reasoning_budget=body.reasoning_budget,
+            parallel=body.parallel,
+            mtp=body.mtp,
+            mtp_n_max=body.mtp_n_max,
+            args=body.args,
         )
         save_profile(cfg.config_path, body.model_id, name, prof)
     except (ValueError, TypeError) as e:
@@ -1250,7 +1267,12 @@ class LlmProfileUpdateBody(BaseModel):
     vram_limit_gb: float | None = None
     ram_spill_policy: str | None = None
     ram_spill_limit_gb: float | None = None
+    kv_cache_type: str | None = None
     thinking: str | None = None
+    reasoning_budget: int | None = None
+    parallel: int | None = None
+    mtp: bool | None = None
+    mtp_n_max: int | None = None
     args: dict[str, Any] | None = None
     new_name: str | None = None
 
@@ -1290,8 +1312,18 @@ async def llm_profile_update(request: Request, name: str,
             ram_spill_limit_gb=(body.ram_spill_limit_gb
                                 if body.ram_spill_limit_gb is not None
                                 else src.ram_spill_limit_gb),
+            kv_cache_type=(body.kv_cache_type if body.kv_cache_type is not None
+                           else src.kv_cache_type),
             thinking=(body.thinking if body.thinking is not None
                       else src.thinking),
+            reasoning_budget=(body.reasoning_budget
+                              if body.reasoning_budget is not None
+                              else src.reasoning_budget),
+            parallel=(body.parallel if body.parallel is not None
+                      else src.parallel),
+            mtp=(body.mtp if body.mtp is not None else src.mtp),
+            mtp_n_max=(body.mtp_n_max if body.mtp_n_max is not None
+                       else src.mtp_n_max),
             args=(body.args if body.args is not None else src.args),
         )
         save_profile(cfg.config_path, body.model_id, target, prof)
