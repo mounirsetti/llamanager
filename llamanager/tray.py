@@ -325,7 +325,26 @@ class TrayApp:
         _open_path(self.cfg.models_dir)
 
     def _act_quit(self, *_: Any) -> None:
-        self._stop.set()
+        # Quitting the tray tears the whole stack down: stop the LLM, then the
+        # daemon service, then exit the icon loop. We notify first because the
+        # shutdown below can take a few seconds, and the icon (and its ability
+        # to post notifications) goes away once _icon.stop() runs.
+        self._notify("Shutting down llamanager…")
+        self._stop.set()  # halt the poller so it doesn't fight the teardown
+        # Stop the LLM server it proxies (best-effort; needs an admin key and a
+        # reachable daemon). Stopping the service below would take it down too,
+        # but doing it explicitly is cleaner and lets it drain in-flight work.
+        if self._client is not None and self.state.snapshot()["daemon"].reachable:
+            try:
+                self._client.server_stop()
+            except AdminClientError as e:
+                log.warning("LLM stop on quit failed: %s", e)
+        # Stop the OS-managed daemon service itself.
+        try:
+            ok, msg = service_ctl.stop_daemon(self.cfg)
+            log.info("service stop on quit: %s", msg)
+        except Exception as e:  # never let teardown block the exit
+            log.warning("service stop on quit failed: %s", e)
         if self._icon is not None:
             self._icon.stop()
 
