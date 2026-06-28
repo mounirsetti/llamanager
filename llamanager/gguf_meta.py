@@ -64,6 +64,18 @@ class GgufMeta:
     key_length: int | None = None
     value_length: int | None = None
     context_length: int | None = None
+    # Hybrid SSM/attention models (e.g. Qwen3.6 "qwen35") interleave Mamba-style
+    # SSM layers with full-attention layers, placing a full-attention layer only
+    # once every ``full_attention_interval`` blocks. Only the attention layers
+    # hold a KV cache that grows with context; the SSM layers keep a fixed-size
+    # recurrent state. Without this, KV sizing over-counts by block_count /
+    # n_attention_layers (≈4× for Qwen3.6-27B: 65 blocks, 16 attention layers).
+    full_attention_interval: int | None = None
+    # SSM recurrent-state geometry, used for the (constant, ctx-independent)
+    # state footprint of the non-attention layers.
+    ssm_inner_size: int | None = None
+    ssm_state_size: int | None = None
+    ssm_conv_kernel: int | None = None
     file_size: int = 0
 
 
@@ -149,7 +161,11 @@ def read_gguf_meta(path: Path, *, max_header_bytes: int = 4 * 1024 * 1024) -> Gg
                     or key.endswith(".attention.head_count_kv") \
                     or key.endswith(".attention.key_length") \
                     or key.endswith(".attention.value_length") \
-                    or key.endswith(".context_length"):
+                    or key.endswith(".context_length") \
+                    or key.endswith(".full_attention_interval") \
+                    or key.endswith(".ssm.inner_size") \
+                    or key.endswith(".ssm.state_size") \
+                    or key.endswith(".ssm.conv_kernel"):
                 val, off = _read_value(buf, off, vtype)
                 pending[key] = val
             else:
@@ -167,7 +183,25 @@ def read_gguf_meta(path: Path, *, max_header_bytes: int = 4 * 1024 * 1024) -> Gg
         meta.value_length = (pending.get(f"{arch}.attention.value_length")
                              or meta.key_length)
         meta.context_length = pending.get(f"{arch}.context_length")
+        meta.full_attention_interval = pending.get(
+            f"{arch}.full_attention_interval")
+        meta.ssm_inner_size = pending.get(f"{arch}.ssm.inner_size")
+        meta.ssm_state_size = pending.get(f"{arch}.ssm.state_size")
+        meta.ssm_conv_kernel = pending.get(f"{arch}.ssm.conv_kernel")
     return meta
+
+
+def is_recurrent(meta: GgufMeta) -> bool:
+    """True if the model has SSM / recurrent layers (Mamba, gated-delta-net,
+    and the hybrid SSM/attention archs like Qwen3.6 "qwen35").
+
+    Detected from the SSM geometry keys in the GGUF header. These models run
+    the ``gated_delta_net`` / SSM compute kernels, which on some ROCm/HIP (and
+    CUDA) builds fault when a CUDA graph is replayed over recurrent state
+    restored from a context checkpoint — see server_manager's graph-disable
+    handling. Both pure-recurrent and hybrid models carry these keys."""
+    return bool(meta.ssm_state_size or meta.ssm_inner_size
+                or meta.ssm_conv_kernel or meta.full_attention_interval)
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +231,8 @@ def kv_bytes_per_elem(kv_cache_type: str | None) -> float:
 
 
 def _kv_cache_gb(meta: GgufMeta, ctx_size: int | None,
-                 *, bytes_per_elem: float = 2.0) -> float | None:
+                 *, bytes_per_elem: float = 2.0,
+                 include_recurrent: bool = True) -> float | None:
     """Estimate KV cache size in GB for ``ctx_size`` tokens.
 
     KV cache holds, per layer and token, an n_kv_heads × head_dim K vector and
@@ -207,6 +242,12 @@ def _kv_cache_gb(meta: GgufMeta, ctx_size: int | None,
     head_dim comes from the model's explicit ``attention.key_length`` /
     ``value_length`` when present (some archs decouple it from
     embedding_length // head_count); otherwise we fall back to that ratio.
+
+    For hybrid SSM/attention models the result is ``linear_attention_KV(ctx) +
+    constant_SSM_state``. Pass ``include_recurrent=False`` to get the
+    ctx-proportional attention term ALONE — needed by callers that want a true
+    per-token rate to extrapolate linearly (e.g. the slider's data-kv-per-1k);
+    folding the constant into a "rate" would over-count it at higher ctx.
 
     Returns None if any required field is missing.
     """
@@ -226,8 +267,32 @@ def _kv_cache_gb(meta: GgufMeta, ctx_size: int | None,
         per_token_elems = 2 * embed
     else:
         return None
-    bytes_total = n_layers * ctx_size * per_token_elems * bytes_per_elem
-    return bytes_total / (1024 ** 3)
+
+    # Hybrid SSM/attention models place a full-attention layer (the only kind
+    # that grows a KV cache with context) once every full_attention_interval
+    # blocks; the rest are SSM/Mamba layers with a fixed-size recurrent state.
+    # Count only the attention layers for the ctx-scaling KV term.
+    interval = meta.full_attention_interval or 0
+    if interval > 1:
+        n_kv_layers = max(1, n_layers // interval)
+    else:
+        n_kv_layers = n_layers
+    bytes_total = n_kv_layers * ctx_size * per_token_elems * bytes_per_elem
+
+    # Non-attention (SSM) layers carry a constant recurrent + conv state that
+    # does NOT scale with ctx_size and is kept in f32 by llama.cpp. Small
+    # (~0.15 GB for Qwen3.6-27B) but worth including so low-ctx estimates and
+    # the absolute footprint stay accurate. Best-effort: only when we have the
+    # SSM geometry.
+    ssm_bytes = 0.0
+    if (include_recurrent and interval > 1
+            and meta.ssm_inner_size and meta.ssm_state_size):
+        recurrent_layers = max(0, n_layers - n_kv_layers)
+        state_elems = meta.ssm_inner_size * (
+            meta.ssm_state_size + (meta.ssm_conv_kernel or 0))
+        ssm_bytes = recurrent_layers * state_elems * 4.0  # f32 state
+
+    return (bytes_total + ssm_bytes) / (1024 ** 3)
 
 
 def compute_n_gpu_layers(

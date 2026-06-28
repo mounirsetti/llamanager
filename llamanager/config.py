@@ -269,6 +269,7 @@ VALID_THINKING = ("", "on", "off")
 # independently of the model's weight quant — q8_0 is ~half size, near
 # lossless; q4_0 is ~quarter, with some quality cost.
 VALID_KV_CACHE_TYPES = ("", "f16", "q8_0", "q5_1", "q4_0")
+VALID_FLASH_ATTN = ("", "on", "off", "auto")
 VALID_EXCLUSIVE_MODES = ("off", "warn", "exclusive", "aggressive")
 
 
@@ -299,6 +300,12 @@ class Profile:
     # KV-cache data type → --cache-type-k/-v (+ flash-attn when quantized).
     # "" / "f16" leave the default; "q8_0"/"q4_0"/… shrink the context memory.
     kv_cache_type: str = ""
+    # Flash attention → llama-server --flash-attn. "" leaves the engine default
+    # (auto). A quantized kv_cache_type forces it on regardless (quantized KV
+    # can't run without FA); this knob lets f16 KV opt into FA too — the fast
+    # path for large-context decode on backends where quantized-KV FA is slow.
+    # "on" | "off" | "auto". llama-engine only.
+    flash_attn: str = ""
     # image-family knobs (ignored by text engines)
     image_model_type: str = ""        # e.g. "dev" | "full" (HiDream)
     image_steps: int | None = None
@@ -600,6 +607,9 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
     kv_cache_type = str(body.get("kv_cache_type", "") or "").strip().lower()
     if kv_cache_type not in VALID_KV_CACHE_TYPES:
         kv_cache_type = ""
+    flash_attn = str(body.get("flash_attn", "") or "").strip().lower()
+    if flash_attn not in VALID_FLASH_ATTN:
+        flash_attn = ""
     return Profile(
         name=name,
         mmproj=str(body.get("mmproj", "") or ""),
@@ -608,6 +618,7 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
         ram_spill_policy=policy,
         ram_spill_limit_gb=_coerce_float(body.get("ram_spill_limit_gb")),
         kv_cache_type=kv_cache_type,
+        flash_attn=flash_attn,
         image_model_type=str(body.get("image_model_type", "") or ""),
         image_steps=_coerce_int(body.get("image_steps")),
         image_guidance=_coerce_float(body.get("image_guidance")),
@@ -942,6 +953,8 @@ def _profile_to_tomlkit(prof: Profile):
         tbl.add("ram_spill_limit_gb", prof.ram_spill_limit_gb)
     if prof.kv_cache_type:
         tbl.add("kv_cache_type", prof.kv_cache_type)
+    if prof.flash_attn:
+        tbl.add("flash_attn", prof.flash_attn)
     if prof.image_model_type:
         tbl.add("image_model_type", prof.image_model_type)
     if prof.image_steps is not None:

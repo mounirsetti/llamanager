@@ -36,7 +36,8 @@ from fastapi.templating import Jinja2Templates
 
 from .auth import AuthManager, Origin
 from .config import (
-    ENGINE_FAMILY, Profile, VALID_KV_CACHE_TYPES, VALID_RAM_SPILL_POLICIES,
+    ENGINE_FAMILY, Profile, VALID_FLASH_ATTN, VALID_KV_CACHE_TYPES,
+    VALID_RAM_SPILL_POLICIES,
     VALID_THINKING,
     delete_profile, detect_engine_for_id, load_config, rename_profile,
     save_profile, set_default_args, set_model_default_profile,
@@ -1571,9 +1572,19 @@ def _models_ctx(request: Request) -> dict:
                 from .gguf_meta import read_gguf_meta
                 _meta = read_gguf_meta(entry.path) if entry.path.is_file() else None
                 if _meta is not None:
-                    kv1k = mem_guard.kv_cache_gb(entry.path, 1024, meta=_meta)
+                    # Per-1k rate must be the ctx-proportional (attention-only)
+                    # term — the JS extrapolates it linearly, so folding in the
+                    # constant SSM state of hybrid models would over-count it at
+                    # high ctx. The constant is added to the fixed base below.
+                    kv1k = mem_guard.kv_cache_gb(entry.path, 1024, meta=_meta,
+                                                 include_recurrent=False)
                     d["kv_per_1k_gb"] = round(kv1k, 4) if kv1k else None
-                    d["weights_gb"] = round(mem_guard.weights_gb(entry.path, meta=_meta), 1)
+                    weights = mem_guard.weights_gb(entry.path, meta=_meta)
+                    # Constant SSM recurrent state (0 for non-hybrid models):
+                    # full footprint at any ctx minus the attention-only part.
+                    full1k = mem_guard.kv_cache_gb(entry.path, 1024, meta=_meta)
+                    ssm_const = (full1k - kv1k) if (full1k and kv1k) else 0.0
+                    d["weights_gb"] = round(weights + max(0.0, ssm_const), 1)
                     _vram = getattr(cfg, "vram_total_gb", None)
                     if _vram:
                         # Conservative ceiling for the slider hint: f16 KV and
@@ -1610,6 +1621,7 @@ def _models_ctx(request: Request) -> dict:
                     "ram_spill_policy": p.ram_spill_policy or "default",
                     "ram_spill_limit_gb": p.ram_spill_limit_gb,
                     "kv_cache_type": getattr(p, "kv_cache_type", "") or "",
+                    "flash_attn": getattr(p, "flash_attn", "") or "",
                     "thinking": getattr(p, "thinking", "") or "",
                     "reasoning_budget": getattr(p, "reasoning_budget", None),
                     "parallel": getattr(p, "parallel", None),
@@ -4187,6 +4199,7 @@ def _build_llm_profile_from_values(
     thinking: str = "",
     reasoning_budget: int | None = None,
     kv_cache_type: str = "",
+    flash_attn: str = "",
     parallel: int | None = None,
     mtp: bool = False,
     mtp_n_max: int | None = None,
@@ -4217,6 +4230,12 @@ def _build_llm_profile_from_values(
         raise ValueError(
             f"invalid kv_cache_type {kv_val!r}; "
             f"must be one of {VALID_KV_CACHE_TYPES}"
+        )
+    fa_val = (flash_attn or "").strip().lower()
+    if fa_val not in VALID_FLASH_ATTN:
+        raise ValueError(
+            f"invalid flash_attn {fa_val!r}; "
+            f"must be one of {VALID_FLASH_ATTN}"
         )
     if reasoning_budget is not None and reasoning_budget < 0:
         raise ValueError(
@@ -4260,6 +4279,7 @@ def _build_llm_profile_from_values(
         thinking=thinking_val,
         reasoning_budget=reasoning_budget,
         kv_cache_type=kv_val,
+        flash_attn=fa_val,
         parallel=parallel,
         mtp=bool(mtp),
         mtp_n_max=mtp_n_max,
@@ -4279,6 +4299,7 @@ def _build_profile_from_form(
     thinking: str,
     args_json: str,
     kv_cache_type: str = "",
+    flash_attn: str = "",
     reasoning_budget: str = "",
     parallel: str = "",
     mtp: str = "",
@@ -4313,6 +4334,7 @@ def _build_profile_from_form(
         thinking=thinking,
         reasoning_budget=reasoning_budget_val,
         kv_cache_type=kv_cache_type,
+        flash_attn=flash_attn,
         parallel=parallel_val,
         mtp=mtp_val,
         mtp_n_max=mtp_n_max_val,
@@ -4333,6 +4355,7 @@ async def models_profile_create(request: Request,
                                 thinking: str = Form(""),
                                 reasoning_budget: str = Form(""),
                                 kv_cache_type: str = Form(""),
+                                flash_attn: str = Form(""),
                                 parallel: str = Form(""),
                                 mtp: str = Form(""),
                                 mtp_n_max: str = Form(""),
@@ -4360,6 +4383,7 @@ async def models_profile_create(request: Request,
             thinking=thinking,
             reasoning_budget=reasoning_budget,
             kv_cache_type=kv_cache_type,
+            flash_attn=flash_attn,
             parallel=parallel,
             mtp=mtp,
             mtp_n_max=mtp_n_max,
@@ -4387,6 +4411,7 @@ async def models_profile_update(request: Request, profile_name: str,
                                 thinking: str = Form(""),
                                 reasoning_budget: str = Form(""),
                                 kv_cache_type: str = Form(""),
+                                flash_attn: str = Form(""),
                                 parallel: str = Form(""),
                                 mtp: str = Form(""),
                                 mtp_n_max: str = Form(""),
@@ -4411,6 +4436,7 @@ async def models_profile_update(request: Request, profile_name: str,
             thinking=thinking,
             reasoning_budget=reasoning_budget,
             kv_cache_type=kv_cache_type,
+            flash_attn=flash_attn,
             parallel=parallel,
             mtp=mtp,
             mtp_n_max=mtp_n_max,

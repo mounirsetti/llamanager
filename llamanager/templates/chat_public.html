@@ -191,6 +191,11 @@
     .chat-input-area {
       padding: 14px 24px 20px; border-top: 1px solid var(--bg-2);
       display: flex; gap: 10px; align-items: flex-end; flex-shrink: 0;
+      transition: background 150ms ease, border-top-color 150ms ease;
+    }
+    .chat-input-area.is-dragover {
+      background: var(--accent-soft);
+      border-top-color: var(--accent);
     }
     .chat-input-area textarea {
       flex: 1; resize: none; background: transparent; border: 0;
@@ -479,7 +484,7 @@
       <div id="chat-attachments" class="chat-attachments-strip"
            style="display: none; padding: 8px 24px 0; gap: 8px; flex-wrap: wrap;"></div>
 
-      <div class="chat-input-area">
+      <div id="chat-input-area" class="chat-input-area">
         <button id="chat-attach" type="button" class="chat-btn chat-btn--ghost"
                 title="Attach an image (visible only when the loaded profile supports vision)"
                 style="margin-right: 6px;" hidden>📎</button>
@@ -587,7 +592,12 @@
   // the attachments array as base64 dataURLs. On send we build the
   // OpenAI multimodal content array which llama-server consumes.
   var attachments = [];
+  // Text files dropped/pasted become removable "reference" chips. Each
+  // entry: {name, text}. Their contents are prepended to the outgoing
+  // message at send time; the bubble only shows the filename chips.
+  var references = [];
   var MAX_IMG_BYTES = 10 * 1024 * 1024;
+  var MAX_REF_BYTES = 1024 * 1024;  // 1 MB of text per reference
   var attachBtn = document.getElementById('chat-attach');
   var attachInput = document.getElementById('chat-attach-input');
   var attachStrip = document.getElementById('chat-attachments');
@@ -607,8 +617,9 @@
   }
   function renderAttachStrip() {
     attachStrip.innerHTML = '';
-    if (!attachments.length) { attachStrip.style.display = 'none'; return; }
+    if (!attachments.length && !references.length) { attachStrip.style.display = 'none'; return; }
     attachStrip.style.display = 'flex';
+    attachStrip.style.alignItems = 'center';
     attachments.forEach(function(a, idx) {
       var wrap = document.createElement('div');
       wrap.style.cssText = 'position: relative; width: 56px; height: 56px; border: 1px solid var(--bg-3); background: var(--bg-0); overflow: hidden;';
@@ -628,6 +639,29 @@
       });
       wrap.appendChild(x);
       attachStrip.appendChild(wrap);
+    });
+    references.forEach(function(r, idx) {
+      var chip = document.createElement('div');
+      chip.style.cssText = 'display: inline-flex; align-items: center; gap: 6px; max-width: 220px; height: 28px; padding: 0 8px; border: 1px solid var(--bg-3); background: var(--bg-0); font-size: 0.75rem; color: var(--fg-2);';
+      var icon = document.createElement('span');
+      icon.textContent = '📄';
+      var name = document.createElement('span');
+      name.textContent = r.name;
+      name.title = r.name + ' (' + r.text.length + ' chars)';
+      name.style.cssText = 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
+      var x = document.createElement('button');
+      x.type = 'button';
+      x.textContent = '×';
+      x.title = 'Remove';
+      x.style.cssText = 'flex-shrink: 0; border: none; background: transparent; color: var(--fg-3); cursor: pointer; font-size: 14px; padding: 0; line-height: 1;';
+      x.addEventListener('click', function() {
+        references.splice(idx, 1);
+        renderAttachStrip();
+      });
+      chip.appendChild(icon);
+      chip.appendChild(name);
+      chip.appendChild(x);
+      attachStrip.appendChild(chip);
     });
   }
   attachBtn.addEventListener('click', function() { attachInput.click(); });
@@ -740,9 +774,12 @@
     if (isMobileChat()) closeDrawers();
   });
 
-  // ---- Markdown toggle ----
-  var renderMarkdown = false;
-  try { renderMarkdown = localStorage.getItem('lm-chat-md') === '1'; } catch (e) {}
+  // ---- Markdown toggle (enabled by default) ----
+  var renderMarkdown = true;
+  try {
+    var storedMdPublic = localStorage.getItem('lm-chat-md');
+    if (storedMdPublic !== null) renderMarkdown = storedMdPublic === '1';
+  } catch (e) {}
   toggleMd.checked = renderMarkdown;
   toggleMd.addEventListener('change', function () {
     renderMarkdown = toggleMd.checked;
@@ -974,16 +1011,128 @@
     if (activeChat) { activeChat.draft = inputEl.value; saveHistory(); }
   });
 
+  // ---- Paste / drag-and-drop files into the chatbox ----
+  // Images (on vision-capable profiles) go through the image-attachment
+  // path; text-like files become removable reference chips; anything else
+  // is rejected rather than dumped as mojibake into the textarea.
+
+  function isTextLike(file) {
+    var t = (file.type || '').toLowerCase();
+    if (t.indexOf('text/') === 0) return true;
+    if (/^application\/(json|xml|x-yaml|yaml|javascript|ld\+json|x-sh|sql|csv|toml|x-toml|x-python)$/.test(t)) return true;
+    if (t === '' || t === 'application/octet-stream') {
+      return /\.(txt|text|md|markdown|rst|csv|tsv|json|ya?ml|toml|ini|cfg|conf|config|env|log|xml|html?|svg|css|scss|less|js|mjs|cjs|jsx|ts|tsx|py|pyw|rb|go|rs|java|kt|kts|c|h|cpp|cc|cxx|hpp|cs|php|sh|bash|zsh|fish|sql|r|swift|scala|pl|pm|lua|vim|tex|dockerfile|makefile|gradle|properties|gitignore)$/i.test(file.name || '');
+    }
+    return false;
+  }
+
+  function addImageAttachment(file) {
+    if (file.size > MAX_IMG_BYTES) {
+      alert('Image too large: ' + file.name + ' (' + (file.size / (1024*1024)).toFixed(1) + ' MB, max 10 MB)');
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+      attachments.push({ name: file.name, type: file.type || 'image/png', dataUrl: reader.result });
+      renderAttachStrip();
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function addTextReference(file) {
+    if (file.size > MAX_REF_BYTES) {
+      alert('File too large to attach as reference: ' + file.name + ' (' + (file.size / (1024*1024)).toFixed(1) + ' MB, max 1 MB)');
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+      references.push({ name: file.name, text: reader.result });
+      renderAttachStrip();
+    };
+    reader.readAsText(file);
+  }
+
+  function ingestFiles(files) {
+    var rejected = [];
+    files.forEach(function (file) {
+      if (!file) return;
+      if (file.type && file.type.indexOf('image/') === 0) {
+        if (visionCapable()) addImageAttachment(file);
+        else rejected.push(file.name + ' — image, but the loaded profile has no vision support');
+      } else if (isTextLike(file)) {
+        addTextReference(file);
+      } else {
+        rejected.push(file.name + ' — unsupported file type');
+      }
+    });
+    if (rejected.length) alert('Skipped:\n' + rejected.join('\n'));
+  }
+
+  inputEl.addEventListener('paste', function (e) {
+    var items = (e.clipboardData && e.clipboardData.items) || [];
+    var pastedFiles = Array.from(items)
+      .filter(function (it) { return it.kind === 'file'; })
+      .map(function (it) { return it.getAsFile(); })
+      .filter(Boolean);
+    if (!pastedFiles.length) return;   // ordinary text paste — let it through
+    e.preventDefault();
+    ingestFiles(pastedFiles);
+  });
+
+  // dataTransfer.files is empty during dragover (the spec's protected mode),
+  // so detect the drag via `types` and use a depth counter so moving the
+  // pointer within the textarea doesn't flicker the highlight off.
+  var inputAreaEl = document.getElementById('chat-input-area');
+  function dragHasFiles(e) {
+    var types = e.dataTransfer && e.dataTransfer.types;
+    return !!types && Array.prototype.indexOf.call(types, 'Files') !== -1;
+  }
+  var dragDepth = 0;
+  inputEl.addEventListener('dragenter', function (e) {
+    if (!dragHasFiles(e)) return;
+    e.preventDefault(); e.stopPropagation();
+    dragDepth++;
+    inputAreaEl.classList.add('is-dragover');
+  });
+  inputEl.addEventListener('dragover', function (e) {
+    if (!dragHasFiles(e)) return;
+    e.preventDefault(); e.stopPropagation();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  });
+  inputEl.addEventListener('dragleave', function (e) {
+    e.stopPropagation();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) inputAreaEl.classList.remove('is-dragover');
+  });
+  inputEl.addEventListener('drop', function (e) {
+    e.preventDefault(); e.stopPropagation();
+    dragDepth = 0;
+    inputAreaEl.classList.remove('is-dragover');
+    var files = Array.from(e.dataTransfer.files || []);
+    if (files.length) ingestFiles(files);
+  });
+
   function send() {
     var text = inputEl.value.trim();
-    if (!text || streaming || !activeChat) return;
+    // Allow sending with no typed text as long as something is attached
+    // (reference files or images carry the message on their own).
+    if ((!text && !references.length && !attachments.length) || streaming || !activeChat) return;
     // On mobile, close any open drawer so the user sees the message stream.
     if (isMobileChat()) closeDrawers();
 
     activeChat.system = systemEl.value;
 
+    // The full text the model sees: each reference's contents as a fenced
+    // block, then the typed prompt. The bubble only shows filename chips.
+    var outText = '';
+    references.forEach(function (r) {
+      outText += '--- ' + r.name + ' ---\n' + r.text + '\n--- end of ' + r.name + ' ---\n\n';
+    });
+    outText += text;
+
     if (!activeChat.messages.length) {
-      activeChat.title = text.length > 40 ? text.slice(0, 40) + '...' : text;
+      var titleSrc = text || (references[0] && references[0].name) || 'New chat';
+      activeChat.title = titleSrc.length > 40 ? titleSrc.slice(0, 40) + '...' : titleSrc;
       saveHistory();
       renderHistoryList();
     }
@@ -994,17 +1143,29 @@
     // the multimodal shape verbatim (same shape api_anthropic.py emits).
     var userContent;
     if (attachments.length) {
-      userContent = [{type: 'text', text: text}];
+      userContent = [{type: 'text', text: outText}];
       attachments.forEach(function(a) {
         userContent.push({type: 'image_url', image_url: {url: a.dataUrl}});
       });
     } else {
-      userContent = text;
+      userContent = outText;
     }
     activeChat.messages.push({ role: 'user', content: userContent });
     activeChat.draft = '';
     saveHistory();
     var userEl = buildMsgEl('user', text);
+    if (references.length) {
+      var refRow = document.createElement('div');
+      refRow.style.cssText = 'display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap;';
+      references.forEach(function(r) {
+        var chip = document.createElement('span');
+        chip.style.cssText = 'display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border: 1px solid var(--bg-3); background: var(--bg-1); font-size: 0.75rem; color: var(--fg-2);';
+        chip.textContent = '📄 ' + r.name;
+        chip.title = r.name + ' (' + r.text.length + ' chars)';
+        refRow.appendChild(chip);
+      });
+      userEl.bubble.appendChild(refRow);
+    }
     if (attachments.length) {
       var thumbs = document.createElement('div');
       thumbs.style.cssText = 'display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap;';
@@ -1023,6 +1184,7 @@
 
     inputEl.value = '';
     attachments = [];
+    references = [];
     renderAttachStrip();
     autoResize();
     userScrolledUp = false;
@@ -1165,10 +1327,16 @@
                     if (isThinking) {
                       assistantEl.bubble.innerHTML = '';
                       isThinking = false;
+                      lastMdLineCountPublic = 0; // reset line tracking on transition
                     }
-                    assistantEl.bubble.textContent = p.content;
-                    assistantEl.bubble.style.color = 'var(--fg-1)';
-                    assistantEl.bubble.classList.add('chat-msg-text--plain');
+                    // Progressive markdown rendering during streaming.
+                    if (renderMarkdown && typeof marked !== 'undefined') {
+                      scheduleMdRenderPublic();
+                    } else {
+                      assistantEl.bubble.textContent = p.content;
+                      assistantEl.bubble.style.color = 'var(--fg-1)';
+                      assistantEl.bubble.classList.add('chat-msg-text--plain');
+                    }
                   }
                   // Live tok/s in top bar
                   if (streamStart) {
@@ -1198,9 +1366,33 @@
         finish();
       });
 
+  // ---- Progressive markdown renderer (stays ~2 lines behind) ----
+  var mdRenderTimerPublic = null;
+  var lastMdLineCountPublic = 0;
+  function scheduleMdRenderPublic() {
+    if (!renderMarkdown || typeof marked === 'undefined') return;
+    if (mdRenderTimerPublic) clearTimeout(mdRenderTimerPublic);
+    mdRenderTimerPublic = setTimeout(function () { renderProgressiveMdPublic(); }, 500);
+  }
+  function cancelMdRenderPublic() { if (mdRenderTimerPublic) { clearTimeout(mdRenderTimerPublic); mdRenderTimerPublic = null; } lastMdLineCountPublic = 0; }
+  function renderProgressiveMdPublic() {
+    if (!assistantEl || !fullContent) return;
+    var lines = fullContent.split('\n');
+    // Stay ~2 lines behind the tip so incomplete lines don't cause
+    // markdown parse noise. If there are ≤2 lines, render everything.
+    var cutoff = Math.max(0, lines.length - 3);
+    if (cutoff <= lastMdLineCountPublic) { mdRenderTimerPublic = null; return; }
+    lastMdLineCountPublic = cutoff;
+    var partial = lines.slice(0, cutoff).join('\n');
+    assistantEl.bubble.innerHTML = marked.parse(partial);
+    assistantEl.bubble.classList.add('chat-md');
+    assistantEl.bubble.style.whiteSpace = 'normal';
+  }
+
     function finish() {
       if (!streaming) return;          // guard against double-finalize
       streaming = false;
+      cancelMdRenderPublic();
       var msgStats = null;
       if (streamStart && tokenCount > 0) {
         var elapsed = (Date.now() - streamStart) / 1000;

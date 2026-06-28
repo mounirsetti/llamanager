@@ -37,6 +37,19 @@
 </select>
 {% endmacro %}
 
+{# Flash-attention control. Independent of kv_cache_type: a quantized KV type
+   already forces FA on (it can't run without it); this lets f16 KV opt in too —
+   the fast large-context path on backends where quantized-KV FA is a slow
+   fallback kernel (e.g. ROCm/HIP). #}
+{% macro flash_attn_select(current) %}
+<select class="lm-input" name="flash_attn">
+  <option value="" {% if (current or '') == '' %}selected{% endif %}>default — let the engine decide</option>
+  <option value="on" {% if current == 'on' %}selected{% endif %}>on — fast long-context decode</option>
+  <option value="off" {% if current == 'off' %}selected{% endif %}>off</option>
+  <option value="auto" {% if current == 'auto' %}selected{% endif %}>auto</option>
+</select>
+{% endmacro %}
+
 {# Reasoning-budget control (llama text models only). `current` is the saved
    value (or none for the create form). Advice uses the model's measured decode
    throughput so the suggestion is hardware-specific, not a magic number. #}
@@ -83,8 +96,8 @@
 <label class="lm-field-label" style="display:flex; align-items:center; gap:.5rem;">
   <input type="checkbox" name="mtp" value="on" {% if enabled %}checked{% endif %}>
   Multi-Token Prediction (MTP)
+  <span class="lm-field-hint">llama-server <code>--spec-type draft-mtp</code>: built-in speculative decoding off the model's own MTP heads — <strong>no separate draft model</strong>. ~1.5–2× faster on MTP-trained models (e.g. <code>*-MTP-GGUF</code>). Forces a single slot and is incompatible with an mmproj. Enabling it on a non-MTP model will fail to launch.</span>
 </label>
-<span class="lm-field-hint">llama-server <code>--spec-type draft-mtp</code>: built-in speculative decoding off the model's own MTP heads — <strong>no separate draft model</strong>. ~1.5–2× faster on MTP-trained models (e.g. <code>*-MTP-GGUF</code>). Forces a single slot and is incompatible with an mmproj. Enabling it on a non-MTP model will fail to launch.</span>
 <label class="lm-field-label" style="margin-top:.4rem;">Drafted tokens per step
   <span class="lm-field-hint">llama-server <code>--spec-draft-n-max</code>. Blank = 2 (the unsloth default).</span>
 </label>
@@ -272,9 +285,13 @@
 
                       {% if m.engine == 'llama' %}
                       <label class="lm-field-label">KV cache type
-                        <span class="lm-field-hint">shrinks context memory, independent of the model's weight quant — q8_0 ≈ half, near-lossless (turns on flash-attn)</span>
+                        <span class="lm-field-hint">Shrinks context memory, independent of the model's weight quant — q8_0 ≈ half, near-lossless. Quantized types force flash-attn on, which is a slow fallback kernel on some backends (ROCm); prefer f16 + Flash attention = on there.</span>
                       </label>
                       {{ kv_cache_select(prof.kv_cache_type) }}
+                      <label class="lm-field-label">Flash attention
+                        <span class="lm-field-hint">llama-server <code>--flash-attn</code>. Speeds up long-context decode. A quantized KV type forces it on regardless; with f16 KV set <strong>on</strong> to get the fast path, or <strong>off</strong> if a backend's FA kernel misbehaves.</span>
+                      </label>
+                      {{ flash_attn_select(prof.flash_attn) }}
                       {% endif %}
 
                       <label class="lm-field-label">VRAM limit (GB)
@@ -437,9 +454,13 @@
 
                   {% if m.engine == 'llama' %}
                   <label class="lm-field-label">KV cache type
-                    <span class="lm-field-hint">shrinks context memory, independent of the model's weight quant — q8_0 ≈ half, near-lossless (turns on flash-attn)</span>
+                    <span class="lm-field-hint">Shrinks context memory, independent of the model's weight quant — q8_0 ≈ half, near-lossless. Quantized types force flash-attn on, which is a slow fallback kernel on some backends (ROCm); prefer f16 + Flash attention = on there.</span>
                   </label>
                   {{ kv_cache_select('') }}
+                  <label class="lm-field-label">Flash attention
+                    <span class="lm-field-hint">llama-server <code>--flash-attn</code>. Speeds up long-context decode. A quantized KV type forces it on regardless; with f16 KV set <strong>on</strong> to get the fast path, or <strong>off</strong> if a backend's FA kernel misbehaves.</span>
+                  </label>
+                  {{ flash_attn_select('') }}
                   {% endif %}
 
                   <label class="lm-field-label">VRAM limit (GB)

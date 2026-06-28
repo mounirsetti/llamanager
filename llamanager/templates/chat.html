@@ -7,8 +7,7 @@
      own messages scroll area and a sticky-on-mobile input row. */
   .chat-app {
     display: flex; min-height: 0;
-    height: calc(100vh - 180px);
-    margin-top: 12px;
+    height: calc(100vh - 168px);
   }
   .chat-main-col {
     flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0;
@@ -25,6 +24,11 @@
     padding: 14px 12px; border-top: 1px solid var(--bg-2);
     display: flex; gap: 8px; align-items: flex-end;
     background: var(--bg-0);
+    transition: background 150ms ease, border-top-color 150ms ease;
+  }
+  .chat-input-row.is-dragover {
+    background: var(--accent-soft);
+    border-top-color: var(--accent);
   }
 
   /* Toolbar shown on mobile only; contains the History / Settings
@@ -37,13 +41,13 @@
   .chat-app.is-drawer-open .chat-backdrop { display: block; }
 
   .chat-history-rail {
-    width: 200px; flex-shrink: 0; border-right: 1px solid var(--bg-2);
+    width: 240px; flex-shrink: 0; border-right: 1px solid var(--bg-2);
     display: flex; flex-direction: column; overflow: hidden;
     background: var(--bg-0);
   }
   .chat-history-header {
-    padding: 10px 12px; border-bottom: 1px solid var(--bg-2);
-    display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+    padding: 14px 16px 10px; border-bottom: 1px solid var(--bg-2);
+    display: flex; align-items: center; gap: 8px; flex-shrink: 0;
   }
   .chat-history-header span { font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); }
   .chat-history-list { flex: 1; overflow-y: auto; padding: 6px 0; }
@@ -355,7 +359,7 @@
     <div id="chat-attachments" class="chat-attachments" style="display: none;"></div>
 
     {# Input row — fixed to the bottom of the viewport on mobile. #}
-    <div class="chat-input-row">
+    <div id="chat-input-row" class="chat-input-row">
       <button id="chat-attach" type="button" class="lm-btn lm-btn--ghost lm-btn--sm"
               title="Attach an image (only when the loaded profile supports vision)"
               style="flex-shrink: 0; padding: 9px 11px;"
@@ -379,6 +383,7 @@
 <script>
 (function () {
   var messagesEl = document.getElementById('chat-messages');
+  var inputRowEl = document.getElementById('chat-input-row');
   var inputEl = document.getElementById('chat-input');
   var sendBtn = document.getElementById('chat-send');
   var profileEl = document.getElementById('chat-profile');
@@ -424,8 +429,13 @@
   // verbatim — verified against the Anthropic translator that already
   // produces the same shape (see api_anthropic.py).
   var attachments = [];
+  // Text files dropped/pasted become removable "reference" chips. Each
+  // entry: {name, text}. Their contents are prepended to the outgoing
+  // message at send time; the bubble only shows the filename chips.
+  var references = [];
   var PROFILES_VISION = {{ profiles_json | safe }};
   var MAX_IMG_BYTES = 10 * 1024 * 1024;  // 10 MB pre-encoded
+  var MAX_REF_BYTES = 1024 * 1024;       // 1 MB of text per reference
   var attachBtn = document.getElementById('chat-attach');
   var attachInput = document.getElementById('chat-attach-input');
   var attachStrip = document.getElementById('chat-attachments');
@@ -453,11 +463,12 @@
 
   function renderAttachStrip() {
     attachStrip.innerHTML = '';
-    if (!attachments.length) {
+    if (!attachments.length && !references.length) {
       attachStrip.style.display = 'none';
       return;
     }
     attachStrip.style.display = 'flex';
+    attachStrip.style.alignItems = 'center';
     attachments.forEach(function(a, idx) {
       var wrap = document.createElement('div');
       wrap.style.cssText = 'position: relative; width: 56px; height: 56px; border: 1px solid var(--bg-3); background: var(--bg-0); overflow: hidden;';
@@ -477,6 +488,29 @@
       });
       wrap.appendChild(x);
       attachStrip.appendChild(wrap);
+    });
+    references.forEach(function(r, idx) {
+      var chip = document.createElement('div');
+      chip.style.cssText = 'display: inline-flex; align-items: center; gap: 6px; max-width: 220px; height: 28px; padding: 0 8px; border: 1px solid var(--bg-3); background: var(--bg-0); font-size: 0.75rem; color: var(--fg-2);';
+      var icon = document.createElement('span');
+      icon.textContent = '📄';
+      var name = document.createElement('span');
+      name.textContent = r.name;
+      name.title = r.name + ' (' + r.text.length + ' chars)';
+      name.style.cssText = 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
+      var x = document.createElement('button');
+      x.type = 'button';
+      x.textContent = '×';
+      x.title = 'Remove';
+      x.style.cssText = 'flex-shrink: 0; border: none; background: transparent; color: var(--fg-3); cursor: pointer; font-size: 14px; padding: 0; line-height: 1;';
+      x.addEventListener('click', function() {
+        references.splice(idx, 1);
+        renderAttachStrip();
+      });
+      chip.appendChild(icon);
+      chip.appendChild(name);
+      chip.appendChild(x);
+      attachStrip.appendChild(chip);
     });
   }
 
@@ -580,9 +614,12 @@
     if (isMobileChat()) closeDrawers();
   });
 
-  // ---- Markdown toggle ----
-  var renderMarkdown = false;
-  try { renderMarkdown = localStorage.getItem('lm-admin-chat-md') === '1'; } catch (e) {}
+  // ---- Markdown toggle (enabled by default) ----
+  var renderMarkdown = true;
+  try {
+    var storedMd = localStorage.getItem('lm-admin-chat-md');
+    if (storedMd !== null) renderMarkdown = storedMd === '1';
+  } catch (e) {}
   toggleMd.checked = renderMarkdown;
   toggleMd.addEventListener('change', function () {
     renderMarkdown = toggleMd.checked;
@@ -759,15 +796,131 @@
     if (activeChat) { activeChat.draft = inputEl.value; saveHistory(); }
   });
 
+  // ---- Paste / drag-and-drop files into the chatbox ----
+  // Images (on vision-capable profiles) go through the image-attachment
+  // path; text-like files become removable reference chips; anything else
+  // is rejected rather than dumped as mojibake into the textarea.
+
+  // A text-like file is accepted as a reference. We trust an explicit
+  // text/* (or known textual application/*) MIME, and otherwise fall back
+  // to extension sniffing for the empty/octet-stream types many editors
+  // and OSes report for source files.
+  function isTextLike(file) {
+    var t = (file.type || '').toLowerCase();
+    if (t.indexOf('text/') === 0) return true;
+    if (/^application\/(json|xml|x-yaml|yaml|javascript|ld\+json|x-sh|sql|csv|toml|x-toml|x-python)$/.test(t)) return true;
+    if (t === '' || t === 'application/octet-stream') {
+      return /\.(txt|text|md|markdown|rst|csv|tsv|json|ya?ml|toml|ini|cfg|conf|config|env|log|xml|html?|svg|css|scss|less|js|mjs|cjs|jsx|ts|tsx|py|pyw|rb|go|rs|java|kt|kts|c|h|cpp|cc|cxx|hpp|cs|php|sh|bash|zsh|fish|sql|r|swift|scala|pl|pm|lua|vim|tex|dockerfile|makefile|gradle|properties|gitignore)$/i.test(file.name || '');
+    }
+    return false;
+  }
+
+  function addImageAttachment(file) {
+    if (file.size > MAX_IMG_BYTES) {
+      alert('Image too large: ' + file.name + ' (' + (file.size / (1024*1024)).toFixed(1) + ' MB, max 10 MB)');
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+      attachments.push({ name: file.name, type: file.type || 'image/png', dataUrl: reader.result });
+      renderAttachStrip();
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function addTextReference(file) {
+    if (file.size > MAX_REF_BYTES) {
+      alert('File too large to attach as reference: ' + file.name + ' (' + (file.size / (1024*1024)).toFixed(1) + ' MB, max 1 MB)');
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+      references.push({ name: file.name, text: reader.result });
+      renderAttachStrip();
+    };
+    reader.readAsText(file);
+  }
+
+  // Route a list of dropped/pasted files to the right handler, collecting
+  // any that we can't accept so the user gets a single notice.
+  function ingestFiles(files) {
+    var rejected = [];
+    files.forEach(function (file) {
+      if (!file) return;
+      if (file.type && file.type.indexOf('image/') === 0) {
+        if (visionCapable()) addImageAttachment(file);
+        else rejected.push(file.name + ' — image, but the loaded profile has no vision support');
+      } else if (isTextLike(file)) {
+        addTextReference(file);
+      } else {
+        rejected.push(file.name + ' — unsupported file type');
+      }
+    });
+    if (rejected.length) alert('Skipped:\n' + rejected.join('\n'));
+  }
+
+  inputEl.addEventListener('paste', function (e) {
+    var items = (e.clipboardData && e.clipboardData.items) || [];
+    var pastedFiles = Array.from(items)
+      .filter(function (it) { return it.kind === 'file'; })
+      .map(function (it) { return it.getAsFile(); })
+      .filter(Boolean);
+    if (!pastedFiles.length) return;   // ordinary text paste — let it through
+    e.preventDefault();
+    ingestFiles(pastedFiles);
+  });
+
+  // dataTransfer.files is empty during dragover (the spec's protected mode),
+  // so detect the drag via `types` and use a depth counter so moving the
+  // pointer within the textarea doesn't flicker the highlight off.
+  function dragHasFiles(e) {
+    var types = e.dataTransfer && e.dataTransfer.types;
+    return !!types && Array.prototype.indexOf.call(types, 'Files') !== -1;
+  }
+  var dragDepth = 0;
+  inputEl.addEventListener('dragenter', function (e) {
+    if (!dragHasFiles(e)) return;
+    e.preventDefault(); e.stopPropagation();
+    dragDepth++;
+    inputRowEl.classList.add('is-dragover');
+  });
+  inputEl.addEventListener('dragover', function (e) {
+    if (!dragHasFiles(e)) return;
+    e.preventDefault(); e.stopPropagation();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  });
+  inputEl.addEventListener('dragleave', function (e) {
+    e.stopPropagation();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) inputRowEl.classList.remove('is-dragover');
+  });
+  inputEl.addEventListener('drop', function (e) {
+    e.preventDefault(); e.stopPropagation();
+    dragDepth = 0;
+    inputRowEl.classList.remove('is-dragover');
+    var files = Array.from(e.dataTransfer.files || []);
+    if (files.length) ingestFiles(files);
+  });
+
   // ---- Send ----
   function send() {
     var text = inputEl.value.trim();
-    if (!text || streaming || !activeChat) return;
+    // Allow sending with no typed text as long as something is attached
+    // (reference files or images carry the message on their own).
+    if ((!text && !references.length && !attachments.length) || streaming || !activeChat) return;
     // On mobile, close any open drawer so the user sees the message stream.
     if (isMobileChat()) closeDrawers();
     activeChat.system = systemEl.value;
+    // The full text the model sees: each reference's contents as a fenced
+    // block, then the typed prompt. The bubble only shows filename chips.
+    var outText = '';
+    references.forEach(function (r) {
+      outText += '--- ' + r.name + ' ---\n' + r.text + '\n--- end of ' + r.name + ' ---\n\n';
+    });
+    outText += text;
     if (!activeChat.messages.length) {
-      activeChat.title = text.length > 40 ? text.slice(0, 40) + '...' : text;
+      var titleSrc = text || (references[0] && references[0].name) || 'New chat';
+      activeChat.title = titleSrc.length > 40 ? titleSrc.slice(0, 40) + '...' : titleSrc;
       saveHistory();
       renderHistoryList();
     }
@@ -777,7 +930,7 @@
     // content array that llama-server (--mmproj) accepts.
     var userContent;
     if (attachments.length) {
-      userContent = [{type: 'text', text: text}];
+      userContent = [{type: 'text', text: outText}];
       attachments.forEach(function(a) {
         userContent.push({
           type: 'image_url',
@@ -785,7 +938,7 @@
         });
       });
     } else {
-      userContent = text;
+      userContent = outText;
     }
     activeChat.messages.push({ role: 'user', content: userContent });
     activeChat.draft = '';
@@ -794,6 +947,20 @@
     var emptyPlaceholder = messagesEl.querySelector('[style*="font-style:italic"]');
     if (emptyPlaceholder) emptyPlaceholder.remove();
     var userEl = buildMsgEl('user', text);
+    // Show reference filename chips in the bubble so the operator can see
+    // what was attached without the raw contents bloating the transcript.
+    if (references.length) {
+      var refRow = document.createElement('div');
+      refRow.style.cssText = 'display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap;';
+      references.forEach(function(r) {
+        var chip = document.createElement('span');
+        chip.style.cssText = 'display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border: 1px solid var(--bg-3); background: var(--bg-1); font-size: 0.75rem; color: var(--fg-2);';
+        chip.textContent = '📄 ' + r.name;
+        chip.title = r.name + ' (' + r.text.length + ' chars)';
+        refRow.appendChild(chip);
+      });
+      userEl.bubble.appendChild(refRow);
+    }
     // Render the attached thumbnails inline in the user message bubble
     // so the operator can verify what got sent (kept inside the same
     // message DOM node so history scroll-restoration still works).
@@ -812,6 +979,7 @@
     messagesEl.appendChild(userEl.el);
     inputEl.value = '';
     attachments = [];
+    references = [];
     renderAttachStrip();
     autoResize();
     userScrolledUp = false;
@@ -962,9 +1130,18 @@
                     if (isThinking) {
                       assistantEl.bubble.innerHTML = '';
                       isThinking = false;
+                      lastMdLineCount = 0; // reset line tracking on transition
                     }
-                    assistantEl.bubble.textContent = p.content;
-                    assistantEl.bubble.style.color = 'var(--fg-1)';
+                    // Progressive markdown rendering during streaming.
+                    // When markdown is enabled, schedule a render that stays
+                    // ~2 lines behind the tip so incomplete lines don't cause
+                    // parse noise. Otherwise fall back to plain textContent.
+                    if (renderMarkdown && typeof marked !== 'undefined') {
+                      scheduleMdRender();
+                    } else {
+                      assistantEl.bubble.textContent = p.content;
+                      assistantEl.bubble.style.color = 'var(--fg-1)';
+                    }
                   }
                   // Live tok/s in top bar
                   if (streamStart) {
@@ -997,9 +1174,34 @@
         finish();
       });
 
+  // ---- Progressive markdown renderer (stays ~2 lines behind) ----
+  var mdRenderTimer = null;
+  var lastMdLineCount = 0;
+  function scheduleMdRender() {
+    if (!renderMarkdown || typeof marked === 'undefined') return;
+    if (mdRenderTimer) clearTimeout(mdRenderTimer);
+    mdRenderTimer = setTimeout(function () { renderProgressiveMd(); }, 500);
+  }
+  function cancelMdRender() { if (mdRenderTimer) { clearTimeout(mdRenderTimer); mdRenderTimer = null; } lastMdLineCount = 0; }
+  function renderProgressiveMd() {
+    if (!assistantEl || !fullContent) return;
+    var lines = fullContent.split('\n');
+    // Stay ~2 lines behind the tip so incomplete lines don't cause
+    // markdown parse noise. If there are ≤2 lines, render everything.
+    var cutoff = Math.max(0, lines.length - 3);
+    if (cutoff <= lastMdLineCount) { mdRenderTimer = null; return; }
+    lastMdLineCount = cutoff;
+    var partial = lines.slice(0, cutoff).join('\n');
+    // Render the complete portion as markdown.
+    assistantEl.bubble.innerHTML = marked.parse(partial);
+    assistantEl.bubble.classList.add('chat-md');
+    assistantEl.bubble.style.whiteSpace = 'normal';
+  }
+
     function finish() {
       if (!streaming) return;          // guard against double-finalize
       streaming = false;
+      cancelMdRender();
       var msgStats = null;
       if (streamStart && tokenCount > 0) {
         var elapsed = (Date.now() - streamStart) / 1000;

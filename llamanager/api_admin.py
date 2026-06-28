@@ -1179,6 +1179,7 @@ async def llm_profiles_list(request: Request,
                 "ram_spill_policy": p.ram_spill_policy or "default",
                 "ram_spill_limit_gb": p.ram_spill_limit_gb,
                 "kv_cache_type": p.kv_cache_type or "",
+                "flash_attn": p.flash_attn or "",
                 "thinking": p.thinking or "",
                 "reasoning_budget": p.reasoning_budget,
                 "parallel": p.parallel,
@@ -1209,6 +1210,7 @@ class LlmProfileBody(BaseModel):
     ram_spill_policy: str = "default"
     ram_spill_limit_gb: float | None = None
     kv_cache_type: str = ""
+    flash_attn: str = ""
     thinking: str = ""
     reasoning_budget: int | None = None
     parallel: int | None = None
@@ -1240,6 +1242,7 @@ async def llm_profile_create(request: Request,
             ram_spill_policy=body.ram_spill_policy,
             ram_spill_limit_gb=body.ram_spill_limit_gb,
             kv_cache_type=body.kv_cache_type,
+            flash_attn=body.flash_attn,
             thinking=body.thinking,
             reasoning_budget=body.reasoning_budget,
             parallel=body.parallel,
@@ -1268,6 +1271,7 @@ class LlmProfileUpdateBody(BaseModel):
     ram_spill_policy: str | None = None
     ram_spill_limit_gb: float | None = None
     kv_cache_type: str | None = None
+    flash_attn: str | None = None
     thinking: str | None = None
     reasoning_budget: int | None = None
     parallel: int | None = None
@@ -1314,6 +1318,8 @@ async def llm_profile_update(request: Request, name: str,
                                 else src.ram_spill_limit_gb),
             kv_cache_type=(body.kv_cache_type if body.kv_cache_type is not None
                            else src.kv_cache_type),
+            flash_attn=(body.flash_attn if body.flash_attn is not None
+                        else src.flash_attn),
             thinking=(body.thinking if body.thinking is not None
                       else src.thinking),
             reasoning_budget=(body.reasoning_budget

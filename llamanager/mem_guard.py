@@ -96,17 +96,21 @@ def _load_meta(model_path: Path) -> GgufMeta | None:
 
 def kv_cache_gb(model_path: Path, ctx_size: int,
                 meta: GgufMeta | None = None,
-                kv_cache_type: str = "") -> float | None:
+                kv_cache_type: str = "",
+                include_recurrent: bool = True) -> float | None:
     """Estimated KV-cache size (GB) for ``ctx_size`` tokens, or None.
 
     ``kv_cache_type`` ("" / "f16" / "q8_0" / "q5_1" / "q4_0") scales the
-    per-element size; blank means the f16 default.
+    per-element size; blank means the f16 default. ``include_recurrent=False``
+    drops the constant SSM-state term so the result is purely ctx-proportional
+    (for callers that derive a per-token rate — see ``_kv_cache_gb``).
     """
     meta = meta or _load_meta(model_path)
     if meta is None:
         return None
     return _kv_cache_gb(meta, ctx_size,
-                        bytes_per_elem=kv_bytes_per_elem(kv_cache_type))
+                        bytes_per_elem=kv_bytes_per_elem(kv_cache_type),
+                        include_recurrent=include_recurrent)
 
 
 def weights_gb(model_path: Path, meta: GgufMeta | None = None) -> float:

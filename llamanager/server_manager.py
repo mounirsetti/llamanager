@@ -24,7 +24,7 @@ from . import runtime_state as rt
 from . import exclusive as _exclusive
 from .config import Config, Profile, detect_engine_for_path
 from .db import DB
-from .gguf_meta import GgufMeta, compute_n_gpu_layers, read_gguf_meta
+from .gguf_meta import GgufMeta, compute_n_gpu_layers, is_recurrent, read_gguf_meta
 from . import mem_guard
 
 log = logging.getLogger(__name__)
@@ -32,6 +32,13 @@ log = logging.getLogger(__name__)
 START_TIMEOUT_S = 60.0
 STOP_GRACE_S = 10.0
 HEALTH_POLL_INTERVAL_S = 0.5
+
+
+def _is_rocm_build(binary: str) -> bool:
+    """Whether ``binary`` is a ROCm/HIP llama.cpp build, by its parent dir name
+    (e.g. ``.../llama.cpp-hip/llama-server``). Vulkan/CPU/CUDA builds → False."""
+    name = Path(binary).parent.name.lower()
+    return "hip" in name or "rocm" in name
 
 
 def _rocm_lib_env(binary: str) -> dict[str, str] | None:
@@ -44,8 +51,7 @@ def _rocm_lib_env(binary: str) -> dict[str, str] | None:
     and silently falls back to CPU (slow). We add the system ROCm lib dir
     only for hip/rocm variants — never for vulkan/cpu/cuda, and never the
     binary's own directory (that shadows system libs and crashed vulkan)."""
-    name = Path(binary).parent.name.lower()
-    if "hip" not in name and "rocm" not in name:
+    if not _is_rocm_build(binary):
         return None
     rocm_lib = None
     candidates = [Path("/opt/rocm/lib")]
@@ -65,10 +71,36 @@ def _rocm_lib_env(binary: str) -> dict[str, str] | None:
     return env
 
 
-def _engine_env(binary: str, *, gpu_device: str = "") -> dict[str, str] | None:
+def model_needs_graph_disable(model_path: Path, binary: str) -> bool:
+    """Whether CUDA graphs must be disabled for ``model_path`` on ``binary``.
+
+    Recurrent / hybrid-SSM models (Mamba, gated-delta-net, Qwen3.6 "qwen35")
+    run the ``gated_delta_net`` / SSM kernels. On ROCm/HIP builds, replaying a
+    CUDA graph over recurrent state that was restored from a context checkpoint
+    reads stale device memory and the queue aborts with
+    HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION inside ``gated_delta_net_cuda``
+    — reproducible within a few requests under agentic tool-call loads (Cline)
+    on hybrid Qwen3.6 + MTP. We detect such models from their GGUF metadata so
+    the workaround applies *only* where it's needed; plain transformers keep
+    graphs (and their decode speedup). Scoped to ROCm builds, the only place
+    this is verified; the env var also works for CUDA if that backend is ever
+    found to need it. Best-effort: any read error → False (graphs left on)."""
+    if not _is_rocm_build(binary):
+        return False
+    try:
+        if not model_path.is_file():
+            return False
+        return is_recurrent(read_gguf_meta(model_path))
+    except Exception as e:  # malformed header, IO error, etc.
+        log.debug("graph-disable check failed for %s: %s", model_path, e)
+        return False
+
+
+def _engine_env(binary: str, *, gpu_device: str = "",
+                disable_cuda_graphs: bool = False) -> dict[str, str] | None:
     """Environment override for the engine subprocess, or None to inherit.
 
-    Layers two independent concerns onto the inherited environment:
+    Layers three independent concerns onto the inherited environment:
 
     * ROCm/HIP runtime path (see ``_rocm_lib_env``).
     * GPU pin: when ``gpu_device`` names a card, set the backend's
@@ -76,8 +108,12 @@ def _engine_env(binary: str, *, gpu_device: str = "") -> dict[str, str] | None:
       what stops a model being silently split across a fast dGPU and a slow
       iGPU. The name is resolved against the *enumeration env* (so a ROCm
       build can actually see its GPUs), and a missing device is non-fatal.
+    * ``GGML_CUDA_DISABLE_GRAPHS``: set when ``disable_cuda_graphs`` (the
+      caller decides per-model via :func:`model_needs_graph_disable`) to avoid
+      the recurrent-checkpoint graph-replay crash. ``setdefault`` so an
+      operator's explicit value (e.g. forcing graphs back on) still wins.
 
-    Returns None only when neither concern applies (plain inherit).
+    Returns None only when no concern applies (plain inherit).
     """
     env = _rocm_lib_env(binary)
     if gpu_device:
@@ -89,6 +125,9 @@ def _engine_env(binary: str, *, gpu_device: str = "") -> dict[str, str] | None:
         if pin:
             base.update(pin)
             env = base
+    if disable_cuda_graphs:
+        env = env if env is not None else dict(os.environ)
+        env.setdefault("GGML_CUDA_DISABLE_GRAPHS", "1")
     return env
 
 
@@ -273,10 +312,17 @@ def _basic_to_args(prof: Profile, engine: str, model_path: Path) -> dict[str, An
     # independently of the model's weight quant. Quantized KV needs flash
     # attention, so turn it on too. "" / "f16" leave the engine default.
     kv = (getattr(prof, "kv_cache_type", "") or "").strip().lower()
+    fa = (getattr(prof, "flash_attn", "") or "").strip().lower()
     if engine == "llama" and kv and kv != "f16":
         out["cache-type-k"] = kv
         out["cache-type-v"] = kv
+        # Quantized KV can't run without flash attention — force it on.
         out["flash-attn"] = "on"
+    elif engine == "llama" and fa in ("on", "off", "auto"):
+        # Independent flash-attn control for f16 KV. On backends where
+        # quantized-KV FA is a slow fallback kernel (e.g. ROCm/HIP), this lets
+        # f16 KV still get FA's large-context decode speedup.
+        out["flash-attn"] = fa
     # VRAM/RAM caps → n-gpu-layers (llama only; mlx ignores it).
     if engine == "llama":
         if (prof.vram_limit_gb is not None
@@ -602,10 +648,18 @@ class ServerManager:
                     # configured GPU pin adds the backend's visible-devices
                     # var. The pin applies to the llama engine only — mlx
                     # (Apple) has no --list-devices to resolve against.
+                    # Recurrent / hybrid-SSM models on ROCm additionally get
+                    # CUDA graphs disabled to dodge the gated-delta-net
+                    # checkpoint-restore crash (see model_needs_graph_disable).
                     env=_engine_env(
                         self.cfg.llama_server_binary,
                         gpu_device=(getattr(self.cfg, "llama_gpu_device", "") or "")
                         if engine == "llama" else "",
+                        disable_cuda_graphs=(
+                            engine == "llama"
+                            and model_needs_graph_disable(
+                                spec.model_path, self.cfg.llama_server_binary)
+                        ),
                     ),
                 )
             except FileNotFoundError as e:

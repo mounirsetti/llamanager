@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.3.994-green.svg" alt="Version 0.3.994">
+  <img src="https://img.shields.io/badge/version-0.3.995-green.svg" alt="Version 0.3.995">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -242,7 +242,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.3.994" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.3.995" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -917,6 +917,37 @@ Bounces the manager/proxy. Use it to pick up new code after updating a
 source / editable (`pip install -e .`) checkout, or after editing the unit —
 no reinstall needed. Any model already loaded keeps its old launch args until
 you reload it.
+
+> **The tray is a separate process.** `restart`/`stop` of `llamanager.service`
+> only touches the `serve` daemon. The tray (`llamanager tray`) is launched by
+> the XDG autostart entry, not by systemd, so it keeps running and just
+> reconnects on its next poll. To cycle the tray too, restart it on its own
+> (see below) or use its right-click **Quit tray**.
+
+### Start / stop / quit gracefully
+```bash
+# Start just the manager/proxy daemon
+systemctl --user start llamanager.service
+
+# Start the tray manually (it's not systemd-managed)
+llamanager tray        # blocks the terminal — it's a GUI loop
+llamanager tray -b     # detached (background); init/autostart use this form
+
+# Stop just the manager/proxy daemon (SIGTERM → stops the llama-server child cleanly)
+systemctl --user stop llamanager.service
+
+# Stop the tray on its own
+pkill -f 'llamanager tray'
+
+# Bring the whole stack down — daemon, tray, and all autostart entries — at once
+llamanager autostart --mode off
+
+# Restart only the tray (e.g. after updating code)
+pkill -f 'llamanager tray'; llamanager tray -b
+```
+The tray's right-click **Quit tray** is the friendliest full shutdown: it stops
+the loaded LLM, then the service, then exits. Stopping the unit with `systemctl`
+shuts the daemon (and the llama-server it manages) down gracefully via SIGTERM.
 
 ## Uninstall
 

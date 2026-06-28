@@ -320,6 +320,7 @@ class AdminClient:
                        ram_spill_policy: str = "default",
                        ram_spill_limit_gb: float | None = None,
                        kv_cache_type: str = "",
+                       flash_attn: str = "",
                        thinking: str = "",
                        reasoning_budget: int | None = None,
                        parallel: int | None = None,
@@ -334,6 +335,7 @@ class AdminClient:
             "ram_spill_policy": ram_spill_policy,
             "ram_spill_limit_gb": ram_spill_limit_gb,
             "kv_cache_type": kv_cache_type,
+            "flash_attn": flash_attn,
             "thinking": thinking,
             "reasoning_budget": reasoning_budget,
             "parallel": parallel,
@@ -349,6 +351,7 @@ class AdminClient:
                        ram_spill_policy: str | None = None,
                        ram_spill_limit_gb: float | None = None,
                        kv_cache_type: str | None = None,
+                       flash_attn: str | None = None,
                        thinking: str | None = None,
                        reasoning_budget: int | None = None,
                        parallel: int | None = None,
@@ -363,6 +366,7 @@ class AdminClient:
         if ram_spill_policy is not None: body["ram_spill_policy"] = ram_spill_policy
         if ram_spill_limit_gb is not None: body["ram_spill_limit_gb"] = ram_spill_limit_gb
         if kv_cache_type is not None: body["kv_cache_type"] = kv_cache_type
+        if flash_attn is not None: body["flash_attn"] = flash_attn
         if thinking is not None: body["thinking"] = thinking
         if reasoning_budget is not None: body["reasoning_budget"] = reasoning_budget
         if parallel is not None: body["parallel"] = parallel

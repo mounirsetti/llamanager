@@ -218,3 +218,71 @@ def test_engine_env_no_pin_is_inherit(monkeypatch):
     from llamanager import server_manager
     # No device + vulkan build → inherit (None), unchanged behaviour.
     assert server_manager._engine_env("/x/llama.cpp-vulkan/llama-server") is None
+
+
+# ---------- recurrent-model CUDA-graph workaround ----------
+
+def test_is_recurrent_detects_ssm_and_hybrid():
+    from llamanager.gguf_meta import GgufMeta, is_recurrent
+    plain = GgufMeta(architecture="gemma4", block_count=48)
+    assert is_recurrent(plain) is False
+    # Hybrid SSM/attention (Qwen3.6 "qwen35"): full_attention_interval + ssm.
+    hybrid = GgufMeta(architecture="qwen35", block_count=64,
+                      full_attention_interval=4, ssm_state_size=128,
+                      ssm_inner_size=4096, ssm_conv_kernel=4)
+    assert is_recurrent(hybrid) is True
+    # Pure recurrent (Mamba-style): ssm geometry, no full_attention_interval.
+    mamba = GgufMeta(architecture="mamba2", block_count=64, ssm_state_size=128)
+    assert is_recurrent(mamba) is True
+
+
+def test_model_needs_graph_disable_only_rocm_recurrent(monkeypatch, tmp_path):
+    from llamanager import server_manager
+    from llamanager.gguf_meta import GgufMeta
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"\0")  # is_file() True; read is monkeypatched below
+    hybrid = GgufMeta(architecture="qwen35", block_count=64,
+                      full_attention_interval=4, ssm_state_size=128)
+    plain = GgufMeta(architecture="gemma4", block_count=48)
+    HIP = "/x/llama.cpp-hip/llama-server"
+    VK = "/x/llama.cpp-vulkan/llama-server"
+
+    monkeypatch.setattr(server_manager, "read_gguf_meta", lambda p: hybrid)
+    assert server_manager.model_needs_graph_disable(model, HIP) is True
+    # Same recurrent model on a non-ROCm build → no workaround.
+    assert server_manager.model_needs_graph_disable(model, VK) is False
+
+    monkeypatch.setattr(server_manager, "read_gguf_meta", lambda p: plain)
+    # Plain transformer on ROCm → keep graphs (and their decode speedup).
+    assert server_manager.model_needs_graph_disable(model, HIP) is False
+
+
+def test_model_needs_graph_disable_read_error_is_safe(monkeypatch, tmp_path):
+    from llamanager import server_manager
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"\0")
+
+    def boom(_):
+        raise ValueError("malformed header")
+    monkeypatch.setattr(server_manager, "read_gguf_meta", boom)
+    # Best-effort: any read failure leaves graphs on rather than crashing launch.
+    assert server_manager.model_needs_graph_disable(
+        model, "/x/llama.cpp-hip/llama-server") is False
+
+
+def test_engine_env_disable_graphs_and_operator_override(monkeypatch):
+    from llamanager import server_manager
+    HIP = "/x/llama.cpp-hip/llama-server"
+    # No rocm lib dir resolved in this test env, but disable_cuda_graphs still
+    # applies the var onto a copied environment.
+    monkeypatch.delenv("GGML_CUDA_DISABLE_GRAPHS", raising=False)
+    env = server_manager._engine_env(HIP, disable_cuda_graphs=True)
+    assert env is not None and env["GGML_CUDA_DISABLE_GRAPHS"] == "1"
+    # An explicit operator value wins (setdefault) — e.g. forcing graphs on.
+    monkeypatch.setenv("GGML_CUDA_DISABLE_GRAPHS", "0")
+    env = server_manager._engine_env(HIP, disable_cuda_graphs=True)
+    assert env["GGML_CUDA_DISABLE_GRAPHS"] == "0"
+    # Not requested → untouched (plain inherit for a vulkan build).
+    monkeypatch.delenv("GGML_CUDA_DISABLE_GRAPHS", raising=False)
+    assert server_manager._engine_env(
+        "/x/llama.cpp-vulkan/llama-server", disable_cuda_graphs=False) is None

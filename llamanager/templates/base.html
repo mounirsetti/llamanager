@@ -979,6 +979,56 @@
       text-transform: none;
       font-family: 'JetBrains Mono', ui-monospace, monospace;
     }
+
+    /* Inside the profile create/edit form, descriptive hints that live inside a
+       field label are collapsed into an on-hover tooltip so the form reads as a
+       clean list of labels. A small ⓘ marks the label as having help; hovering
+       (or keyboard-focusing a control within) the label reveals the text.
+       Standalone hints (not a label child — e.g. the live throughput advice)
+       keep their inline display. */
+    .lm-profile-form .lm-field-label:has(> .lm-field-hint) {
+      position: relative;
+      cursor: help;
+    }
+    .lm-profile-form .lm-field-label:has(> .lm-field-hint)::after {
+      content: "ⓘ";
+      margin-left: 6px;
+      font-size: 0.72em;
+      color: var(--fg-3);
+      text-transform: none;
+      vertical-align: baseline;
+    }
+    .lm-profile-form .lm-field-label > .lm-field-hint {
+      position: absolute;
+      left: 0;
+      top: calc(100% + 5px);
+      z-index: 30;
+      visibility: hidden;
+      opacity: 0;
+      margin-left: 0;
+      width: max-content;
+      max-width: 340px;
+      padding: 9px 11px;
+      letter-spacing: normal;
+      line-height: 1.5;
+      white-space: normal;
+      color: var(--fg-1);
+      background: var(--bg-2);
+      border: 1px solid var(--bg-4);
+      border-radius: 7px;
+      box-shadow: 0 8px 26px rgba(0, 0, 0, 0.4);
+      pointer-events: none;
+      transition: opacity 120ms ease, visibility 120ms ease;
+    }
+    .lm-profile-form .lm-field-label:hover > .lm-field-hint,
+    .lm-profile-form .lm-field-label:focus-within > .lm-field-hint {
+      visibility: visible;
+      opacity: 1;
+    }
+    .lm-profile-form .lm-field-label > .lm-field-hint code {
+      font-size: 0.95em;
+      color: var(--accent);
+    }
     .lm-slider-pair {
       display: flex;
       align-items: center;
@@ -2086,12 +2136,14 @@
       var mmproj = mmOpt ? parseFloat(mmOpt.getAttribute('data-mmproj-gb')) : 0;
       if (isNaN(mmproj)) mmproj = 0;
       var total = (isNaN(weights) ? 0 : weights) + mmproj + kv;
-      var kvTag = (kvType && kvType !== 'f16') ? ' (' + kvType + ')' : '';
-      var mmTag = mmproj > 0.05 ? ' + mmproj ' + mmproj.toFixed(1) : '';
-      var msg = 'KV ~' + kv.toFixed(1) + ' GB' + kvTag
-              + (isNaN(weights) ? '' : ' · weights' + mmTag + '+KV ~' + total.toFixed(1) + ' GB');
+      var kvTag = (kvType && kvType !== 'f16') ? ' ' + kvType : '';
+      // Compact headline: total footprint / VRAM, plus a one-word verdict. The
+      // full breakdown lives in the field tooltip; this stays terse on purpose.
+      var msg = isNaN(weights)
+        ? 'KV ~' + kv.toFixed(1) + ' GB' + kvTag
+        : '~' + total.toFixed(1) + ' GB' + kvTag
+            + (isNaN(vram) ? '' : ' / ' + Math.round(vram) + ' GB');
       var color = 'var(--fg-2)';
-      var V = Math.round(vram);
       // Engine overhead beyond weights+KV+mmproj: a ~per-slot compute buffer
       // plus allocator slack. Mirrors mem_guard._gpu_overhead_gb — the compute
       // buffer scales with --parallel (blank = engine auto, assume 4 to match
@@ -2102,21 +2154,16 @@
       var usable = vram - (1.0 * P + vram * 0.04);
       if (!isNaN(vram)) {
         if (total <= usable) {
-          color = 'var(--ok)'; msg += ' · fits your ' + V + ' GB GPU';
+          color = 'var(--ok)'; msg += ' · fits';
         } else if (total <= vram) {
-          // Fits the raw number but not with much room for the compute
-          // buffers llama allocates on top — genuinely tight, likely a spill.
-          color = 'var(--warn)';
-          msg += ' · tight for ' + V + ' GB (compute buffers go on top) — may spill to RAM';
+          color = 'var(--warn)'; msg += ' · tight, may spill';
         } else if (isNaN(ram) || total <= vram + ram) {
-          color = 'var(--warn)';
-          msg += ' · over your ' + V + ' GB GPU — spills to RAM, slower';
+          color = 'var(--warn)'; msg += ' · spills to RAM';
         } else {
-          color = 'var(--bad)';
-          msg += ' · over VRAM+RAM — will thrash swap, reduce the context';
+          color = 'var(--bad)'; msg += ' · too big — reduce ctx';
         }
       } else if (!isNaN(ram) && total > ram * 0.88) {
-        color = 'var(--bad)'; msg += ' · over system RAM — reduce the context';
+        color = 'var(--bad)'; msg += ' · over RAM — reduce ctx';
       }
       out.textContent = msg;
       out.style.color = color;
