@@ -24,6 +24,7 @@ from .auth import AuthManager, load_or_create_lookup_secret
 from .config import Config, load_config
 from .db import DB
 from . import exclusive as _exclusive
+from .audio_runner import AudioTaskRunner
 from .image_runner import ImageTaskRunner
 from .queue_mgr import QueueManager
 from .registry import Registry
@@ -135,6 +136,7 @@ def create_app(config_path: Path | None = None,
     supervisor = Supervisor(cfg, sm)
     registry = Registry(cfg, db)
     image_runner = ImageTaskRunner(cfg, db, sm=sm)
+    audio_runner = AudioTaskRunner(cfg, db, sm=sm)
 
     # Warn if llama-server binary is not found
     if not detect_binary(cfg.llama_server_binary):
@@ -352,6 +354,7 @@ def create_app(config_path: Path | None = None,
     app.state.supervisor = supervisor
     app.state.registry = registry
     app.state.image_runner = image_runner
+    app.state.audio_runner = audio_runner
     from .engine_installer import EngineInstaller
     app.state.engine_installer = EngineInstaller(cfg, db)
     # One InstallState per installable variant (source + backend), so the UI

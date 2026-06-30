@@ -22,7 +22,9 @@ import base64
 import contextlib
 import json
 import logging
+import shutil
 import time
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 import httpx
@@ -32,7 +34,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .auth import AuthManager, Origin
 from .caller import describe_caller
 from .config import ENGINE_FAMILY, Config, detect_engine_for_id
-from .engines._base import ImageRequest
+from .audio_runner import (
+    AudioError, AudioTaskRunner, execute_transcription, resolve_audio_engine,
+)
+from .engines._base import AudioRequest, ImageRequest
 from .image_runner import ImageError, ImageTaskRunner, resolve_image_engine
 from .queue_mgr import Cancelled, QueueManager, QueueFull, QueuedRequest
 from .registry import Registry
@@ -921,6 +926,123 @@ def _stage_ref_images(
         p.write_bytes(blob)
         paths.append(p)
     return paths
+
+
+@router.post("/audio/transcriptions")
+async def audio_transcriptions(request: Request) -> Response:
+    """Transcribe an audio file (OpenAI-compatible).
+
+    multipart/form-data fields:
+        file:             the audio file (required; wav/mp3/m4a/ogg/…).
+        model:            bare model id (audio-family); falls back to the
+                          X-Llamanager-Model header if omitted.
+        language:         ISO hint (e.g. "ar"), or "auto"/omitted to detect.
+        response_format:  "json" (default) | "text" | "verbose_json".
+        profile:          llamanager extension — selects an audio profile.
+    """
+    origin = await _origin_from_request(request)
+    try:
+        form = await request.form()
+    except Exception:
+        raise HTTPException(status_code=400, detail="expected multipart/form-data")
+
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(status_code=400, detail="'file' (audio upload) is required")
+
+    qm: QueueManager = request.app.state.queue
+    cfg = request.app.state.cfg
+    runner: AudioTaskRunner = request.app.state.audio_runner
+
+    model_required = (form.get("model")
+                      or request.headers.get("x-llamanager-model"))
+    if not model_required:
+        raise HTTPException(
+            status_code=400,
+            detail="audio requests require 'model' (an audio-family model id)",
+        )
+    _check_model_allowed(origin, model_required)
+    try:
+        engine = resolve_audio_engine(cfg, model_required)
+    except AudioError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    profile_required = (form.get("profile")
+                        or request.headers.get("x-llamanager-profile"))
+    language = (form.get("language") or "").strip() or None
+    response_format = (form.get("response_format") or "json").strip()
+
+    try:
+        qr = await qm.enqueue(
+            origin=origin,
+            model_required=model_required,
+            profile_required=profile_required,
+            task_type="audio",
+            caller=await describe_caller(request),
+        )
+    except QueueFull:
+        raise HTTPException(status_code=503, detail="queue full")
+
+    # Stage the uploaded audio under <data_dir>/audio_in/<request_id>/ after
+    # enqueue (stable request_id) but before the runner spawns.
+    stage_dir = cfg.data_dir / "audio_in" / qr.request_id
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(getattr(upload, "filename", "") or "audio").suffix or ".bin"
+    audio_path = stage_dir / f"input{suffix}"
+    try:
+        audio_path.write_bytes(await upload.read())
+    except Exception as e:
+        qm.cancel(qr.request_id)
+        shutil.rmtree(stage_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=f"could not read upload: {e}")
+
+    profile_obj = None
+    if profile_required:
+        profile_obj = cfg.get_profile(model_required, profile_required)
+        if profile_obj is None:
+            qm.cancel(qr.request_id)
+            shutil.rmtree(stage_dir, ignore_errors=True)
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown profile {profile_required!r} for model {model_required!r}",
+            )
+
+    audio_req = AudioRequest(audio_path=audio_path, language=language,
+                             task="transcribe")
+    try:
+        result = await execute_transcription(
+            qm, runner, qr=qr, engine=engine, model_id=model_required,
+            profile_obj=profile_obj, audio_req=audio_req,
+        )
+        headers = {"x-llamanager-request-id": qr.request_id}
+        if response_format == "text":
+            return Response(content=result.text, media_type="text/plain",
+                            headers=headers)
+        if response_format == "verbose_json":
+            return JSONResponse(content=result.raw, headers=headers)
+        return JSONResponse(content={"text": result.text}, headers=headers)
+    except AudioError as e:
+        if str(e) == "cancelled":
+            return JSONResponse(
+                status_code=499,
+                content={"error": {"message": "request cancelled",
+                                   "type": "llamanager_error"}},
+            )
+        raise HTTPException(status_code=502, detail=str(e))
+    except Cancelled:
+        return JSONResponse(
+            status_code=499,
+            content={"error": {"message": "request cancelled",
+                               "type": "llamanager_error"}},
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504,
+                            detail="request timed out waiting in queue")
+    except Exception as e:
+        log.exception("transcription failed for %s", qr.request_id)
+        raise HTTPException(status_code=502, detail=str(e))
+    finally:
+        shutil.rmtree(stage_dir, ignore_errors=True)
 
 
 @router.post("/images/generations")

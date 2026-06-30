@@ -607,3 +607,46 @@ class AdminClient:
                 f"{body.get('error') or body.get('detail') or r.text}"
             )
         return body
+
+    # ---- ASR (speech-to-text) ----
+    def asr_engines(self) -> dict[str, Any]:
+        return self._get("/admin/asr/engines")
+
+    def asr_install(self, *, torch_backend: str = "auto") -> dict[str, Any]:
+        return self._post("/admin/asr/install", {"torch_backend": torch_backend})
+
+    def asr_cancel_install(self) -> dict[str, Any]:
+        return self._post("/admin/asr/cancel-install")
+
+    def asr_setup(self, python: str) -> dict[str, Any]:
+        return self._post("/admin/asr/setup", {"python": python})
+
+    def asr_models(self) -> dict[str, Any]:
+        return self._get("/admin/asr/models")
+
+    def asr_profiles(self, model_id: str) -> dict[str, Any]:
+        return self._get("/admin/asr/profiles", model=model_id)
+
+    def asr_profile_create(self, model_id: str, name: str, *,
+                           fields: dict[str, Any] | None = None,
+                           make_default: bool = False) -> dict[str, Any]:
+        return self._post("/admin/asr/profiles", {
+            "model_id": model_id, "name": name,
+            "fields": fields or {}, "make_default": make_default,
+        })
+
+    def asr_profile_delete(self, name: str, model_id: str) -> dict[str, Any]:
+        return self._delete(f"/admin/asr/profiles/{name}", model_id=model_id)
+
+    def asr_profile_set_default(self, model_id: str, *,
+                                profile_name: str = "") -> dict[str, Any]:
+        return self._post("/admin/asr/profiles/set-default", {
+            "model_id": model_id, "profile_name": profile_name,
+        })
+
+    def asr_transcribe(self, file: str, model: str, *, language: str = "",
+                       task: str = "transcribe", profile: str = "") -> dict[str, Any]:
+        return self._post("/admin/asr/transcribe", {
+            "file": file, "model": model, "language": language,
+            "task": task, "profile": profile,
+        })

@@ -121,7 +121,7 @@ class QueueManager:
         # them internally via its own lock. When cfg.allow_concurrent is
         # False (the default), the two families are mutually exclusive:
         # no image starts while text is in flight and vice versa.
-        self._in_flight_count: dict[str, int] = {"text": 0, "image": 0}
+        self._in_flight_count: dict[str, int] = {"text": 0, "image": 0, "audio": 0}
         # Monotonic timestamp of the last time the queue had work — bumped on
         # enqueue and on each in-flight completion. Read by ``idle_seconds()``
         # for the auto-update-when-idle scheduler (see auto_update.AutoUpdater).
@@ -495,16 +495,23 @@ class QueueManager:
         """
         text_in = self._in_flight_count.get("text", 0)
         image_in = self._in_flight_count.get("image", 0)
-        if req.task_type == "image":
-            if image_in >= 1:
+        audio_in = self._in_flight_count.get("audio", 0)
+        # image and audio are one-shot GPU families, each with a hard 1-slot
+        # ceiling; their runners also hold an internal lock as a backstop.
+        if req.task_type in ("image", "audio"):
+            if self._in_flight_count.get(req.task_type, 0) >= 1:
                 return False
-            if not self.cfg.allow_concurrent and text_in > 0:
-                return False
+            # When concurrency is off, a one-shot task is mutually exclusive
+            # with text *and* the other one-shot family.
+            if not self.cfg.allow_concurrent:
+                others = text_in + image_in + audio_in
+                if others - self._in_flight_count.get(req.task_type, 0) > 0:
+                    return False
             return True
         # text
         if text_in >= max(1, self.cfg.max_concurrent):
             return False
-        if not self.cfg.allow_concurrent and image_in > 0:
+        if not self.cfg.allow_concurrent and (image_in > 0 or audio_in > 0):
             return False
         return True
 
@@ -655,10 +662,10 @@ class QueueManager:
         ``profile:foo`` shorthand is no longer accepted; per-request profile
         selection arrives via the X-Llamanager-Profile header path instead.
 
-        For image-family tasks (``req.task_type == "image"``), no swap is
-        done here — the image runner owns the cross-family coordination
-        via ServerManager.yield_to_image() at dispatch time. We just mark
-        the slot in-flight and let the handler invoke the runner.
+        For one-shot GPU tasks (``req.task_type`` in ``image``/``audio``), no
+        swap is done here — the image/audio runner owns the cross-family
+        coordination via ServerManager.yield_to_image() at dispatch time. We
+        just mark the slot in-flight and let the handler invoke the runner.
         """
         # Cancelled between dispatch and now — don't load anything.
         if self._abandon_before_running(req):
@@ -667,8 +674,8 @@ class QueueManager:
         wanted_profile = getattr(req, "profile_required", None)
         loaded = self.sm.runtime.current_model
 
-        # Image-family tasks bypass the text server swap entirely.
-        if req.task_type == "image":
+        # Image/audio one-shot tasks bypass the text server swap entirely.
+        if req.task_type in ("image", "audio"):
             self._in_flight[req.request_id] = req
             req.status = "running"
             req.started_at = time.time()
@@ -896,4 +903,5 @@ def _infer_task_type(cfg: Config, model_id: str | None) -> str:
     if not model_id:
         return "text"
     engine = detect_engine_for_id(model_id, cfg.models_dir)
-    return "image" if ENGINE_FAMILY.get(engine, "text") == "image" else "text"
+    family = ENGINE_FAMILY.get(engine, "text")
+    return family if family in ("image", "audio") else "text"

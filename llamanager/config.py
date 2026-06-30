@@ -109,6 +109,7 @@ lock_model_loading = false
 # hidream_repo      = "/path/to/HiDream-O1-Image"
 # flux2_sd_cli      = "/path/to/sd-cli"
 # flux2_device_index = 1     # GGML_VK_VISIBLE_DEVICES for the AMD card
+# asr_python        = "~/.llamanager/venvs/z_image/bin/python"  # Whisper STT
 # images_dir        = "~/.llamanager/images"
 max_disk_gb = 10               # cap for the on-disk image gallery
 
@@ -163,16 +164,21 @@ ENGINE_FAMILY: dict[str, str] = {
     "hidream": "image",
     "flux2":   "image",
     "z_image": "image",
+    "asr":     "audio",
 }
 
 # Text engines that are still managed by the existing HTTP-server path.
 TEXT_ENGINES = frozenset(e for e, f in ENGINE_FAMILY.items() if f == "text")
 IMAGE_ENGINES = frozenset(e for e, f in ENGINE_FAMILY.items() if f == "image")
+# Audio / speech-to-text engines — one-shot subprocess tasks like the image
+# family, but consuming an audio file and producing a transcription.
+AUDIO_ENGINES = frozenset(e for e, f in ENGINE_FAMILY.items() if f == "audio")
 
 
 def engine_family(engine: str) -> str:
-    """Return ``"text"`` or ``"image"`` (defaults to ``"text"`` for unknown
-    engines so legacy configs keep working)."""
+    """Return the task family (``"text"`` / ``"image"`` / ``"audio"``) for
+    ``engine``, defaulting to ``"text"`` for unknown engines so legacy configs
+    keep working."""
     return ENGINE_FAMILY.get(engine, "text")
 
 
@@ -223,16 +229,43 @@ def _looks_like_z_image(d: Path) -> bool:
     return (data.get("_class_name") or "").strip() == "ZImagePipeline"
 
 
+def _looks_like_asr(d: Path) -> bool:
+    """Whisper / speech-to-text checkpoint directory shape: a Hugging Face
+    ``config.json`` whose ``model_type`` is ``whisper`` (or whose
+    ``architectures`` names ``WhisperForConditionalGeneration``).
+
+    Must be checked *before* HiDream and the MLX fallback: a Whisper folder
+    also ships ``tokenizer_config.json`` + ``preprocessor_config.json`` +
+    safetensors, so it would otherwise be mis-detected as a HiDream/MLX dir.
+    """
+    if not d.is_dir():
+        return False
+    cfg_file = d / "config.json"
+    if not cfg_file.is_file():
+        return False
+    try:
+        import json as _json
+        data = _json.loads(cfg_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if (data.get("model_type") or "").strip().lower() == "whisper":
+        return True
+    archs = data.get("architectures") or []
+    return any("WhisperForConditionalGeneration" in str(a) for a in archs)
+
+
 def detect_engine_for_path(model_path: Path) -> str:
     """Return the engine name for a model on disk.
 
-    Order matters: image engines are checked before the generic MLX
-    directory shape because a HiDream dir technically also contains
+    Order matters: ASR and image engines are checked before the generic MLX
+    directory shape because a Whisper / HiDream dir technically also contains
     safetensors + (some) tokenizer config.
     """
     if model_path.is_file() and model_path.suffix.lower() == ".gguf":
         return "llama"
     if model_path.is_dir():
+        if _looks_like_asr(model_path):
+            return "asr"
         if _looks_like_z_image(model_path):
             return "z_image"
         if _looks_like_hidream(model_path):
@@ -319,6 +352,11 @@ class Profile:
     # HiDream. Both can be overridden per-request.
     image_editing_scheduler: str = ""
     image_strength: float | None = None
+    # Audio-family (ASR / Whisper) knobs. ``audio_language`` is an ISO hint
+    # ("ar", "en", … or "auto"); ``audio_task`` is "transcribe" | "translate".
+    # Both ignored by text/image engines.
+    audio_language: str = ""
+    audio_task: str = ""
     # Chat reasoning default. "on" / "off" inject
     # ``chat_template_kwargs.enable_thinking`` into the upstream body for
     # /v1/chat/completions; "" leaves the model/template default alone.
@@ -459,6 +497,11 @@ class Config:
     # with llamanager (engines/_z_image_runner.py), so there's no
     # separate source folder to clone.
     z_image_python: str = ""
+    # ASR (Whisper / speech-to-text) only needs a Python interpreter with
+    # ``torch`` + ``transformers``; the runner ships with llamanager
+    # (engines/_asr_runner.py). The installer typically points this at the
+    # shared z_image venv rather than rebuilding torch.
+    asr_python: str = ""
     # Per-engine diffusers version override (engine name → version), set when
     # the operator installs a specific diffusers version from the UI/CLI
     # version picker. While set it overrides engine_installer.DIFFUSERS_PIN as
@@ -626,6 +669,8 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
         image_seed=_coerce_int(body.get("image_seed")),
         image_editing_scheduler=str(body.get("image_editing_scheduler", "") or ""),
         image_strength=_coerce_float(body.get("image_strength")),
+        audio_language=str(body.get("audio_language", "") or ""),
+        audio_task=str(body.get("audio_task", "") or ""),
         thinking=thinking,
         reasoning_budget=_coerce_int(body.get("reasoning_budget")),
         parallel=_coerce_int(body.get("parallel")),
@@ -680,6 +725,7 @@ def load_config(path: Path | None = None) -> Config:
         flux2_sd_cli=str(image_cfg.get("flux2_sd_cli", "") or ""),
         flux2_device_index=_coerce_int(image_cfg.get("flux2_device_index")),
         z_image_python=str(image_cfg.get("z_image_python", "") or ""),
+        asr_python=str(image_cfg.get("asr_python", "") or ""),
         images_max_disk_gb=int(image_cfg.get("max_disk_gb", 10)),
         unload_text_on_arrival=bool(coex_cfg.get("unload_text_on_arrival", True)),
         restart_text_after_image=bool(coex_cfg.get("restart_text_after_image", True)),
@@ -969,6 +1015,10 @@ def _profile_to_tomlkit(prof: Profile):
         tbl.add("image_editing_scheduler", prof.image_editing_scheduler)
     if prof.image_strength is not None:
         tbl.add("image_strength", prof.image_strength)
+    if prof.audio_language:
+        tbl.add("audio_language", prof.audio_language)
+    if prof.audio_task:
+        tbl.add("audio_task", prof.audio_task)
     if prof.thinking:
         tbl.add("thinking", prof.thinking)
     if prof.reasoning_budget is not None:
@@ -1122,6 +1172,7 @@ def update_image_config(cfg_path: Path, *,
                         flux2_device_index: int | None = None,
                         clear_flux2_device_index: bool = False,
                         z_image_python: str | None = None,
+                        asr_python: str | None = None,
                         images_dir: str | None = None,
                         max_disk_gb: int | None = None) -> None:
     """Update the [image] section in config.toml. Each kwarg is persisted
@@ -1147,6 +1198,8 @@ def update_image_config(cfg_path: Path, *,
         img["flux2_device_index"] = int(flux2_device_index)
     if z_image_python is not None:
         img["z_image_python"] = z_image_python
+    if asr_python is not None:
+        img["asr_python"] = asr_python
     if images_dir is not None:
         img["images_dir"] = images_dir
     if max_disk_gb is not None:

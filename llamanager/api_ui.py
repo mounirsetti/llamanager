@@ -4853,6 +4853,18 @@ def _engine_module_or_400(engine: str):
         return None
 
 
+def _models_page_for(request: Request, model_id: str, engine: str = "") -> str:
+    """Return the models page a profile-CRUD redirect should land on.
+
+    Profile endpoints are shared across the image and audio families; this
+    sends the operator back to whichever page they came from (ASR models vs
+    Diffusion models) based on the model's engine family."""
+    eng = engine or detect_engine_for_id(model_id, request.app.state.cfg.models_dir)
+    if ENGINE_FAMILY.get(eng, "text") == "audio":
+        return "/ui/asr-models"
+    return "/ui/diffusion-models"
+
+
 @router.post("/diffusion-models/profiles/create", response_class=HTMLResponse)
 async def diffusion_profile_create(request: Request,
                                    _: None = Depends(require_csrf)) -> Response:
@@ -4882,7 +4894,8 @@ async def diffusion_profile_create(request: Request,
     if make_default:
         set_model_default_profile(cfg.config_path, model_id, name)
     _reload_config(request)
-    return RedirectResponse("/ui/diffusion-models", status_code=303)
+    return RedirectResponse(_models_page_for(request, model_id, engine),
+                            status_code=303)
 
 
 @router.post("/diffusion-models/profiles/{profile_name}/update",
@@ -4926,7 +4939,8 @@ async def diffusion_profile_update(request: Request, profile_name: str,
     except ValueError as e:
         return _error_html(str(e), status_code=400)
     _reload_config(request)
-    return RedirectResponse("/ui/diffusion-models", status_code=303)
+    return RedirectResponse(_models_page_for(request, model_id, engine),
+                            status_code=303)
 
 
 @router.post("/diffusion-models/profiles/{profile_name}/delete",
@@ -4935,9 +4949,10 @@ async def diffusion_profile_delete(request: Request, profile_name: str,
                                    model_id: str = Form(...),
                                    _: None = Depends(require_csrf)) -> Response:
     cfg = request.app.state.cfg
-    delete_profile(cfg.config_path, model_id.strip(), profile_name)
+    mid = model_id.strip()
+    delete_profile(cfg.config_path, mid, profile_name)
     _reload_config(request)
-    return RedirectResponse("/ui/diffusion-models", status_code=303)
+    return RedirectResponse(_models_page_for(request, mid), status_code=303)
 
 
 @router.post("/diffusion-models/profiles/{profile_name}/clone",
@@ -4977,7 +4992,7 @@ async def diffusion_profile_clone(request: Request, profile_name: str,
     except ValueError as e:
         return _error_html(str(e), status_code=400)
     _reload_config(request)
-    return RedirectResponse("/ui/diffusion-models", status_code=303)
+    return RedirectResponse(_models_page_for(request, mid), status_code=303)
 
 
 @router.post("/diffusion-models/profiles/set-model-default",
@@ -4999,7 +5014,7 @@ async def diffusion_profiles_set_model_default(
         )
     set_model_default_profile(cfg.config_path, mid, pname)
     _reload_config(request)
-    return RedirectResponse("/ui/diffusion-models", status_code=303)
+    return RedirectResponse(_models_page_for(request, mid), status_code=303)
 
 
 @router.post("/diffusion-models/profiles/materialize-defaults",
@@ -5038,7 +5053,133 @@ async def diffusion_profiles_materialize_defaults(
                 status_code=400,
             )
     _reload_config(request)
-    return RedirectResponse("/ui/diffusion-models", status_code=303)
+    return RedirectResponse(_models_page_for(request, mid, engine),
+                            status_code=303)
+
+
+# ---- ASR (speech-to-text) models page ---------------------------------
+
+def _asr_models_ctx(request: Request) -> dict[str, Any]:
+    """Context for the ASR models page: installed audio models + profiles,
+    plus the audio-engine install/setup state.
+
+    Mirrors ``_diffusion_models_ctx`` but filters to the *audio* family and
+    has no catalog (audio models are pulled by the operator). Profile CRUD
+    reuses the shared /ui/diffusion-models/profiles/* endpoints, which
+    redirect back here via ``_models_page_for``."""
+    cfg = request.app.state.cfg
+    reg: Registry = request.app.state.registry
+    installer = request.app.state.engine_installer
+    from .engine_installer import ENGINE_PLANS
+
+    on_disk: dict[str, dict[str, Any]] = {}
+    for entry in reg.list():
+        engine = detect_engine_for_id(entry.model_id, cfg.models_dir)
+        if ENGINE_FAMILY.get(engine, "text") != "audio":
+            continue
+        on_disk[entry.model_id] = {
+            "model_id": entry.model_id, "engine": engine,
+            "size_bytes": entry.size, "path": str(entry.path),
+        }
+
+    engines_view: list[dict[str, Any]] = []
+    for eng_id, eng_mod in image_engines.ADAPTERS.items():
+        if ENGINE_FAMILY.get(eng_id, "text") != "audio":
+            continue
+        configured = bool(cfg.asr_python) if eng_id == "asr" else False
+        label = {"asr": "Whisper (transformers)"}.get(eng_id, eng_id)
+        schema = [_serialize_profile_field(f) for f in eng_mod.profile_schema()]
+        try:
+            default_profiles_dict = eng_mod.default_profiles()
+        except Exception:
+            default_profiles_dict = {}
+        default_profiles_view = [
+            {"name": n, "fields": d} for n, d in default_profiles_dict.items()
+        ]
+
+        rows: list[dict[str, Any]] = []
+        for mid, meta in on_disk.items():
+            if meta["engine"] != eng_id:
+                continue
+            model_cfg = cfg.get_model(mid)
+            profs: list[dict[str, Any]] = []
+            if model_cfg:
+                for p in sorted(model_cfg.profiles.values(), key=lambda x: x.name):
+                    profs.append({
+                        "name": p.name,
+                        "fields": {s["key"]: _profile_field_value(p, s["key"])
+                                   for s in schema},
+                    })
+            rows.append({
+                "catalog": None, "installed": True, "model_id": mid,
+                "size_bytes": meta.get("size_bytes", 0),
+                "is_active_default": False,
+                "profiles": profs,
+                "default_profile": (model_cfg.default_profile if model_cfg else ""),
+            })
+
+        # Install state + plan for the engine card.
+        active = installer.active_for_engine(eng_id)
+        if not active:
+            recent = installer.list_for_engine(eng_id, limit=1)
+            active = recent[0] if recent else None
+        plan = ENGINE_PLANS.get(eng_id)
+        engines_view.append({
+            "id": eng_id, "label": label, "configured": configured,
+            "schema": schema, "default_profiles": default_profiles_view,
+            "rows": rows, "python_path": cfg.asr_python if eng_id == "asr" else "",
+            "install": active,
+            "plan": {"packages": plan.packages, "notes": plan.notes} if plan else None,
+        })
+
+    return _ctx(request, active="asr-models", engines=engines_view)
+
+
+@router.get("/asr-models", response_class=HTMLResponse)
+async def asr_models_view(request: Request,
+                          _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """List installed speech-to-text models, manage profiles, and install /
+    point the ASR engine at a Python environment."""
+    return templates.TemplateResponse(
+        request, "asr_models.html", _asr_models_ctx(request),
+    )
+
+
+@router.post("/asr-models/install-deps", response_class=HTMLResponse)
+async def asr_install_deps(request: Request,
+                           torch_backend: str = Form("auto"),
+                           _: None = Depends(require_csrf)) -> Response:
+    """Install (or reuse a diffusion venv for) the ASR engine deps."""
+    from .engine_installer import TORCH_BACKENDS
+    installer = request.app.state.engine_installer
+    options: dict[str, Any] = {}
+    tb = (torch_backend or "auto").strip().lower()
+    if tb in TORCH_BACKENDS and tb != "auto":
+        options["torch_backend"] = tb
+    try:
+        installer.start("asr", options=options)
+    except (ValueError, RuntimeError) as e:
+        return _error_html(f"install failed: {e}", status_code=400)
+    return RedirectResponse("/ui/asr-models", status_code=303)
+
+
+@router.post("/asr-models/install-deps/{install_id}/cancel",
+             response_class=HTMLResponse)
+async def asr_cancel_install(request: Request, install_id: str,
+                             _: None = Depends(require_csrf)) -> Response:
+    request.app.state.engine_installer.cancel(install_id)
+    return RedirectResponse("/ui/asr-models", status_code=303)
+
+
+@router.post("/setup/audio/asr", response_class=HTMLResponse)
+async def setup_asr(request: Request, asr_python: str = Form(""),
+                    _: None = Depends(require_csrf)) -> Response:
+    """Point the ASR engine at an existing Python interpreter (one with
+    torch + transformers, e.g. the z_image venv)."""
+    cfg = request.app.state.cfg
+    cfg.asr_python = asr_python.strip()
+    update_image_config(cfg.config_path, asr_python=cfg.asr_python)
+    return RedirectResponse("/ui/asr-models", status_code=303)
 
 
 # ============================================================ #

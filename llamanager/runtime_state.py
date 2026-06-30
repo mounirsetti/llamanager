@@ -36,6 +36,24 @@ class ImageRuntimeState:
 
 
 @dataclass
+class AudioRuntimeState:
+    """Transient state for the active audio (ASR / Whisper) task.
+
+    Single-task (mutual exclusion within the audio family), one-shot like the
+    image family. Fields reset to defaults when no task is running.
+    """
+    status: str = "idle"              # idle|transcribing|failed
+    engine: str | None = None         # "asr"
+    model_id: str | None = None
+    profile: str | None = None
+    request_id: str | None = None
+    step: int | None = None
+    total_steps: int | None = None
+    started_at: float | None = None
+    last_event_at: float | None = None
+
+
+@dataclass
 class RuntimeState:
     state: str = "stopped"            # stopped|starting|running|swapping|crashed|degraded
     pid: int | None = None
@@ -45,6 +63,7 @@ class RuntimeState:
     started_at: float | None = None
     last_event_at: float | None = None
     image: ImageRuntimeState = field(default_factory=ImageRuntimeState)
+    audio: AudioRuntimeState = field(default_factory=AudioRuntimeState)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -77,6 +96,18 @@ def load(path: Path) -> RuntimeState:
         started_at=image_raw.get("started_at"),
         last_event_at=image_raw.get("last_event_at"),
     )
+    audio_raw = data.get("audio") or {}
+    audio = AudioRuntimeState(
+        status=audio_raw.get("status", "idle"),
+        engine=audio_raw.get("engine"),
+        model_id=audio_raw.get("model_id"),
+        profile=audio_raw.get("profile"),
+        request_id=audio_raw.get("request_id"),
+        step=audio_raw.get("step"),
+        total_steps=audio_raw.get("total_steps"),
+        started_at=audio_raw.get("started_at"),
+        last_event_at=audio_raw.get("last_event_at"),
+    )
     return RuntimeState(
         state=data.get("state", "stopped"),
         pid=data.get("pid"),
@@ -86,6 +117,7 @@ def load(path: Path) -> RuntimeState:
         started_at=data.get("started_at"),
         last_event_at=data.get("last_event_at"),
         image=image,
+        audio=audio,
     )
 
 

@@ -65,7 +65,7 @@ AMD_ROCM_INDEX = f"https://repo.radeon.com/rocm/manylinux/{AMD_ROCM_REL}/"
 CPU_TORCH_INDEX = "https://download.pytorch.org/whl/cpu"
 
 # Engines whose AMD path we know how to wire to repo.radeon.com wheels.
-AMD_WHEEL_ENGINES = {"hidream", "z_image"}
+AMD_WHEEL_ENGINES = {"hidream", "z_image", "asr"}
 # Valid values for the UI/CLI torch-backend selector.
 TORCH_BACKENDS = ("auto", "rocm", "cuda", "cpu")
 
@@ -97,6 +97,16 @@ class EnginePackages:
     extra_index_url: str | None = None
     space_mb: int = 0
     notes: str = ""
+    # Engines whose existing venv may *host* this one. When any candidate's
+    # venv already satisfies the heavy deps (probed via ``reuse_probe``), the
+    # installer skips building a new venv and layers only ``packages`` on top,
+    # pointing this engine's python at the shared venv. Empty = always build a
+    # dedicated venv. Used by ASR to reuse the diffusion torch+transformers
+    # stack instead of re-downloading multi-GB torch wheels.
+    reuse_from: tuple[str, ...] = ()
+    # Import probe that decides whether a candidate venv is reusable. Run as
+    # ``python -c "import <reuse_probe>"`` in the candidate interpreter.
+    reuse_probe: str = ""
 
 
 @dataclass(frozen=True)
@@ -169,6 +179,24 @@ ENGINE_PLANS: dict[str, EnginePackages] = {
             "repo.radeon.com) and offers to patch hidream-source's "
             "pipeline.py to disable flash-attn. On NVIDIA, installs the "
             "generic CUDA torch wheel."
+        ),
+    ),
+    "asr": EnginePackages(
+        engine="asr",
+        label="Whisper (transformers) — speech-to-text",
+        # No torch here: ASR reuses the diffusion venv's torch+transformers
+        # (reuse_from below). If no reusable venv exists, the GPU resolver's
+        # dedicated-venv fallback supplies torch (AMD wheels / CUDA / CPU).
+        packages=["transformers", "accelerate", "safetensors", "numpy"],
+        reuse_from=("z_image", "hidream"),
+        reuse_probe="torch, transformers",
+        space_mb=300,
+        notes=(
+            "Runs Hugging Face Whisper checkpoints for speech-to-text. Reuses "
+            "the Z-Image / HiDream diffusion venv's torch + transformers when "
+            "present (no multi-GB re-download); otherwise builds a dedicated "
+            "venv with the GPU-appropriate torch. Audio is decoded via the "
+            "system ffmpeg."
         ),
     ),
 }
@@ -666,6 +694,17 @@ class EngineInstaller:
                  + (f" arch={gpu.rocm_arch}" if gpu.rocm_arch else "")
                  + (f" render_gid={gpu.render_gid}" if gpu.render_gid is not None else ""))
 
+            # Reuse path: if this engine can host on another engine's venv
+            # (e.g. ASR on the diffusion torch+transformers stack), probe the
+            # candidates first and, on a hit, install only the lightweight
+            # extras there instead of rebuilding a multi-GB torch venv.
+            base = ENGINE_PLANS.get(engine)
+            if base and base.reuse_from:
+                reused = await self._try_reuse(
+                    install_id, engine, base, cancel, emit, set_progress)
+                if reused is not None:
+                    return  # _try_reuse finished + persisted the python path
+
             backend = str(options.get("torch_backend") or "auto")
             plan = resolve_plan(engine, gpu, emit, cfg=self.cfg, backend=backend)
             if plan is None:
@@ -839,6 +878,75 @@ class EngineInstaller:
         finally:
             self._cancel_flags.pop(install_id, None)
             self._tasks.pop(install_id, None)
+
+    async def _try_reuse(self, install_id: str, engine: str,
+                         base: EnginePackages, cancel: asyncio.Event,
+                         emit, set_progress) -> str | None:
+        """Reuse a sibling engine's venv to host ``engine``.
+
+        Probes each ``base.reuse_from`` candidate's interpreter for the heavy
+        deps (``base.reuse_probe``). On the first hit, installs only the
+        lightweight ``base.packages`` extras there — *without* ``--upgrade``,
+        so the host venv's pinned versions are left untouched — points the
+        engine at that interpreter, and marks the install done. Returns the
+        python path on success, or None to fall through to a dedicated venv.
+        """
+        # AMD: torch needs the system ROCm libs on its path to import.
+        verify_env: dict[str, str] | None = None
+        rocm_dirs = rocm_lib_dirs()
+        if rocm_dirs:
+            prior = os.environ.get("LD_LIBRARY_PATH", "")
+            verify_env = {"LD_LIBRARY_PATH": os.pathsep.join(
+                rocm_dirs + ([prior] if prior else []))}
+
+        set_progress(10, "Looking for a reusable engine venv")
+        probe = base.reuse_probe or "torch"
+        target_py: Path | None = None
+        for cand in base.reuse_from:
+            cand_py = venv_python(self.cfg, cand)
+            if not cand_py.exists():
+                continue
+            emit(f"[reuse] probing {cand} venv: import {probe}")
+            rc = await self._run_subprocess(
+                [str(cand_py), "-c", f"import {probe}"],
+                cancel, emit, env=verify_env,
+            )
+            if cancel.is_set():
+                raise asyncio.CancelledError()
+            if rc == 0:
+                target_py = cand_py
+                emit(f"[reuse] reusing {cand} venv at {cand_py}")
+                break
+            emit(f"[reuse] {cand} venv missing deps (exit {rc}); skipping")
+
+        if target_py is None:
+            emit("[reuse] no reusable venv found; building a dedicated venv")
+            return None
+
+        # Install only the extras, never --upgrade: leave the host venv's
+        # pinned packages (e.g. z_image's diffusers/transformers) intact.
+        if base.packages:
+            set_progress(60, f"Adding {len(base.packages)} extra package(s) "
+                             "to the shared venv")
+            argv = [
+                str(target_py), "-m", "pip", "install",
+                "--upgrade-strategy", "only-if-needed",
+                "--progress-bar", "off", *base.packages,
+            ]
+            rc = await self._run_subprocess(argv, cancel, emit, env=verify_env)
+            if cancel.is_set():
+                raise asyncio.CancelledError()
+            if rc != 0:
+                raise RuntimeError(f"extras install failed (exit {rc})")
+
+        self._persist_engine_python(engine, str(target_py))
+        set_progress(100, f"Reusing venv at {target_py}")
+        self._set(install_id, status="done", finished_at=time.time())
+        self.db.log_event("install_done", {
+            "id": install_id, "engine": engine,
+            "python": str(target_py), "target": "reuse",
+        })
+        return str(target_py)
 
     async def _run_subprocess(self, argv: list[str], cancel: asyncio.Event,
                               emit, env: dict[str, str] | None = None) -> int:
@@ -1047,6 +1155,9 @@ class EngineInstaller:
         elif engine == "hidream":
             kwargs["hidream_python"] = python_path
             self.cfg.hidream_python = python_path
+        elif engine == "asr":
+            kwargs["asr_python"] = python_path
+            self.cfg.asr_python = python_path
         else:
             return
         try:

@@ -1128,6 +1128,75 @@ def cmd_diffusion_materialize_defaults(args):
         args.model_id, args.engine))
 
 
+# ---- ASR (speech-to-text) ----
+
+def cmd_asr_engines(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.asr_engines())
+
+
+def cmd_asr_install(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.asr_install(torch_backend=args.backend))
+
+
+def cmd_asr_cancel_install(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.asr_cancel_install())
+
+
+def cmd_asr_setup(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.asr_setup(args.python))
+
+
+def cmd_asr_models(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.asr_models())
+
+
+def cmd_asr_transcribe(args):
+    c = _make_admin_client(args)
+    from .admin_client import AdminClientError
+    import os
+    try:
+        res = c.asr_transcribe(
+            os.path.abspath(os.path.expanduser(args.file)), args.model,
+            language=(args.language or ""), task=args.task,
+            profile=(args.profile or ""))
+    except AdminClientError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if args.format == "text":
+        print(res.get("text", ""))
+    else:
+        _emit(res)
+    return 0
+
+
+def cmd_asr_profiles_list(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.asr_profiles(args.model_id))
+
+
+def cmd_asr_profile_create(args):
+    c = _make_admin_client(args)
+    fields = _parse_field_kv(args.field)
+    return _run_admin(lambda: c.asr_profile_create(
+        args.model_id, args.name, fields=fields, make_default=args.make_default))
+
+
+def cmd_asr_profile_delete(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.asr_profile_delete(args.name, args.model_id))
+
+
+def cmd_asr_profile_set_default(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.asr_profile_set_default(
+        args.model_id, profile_name=(args.profile or "")))
+
+
 # ---- self-update ----
 
 def cmd_update_check(args):
@@ -1697,6 +1766,68 @@ def main(argv: list[str] | None = None) -> int:
                         help="copy the engine's built-in defaults into config.toml")
     sp.add_argument("model_id"); sp.add_argument("engine")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_materialize_defaults)
+
+    # ---- asr (speech-to-text) ----
+    afp = sub.add_parser(
+        "asr",
+        help="speech-to-text: transcribe audio, manage the ASR engine + models"
+    ).add_subparsers(dest="asr_cmd", required=True)
+
+    sp = afp.add_parser("transcribe", help="transcribe a local audio file")
+    sp.add_argument("file", help="path to an audio file (wav/mp3/m4a/ogg/flac/…)")
+    sp.add_argument("--model", required=True, help="audio-family model id")
+    sp.add_argument("--language", default="", help="ISO hint (e.g. ar); blank = auto-detect")
+    sp.add_argument("--task", default="transcribe", choices=["transcribe", "translate"])
+    sp.add_argument("--profile", default="", help="audio profile name")
+    sp.add_argument("--format", default="text", choices=["text", "json"],
+                    help="text = print the transcription only (default); json = full result")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_transcribe)
+
+    sp = afp.add_parser("engines", help="ASR engine status (configured? installed?)")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_engines)
+
+    sp = afp.add_parser("install",
+                        help="install/reuse the ASR engine dependencies "
+                             "(reuses the diffusion torch+transformers venv)")
+    sp.add_argument("--backend", default="auto",
+                    choices=["auto", "rocm", "cuda", "cpu"],
+                    help="torch build for the dedicated-venv fallback")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_install)
+
+    sp = afp.add_parser("cancel-install", help="cancel an in-progress ASR install")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_cancel_install)
+
+    sp = afp.add_parser("setup", help="point the ASR engine at a Python interpreter")
+    sp.add_argument("python", help="path to a python with torch + transformers")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_setup)
+
+    sp = afp.add_parser("models", help="list installed speech-to-text models")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_models)
+
+    pfp = afp.add_parser("profiles", help="manage per-model ASR profiles"
+                         ).add_subparsers(dest="asr_profiles_cmd", required=True)
+
+    sp = pfp.add_parser("list", help="show profiles + built-in defaults for a model")
+    sp.add_argument("model_id")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_profiles_list)
+
+    sp = pfp.add_parser("create", help="create a new audio profile")
+    sp.add_argument("model_id"); sp.add_argument("name")
+    sp.add_argument("--field", action="append", default=None, metavar="KEY=VALUE",
+                    help="schema field (repeatable, e.g. --field audio_language=ar)")
+    sp.add_argument("--make-default", action="store_true",
+                    help="also set the new profile as this model's default")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_profile_create)
+
+    sp = pfp.add_parser("delete", help="delete an audio profile")
+    sp.add_argument("model_id"); sp.add_argument("name")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_profile_delete)
+
+    sp = pfp.add_parser("set-default",
+                        help="set the per-model default audio profile (blank to clear)")
+    sp.add_argument("model_id")
+    sp.add_argument("--profile", default="")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_profile_set_default)
 
     # profiles (LLM-side, mirror of `diffusion profiles`)
     pfp = sub.add_parser("profiles",

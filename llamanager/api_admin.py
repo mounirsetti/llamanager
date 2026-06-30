@@ -1885,3 +1885,290 @@ async def set_auto_update_settings(request: Request,
         "idle_seconds": cfg.auto_update_idle_seconds,
         "check_interval_seconds": cfg.auto_update_check_interval_seconds,
     })
+
+
+# ---------- ASR (speech-to-text) ----------
+#
+# Mirror the ASR models page over JSON so the CLI can list, install, profile,
+# and transcribe without the web UI. Audio-family only (engine "asr").
+
+def _reload_cfg_inplace(request: Request) -> None:
+    """Re-read config.toml into app.state.cfg after a write, keeping the
+    runtime bind/port stable — so a profile created over the admin API is
+    immediately visible to listing and usable for transcription."""
+    from .config import load_config
+    old = request.app.state.cfg
+    fresh = load_config(old.path)
+    fresh.bind = old.bind
+    fresh.port = old.port
+    request.app.state.cfg = fresh
+
+@router.get("/asr/engines")
+async def asr_engines(request: Request,
+                      _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """ASR engine(s) state: configured python path, install status, plan."""
+    from . import engines as _engines
+    from .config import ENGINE_FAMILY
+    from .engine_installer import ENGINE_PLANS
+    cfg = request.app.state.cfg
+    installer = request.app.state.engine_installer
+    out: list[dict[str, Any]] = []
+    for eng_id in _engines.ADAPTERS.keys():
+        if ENGINE_FAMILY.get(eng_id, "text") != "audio":
+            continue
+        configured = bool(cfg.asr_python) if eng_id == "asr" else False
+        active = installer.active_for_engine(eng_id)
+        last = active or (installer.list_for_engine(eng_id, limit=1) or [None])[0]
+        plan = ENGINE_PLANS.get(eng_id)
+        out.append({
+            "engine": eng_id,
+            "label": getattr(_engines.get(eng_id), "LABEL", eng_id),
+            "configured": configured,
+            "python": cfg.asr_python if eng_id == "asr" else "",
+            "packages": (plan.packages if plan else []),
+            "reuse_from": list(plan.reuse_from) if plan else [],
+            "notes": (plan.notes if plan else ""),
+            "last_install": last,
+        })
+    return JSONResponse({"engines": out})
+
+
+class AsrInstallBody(BaseModel):
+    torch_backend: str = "auto"
+
+
+@router.post("/asr/install")
+async def asr_install(request: Request, body: AsrInstallBody | None = None,
+                      _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Install (or reuse a diffusion venv for) the ASR engine dependencies."""
+    from .engine_installer import TORCH_BACKENDS
+    installer = request.app.state.engine_installer
+    options: dict[str, Any] = {}
+    tb = ((body.torch_backend if body else "auto") or "auto").strip().lower()
+    if tb in TORCH_BACKENDS and tb != "auto":
+        options["torch_backend"] = tb
+    try:
+        install_id = installer.start("asr", options=options)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse({"ok": True, "install_id": install_id}, status_code=202)
+
+
+@router.post("/asr/cancel-install")
+async def asr_cancel_install(request: Request,
+                             _: Origin = Depends(admin_origin)) -> JSONResponse:
+    installer = request.app.state.engine_installer
+    active = installer.active_for_engine("asr")
+    if active:
+        installer.cancel(active["id"])
+        return JSONResponse({"ok": True, "cancelled": active["id"]})
+    return JSONResponse({"ok": True, "cancelled": None})
+
+
+class AsrSetupBody(BaseModel):
+    python: str
+
+
+@router.post("/asr/setup")
+async def asr_setup(request: Request, body: AsrSetupBody,
+                    _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Point the ASR engine at a Python interpreter (torch + transformers)."""
+    from .config import update_image_config
+    cfg = request.app.state.cfg
+    cfg.asr_python = body.python.strip()
+    update_image_config(cfg.config_path, asr_python=cfg.asr_python)
+    return JSONResponse({"ok": True, "asr_python": cfg.asr_python})
+
+
+@router.get("/asr/models")
+async def asr_models(request: Request,
+                     _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Installed audio-family (speech-to-text) models on disk."""
+    from .config import ENGINE_FAMILY, detect_engine_for_id
+    cfg = request.app.state.cfg
+    reg: Registry = request.app.state.registry
+    on_disk: list[dict[str, Any]] = []
+    for entry in reg.list():
+        engine = detect_engine_for_id(entry.model_id, cfg.models_dir)
+        if ENGINE_FAMILY.get(engine, "text") != "audio":
+            continue
+        m = cfg.get_model(entry.model_id)
+        on_disk.append({
+            "model_id": entry.model_id, "engine": engine,
+            "size_bytes": entry.size, "path": str(entry.path),
+            "default_profile": (m.default_profile if m else ""),
+            "profiles": sorted(m.profiles.keys()) if m else [],
+        })
+    return JSONResponse({"installed": on_disk, "configured": bool(cfg.asr_python)})
+
+
+@router.get("/asr/profiles")
+async def asr_profiles_list(request: Request, model: str = "",
+                            _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Profiles attached to an audio model + the engine's built-in defaults."""
+    from . import engines as _engines
+    from .config import detect_engine_for_id
+    cfg = request.app.state.cfg
+    if not model:
+        raise HTTPException(status_code=400, detail="model is required")
+    m = cfg.get_model(model)
+    profiles: list[dict[str, Any]] = []
+    if m:
+        for p in sorted(m.profiles.values(), key=lambda x: x.name):
+            fields = {k: getattr(p, k) for k in ("audio_language", "audio_task")
+                      if getattr(p, k) not in ("", None)}
+            profiles.append({"name": p.name, "fields": fields})
+    engine = detect_engine_for_id(model, cfg.models_dir)
+    try:
+        builtins = _engines.get(engine).default_profiles()
+    except Exception:
+        builtins = {}
+    return JSONResponse({
+        "model": model, "engine": engine,
+        "default_profile": (m.default_profile if m else ""),
+        "profiles": profiles, "builtin_defaults": builtins,
+    })
+
+
+class AsrProfileBody(BaseModel):
+    model_id: str
+    name: str
+    fields: dict[str, Any] = Field(default_factory=dict)
+    make_default: bool = False
+
+
+@router.post("/asr/profiles")
+async def asr_profile_create(request: Request, body: AsrProfileBody,
+                             _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .config import (Profile, save_profile, set_model_default_profile,
+                         detect_engine_for_id)
+    from . import engines as _engines
+    cfg = request.app.state.cfg
+    if not body.model_id or not body.name:
+        raise HTTPException(status_code=400, detail="model_id and name are required")
+    name = body.name.strip().lower()
+    existing = cfg.get_model(body.model_id)
+    if existing and name in existing.profiles:
+        raise HTTPException(status_code=409, detail=f"profile {name!r} already exists")
+    engine = detect_engine_for_id(body.model_id, cfg.models_dir)
+    try:
+        adapter = _engines.get(engine)
+    except KeyError:
+        raise HTTPException(status_code=400,
+                            detail=f"unknown engine for model {body.model_id!r}")
+    kwargs: dict[str, Any] = {"name": name}
+    schema_keys = {f.key for f in adapter.profile_schema()}
+    for k, v in body.fields.items():
+        if k in schema_keys and v not in ("", None):
+            kwargs[k] = v
+    try:
+        save_profile(cfg.config_path, body.model_id, name, Profile(**kwargs))
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if body.make_default:
+        set_model_default_profile(cfg.config_path, body.model_id, name)
+    _reload_cfg_inplace(request)
+    return JSONResponse({"ok": True, "name": name})
+
+
+@router.delete("/asr/profiles/{name}")
+async def asr_profile_delete(request: Request, name: str, model_id: str = "",
+                             _: Origin = Depends(admin_origin)) -> JSONResponse:
+    from .config import delete_profile
+    cfg = request.app.state.cfg
+    if not model_id:
+        raise HTTPException(status_code=400, detail="model_id is required")
+    delete_profile(cfg.config_path, model_id.strip(), name)
+    _reload_cfg_inplace(request)
+    return JSONResponse({"ok": True})
+
+
+class AsrSetDefaultBody(BaseModel):
+    model_id: str
+    profile_name: str = ""
+
+
+@router.post("/asr/profiles/set-default")
+async def asr_profile_set_default(request: Request, body: AsrSetDefaultBody,
+                                  _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Set (or clear, with a blank name) a model's default audio profile."""
+    from .config import set_model_default_profile
+    cfg = request.app.state.cfg
+    mid = body.model_id.strip()
+    pname = body.profile_name.strip()
+    if not mid:
+        raise HTTPException(status_code=400, detail="model_id is required")
+    if pname and cfg.get_profile(mid, pname) is None:
+        raise HTTPException(status_code=400,
+                            detail=f"unknown profile {pname!r} for model {mid!r}")
+    set_model_default_profile(cfg.config_path, mid, pname)
+    _reload_cfg_inplace(request)
+    return JSONResponse({"ok": True, "default_profile": pname})
+
+
+class AsrTranscribeBody(BaseModel):
+    file: str
+    model: str
+    language: str = ""
+    task: str = "transcribe"
+    profile: str = ""
+
+
+@router.post("/asr/transcribe")
+async def asr_transcribe(request: Request, body: AsrTranscribeBody,
+                         origin: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Transcribe a server-local audio file through the normal queue.
+
+    The admin/CLI caller and the daemon share a host, so we pass a path
+    rather than uploading bytes. Routing still goes through the queue so the
+    1-slot ceiling and text/image coexistence are honoured.
+    """
+    from .audio_runner import (AudioError, AudioTaskRunner,
+                               execute_transcription, resolve_audio_engine)
+    from .engines._base import AudioRequest
+    from .queue_mgr import Cancelled, QueueFull
+    cfg = request.app.state.cfg
+    qm: QueueManager = request.app.state.queue
+    runner: AudioTaskRunner = request.app.state.audio_runner
+
+    audio_path = Path(body.file).expanduser()
+    if not audio_path.is_file():
+        raise HTTPException(status_code=400, detail=f"file not found: {audio_path}")
+    try:
+        engine = resolve_audio_engine(cfg, body.model)
+    except AudioError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    profile_obj = None
+    profile_required = body.profile.strip() or None
+    if profile_required:
+        profile_obj = cfg.get_profile(body.model, profile_required)
+        if profile_obj is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown profile {profile_required!r} for model {body.model!r}")
+    try:
+        qr = await qm.enqueue(origin=origin, model_required=body.model,
+                              profile_required=profile_required, task_type="audio")
+    except QueueFull:
+        raise HTTPException(status_code=503, detail="queue full")
+
+    audio_req = AudioRequest(audio_path=audio_path,
+                             language=(body.language.strip() or None),
+                             task=(body.task or "transcribe"))
+    try:
+        result = await execute_transcription(
+            qm, runner, qr=qr, engine=engine, model_id=body.model,
+            profile_obj=profile_obj, audio_req=audio_req)
+    except AudioError as e:
+        code = 499 if str(e) == "cancelled" else 502
+        raise HTTPException(status_code=code, detail=str(e))
+    except Cancelled:
+        raise HTTPException(status_code=499, detail="cancelled")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(e))
+    return JSONResponse({
+        "text": result.text, "language": result.language,
+        "duration_s": result.duration_s, "segments": result.segments,
+        "request_id": qr.request_id,
+    })

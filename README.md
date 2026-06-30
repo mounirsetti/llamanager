@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.3.995-green.svg" alt="Version 0.3.995">
+  <img src="https://img.shields.io/badge/version-0.4.0-green.svg" alt="Version 0.4.0">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -59,6 +59,12 @@ The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silic
   - [Download models](#download-models)
   - [Reference images (editing, composition, img2img)](#reference-images-editing-composition-img2img)
   - [Sharing the GPU with the text engine](#sharing-the-gpu-with-the-text-engine)
+- [Speech-to-text (ASR)](#speech-to-text-asr)
+  - [Install the engine](#install-the-engine)
+  - [Add a model](#add-a-model)
+  - [Transcribe from the API](#transcribe-from-the-api)
+  - [Transcribe from the CLI](#transcribe-from-the-cli)
+  - [Profiles](#asr-profiles)
 - [Calling the API](#calling-the-api)
   - [Anthropic-compatible API](#anthropic-compatible-api)
   - [Reasoning / thinking control](#reasoning--thinking-control)
@@ -81,12 +87,13 @@ The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silic
 
 What you get out of the box:
 
-- **OpenAI-compatible `/v1/*` proxy** for chat, completions, and image generations. Any existing OpenAI client library works.
+- **OpenAI-compatible `/v1/*` proxy** for chat, completions, image generations, and audio transcriptions. Any existing OpenAI client library works.
 - **Anthropic-compatible `/anthropic/v1/*` proxy** for the Messages API, token counting, and model listing. Point the official `anthropic` SDK at llamanager via `base_url` and it just works — including streaming, tool use, and base64 image inputs.
 - **Per-engine install flow** in the web UI. Click `Install dependencies` for HiDream or Z-Image and llamanager creates a Python venv under `~/.llamanager/venvs/<engine>/` and pip-installs the right packages. The disk footprint and live install log are visible on the page.
 - **Model download manager** that pulls whole HF repos (or a single subfolder, useful for monster repos like SeeSee21/Z-Anime where only the `diffusers/` subtree is needed). Progress streams to the UI every 2 s.
 - **Per-origin priority queue** with cancellation that propagates all the way to the running subprocess. A long batch can't block your editor; cancelling a queued or in-flight image task actually stops the work.
-- **Family-aware concurrency.** Text and image are mutually exclusive by default (they fight over the same GPU), but the policy is one toggle to switch when you have the VRAM headroom.
+- **Speech-to-text (ASR).** Run Whisper-class transcription models (Hugging Face `transformers` format) for `POST /v1/audio/transcriptions`. The ASR engine reuses the diffusion venv's torch + transformers — one click, no multi-GB re-download — and audio is decoded through the system `ffmpeg`. See [Speech-to-text (ASR)](#speech-to-text-asr).
+- **Family-aware concurrency.** Text, image, and audio are mutually exclusive by default (they fight over the same GPU), but the policy is one toggle to switch when you have the VRAM headroom. A transcription unloads the loaded LLM, runs, then restores it — exactly like an image task.
 - **Hot-swap by header.** Requests can name a specific model via `X-Llamanager-Model`; the queue swaps the loaded model in-flight without dropping in-flight work.
 - **Multi-slot LLM (beta, since 0.3.9).** Opt-in mode that keeps several models warm in parallel slots, each on its own port. Requests route by model id — no swap penalty. Mutually exclusive with the host-wide "exclusive mode" sweep; managed from the **Slots** page or the `llamanager slots` CLI. See [Multi-slot LLM (beta)](#multi-slot-llm-beta).
 - **Crash supervisor** with a 3-in-5-minutes restart cap, applied to text servers and image engines alike.
@@ -106,8 +113,9 @@ Full design notes are in [`llamanager-spec.md`](llamanager-spec.md).
 | diffusion | `hidream` (HiDream-O1-Image) | one-shot Python subprocess              | auto-install venv + deps                    |
 | diffusion | `flux2` (FLUX 2 via sd.cpp)  | one-shot `sd-cli` binary                | manual: download from sd.cpp releases       |
 | diffusion | `z_image` (Z-Image / Z-Anime)| one-shot Python subprocess (diffusers)  | auto-install venv + deps                    |
+| audio     | `asr` (Whisper, transformers)| one-shot Python subprocess (transformers)| reuse the diffusion venv (1 click), or build a dedicated one |
 
-Adding a new engine is a single Python module in [`llamanager/engines/`](llamanager/engines/) plus three lines of registration. The existing five live there as references.
+Adding a new engine is a single Python module in [`llamanager/engines/`](llamanager/engines/) plus three lines of registration. The existing engines live there as references.
 
 ## Platforms and GPUs
 
@@ -242,7 +250,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.3.995" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.4.0" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -728,6 +736,108 @@ when an image task arrives.
 
 Cancellation: cancelling a queued image request removes it before it starts. Cancelling an in-flight one terminates the subprocess (SIGTERM, escalating to SIGKILL after 5 s) so the GPU is freed promptly.
 
+## Speech-to-text (ASR)
+
+llamanager runs Whisper-class speech-to-text models as a third engine family (`audio`), alongside text and diffusion. Like the diffusion engines, the ASR engine is a **one-shot subprocess** — it holds no VRAM between requests — and every transcription flows through the same queue, so the single-slot invariant and text/image/audio coexistence are all honoured.
+
+The engine targets Hugging Face `transformers` checkpoints (`WhisperForConditionalGeneration` + safetensors): the OpenAI `whisper-large-v3` family, `whisper-large-v3-turbo`, distil-whisper, and fine-tunes such as [`naazimsnh02/whisper-large-v3-turbo-ar-quran`](https://huggingface.co/naazimsnh02/whisper-large-v3-turbo-ar-quran). Audio is decoded with the system **`ffmpeg`** (wav/mp3/m4a/ogg/flac/…), so no audio Python packages are pulled in.
+
+### Install the engine
+
+The ASR engine needs a Python environment with `torch` + `transformers`. Rather than rebuild a multi-GB torch install, it **reuses the diffusion venv** (`z_image` or `hidream`) when one exists — it probes for `import torch, transformers` and, on a hit, layers only the small extras on top without touching the host venv's pins. If no reusable venv is found, it builds a dedicated `~/.llamanager/venvs/asr/` with the GPU-appropriate torch (AMD ROCm wheels / CUDA / CPU).
+
+From the **ASR models** page (`/ui/asr-models`), click **Install dependencies**. Or from the CLI:
+
+```bash
+llamanager asr install                 # reuse the diffusion venv if present
+llamanager asr install --backend rocm  # dedicated-venv fallback: force a torch build
+llamanager asr engines                 # show status: configured? which python? last install
+```
+
+To point the engine at an existing interpreter instead of installing:
+
+```bash
+llamanager asr setup ~/.llamanager/venvs/z_image/bin/python
+```
+
+This sets `image.asr_python` in `config.toml`. GPU **ordering** (which card the runner uses) is governed by your normal llamanager GPU settings — the ASR runner only prepends the ROCm runtime libraries on AMD; it does not pick a device on its own.
+
+### Add a model
+
+Download a Whisper checkpoint in `transformers` format into your models directory (the same dir as your GGUFs and diffusion models). For example, with the HF CLI or `huggingface_hub`:
+
+```bash
+huggingface-cli download naazimsnh02/whisper-large-v3-turbo-ar-quran \
+  --local-dir "$MODELS_DIR/whisper-large-v3-turbo-ar-quran"
+```
+
+llamanager auto-detects the folder as an `asr` model (it reads `config.json` → `model_type: whisper`) and lists it on the **ASR models** page and under `llamanager asr models`. No catalog entry or manual registration is needed.
+
+### Transcribe from the API
+
+OpenAI-compatible `multipart/form-data` upload:
+
+```bash
+curl http://localhost:7200/v1/audio/transcriptions \
+  -H "Authorization: Bearer $ORIGIN_KEY" \
+  -F file=@verse.mp3 \
+  -F model=whisper-large-v3-turbo-ar-quran \
+  -F language=ar
+# {"text":"وَالشَّمْسِ وَضُحَاهَا"}
+```
+
+Form fields:
+
+| field | meaning |
+|-------|---------|
+| `file` | the audio file (required) |
+| `model` | audio-family model id (or the `X-Llamanager-Model` header) |
+| `language` | ISO hint such as `ar`; omit or use `auto` to let the model detect |
+| `response_format` | `json` (default, `{"text": …}`), `text` (plain body), or `verbose_json` (adds `language`, `duration_s`, `segments`) |
+| `profile` | an ASR profile name (llamanager extension) |
+
+It also works straight from the OpenAI Python SDK:
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:7200/v1", api_key=ORIGIN_KEY)
+with open("verse.mp3", "rb") as f:
+    print(client.audio.transcriptions.create(
+        model="whisper-large-v3-turbo-ar-quran", file=f, language="ar").text)
+```
+
+### Transcribe from the CLI
+
+The CLI talks to a running daemon over the admin control plane. Because the CLI and daemon share a host, `transcribe` passes a **local file path** (no upload), but routing still goes through the queue:
+
+```bash
+llamanager asr transcribe verse.mp3 --model whisper-large-v3-turbo-ar-quran --language ar
+# قُلْ هُوَ اللَّهُ أَحَدٌ
+
+# full result (language, duration, segments) as JSON:
+llamanager asr transcribe verse.mp3 --model whisper-large-v3-turbo-ar-quran --format json
+
+# use a saved profile, or translate to English instead of transcribing:
+llamanager asr transcribe verse.mp3 --model whisper-... --profile quran-ar
+llamanager asr transcribe talk.m4a --model whisper-... --task translate
+```
+
+### <a id="asr-profiles"></a>Profiles
+
+ASR profiles are per-model presets of the two audio knobs — `audio_language` (`ar`, `en`, … or `auto`) and `audio_task` (`transcribe` | `translate`) — surfaced in the profile editor on the ASR models page and over the CLI. A request without an explicit `language` falls back to the model's default profile.
+
+```bash
+llamanager asr profiles list   whisper-large-v3-turbo-ar-quran
+llamanager asr profiles create whisper-large-v3-turbo-ar-quran quran-ar \
+  --field audio_language=ar --field audio_task=transcribe --make-default
+llamanager asr profiles set-default whisper-large-v3-turbo-ar-quran --profile quran-ar
+llamanager asr profiles delete whisper-large-v3-turbo-ar-quran quran-ar
+```
+
+The engine also ships built-in defaults (`quran-ar`, `auto`) you can materialise into editable profiles from the UI.
+
+> **Note on some fine-tunes:** a few community Whisper fine-tunes ship a `generation_config` missing the language/task token maps, which makes `transformers`' `generate(language=…)` raise. llamanager's runner sets the forced decoder prompt on the generation config instead, so forcing a language works regardless.
+
 ## Calling the API
 
 Any OpenAI-compatible client works. With `curl`:
@@ -766,6 +876,14 @@ Two operator switches can refuse a request outright (distinct from the soft mode
 
 - **Disabled origin.** If an admin has flipped the origin's Status to *disabled* on the Origins page (`/ui/origins`), every submission from that key returns **403** (`origin '<name>' is disabled …`). The key still authenticates — this is a deliberate park-the-client switch, not a revocation.
 - **Model-loading lock.** When the lock is on (Settings → *Lock model loading*), a request the loaded model can serve runs normally, but one that would start the engine, swap models, or change profile resolves to a `failed` status with a `model loading is locked: …` error telling you to load the model manually or turn the lock off. It takes effect immediately and persists across restarts (`[queue].lock_model_loading`).
+
+Beyond chat/completions, the same `/v1` surface exposes the other families:
+
+| endpoint | family | docs |
+|----------|--------|------|
+| `POST /v1/chat/completions`, `POST /v1/completions` | text | this section |
+| `POST /v1/images/generations` | diffusion | [Diffusion models → Generating from the API](#generating-from-the-api) |
+| `POST /v1/audio/transcriptions` | audio | [Speech-to-text → Transcribe from the API](#transcribe-from-the-api) |
 
 ### Anthropic-compatible API
 
@@ -1096,6 +1214,18 @@ llamanager diffusion profiles clone <model_id> <name> <new_name>
 llamanager diffusion profiles set-default <model_id> [--profile NAME]
 llamanager diffusion profiles materialize-defaults <model_id> <engine>
 
+llamanager asr transcribe <file> --model M [--language ar] [--task transcribe|translate]
+        [--profile NAME] [--format text|json]            # text = transcription only (default)
+llamanager asr engines                                   # ASR engine status (configured? installed?)
+llamanager asr install [--backend auto|rocm|cuda|cpu]    # reuse the diffusion venv, or build one
+llamanager asr cancel-install
+llamanager asr setup <python_path>                       # point asr_python at a torch+transformers venv
+llamanager asr models                                    # installed speech-to-text models
+llamanager asr profiles list <model_id>
+llamanager asr profiles create <model_id> <name> [--field K=V ...] [--make-default]   # e.g. --field audio_language=ar
+llamanager asr profiles delete <model_id> <name>
+llamanager asr profiles set-default <model_id> [--profile NAME]
+
 llamanager update [--check]                               # pip install --upgrade + restart (same as the /ui/about button)
 
 llamanager slots status                                   # enabled flag + per-slot dashboard
@@ -1110,7 +1240,7 @@ llamanager slots unload <slot_id>                         # stop the model in a 
 llamanager slots coex on|off                              # diffusion-coexistence (on = image keeps LLMs loaded)
 ```
 
-The CLI mirrors the web UI feature-for-feature: every page that lets you click something has a `llamanager` verb that does the same thing against `/admin/*`. `llamanager profiles` covers the LLM-profile editor on `/ui/models`, `llamanager diffusion` covers the Diffusion engines + Diffusion models pages, `llamanager setup` covers paths/coexistence/autolaunch and the llama-server installer, `llamanager slots` (beta, see [Multi-slot LLM (beta)](#multi-slot-llm-beta)) covers the parallel-model dashboard, `llamanager models {set-default,add-existing,set-dir}` covers the LLM-model housekeeping rows, and `llamanager queue cancel-all` + `llamanager origins update` round out the existing groups. `update` runs `pip install --upgrade llamanager` against the service's venv and SIGTERMs so the supervisor restarts it — exactly what the `/ui/about` Update button does. `--check` reports the latest GitHub tag plus the detected install mode without doing anything. If the service was installed in editable / developer mode (`pip install -e .` from a git checkout), the auto-update refuses with instructions to run `git pull && pip install -e .` in the checkout yourself — the operator's checkout is the source of truth in that case.
+The CLI mirrors the web UI feature-for-feature: every page that lets you click something has a `llamanager` verb that does the same thing against `/admin/*`. `llamanager profiles` covers the LLM-profile editor on `/ui/models`, `llamanager diffusion` covers the Diffusion engines + Diffusion models pages, `llamanager asr` covers the ASR models page (install/setup, model list, profiles) and adds `transcribe` for one-shot speech-to-text, `llamanager setup` covers paths/coexistence/autolaunch and the llama-server installer, `llamanager slots` (beta, see [Multi-slot LLM (beta)](#multi-slot-llm-beta)) covers the parallel-model dashboard, `llamanager models {set-default,add-existing,set-dir}` covers the LLM-model housekeeping rows, and `llamanager queue cancel-all` + `llamanager origins update` round out the existing groups. `update` runs `pip install --upgrade llamanager` against the service's venv and SIGTERMs so the supervisor restarts it — exactly what the `/ui/about` Update button does. `--check` reports the latest GitHub tag plus the detected install mode without doing anything. If the service was installed in editable / developer mode (`pip install -e .` from a git checkout), the auto-update refuses with instructions to run `git pull && pip install -e .` in the checkout yourself — the operator's checkout is the source of truth in that case.
 
 Example, an agent that wants to swap models before a long batch and revert after:
 
@@ -1167,6 +1297,7 @@ lock_model_loading = false
 # flux2_sd_cli       = "/path/to/sd-cli"
 # flux2_device_index = 1                  # GGML_VK_VISIBLE_DEVICES
 # z_image_python     = "/path/to/.venv-z-image/bin/python"
+# asr_python         = "~/.llamanager/venvs/z_image/bin/python"  # ASR reuses a torch+transformers venv
 max_disk_gb = 10                          # cap for the on-disk image gallery
 
 [coexistence]

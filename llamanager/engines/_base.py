@@ -44,6 +44,22 @@ class ImageRequest:
 
 
 @dataclass
+class AudioRequest:
+    """One speech-to-text request, resolved and ready to dispatch.
+
+    The adapter consumes this object to produce a subprocess argv. The audio
+    file is an absolute path on disk that the API layer has already staged
+    (see ``api_v1`` transcription handler); the runner owns the lifecycle of
+    its parent directory and removes it after the run completes.
+    """
+    audio_path: Path
+    # ISO language hint (e.g. ``"ar"``) or ``None`` to let the model decide.
+    language: str | None = None
+    # ``"transcribe"`` (same language) or ``"translate"`` (to English).
+    task: str = "transcribe"
+
+
+@dataclass
 class ProgressEvent:
     """One progress tick parsed from an adapter's stderr/stdout.
 
