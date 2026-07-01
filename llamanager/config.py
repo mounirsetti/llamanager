@@ -110,6 +110,7 @@ lock_model_loading = false
 # flux2_sd_cli      = "/path/to/sd-cli"
 # flux2_device_index = 1     # GGML_VK_VISIBLE_DEVICES for the AMD card
 # asr_python        = "~/.llamanager/venvs/z_image/bin/python"  # Whisper STT
+# asr_models_dir    = "/path/to/whisper-models"   # ASR-only model folder; blank = shared models dir
 # images_dir        = "~/.llamanager/images"
 max_disk_gb = 10               # cap for the on-disk image gallery
 
@@ -478,6 +479,13 @@ class Config:
     # config.toml. When None, models_dir falls back to data_dir/models.
     models_dir_override: Path | None = None
 
+    # Optional dedicated directory for ASR (speech-to-text) models, set via the
+    # ASR models page or [image].asr_models_dir. When None, asr_models_dir
+    # falls back to the shared models_dir — so by default Whisper models live
+    # alongside everything else, but the operator can point ASR at its own
+    # folder (e.g. a shared HF cache) without polluting the LLM model list.
+    asr_models_dir_override: Path | None = None
+
     # ---- image engines ----
     # Per-engine paths the operator sets via /ui/setup (no auto-install:
     # both stacks have hardware-pinned dependency chains documented in
@@ -557,6 +565,15 @@ class Config:
         if self.models_dir_override is not None:
             return self.models_dir_override
         return self.data_dir / "models"
+
+    @property
+    def asr_models_dir(self) -> Path:
+        """Where ASR (Whisper) models live. Falls back to ``models_dir`` so
+        the shared directory is the default; an override lets ASR models sit
+        in a separate folder, kept out of the LLM model list."""
+        if self.asr_models_dir_override is not None:
+            return self.asr_models_dir_override
+        return self.models_dir
 
     @property
     def logs_dir(self) -> Path:
@@ -726,6 +743,9 @@ def load_config(path: Path | None = None) -> Config:
         flux2_device_index=_coerce_int(image_cfg.get("flux2_device_index")),
         z_image_python=str(image_cfg.get("z_image_python", "") or ""),
         asr_python=str(image_cfg.get("asr_python", "") or ""),
+        asr_models_dir_override=(
+            expand(str(image_cfg["asr_models_dir"]))
+            if image_cfg.get("asr_models_dir") else None),
         images_max_disk_gb=int(image_cfg.get("max_disk_gb", 10)),
         unload_text_on_arrival=bool(coex_cfg.get("unload_text_on_arrival", True)),
         restart_text_after_image=bool(coex_cfg.get("restart_text_after_image", True)),
@@ -1173,6 +1193,7 @@ def update_image_config(cfg_path: Path, *,
                         clear_flux2_device_index: bool = False,
                         z_image_python: str | None = None,
                         asr_python: str | None = None,
+                        asr_models_dir: str | None = None,
                         images_dir: str | None = None,
                         max_disk_gb: int | None = None) -> None:
     """Update the [image] section in config.toml. Each kwarg is persisted
@@ -1200,6 +1221,8 @@ def update_image_config(cfg_path: Path, *,
         img["z_image_python"] = z_image_python
     if asr_python is not None:
         img["asr_python"] = asr_python
+    if asr_models_dir is not None:
+        img["asr_models_dir"] = asr_models_dir
     if images_dir is not None:
         img["images_dir"] = images_dir
     if max_disk_gb is not None:

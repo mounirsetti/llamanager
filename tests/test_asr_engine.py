@@ -234,6 +234,59 @@ def test_asr_install_plan_reuses_diffusion_venv():
 
 # ---------- runner resolve ----------
 
+def test_asr_models_dir_defaults_to_models_dir(tmp_path: Path):
+    from llamanager.config import Config
+    cfg = Config(data_dir=tmp_path)
+    # No override → asr_models_dir tracks models_dir.
+    assert cfg.asr_models_dir == cfg.models_dir
+    other = tmp_path / "whisper-store"
+    cfg.asr_models_dir_override = other
+    assert cfg.asr_models_dir == other
+    assert cfg.models_dir != other  # LLM models dir is unaffected
+
+
+def test_asr_models_dir_config_roundtrip(tmp_path: Path):
+    from llamanager.config import (
+        DEFAULT_CONFIG_TOML, load_config, update_image_config,
+    )
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(DEFAULT_CONFIG_TOML, encoding="utf-8")
+    d = tmp_path / "asr-models"
+    update_image_config(cfg_path, asr_models_dir=str(d))
+    cfg = load_config(cfg_path)
+    assert cfg.asr_models_dir_override == d
+    assert cfg.asr_models_dir == d
+    # Blank clears the override → back to the shared models dir.
+    update_image_config(cfg_path, asr_models_dir="")
+    cfg2 = load_config(cfg_path)
+    assert cfg2.asr_models_dir_override is None
+
+
+def test_scan_asr_models_finds_whisper_dirs(tmp_path: Path):
+    from llamanager.config import Config
+    from llamanager.audio_runner import scan_asr_models
+    store = tmp_path / "asr-store"
+    _make_whisper_dir(store / "whisper-ar")
+    (store / "whisper-ar" / "model.safetensors").write_bytes(b"x" * 10)
+    # A non-ASR dir in the same folder must be ignored.
+    (store / "notes").mkdir(parents=True)
+    (store / "notes" / "config.json").write_text('{"model_type":"llama"}')
+    cfg = Config(data_dir=tmp_path, asr_models_dir_override=store)
+    found = scan_asr_models(cfg)
+    assert [m["model_id"] for m in found] == ["whisper-ar"]
+    assert found[0]["size_bytes"] > 0
+
+
+def test_resolve_audio_engine_uses_asr_models_dir(tmp_path: Path):
+    from llamanager.config import Config
+    from llamanager.audio_runner import resolve_audio_engine
+    store = tmp_path / "asr-store"
+    _make_whisper_dir(store / "w")
+    cfg = Config(data_dir=tmp_path, asr_models_dir_override=store)
+    # Model lives only in the dedicated ASR dir, not models_dir.
+    assert resolve_audio_engine(cfg, "w") == "asr"
+
+
 def test_resolve_audio_engine_rejects_non_audio(tmp_path: Path):
     import pytest
     from llamanager.config import Config

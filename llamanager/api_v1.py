@@ -970,6 +970,10 @@ async def audio_transcriptions(request: Request) -> Response:
     profile_required = (form.get("profile")
                         or request.headers.get("x-llamanager-profile"))
     language = (form.get("language") or "").strip() or None
+    task = (form.get("task") or "transcribe").strip().lower()
+    if task not in ("transcribe", "translate"):
+        raise HTTPException(status_code=400,
+                            detail="task must be 'transcribe' or 'translate'")
     response_format = (form.get("response_format") or "json").strip()
 
     try:
@@ -1008,7 +1012,7 @@ async def audio_transcriptions(request: Request) -> Response:
             )
 
     audio_req = AudioRequest(audio_path=audio_path, language=language,
-                             task="transcribe")
+                             task=task)
     try:
         result = await execute_transcription(
             qm, runner, qr=qr, engine=engine, model_id=model_required,

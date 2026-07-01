@@ -1155,22 +1155,82 @@ def cmd_asr_models(args):
     return _run_admin(lambda: c.asr_models())
 
 
-def cmd_asr_transcribe(args):
+def cmd_asr_models_dir(args):
     c = _make_admin_client(args)
-    from .admin_client import AdminClientError
+    return _run_admin(lambda: c.asr_models_dir(args.path or ""))
+
+
+def cmd_asr_transcribe(args):
+    """Transcribe a *local* audio file by uploading it to the daemon's
+    OpenAI-compatible ``/v1/audio/transcriptions`` endpoint.
+
+    Unlike the other ``asr`` verbs (which drive the admin control plane), this
+    is a client operation: it authenticates with a plain **origin** bearer key
+    — not an admin key — and uploads the file, so any user on the tailnet with
+    a valid key can transcribe against a remote daemon, choosing the model,
+    profile, language, and task per request.
+    """
     import os
+    import httpx
+    from .admin_client import resolve_base_url
+
+    cfg = None
     try:
-        res = c.asr_transcribe(
-            os.path.abspath(os.path.expanduser(args.file)), args.model,
-            language=(args.language or ""), task=args.task,
-            profile=(args.profile or ""))
-    except AdminClientError as e:
-        print(f"error: {e}", file=sys.stderr)
+        cfg = load_config(Path(args.config) if args.config else None)
+    except Exception:
+        cfg = None
+    base = resolve_base_url(cfg, getattr(args, "url", None))
+    # Bearer key: an ORIGIN key (any enabled origin). Falls back to the admin
+    # key resolution because an admin key is also a valid origin.
+    key = (getattr(args, "key", None)
+           or os.environ.get("LLAMANAGER_API_KEY")
+           or getattr(args, "admin_key", None)
+           or os.environ.get("LLAMANAGER_ADMIN_KEY"))
+    if not key and cfg is not None:
+        cli_section = (cfg.raw or {}).get("cli") or {}
+        key = cli_section.get("api_key") or cli_section.get("admin_key")
+    if not key:
+        print("error: no API key. Pass --key (an origin key), set "
+              "$LLAMANAGER_API_KEY, or add `api_key`/`admin_key` under [cli] "
+              "in config.toml.", file=sys.stderr)
+        return 2
+
+    path = os.path.abspath(os.path.expanduser(args.file))
+    if not os.path.isfile(path):
+        print(f"error: file not found: {path}", file=sys.stderr)
+        return 2
+
+    data: dict[str, str] = {
+        "model": args.model,
+        "response_format": "verbose_json" if args.format == "json" else "text",
+        "task": args.task,
+    }
+    if args.language:
+        data["language"] = args.language
+    if args.profile:
+        data["profile"] = args.profile
+    try:
+        with open(path, "rb") as f:
+            r = httpx.post(
+                f"{base}/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {key}"},
+                data=data, files={"file": (os.path.basename(path), f)},
+                timeout=1800.0,
+            )
+    except httpx.HTTPError as e:
+        print(f"error: could not reach {base}: {e}", file=sys.stderr)
+        return 1
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("detail") or r.text
+        except Exception:
+            detail = r.text
+        print(f"error: {r.status_code}: {detail}", file=sys.stderr)
         return 1
     if args.format == "text":
-        print(res.get("text", ""))
+        print(r.text)
     else:
-        _emit(res)
+        _emit(r.json())
     return 0
 
 
@@ -1773,14 +1833,19 @@ def main(argv: list[str] | None = None) -> int:
         help="speech-to-text: transcribe audio, manage the ASR engine + models"
     ).add_subparsers(dest="asr_cmd", required=True)
 
-    sp = afp.add_parser("transcribe", help="transcribe a local audio file")
-    sp.add_argument("file", help="path to an audio file (wav/mp3/m4a/ogg/flac/…)")
+    sp = afp.add_parser("transcribe",
+                        help="transcribe a local audio file (uploads to the daemon "
+                             "with an origin key; works over the tailnet)")
+    sp.add_argument("file", help="path to a LOCAL audio file (wav/mp3/m4a/ogg/flac/…)")
     sp.add_argument("--model", required=True, help="audio-family model id")
     sp.add_argument("--language", default="", help="ISO hint (e.g. ar); blank = auto-detect")
     sp.add_argument("--task", default="transcribe", choices=["transcribe", "translate"])
     sp.add_argument("--profile", default="", help="audio profile name")
     sp.add_argument("--format", default="text", choices=["text", "json"],
                     help="text = print the transcription only (default); json = full result")
+    sp.add_argument("--key", default=None,
+                    help="origin bearer token (default: $LLAMANAGER_API_KEY, "
+                         "[cli].api_key, or the admin key). Any enabled origin works.")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_transcribe)
 
     sp = afp.add_parser("engines", help="ASR engine status (configured? installed?)")
@@ -1803,6 +1868,12 @@ def main(argv: list[str] | None = None) -> int:
 
     sp = afp.add_parser("models", help="list installed speech-to-text models")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_models)
+
+    sp = afp.add_parser("models-dir",
+                        help="set the dedicated ASR models folder (blank = shared LLM models dir)")
+    sp.add_argument("path", nargs="?", default="",
+                    help="folder to scan for Whisper models; omit to revert to the shared dir")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_models_dir)
 
     pfp = afp.add_parser("profiles", help="manage per-model ASR profiles"
                          ).add_subparsers(dest="asr_profiles_cmd", required=True)

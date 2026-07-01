@@ -624,6 +624,9 @@ class AdminClient:
     def asr_models(self) -> dict[str, Any]:
         return self._get("/admin/asr/models")
 
+    def asr_models_dir(self, path: str = "") -> dict[str, Any]:
+        return self._post("/admin/asr/models-dir", {"path": path})
+
     def asr_profiles(self, model_id: str) -> dict[str, Any]:
         return self._get("/admin/asr/profiles", model=model_id)
 

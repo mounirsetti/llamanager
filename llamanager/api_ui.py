@@ -999,8 +999,13 @@ def _topbar_models(request: Request) -> dict[str, Any]:
             "profiles": profile_names,
             "default_profile": default_profile,
         }
-        if ENGINE_FAMILY.get(engine, "text") == "image":
+        fam = ENGINE_FAMILY.get(engine, "text")
+        if fam == "image":
             image.append(row)
+        elif fam == "audio":
+            # ASR models aren't launchable LLMs — keep them out of the LLM
+            # model picker (they have their own page + transcription API).
+            continue
         else:
             text.append(row)
 
@@ -1518,6 +1523,7 @@ def _models_ctx(request: Request) -> dict:
     # without poking dataclasses.
     text_models: list[dict] = []
     image_models: list[dict] = []
+    audio_models: list[dict] = []
 
     # Measured decode throughput per model, for the reasoning-budget advice.
     decode_rates = _decode_rates_by_model(request.app.state.db)
@@ -1635,6 +1641,10 @@ def _models_ctx(request: Request) -> dict:
         d["default_profile"] = default_profile
         if d["engine_family"] == "image":
             image_models.append(d)
+        elif d["engine_family"] == "audio":
+            # ASR models have their own page (/ui/asr-models) — keep them out
+            # of the LLM model list, the same way diffusion models are.
+            audio_models.append(d)
         else:
             text_models.append(d)
 
@@ -5068,18 +5078,17 @@ def _asr_models_ctx(request: Request) -> dict[str, Any]:
     reuses the shared /ui/diffusion-models/profiles/* endpoints, which
     redirect back here via ``_models_page_for``."""
     cfg = request.app.state.cfg
-    reg: Registry = request.app.state.registry
     installer = request.app.state.engine_installer
     from .engine_installer import ENGINE_PLANS
+    from .audio_runner import scan_asr_models
 
+    # Scan the (possibly dedicated) ASR models directory, not the Registry —
+    # ASR models may live in their own folder outside the LLM models_dir.
     on_disk: dict[str, dict[str, Any]] = {}
-    for entry in reg.list():
-        engine = detect_engine_for_id(entry.model_id, cfg.models_dir)
-        if ENGINE_FAMILY.get(engine, "text") != "audio":
-            continue
-        on_disk[entry.model_id] = {
-            "model_id": entry.model_id, "engine": engine,
-            "size_bytes": entry.size, "path": str(entry.path),
+    for m in scan_asr_models(cfg):
+        on_disk[m["model_id"]] = {
+            "model_id": m["model_id"], "engine": "asr",
+            "size_bytes": m["size_bytes"], "path": m["path"],
         }
 
     engines_view: list[dict[str, Any]] = []
@@ -5132,7 +5141,11 @@ def _asr_models_ctx(request: Request) -> dict[str, Any]:
             "plan": {"packages": plan.packages, "notes": plan.notes} if plan else None,
         })
 
-    return _ctx(request, active="asr-models", engines=engines_view)
+    return _ctx(
+        request, active="asr-models", engines=engines_view,
+        asr_models_dir=str(cfg.asr_models_dir),
+        asr_models_dir_is_default=(cfg.asr_models_dir_override is None),
+    )
 
 
 @router.get("/asr-models", response_class=HTMLResponse)
@@ -5179,6 +5192,24 @@ async def setup_asr(request: Request, asr_python: str = Form(""),
     cfg = request.app.state.cfg
     cfg.asr_python = asr_python.strip()
     update_image_config(cfg.config_path, asr_python=cfg.asr_python)
+    return RedirectResponse("/ui/asr-models", status_code=303)
+
+
+@router.post("/setup/audio/asr-models-dir", response_class=HTMLResponse)
+async def setup_asr_models_dir(request: Request, asr_models_dir: str = Form(""),
+                              _: None = Depends(require_csrf)) -> Response:
+    """Set (or clear, when blank) the dedicated folder ASR models are scanned
+    from. Blank reverts to the shared LLM models directory."""
+    cfg = request.app.state.cfg
+    raw = asr_models_dir.strip()
+    if raw:
+        new_dir = Path(raw).expanduser().resolve()
+        new_dir.mkdir(parents=True, exist_ok=True)
+        cfg.asr_models_dir_override = new_dir
+        update_image_config(cfg.config_path, asr_models_dir=str(new_dir))
+    else:
+        cfg.asr_models_dir_override = None
+        update_image_config(cfg.config_path, asr_models_dir="")
     return RedirectResponse("/ui/asr-models", status_code=303)
 
 

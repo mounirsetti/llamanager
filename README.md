@@ -771,7 +771,16 @@ huggingface-cli download naazimsnh02/whisper-large-v3-turbo-ar-quran \
   --local-dir "$MODELS_DIR/whisper-large-v3-turbo-ar-quran"
 ```
 
-llamanager auto-detects the folder as an `asr` model (it reads `config.json` → `model_type: whisper`) and lists it on the **ASR models** page and under `llamanager asr models`. No catalog entry or manual registration is needed.
+llamanager auto-detects the folder as an `asr` model (it reads `config.json` → `model_type: whisper`) and lists it on the **ASR models** page and under `llamanager asr models`. No catalog entry or manual registration is needed. Like diffusion models, ASR models are **kept out of the LLM model list and picker** — they live only on the ASR page.
+
+By default ASR scans the same `models_dir` as everything else. If you keep Whisper models somewhere separate (a shared HF cache, a different disk), point ASR at that folder — the **ASR models folder** field on the ASR page, or:
+
+```bash
+llamanager asr models-dir /path/to/whisper-models   # scan a dedicated folder
+llamanager asr models-dir                            # blank → revert to the shared models dir
+```
+
+A dedicated folder is scanned independently of the LLM registry, so those models never show up under LLM models. (Models are sandboxed under the folder; a symlink pointing outside it is refused, same as for LLM/diffusion models.)
 
 ### Transcribe from the API
 
@@ -808,19 +817,32 @@ with open("verse.mp3", "rb") as f:
 
 ### Transcribe from the CLI
 
-The CLI talks to a running daemon over the admin control plane. Because the CLI and daemon share a host, `transcribe` passes a **local file path** (no upload), but routing still goes through the queue:
+`asr transcribe` is a **client** command, unlike the other `asr` verbs (which drive the admin control plane). It **uploads your local file** to the daemon's `/v1/audio/transcriptions` and authenticates with a plain **origin key** — *not* an admin key. So any user on the tailnet with a valid key can transcribe against a remote daemon, choosing the model, profile, language, and task per request:
 
 ```bash
+# point at a remote daemon over the tailnet, authenticate with an origin key
+export LLAMANAGER_URL=http://your-host.tailnet.ts.net:7200
+export LLAMANAGER_API_KEY=lm_...             # any enabled origin key
+
 llamanager asr transcribe verse.mp3 --model whisper-large-v3-turbo-ar-quran --language ar
 # قُلْ هُوَ اللَّهُ أَحَدٌ
 
 # full result (language, duration, segments) as JSON:
 llamanager asr transcribe verse.mp3 --model whisper-large-v3-turbo-ar-quran --format json
 
-# use a saved profile, or translate to English instead of transcribing:
+# select a saved profile, or translate to English instead of transcribing:
 llamanager asr transcribe verse.mp3 --model whisper-... --profile quran-ar
-llamanager asr transcribe talk.m4a --model whisper-... --task translate
+llamanager asr transcribe talk.m4a  --model whisper-... --task translate
+
+# or pass the key/url inline instead of env vars:
+llamanager asr transcribe verse.mp3 --model whisper-... --key lm_... --url http://host:7200
 ```
+
+**Who can do what.** Transcription is a normal `/v1` request, so it follows the standard origin model:
+
+- **Any enabled origin key** can transcribe — no admin rights needed. Requests from a *disabled* origin are refused (403).
+- **Model choice** is gated by the origin's `allowed_models` allowlist (new origins default to `*` = all). Requesting a model outside the list returns 403.
+- **Profiles** are server-side config: a client can **select** an existing profile by name and override `language`/`task` per request, but **creating/editing** profiles (and installing the engine, setting the models folder, etc.) requires an **admin** key. Those live only on the admin control plane / the web UI.
 
 ### <a id="asr-profiles"></a>Profiles
 
@@ -1215,12 +1237,13 @@ llamanager diffusion profiles set-default <model_id> [--profile NAME]
 llamanager diffusion profiles materialize-defaults <model_id> <engine>
 
 llamanager asr transcribe <file> --model M [--language ar] [--task transcribe|translate]
-        [--profile NAME] [--format text|json]            # text = transcription only (default)
+        [--profile NAME] [--format text|json] [--key ORIGIN_KEY]   # uploads to /v1; origin key (not admin)
 llamanager asr engines                                   # ASR engine status (configured? installed?)
 llamanager asr install [--backend auto|rocm|cuda|cpu]    # reuse the diffusion venv, or build one
 llamanager asr cancel-install
 llamanager asr setup <python_path>                       # point asr_python at a torch+transformers venv
 llamanager asr models                                    # installed speech-to-text models
+llamanager asr models-dir [<path>]                       # dedicated ASR models folder (blank = shared dir)
 llamanager asr profiles list <model_id>
 llamanager asr profiles create <model_id> <name> [--field K=V ...] [--make-default]   # e.g. --field audio_language=ar
 llamanager asr profiles delete <model_id> <name>
@@ -1298,6 +1321,7 @@ lock_model_loading = false
 # flux2_device_index = 1                  # GGML_VK_VISIBLE_DEVICES
 # z_image_python     = "/path/to/.venv-z-image/bin/python"
 # asr_python         = "~/.llamanager/venvs/z_image/bin/python"  # ASR reuses a torch+transformers venv
+# asr_models_dir     = "/path/to/whisper-models"  # ASR-only model folder (blank = shared models dir)
 max_disk_gb = 10                          # cap for the on-disk image gallery
 
 [coexistence]

@@ -1983,23 +1983,46 @@ async def asr_setup(request: Request, body: AsrSetupBody,
 @router.get("/asr/models")
 async def asr_models(request: Request,
                      _: Origin = Depends(admin_origin)) -> JSONResponse:
-    """Installed audio-family (speech-to-text) models on disk."""
-    from .config import ENGINE_FAMILY, detect_engine_for_id
+    """Installed speech-to-text models under the ASR models directory."""
+    from .audio_runner import scan_asr_models
     cfg = request.app.state.cfg
-    reg: Registry = request.app.state.registry
     on_disk: list[dict[str, Any]] = []
-    for entry in reg.list():
-        engine = detect_engine_for_id(entry.model_id, cfg.models_dir)
-        if ENGINE_FAMILY.get(engine, "text") != "audio":
-            continue
-        m = cfg.get_model(entry.model_id)
+    for m in scan_asr_models(cfg):
+        mc = cfg.get_model(m["model_id"])
         on_disk.append({
-            "model_id": entry.model_id, "engine": engine,
-            "size_bytes": entry.size, "path": str(entry.path),
-            "default_profile": (m.default_profile if m else ""),
-            "profiles": sorted(m.profiles.keys()) if m else [],
+            "model_id": m["model_id"], "engine": "asr",
+            "size_bytes": m["size_bytes"], "path": m["path"],
+            "default_profile": (mc.default_profile if mc else ""),
+            "profiles": sorted(mc.profiles.keys()) if mc else [],
         })
-    return JSONResponse({"installed": on_disk, "configured": bool(cfg.asr_python)})
+    return JSONResponse({
+        "installed": on_disk,
+        "configured": bool(cfg.asr_python),
+        "asr_models_dir": str(cfg.asr_models_dir),
+        "asr_models_dir_is_default": cfg.asr_models_dir_override is None,
+    })
+
+
+class AsrModelsDirBody(BaseModel):
+    path: str = ""
+
+
+@router.post("/asr/models-dir")
+async def asr_models_dir(request: Request, body: AsrModelsDirBody,
+                         _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Set (blank clears → shared models dir) the dedicated ASR models folder."""
+    from .config import update_image_config
+    cfg = request.app.state.cfg
+    raw = body.path.strip()
+    if raw:
+        new_dir = Path(raw).expanduser().resolve()
+        new_dir.mkdir(parents=True, exist_ok=True)
+        cfg.asr_models_dir_override = new_dir
+        update_image_config(cfg.config_path, asr_models_dir=str(new_dir))
+    else:
+        cfg.asr_models_dir_override = None
+        update_image_config(cfg.config_path, asr_models_dir="")
+    return JSONResponse({"ok": True, "asr_models_dir": str(cfg.asr_models_dir)})
 
 
 @router.get("/asr/profiles")

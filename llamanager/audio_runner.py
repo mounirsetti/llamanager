@@ -56,9 +56,13 @@ class AudioResult:
 
 def resolve_audio_engine(cfg: Config, model_id: str) -> str:
     """Resolve which audio engine to use for ``model_id``. Raises
-    ``AudioError`` if the model isn't an audio-family model."""
+    ``AudioError`` if the model isn't an audio-family model.
+
+    ASR models are looked up under ``cfg.asr_models_dir`` (which defaults to
+    the shared ``models_dir``), so they can live in their own folder."""
     _validate_model_id(model_id)
-    model_path = _safe_under(cfg.models_dir, cfg.models_dir / model_id)
+    base = cfg.asr_models_dir
+    model_path = _safe_under(base, base / model_id)
     if not model_path.exists():
         raise AudioError(f"model not found: {model_id}")
     engine = detect_engine_for_path(model_path)
@@ -68,6 +72,41 @@ def resolve_audio_engine(cfg: Config, model_id: str) -> str:
             f"(detected engine: {engine})"
         )
     return engine
+
+
+def scan_asr_models(cfg: Config) -> list[dict[str, Any]]:
+    """List Whisper / speech-to-text model folders under ``cfg.asr_models_dir``.
+
+    A dedicated lightweight scan (rather than the GGUF-oriented Registry) so
+    ASR models can sit in a separate directory the Registry doesn't index.
+    Returns ``{model_id, path, size_bytes}`` dicts, where ``model_id`` is the
+    folder's path relative to ``asr_models_dir``."""
+    base = cfg.asr_models_dir
+    out: list[dict[str, Any]] = []
+    if not base.is_dir():
+        return out
+    adapter = engines.get("asr")
+    seen: set[Path] = set()
+    # Do NOT follow symlinked directories: the transcription path sandboxes
+    # models under ``asr_models_dir`` via ``_safe_under`` (which rejects
+    # symlinks escaping the base), so a symlinked model would list but refuse
+    # to run. ``rglob`` skips symlinked dirs, keeping the two consistent.
+    for cfg_file in base.rglob("config.json"):
+        d = cfg_file.parent
+        if d in seen or not adapter.detect(d):
+            continue
+        seen.add(d)
+        try:
+            rel = d.relative_to(base).as_posix()
+        except ValueError:
+            continue
+        try:
+            size = sum(f.stat().st_size for f in d.iterdir() if f.is_file())
+        except OSError:
+            size = 0
+        out.append({"model_id": rel, "path": str(d), "size_bytes": size})
+    out.sort(key=lambda m: m["model_id"])
+    return out
 
 
 async def execute_transcription(qm, runner: "AudioTaskRunner", *, qr,
@@ -179,7 +218,8 @@ class AudioTaskRunner:
         adapter = engines.get(engine)
 
         _validate_model_id(model_id)
-        model_path = _safe_under(self.cfg.models_dir, self.cfg.models_dir / model_id)
+        base = self.cfg.asr_models_dir
+        model_path = _safe_under(base, base / model_id)
         if not model_path.exists():
             raise AudioError(f"model not found: {model_path}")
         if not adapter.detect(model_path):
