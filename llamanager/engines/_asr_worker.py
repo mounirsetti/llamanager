@@ -182,8 +182,14 @@ def _finish_word(cur: dict, offset_ms: int) -> dict:
 
 def transcribe(path: Path, language: str | None, task: str,
                word_timestamps: bool) -> dict:
+    return transcribe_audio(_decode_audio(path), language, task, word_timestamps)
+
+
+def transcribe_audio(audio, language: str | None, task: str,
+                     word_timestamps: bool) -> dict:
+    """Core transcription over a float32 mono 16 kHz numpy array. Shared by the
+    file endpoint and the streaming raw-PCM endpoint."""
     import torch
-    audio = _decode_audio(path)
     dur_ms = int(round(1000 * audio.size / SAMPLE_RATE))
     n_chunks = max(1, (audio.size + CHUNK_SAMPLES - 1) // CHUNK_SAMPLES)
     fid = _forced_ids(language, task)
@@ -283,9 +289,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path.split("?", 1)[0] != "/transcribe":
+        route = self.path.split("?", 1)[0]
+        if route == "/transcribe":
+            self._do_transcribe_file()
+        elif route == "/transcribe_pcm":
+            self._do_transcribe_pcm()
+        else:
             self._send(404, {"error": "not found"})
-            return
+
+    def _do_transcribe_file(self):
         try:
             n = int(self.headers.get("Content-Length") or 0)
             req = json.loads(self.rfile.read(n) or b"{}")
@@ -303,6 +315,29 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, env)
         except Exception as e:  # noqa: BLE001
             _log(f"[asr-worker] transcribe error: {e}")
+            self._send(500, {"error": str(e)})
+
+    def _do_transcribe_pcm(self):
+        """Body: raw float32 mono 16 kHz PCM. Query: language, task,
+        word_timestamps. Used by the daemon's streaming loop — no ffmpeg /
+        temp file per interval."""
+        import numpy as np
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n) if n else b""
+            audio = np.frombuffer(raw, dtype=np.float32)
+            if audio.size == 0:
+                self._send(400, {"error": "empty pcm"})
+                return
+            lang = (q.get("language", [""])[0] or None)
+            task = (q.get("task", ["transcribe"])[0] or "transcribe")
+            wts = (q.get("word_timestamps", ["1"])[0] in ("1", "true", "on", "yes"))
+            env = transcribe_audio(audio, lang, task, wts)
+            self._send(200, env)
+        except Exception as e:  # noqa: BLE001
+            _log(f"[asr-worker] transcribe_pcm error: {e}")
             self._send(500, {"error": str(e)})
 
 

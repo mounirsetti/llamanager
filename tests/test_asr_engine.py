@@ -372,6 +372,24 @@ def test_resolve_audio_engine_uses_asr_models_dir(tmp_path: Path):
     assert resolve_audio_engine(cfg, "w") == "asr"
 
 
+def test_asr_stream_ms_conversions():
+    from llamanager.asr_stream import _bytes_to_ms, _ms_to_bytes, SAMPLE_RATE
+    # 1 s of float32 mono @16k = 16000*4 bytes = 1000 ms
+    assert _bytes_to_ms(SAMPLE_RATE * 4) == 1000
+    assert _ms_to_bytes(1000) == SAMPLE_RATE * 4
+    assert _bytes_to_ms(_ms_to_bytes(500)) == 500
+
+
+def test_ws_stream_requires_auth(app):
+    """The streaming WebSocket rejects an unauthenticated handshake."""
+    from fastapi.testclient import TestClient
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/audio/stream") as ws:
+            msg = ws.receive_json()
+            assert msg["type"] == "error"
+            assert "unauth" in msg["error"].lower()
+
+
 def test_resolve_audio_engine_rejects_non_audio(tmp_path: Path):
     import pytest
     from llamanager.config import Config

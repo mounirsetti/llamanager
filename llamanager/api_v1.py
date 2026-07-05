@@ -28,7 +28,8 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import (APIRouter, HTTPException, Request, Response, WebSocket,
+                     WebSocketDisconnect)
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .auth import AuthManager, Origin
@@ -41,7 +42,7 @@ from .engines._base import AudioRequest, ImageRequest
 from .image_runner import ImageError, ImageTaskRunner, resolve_image_engine
 from .queue_mgr import Cancelled, QueueManager, QueueFull, QueuedRequest
 from .registry import Registry
-from .server_manager import ServerManager
+from .server_manager import ServerManager, _safe_under
 
 log = logging.getLogger(__name__)
 
@@ -1056,6 +1057,123 @@ async def audio_transcriptions(request: Request) -> Response:
         raise HTTPException(status_code=502, detail=str(e))
     finally:
         shutil.rmtree(stage_dir, ignore_errors=True)
+
+
+def _ws_bearer(websocket: WebSocket) -> str | None:
+    """Pull a bearer key from a WS handshake: query ``?key=`` / ``?authorization=``
+    (browsers can't set headers), or the Authorization header (CLI clients)."""
+    qp = websocket.query_params
+    if qp.get("key"):
+        return qp["key"]
+    auth = qp.get("authorization") or websocket.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip()
+    return auth or None
+
+
+@router.websocket("/audio/stream")
+async def audio_stream(websocket: WebSocket) -> None:
+    """Live streaming transcription over WebSocket.
+
+    Handshake: connect with ``?key=<origin key>&model=<id>[&language=ar&task=…]``
+    (or send a first ``{"type":"start", …}`` text frame). Then stream binary
+    audio frames (any format ffmpeg reads). The server pushes
+    ``{type:"transcript", rev, final, audio_ms, words:[{w,t0,t1,p}]}`` at the
+    decode cadence and a final one on ``{"type":"stop"}`` / disconnect.
+    """
+    from .asr_stream import AsrStreamSession
+    await websocket.accept()
+    cfg = websocket.app.state.cfg
+    qm: QueueManager = websocket.app.state.queue
+    runner: AudioTaskRunner = websocket.app.state.audio_runner
+    am = websocket.app.state.auth
+
+    async def fail(msg: str, code: int = 1008) -> None:
+        with contextlib.suppress(Exception):
+            await websocket.send_text(json.dumps({"type": "error", "error": msg}))
+            await websocket.close(code=code)
+
+    key = _ws_bearer(websocket)
+    origin = await am.verify(key) if key else None
+    if origin is None:
+        # Browser live panel: authenticate via the admin UI session cookie
+        # (same-origin) instead of embedding an origin key in the page.
+        sess = websocket.app.state.sessions.get(
+            websocket.cookies.get("llamanager_session"))
+        if sess:
+            origin = await am.verify(sess.get("key"))
+    if origin is None or not origin.enabled:
+        return await fail("unauthorized", code=1008)
+
+    qp = websocket.query_params
+    model = qp.get("model") or websocket.headers.get("x-llamanager-model")
+    language = (qp.get("language") or "").strip() or None
+    task = (qp.get("task") or "transcribe").strip().lower()
+    profile_name = qp.get("profile") or None
+    prebuffer = b""
+    # Optional start frame overrides query params.
+    try:
+        first = await asyncio.wait_for(websocket.receive(), timeout=10.0)
+        if first.get("type") == "websocket.disconnect":
+            return
+        if first.get("text"):
+            with contextlib.suppress(Exception):
+                start = json.loads(first["text"])
+                if start.get("type") == "start":
+                    model = start.get("model") or model
+                    language = start.get("language") or language
+                    task = (start.get("task") or task)
+                    profile_name = start.get("profile") or profile_name
+        elif first.get("bytes"):
+            # audio arrived before a start frame — feed it to the decoder
+            prebuffer = first["bytes"]
+    except asyncio.TimeoutError:
+        return await fail("no start frame")
+
+    if not model:
+        return await fail("model is required")
+    if not _model_allowed(origin, model):
+        return await fail(f"origin not allowed to use model {model!r}", 1008)
+    try:
+        engine = resolve_audio_engine(cfg, model)
+    except AudioError as e:
+        return await fail(str(e))
+
+    base = cfg.asr_models_dir
+    model_path = _safe_under(base, base / model)
+    # decode cadence: profile override → global default.
+    interval = cfg.asr_decode_interval_s
+    if profile_name:
+        prof = cfg.get_profile(model, profile_name)
+        if prof and prof.audio_decode_interval_s:
+            interval = prof.audio_decode_interval_s
+
+    # Occupy one audio slot for the session (bounds concurrent streams by the
+    # VRAM budget, same as one-shot transcriptions).
+    try:
+        qr = await qm.enqueue(origin=origin, model_required=model,
+                              task_type="audio")
+    except QueueFull:
+        return await fail("queue full", 1013)
+    error: str | None = None
+    try:
+        await qm.wait_for_slot(qr)
+        session = AsrStreamSession(
+            cfg=cfg, runner=runner, sm=runner.sm, ws=websocket,
+            model_id=model, model_path=model_path, language=language,
+            task=task, decode_interval_s=interval, prebuffer=prebuffer)
+        await session.run()
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:  # noqa: BLE001
+        error = str(e)
+        log.exception("asr stream failed for %s", qr.request_id)
+        await fail(str(e), 1011)
+    finally:
+        qm.mark_in_flight_done(qr, error=error, cancelled=False,
+                               prompt_tokens=None, completion_tokens=None)
+        with contextlib.suppress(Exception):
+            await websocket.close()
 
 
 @router.post("/images/generations")

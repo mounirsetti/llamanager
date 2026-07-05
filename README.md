@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.4.0-green.svg" alt="Version 0.4.0">
+  <img src="https://img.shields.io/badge/version-0.4.1-green.svg" alt="Version 0.4.1">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -66,6 +66,7 @@ The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silic
   - [Word-level output](#word-level-output)
   - [Transcribe from the API](#transcribe-from-the-api)
   - [Transcribe from the CLI](#transcribe-from-the-cli)
+  - [Live streaming (WebSocket)](#live-streaming-websocket)
   - [Profiles](#asr-profiles)
 - [Calling the API](#calling-the-api)
   - [Anthropic-compatible API](#anthropic-compatible-api)
@@ -252,7 +253,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.4.0" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.4.1" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -742,7 +743,7 @@ Cancellation: cancelling a queued image request removes it before it starts. Can
 
 llamanager runs Whisper-class speech-to-text models as a third engine family (`audio`), alongside text and diffusion. Unlike the one-shot diffusion engines, ASR is a **multi-tenant GPU service**: a **warm worker** keeps the model loaded and serves **many concurrent transcriptions**, bounded by a **VRAM budget** so it always leaves headroom for the LLM. It can **run alongside a loaded LLM** or unload it — your choice, editable in the UI and CLI. Everything flows through the same queue, and the worker idle-stops to reclaim VRAM when ASR is quiet.
 
-It also does **word-level output** — per-word timing + confidence — and (Phase 2) live streaming over WebSocket.
+It also does **word-level output** (per-word timing + confidence) and **live streaming over WebSocket** — stream your mic and get revised partials as you speak.
 
 The engine targets Hugging Face `transformers` checkpoints (`WhisperForConditionalGeneration` + safetensors): the OpenAI `whisper-large-v3` family, `whisper-large-v3-turbo`, distil-whisper, and fine-tunes such as [`naazimsnh02/whisper-large-v3-turbo-ar-quran`](https://huggingface.co/naazimsnh02/whisper-large-v3-turbo-ar-quran). Audio is decoded with the system **`ffmpeg`** (wav/mp3/m4a/ogg/flac/…), so no audio Python packages are pulled in.
 
@@ -876,6 +877,68 @@ llamanager asr transcribe verse.mp3 --model whisper-... --key lm_... --url http:
 - **Any enabled origin key** can transcribe — no admin rights needed. Requests from a *disabled* origin are refused (403).
 - **Model choice** is gated by the origin's `allowed_models` allowlist (new origins default to `*` = all). Requesting a model outside the list returns 403.
 - **Profiles** are server-side config: a client can **select** an existing profile by name and override `language`/`task` per request, but **creating/editing** profiles (and installing the engine, setting the models folder, etc.) requires an **admin** key. Those live only on the admin control plane / the web UI.
+
+### Live streaming (WebSocket)
+
+For live transcription (e.g. recitation feedback), stream audio to `ws(s)://<host>/v1/audio/stream` and receive **revised partials** as you speak — the same word envelope as batch, with `final:false` until you stop:
+
+```
+{"type":"transcript","rev":1,"final":false,"audio_ms":927,"words":[{"w":"قُلْ",...}]}
+{"type":"transcript","rev":2,"final":false,"audio_ms":3899,"words":[…]}   # revised
+{"type":"transcript","rev":3,"final":true, "audio_ms":4948,"words":[…]}   # on stop
+```
+
+Each session holds one audio slot, so live streams are bounded by the **same VRAM budget** as one-shot transcriptions and honor the coexistence policy. Partials are whole-hypothesis re-decodes (Whisper isn't natively streaming), so early words can change as more audio arrives — that's what `rev` tracks.
+
+#### Activate from the web UI (mic in the browser)
+
+1. Open **`/ui/asr-models`** (the **ASR models** link in the sidebar).
+2. Find the **Live transcription** panel at the top of the page.
+3. Pick a **Model** and set the **Language** (`ar`, or blank for auto-detect).
+4. Click **● Start mic** → the browser asks for microphone permission; allow it.
+5. Speak. Words stream in **colored by confidence** (green = high, amber/red = low) and revise as you go. The status shows *listening…* then *final*.
+6. Click **■ Stop** to finalize (a `final:true` transcript) and release the mic.
+
+No API key is needed in the browser — the panel authenticates over the WebSocket with your **admin UI session cookie**.
+
+> **Microphone needs a secure context.** Browsers only expose `getUserMedia` on **HTTPS** or **`http://localhost`**. If you reach llamanager over plain `http://` on a LAN/Tailscale IP, the panel shows *"mic unavailable — open over https:// or http://localhost"*. Fixes: browse from the same machine via `http://localhost:7200`, or put the daemon behind HTTPS — e.g. `tailscale serve https / http://127.0.0.1:7200` (or a `tailscale cert` + reverse proxy) and open the `https://<magicdns-name>/` URL. The **CLI** streaming path below has no such restriction.
+
+#### Activate from the CLI
+
+`llamanager asr transcribe --stream` is the client. It authenticates with an **origin key** (like all `asr transcribe`) and connects to the daemon's WebSocket. Point it at a remote daemon with `--url`/`$LLAMANAGER_URL` and `--key`/`$LLAMANAGER_API_KEY`.
+
+**Stream a file** (paced to real-time with `ffmpeg -re` so you see progressive partials):
+
+```bash
+llamanager asr transcribe verse.mp3 --stream \
+  --model whisper-large-v3-turbo-ar-quran --language ar \
+  --url http://your-host:7200 --key lm_...
+# [rev 1 · 927ms]  قُلْ أَعْلَى
+# [rev 2 · 3899ms] قُلْ أَعُوذُ بِرَبِّ النَّاسِ
+# [FINAL · 4948ms] قُلْ أَعُوذُ بِرَبِّ النَّاسِ
+```
+
+**Stream a live mic** — pipe your microphone through `ffmpeg` into `--stream -` (read stdin). Pick the capture flags for your OS:
+
+```bash
+# Linux (PulseAudio/PipeWire)
+ffmpeg -f pulse -i default -f wav - \
+  | llamanager asr transcribe - --stream --model whisper-... --language ar
+
+# macOS (list devices with: ffmpeg -f avfoundation -list_devices true -i "")
+ffmpeg -f avfoundation -i ":0" -f wav - \
+  | llamanager asr transcribe - --stream --model whisper-... --language ar
+
+# Windows (list devices with: ffmpeg -list_devices true -f dshow -i dummy)
+ffmpeg -f dshow -i audio="Microphone (…)" -f wav - \
+  | llamanager asr transcribe - --stream --model whisper-... --language ar
+```
+
+`--stream` accepts any format ffmpeg produces; the daemon decodes it. Set the partial cadence with the profile field `audio_decode_interval_s` or the global `llamanager asr defaults --decode-interval-s`.
+
+#### Raw WebSocket (build your own client)
+
+`ws(s)://<host>/v1/audio/stream?model=<id>&language=ar&key=<origin key>` — then send **binary audio frames** (any container ffmpeg reads: webm/opus, wav, raw) and read JSON `transcript` messages; send `{"type":"stop"}` or disconnect to finalize. (Browsers authenticate via the session cookie instead of `key`.)
 
 ### <a id="asr-profiles"></a>Profiles
 
@@ -1270,7 +1333,8 @@ llamanager diffusion profiles set-default <model_id> [--profile NAME]
 llamanager diffusion profiles materialize-defaults <model_id> <engine>
 
 llamanager asr transcribe <file> --model M [--language ar] [--task transcribe|translate]
-        [--profile NAME] [--format text|json|words] [--word-timestamps] [--key ORIGIN_KEY]  # uploads to /v1; origin key
+        [--profile NAME] [--format text|json|words] [--word-timestamps] [--stream] [--key ORIGIN_KEY]
+        # uploads to /v1 (origin key); --stream = live WebSocket, file paced real-time or '-' for stdin
 llamanager asr defaults [--vram-budget-gb X] [--coexist on|off] [--idle-timeout-s N] [--decode-interval-s S]
 llamanager asr engines                                   # ASR engine status (configured? installed?)
 llamanager asr install [--backend auto|rocm|cuda|cpu]    # reuse the diffusion venv, or build one

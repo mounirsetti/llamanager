@@ -1169,6 +1169,91 @@ def cmd_asr_defaults(args):
         decode_interval_s=args.decode_interval_s))
 
 
+def _asr_stream(args, base: str, key: str) -> int:
+    """Live streaming client: pipe a local file (paced real-time with ffmpeg
+    -re) or stdin (``-``) to the ``/v1/audio/stream`` WebSocket and print the
+    revised transcripts as they arrive."""
+    import asyncio
+    import os
+    from urllib.parse import urlencode
+
+    ws_base = base.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
+    params = {"key": key, "model": args.model, "task": args.task}
+    if args.language:
+        params["language"] = args.language
+    if args.profile:
+        params["profile"] = args.profile
+    uri = f"{ws_base}/v1/audio/stream?{urlencode(params)}"
+
+    is_stdin = args.file == "-"
+    if not is_stdin and not os.path.isfile(os.path.expanduser(args.file)):
+        print(f"error: file not found: {args.file}", file=sys.stderr)
+        return 2
+
+    async def go() -> int:
+        import websockets
+        if is_stdin:
+            ff = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
+                  "-f", "wav", "pipe:1"]
+            ff_stdin = sys.stdin.buffer
+        else:
+            ff = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                  "-re", "-i", os.path.expanduser(args.file), "-f", "wav", "pipe:1"]
+            ff_stdin = asyncio.subprocess.DEVNULL
+        proc = await asyncio.create_subprocess_exec(
+            *ff, stdin=ff_stdin, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL)
+        try:
+            async with websockets.connect(uri, max_size=None) as ws:
+                async def send() -> None:
+                    assert proc.stdout is not None
+                    while True:
+                        chunk = await proc.stdout.read(8192)
+                        if not chunk:
+                            break
+                        await ws.send(chunk)
+                    await ws.send(json.dumps({"type": "stop"}))
+
+                sender = asyncio.create_task(send())
+                final_text = ""
+                async for raw in ws:
+                    if isinstance(raw, bytes):
+                        continue
+                    msg = json.loads(raw)
+                    t = msg.get("type")
+                    if t == "transcript":
+                        tag = "FINAL" if msg.get("final") else f"rev {msg.get('rev')}"
+                        txt = msg.get("text") or " ".join(
+                            w["w"] for w in msg.get("words", []))
+                        print(f"[{tag} · {msg.get('audio_ms', 0)}ms] {txt}")
+                        if msg.get("final"):
+                            final_text = txt
+                    elif t == "error":
+                        print(f"error: {msg.get('error')}", file=sys.stderr)
+                        return 1
+                    elif t == "done":
+                        break
+                sender.cancel()
+                with contextlib_suppress():
+                    await sender
+            return 0
+        finally:
+            with contextlib_suppress(ProcessLookupError):
+                if proc.returncode is None:
+                    proc.kill()
+
+    try:
+        return asyncio.run(go())
+    except Exception as e:  # noqa: BLE001
+        print(f"error: streaming failed: {e}", file=sys.stderr)
+        return 1
+
+
+def contextlib_suppress(*exc):
+    import contextlib
+    return contextlib.suppress(*(exc or (Exception,)))
+
+
 def cmd_asr_transcribe(args):
     """Transcribe a *local* audio file by uploading it to the daemon's
     OpenAI-compatible ``/v1/audio/transcriptions`` endpoint.
@@ -1203,6 +1288,9 @@ def cmd_asr_transcribe(args):
               "$LLAMANAGER_API_KEY, or add `api_key`/`admin_key` under [cli] "
               "in config.toml.", file=sys.stderr)
         return 2
+
+    if args.stream:
+        return _asr_stream(args, base, key)
 
     path = os.path.abspath(os.path.expanduser(args.file))
     if not os.path.isfile(path):
@@ -1856,6 +1944,9 @@ def main(argv: list[str] | None = None) -> int:
                          "words = word-level {w,t0,t1,p} envelope")
     sp.add_argument("--word-timestamps", action="store_true",
                     help="include per-word timing + confidence")
+    sp.add_argument("--stream", action="store_true",
+                    help="live streaming over WebSocket: pace the file real-time "
+                         "(or read '-' from stdin) and print revised partials")
     sp.add_argument("--key", default=None,
                     help="origin bearer token (default: $LLAMANAGER_API_KEY, "
                          "[cli].api_key, or the admin key). Any enabled origin works.")

@@ -73,6 +73,115 @@
   multi-GB install.
 </p>
 
+{# ---------- Live transcription (WebSocket streaming) ---------- #}
+{% set _audio_models = [] %}
+{% for eng in engines %}{% for row in eng.rows %}{% set _ = _audio_models.append(row.model_id) %}{% endfor %}{% endfor %}
+{% if _audio_models %}
+<section class="lm-asr-live" style="margin-bottom: 24px;">
+  <div class="lm-dm-engine__head">
+    <span class="lm-dm-engine__title">Live transcription <span class="lm-dm-engine__meta">· stream your mic over WebSocket</span></span>
+  </div>
+  <div class="lm-asr-engine-card">
+    <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end;">
+      <div class="lm-dm-field" style="margin: 0;">
+        <label class="lm-dm-field__label">Model</label>
+        <select id="asr-live-model" class="lm-input lm-input--mono">
+          {% for m in _audio_models %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="lm-dm-field" style="margin: 0;">
+        <label class="lm-dm-field__label">Language</label>
+        <input id="asr-live-lang" class="lm-input lm-input--mono" type="text" value="ar" placeholder="auto" style="width: 90px;">
+      </div>
+      <button id="asr-live-btn" type="button" class="lm-btn lm-btn--primary lm-btn--sm">● Start mic</button>
+      <span id="asr-live-status" class="lm-dm-engine__meta"></span>
+    </div>
+    <div id="asr-live-out" dir="rtl" lang="ar"
+         style="margin-top: 12px; min-height: 3em; padding: 10px 12px; background: var(--bg-0);
+                border: 1px solid var(--bg-3); font-size: 1.25rem; line-height: 2; text-align: right;"></div>
+    <p class="lm-dm-field__help">Words are colored by confidence (green = high, amber/red = low). Partial results revise as you speak; the final appears when you stop.</p>
+  </div>
+</section>
+
+<style>
+  .asr-w { padding: 0 2px; border-radius: 3px; transition: background 120ms; }
+  .asr-final { opacity: 1; }
+  .asr-partial { opacity: 0.6; font-style: italic; }
+</style>
+<script>
+(function () {
+  var btn = document.getElementById('asr-live-btn');
+  if (!btn) return;
+  var out = document.getElementById('asr-live-out');
+  var statusEl = document.getElementById('asr-live-status');
+  var rec = null, ws = null, streaming = false, mediaStream = null;
+
+  function conf(p) {
+    if (p == null) return 'var(--fg-0)';
+    if (p >= 0.85) return 'var(--ok, #3fb950)';
+    if (p >= 0.6) return 'var(--warn, #d29922)';
+    return 'var(--err, #f85149)';
+  }
+  function render(msg) {
+    var words = msg.words || [];
+    if (!words.length && msg.text) { out.textContent = msg.text; return; }
+    out.innerHTML = words.map(function (w) {
+      return '<span class="asr-w ' + (msg.final ? 'asr-final' : 'asr-partial') +
+             '" style="color:' + conf(w.p) + '">' + (w.w || '') + '</span>';
+    }).join(' ');
+  }
+  function stop() {
+    streaming = false;
+    btn.textContent = '● Start mic';
+    btn.classList.remove('lm-btn--danger'); btn.classList.add('lm-btn--primary');
+    if (rec && rec.state !== 'inactive') { try { rec.stop(); } catch (e) {} }
+    if (mediaStream) { mediaStream.getTracks().forEach(function (t) { t.stop(); }); mediaStream = null; }
+  }
+  async function start() {
+    var model = document.getElementById('asr-live-model').value;
+    var lang = (document.getElementById('asr-live-lang').value || '').trim();
+    // Browsers only expose the mic on a secure context: HTTPS or localhost.
+    // Over plain http:// (e.g. Tailscale by IP) navigator.mediaDevices is
+    // undefined — surface a clear hint instead of a cryptic failure.
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      statusEl.textContent = 'mic unavailable — open over https:// or http://localhost';
+      return;
+    }
+    statusEl.textContent = 'requesting mic…';
+    try { mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { statusEl.textContent = 'mic ' + (e && e.name === 'NotAllowedError' ? 'permission denied' : 'error: ' + (e && e.name)); return; }
+    var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    var qs = 'model=' + encodeURIComponent(model) + (lang ? '&language=' + encodeURIComponent(lang) : '');
+    ws = new WebSocket(proto + location.host + '/v1/audio/stream?' + qs);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = function () {
+      statusEl.textContent = 'listening…';
+      rec = new MediaRecorder(mediaStream, { mimeType: 'audio/webm;codecs=opus' });
+      rec.ondataavailable = function (ev) {
+        if (ev.data && ev.data.size && ws && ws.readyState === 1) ws.send(ev.data);
+      };
+      rec.onstop = function () { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'stop' })); };
+      rec.start(300); // 300ms chunks
+      streaming = true;
+      btn.textContent = '■ Stop';
+      btn.classList.remove('lm-btn--primary'); btn.classList.add('lm-btn--danger');
+    };
+    ws.onmessage = function (ev) {
+      if (typeof ev.data !== 'string') return;
+      var msg = JSON.parse(ev.data);
+      if (msg.type === 'transcript') { render(msg); if (msg.final) statusEl.textContent = 'final'; }
+      else if (msg.type === 'error') { statusEl.textContent = 'error: ' + msg.error; stop(); }
+      else if (msg.type === 'done') { if (ws) ws.close(); }
+      else if (msg.type === 'ready') { statusEl.textContent = 'listening…'; }
+    };
+    ws.onclose = function () { stop(); if (statusEl.textContent === 'listening…') statusEl.textContent = 'stopped'; };
+    ws.onerror = function () { statusEl.textContent = 'connection error'; };
+  }
+  btn.addEventListener('click', function () { if (streaming) stop(); else start(); });
+})();
+</script>
+{% endif %}
+
 {% for eng in engines %}
 <section class="lm-dm-engine">
   <div class="lm-dm-engine__head">

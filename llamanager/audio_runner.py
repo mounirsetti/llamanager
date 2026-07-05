@@ -267,6 +267,30 @@ class AudioTaskRunner:
             if self._active == 0:
                 self._set_state("idle", None, None, None, None)
 
+    # ---- streaming helpers (Phase 2) ----
+    async def ensure_worker(self, model_id: str, model_path: Path) -> None:
+        """Public: make sure the warm worker for ``model_id`` is up. Used by a
+        streaming session, which owns its own queue slot + coexistence."""
+        await self._ensure_worker(model_id, model_path)
+
+    async def transcribe_pcm(self, pcm: bytes, *, language: str | None,
+                             task: str, word_timestamps: bool = True) -> dict:
+        """Transcribe a raw float32 16 kHz mono PCM buffer via the warm worker
+        (no temp file / ffmpeg). The caller must have ensured the worker."""
+        assert self._client is not None and self._base_url
+        from urllib.parse import urlencode
+        qs = urlencode({"language": language or "", "task": task,
+                        "word_timestamps": "1" if word_timestamps else "0"})
+        self._last_used = time.time()
+        resp = await self._client.post(
+            f"{self._base_url}/transcribe_pcm?{qs}", content=pcm,
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=TRANSCRIBE_TIMEOUT_S)
+        env = resp.json()
+        if resp.status_code != 200:
+            raise AudioError(env.get("error") or f"worker {resp.status_code}")
+        return env
+
     # ---- worker lifecycle ----
     async def _ensure_worker(self, model_id: str, model_path: Path) -> None:
         if (self._proc is not None and self._worker_model == model_id
