@@ -627,6 +627,21 @@ class AdminClient:
     def asr_models_dir(self, path: str = "") -> dict[str, Any]:
         return self._post("/admin/asr/models-dir", {"path": path})
 
+    def asr_defaults(self, *, vram_budget_gb: float | None = None,
+                     coexist: bool | None = None,
+                     idle_timeout_s: int | None = None,
+                     decode_interval_s: float | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {}
+        if vram_budget_gb is not None:
+            body["vram_budget_gb"] = vram_budget_gb
+        if coexist is not None:
+            body["coexist"] = coexist
+        if idle_timeout_s is not None:
+            body["idle_timeout_s"] = idle_timeout_s
+        if decode_interval_s is not None:
+            body["decode_interval_s"] = decode_interval_s
+        return self._post("/admin/asr/defaults", body)
+
     def asr_profiles(self, model_id: str) -> dict[str, Any]:
         return self._get("/admin/asr/profiles", model=model_id)
 

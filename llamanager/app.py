@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import secrets
@@ -321,6 +322,8 @@ def create_app(config_path: Path | None = None,
             await mem_watchdog.stop()
             await queue.stop()
             await supervisor.stop()
+            with contextlib.suppress(Exception):
+                await audio_runner.stop()
             await sm.stop()
             db.close()
 

@@ -111,6 +111,11 @@ lock_model_loading = false
 # flux2_device_index = 1     # GGML_VK_VISIBLE_DEVICES for the AMD card
 # asr_python        = "~/.llamanager/venvs/z_image/bin/python"  # Whisper STT
 # asr_models_dir    = "/path/to/whisper-models"   # ASR-only model folder; blank = shared models dir
+# ASR runs a warm worker (model loaded once) serving concurrent transcriptions:
+# asr_vram_budget_gb   = 6.0     # cap ASR VRAM; admits tasks while under it (0 = uncapped)
+# asr_coexist          = true    # run ASR alongside a loaded LLM (false = unload LLM per task)
+# asr_idle_timeout_s   = 600     # stop the warm worker after N idle seconds (0 = never)
+# asr_decode_interval_s = 1.0    # streaming decode cadence (env ASR_DECODE_INTERVAL_S wins)
 # images_dir        = "~/.llamanager/images"
 max_disk_gb = 10               # cap for the on-disk image gallery
 
@@ -358,6 +363,13 @@ class Profile:
     # Both ignored by text/image engines.
     audio_language: str = ""
     audio_task: str = ""
+    # ``audio_word_timestamps`` ("on"/"off") requests word-level output
+    # ({w,t0,t1,p}); ``audio_decode_interval_s`` is the streaming decode cadence
+    # (Phase 2); ``audio_transport`` ("http"/"websocket") the preferred
+    # transport. All ignored by text/image engines.
+    audio_word_timestamps: str = ""
+    audio_decode_interval_s: float | None = None
+    audio_transport: str = ""
     # Chat reasoning default. "on" / "off" inject
     # ``chat_template_kwargs.enable_thinking`` into the upstream body for
     # /v1/chat/completions; "" leaves the model/template default alone.
@@ -510,6 +522,24 @@ class Config:
     # (engines/_asr_runner.py). The installer typically points this at the
     # shared z_image venv rather than rebuilding torch.
     asr_python: str = ""
+    # ---- ASR (speech-to-text) service settings ----
+    # ASR runs as a persistent *warm worker* (model loaded once) serving many
+    # concurrent transcriptions, unlike the one-shot image engines. These caps
+    # make it a well-behaved multi-tenant GPU tenant:
+    #   * asr_vram_budget_gb: how much VRAM ASR may use. The dispatcher admits
+    #     concurrent transcriptions only while the estimated footprint stays
+    #     under this, leaving headroom for the LLM/diffusion. 0 = uncapped.
+    #   * asr_coexist: when True, ASR runs *alongside* a loaded LLM (no unload,
+    #     bounded by the budget). When False, an ASR task unloads the text
+    #     server for its duration and restores it (the legacy image-like path).
+    #   * asr_idle_timeout_s: stop the warm worker after this many idle seconds
+    #     to reclaim its VRAM. 0 = never idle-stop.
+    #   * asr_decode_interval_s: streaming decode cadence (Phase 2); honors env
+    #     ASR_DECODE_INTERVAL_S. Stored now so it's editable in UI/CLI.
+    asr_vram_budget_gb: float = 6.0
+    asr_coexist: bool = True
+    asr_idle_timeout_s: int = 600
+    asr_decode_interval_s: float = 1.0
     # Per-engine diffusers version override (engine name → version), set when
     # the operator installs a specific diffusers version from the UI/CLI
     # version picker. While set it overrides engine_installer.DIFFUSERS_PIN as
@@ -657,6 +687,37 @@ def _coerce_float(v: Any) -> float | None:
         return None
 
 
+# Rough VRAM estimates (GB) used to turn the ASR VRAM budget into a
+# concurrency cap: the warm worker holds one model copy, plus a per-in-flight
+# activation cost. Deliberately conservative — the budget is the hard guarantee.
+ASR_MODEL_GB_EST = 2.0
+ASR_PER_REQ_GB_EST = 1.0
+
+
+def asr_max_concurrent(cfg: "Config") -> int:
+    """Effective max concurrent ASR transcriptions the VRAM budget allows.
+    ``asr_vram_budget_gb <= 0`` means uncapped (a generous ceiling)."""
+    budget = getattr(cfg, "asr_vram_budget_gb", 0.0) or 0.0
+    if budget <= 0:
+        return 8
+    return max(1, int((budget - ASR_MODEL_GB_EST) / ASR_PER_REQ_GB_EST))
+
+
+def _asr_decode_interval_default(image_cfg: dict[str, Any]) -> float:
+    """Streaming decode cadence: env ASR_DECODE_INTERVAL_S wins, then
+    [image].asr_decode_interval_s, then a 1.0 s default."""
+    env = os.environ.get("ASR_DECODE_INTERVAL_S")
+    if env:
+        try:
+            return float(env)
+        except ValueError:
+            pass
+    try:
+        return float(image_cfg.get("asr_decode_interval_s", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+
+
 def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
     policy = str(body.get("ram_spill_policy", "default") or "default")
     if policy not in VALID_RAM_SPILL_POLICIES:
@@ -688,6 +749,9 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
         image_strength=_coerce_float(body.get("image_strength")),
         audio_language=str(body.get("audio_language", "") or ""),
         audio_task=str(body.get("audio_task", "") or ""),
+        audio_word_timestamps=str(body.get("audio_word_timestamps", "") or ""),
+        audio_decode_interval_s=_coerce_float(body.get("audio_decode_interval_s")),
+        audio_transport=str(body.get("audio_transport", "") or ""),
         thinking=thinking,
         reasoning_budget=_coerce_int(body.get("reasoning_budget")),
         parallel=_coerce_int(body.get("parallel")),
@@ -746,6 +810,10 @@ def load_config(path: Path | None = None) -> Config:
         asr_models_dir_override=(
             expand(str(image_cfg["asr_models_dir"]))
             if image_cfg.get("asr_models_dir") else None),
+        asr_vram_budget_gb=float(image_cfg.get("asr_vram_budget_gb", 6.0) or 0.0),
+        asr_coexist=bool(image_cfg.get("asr_coexist", True)),
+        asr_idle_timeout_s=int(image_cfg.get("asr_idle_timeout_s", 600) or 0),
+        asr_decode_interval_s=_asr_decode_interval_default(image_cfg),
         images_max_disk_gb=int(image_cfg.get("max_disk_gb", 10)),
         unload_text_on_arrival=bool(coex_cfg.get("unload_text_on_arrival", True)),
         restart_text_after_image=bool(coex_cfg.get("restart_text_after_image", True)),
@@ -1039,6 +1107,12 @@ def _profile_to_tomlkit(prof: Profile):
         tbl.add("audio_language", prof.audio_language)
     if prof.audio_task:
         tbl.add("audio_task", prof.audio_task)
+    if prof.audio_word_timestamps:
+        tbl.add("audio_word_timestamps", prof.audio_word_timestamps)
+    if prof.audio_decode_interval_s is not None:
+        tbl.add("audio_decode_interval_s", prof.audio_decode_interval_s)
+    if prof.audio_transport:
+        tbl.add("audio_transport", prof.audio_transport)
     if prof.thinking:
         tbl.add("thinking", prof.thinking)
     if prof.reasoning_budget is not None:
@@ -1194,6 +1268,10 @@ def update_image_config(cfg_path: Path, *,
                         z_image_python: str | None = None,
                         asr_python: str | None = None,
                         asr_models_dir: str | None = None,
+                        asr_vram_budget_gb: float | None = None,
+                        asr_coexist: bool | None = None,
+                        asr_idle_timeout_s: int | None = None,
+                        asr_decode_interval_s: float | None = None,
                         images_dir: str | None = None,
                         max_disk_gb: int | None = None) -> None:
     """Update the [image] section in config.toml. Each kwarg is persisted
@@ -1223,6 +1301,14 @@ def update_image_config(cfg_path: Path, *,
         img["asr_python"] = asr_python
     if asr_models_dir is not None:
         img["asr_models_dir"] = asr_models_dir
+    if asr_vram_budget_gb is not None:
+        img["asr_vram_budget_gb"] = float(asr_vram_budget_gb)
+    if asr_coexist is not None:
+        img["asr_coexist"] = bool(asr_coexist)
+    if asr_idle_timeout_s is not None:
+        img["asr_idle_timeout_s"] = int(asr_idle_timeout_s)
+    if asr_decode_interval_s is not None:
+        img["asr_decode_interval_s"] = float(asr_decode_interval_s)
     if images_dir is not None:
         img["images_dir"] = images_dir
     if max_disk_gb is not None:

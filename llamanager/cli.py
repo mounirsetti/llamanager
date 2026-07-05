@@ -1160,6 +1160,15 @@ def cmd_asr_models_dir(args):
     return _run_admin(lambda: c.asr_models_dir(args.path or ""))
 
 
+def cmd_asr_defaults(args):
+    c = _make_admin_client(args)
+    coexist = None if args.coexist is None else (args.coexist == "on")
+    return _run_admin(lambda: c.asr_defaults(
+        vram_budget_gb=args.vram_budget_gb, coexist=coexist,
+        idle_timeout_s=args.idle_timeout_s,
+        decode_interval_s=args.decode_interval_s))
+
+
 def cmd_asr_transcribe(args):
     """Transcribe a *local* audio file by uploading it to the daemon's
     OpenAI-compatible ``/v1/audio/transcriptions`` endpoint.
@@ -1200,11 +1209,12 @@ def cmd_asr_transcribe(args):
         print(f"error: file not found: {path}", file=sys.stderr)
         return 2
 
+    rf = {"text": "text", "json": "verbose_json", "words": "words"}[args.format]
     data: dict[str, str] = {
-        "model": args.model,
-        "response_format": "verbose_json" if args.format == "json" else "text",
-        "task": args.task,
+        "model": args.model, "response_format": rf, "task": args.task,
     }
+    if args.word_timestamps or args.format == "words":
+        data["word_timestamps"] = "true"
     if args.language:
         data["language"] = args.language
     if args.profile:
@@ -1229,7 +1239,7 @@ def cmd_asr_transcribe(args):
         return 1
     if args.format == "text":
         print(r.text)
-    else:
+    else:  # json / words → full envelope
         _emit(r.json())
     return 0
 
@@ -1841,8 +1851,11 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--language", default="", help="ISO hint (e.g. ar); blank = auto-detect")
     sp.add_argument("--task", default="transcribe", choices=["transcribe", "translate"])
     sp.add_argument("--profile", default="", help="audio profile name")
-    sp.add_argument("--format", default="text", choices=["text", "json"],
-                    help="text = print the transcription only (default); json = full result")
+    sp.add_argument("--format", default="text", choices=["text", "json", "words"],
+                    help="text = transcription only (default); json = full result; "
+                         "words = word-level {w,t0,t1,p} envelope")
+    sp.add_argument("--word-timestamps", action="store_true",
+                    help="include per-word timing + confidence")
     sp.add_argument("--key", default=None,
                     help="origin bearer token (default: $LLAMANAGER_API_KEY, "
                          "[cli].api_key, or the admin key). Any enabled origin works.")
@@ -1874,6 +1887,19 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("path", nargs="?", default="",
                     help="folder to scan for Whisper models; omit to revert to the shared dir")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_models_dir)
+
+    sp = afp.add_parser("defaults",
+                        help="set ASR service defaults: VRAM budget, coexistence, "
+                             "idle timeout, streaming decode cadence")
+    sp.add_argument("--vram-budget-gb", type=float, default=None,
+                    help="cap ASR VRAM (GB); admits concurrent tasks under it (0 = uncapped)")
+    sp.add_argument("--coexist", choices=["on", "off"], default=None,
+                    help="on = run ASR alongside the LLM; off = unload the LLM per task")
+    sp.add_argument("--idle-timeout-s", type=int, default=None,
+                    help="stop the warm worker after N idle seconds (0 = never)")
+    sp.add_argument("--decode-interval-s", type=float, default=None,
+                    help="streaming decode cadence (live WebSocket mode)")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_defaults)
 
     pfp = afp.add_parser("profiles", help="manage per-model ASR profiles"
                          ).add_subparsers(dest="asr_profiles_cmd", required=True)

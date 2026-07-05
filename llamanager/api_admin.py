@@ -1,6 +1,7 @@
 """Admin endpoints — server lifecycle, queue, models, origins, logs, events."""
 from __future__ import annotations
 
+import contextlib
 import logging
 import shutil
 import time
@@ -2000,6 +2001,46 @@ async def asr_models(request: Request,
         "configured": bool(cfg.asr_python),
         "asr_models_dir": str(cfg.asr_models_dir),
         "asr_models_dir_is_default": cfg.asr_models_dir_override is None,
+    })
+
+
+class AsrDefaultsBody(BaseModel):
+    vram_budget_gb: float | None = None
+    coexist: bool | None = None
+    idle_timeout_s: int | None = None
+    decode_interval_s: float | None = None
+
+
+@router.post("/asr/defaults")
+async def asr_defaults(request: Request, body: AsrDefaultsBody,
+                       _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Set the ASR service defaults: VRAM budget, coexistence, idle timeout,
+    streaming decode cadence. Reloads config so they take effect live."""
+    from .config import update_image_config, asr_max_concurrent
+    cfg = request.app.state.cfg
+    update_image_config(
+        cfg.config_path,
+        asr_vram_budget_gb=body.vram_budget_gb,
+        asr_coexist=body.coexist,
+        asr_idle_timeout_s=body.idle_timeout_s,
+        asr_decode_interval_s=body.decode_interval_s)
+    _reload_cfg_inplace(request)
+    cfg = request.app.state.cfg
+    # The queue (admission) and the worker manager hold their own cfg
+    # references — re-point them at the fresh config so the new budget /
+    # coexistence policy takes effect live.
+    for comp in ("queue", "audio_runner"):
+        obj = getattr(request.app.state, comp, None)
+        if obj is not None:
+            with contextlib.suppress(Exception):
+                obj.cfg = cfg
+    return JSONResponse({
+        "ok": True,
+        "asr_vram_budget_gb": cfg.asr_vram_budget_gb,
+        "asr_coexist": cfg.asr_coexist,
+        "asr_idle_timeout_s": cfg.asr_idle_timeout_s,
+        "asr_decode_interval_s": cfg.asr_decode_interval_s,
+        "max_concurrent": asr_max_concurrent(cfg),
     })
 
 

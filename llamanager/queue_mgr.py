@@ -496,22 +496,40 @@ class QueueManager:
         text_in = self._in_flight_count.get("text", 0)
         image_in = self._in_flight_count.get("image", 0)
         audio_in = self._in_flight_count.get("audio", 0)
-        # image and audio are one-shot GPU families, each with a hard 1-slot
-        # ceiling; their runners also hold an internal lock as a backstop.
-        if req.task_type in ("image", "audio"):
-            if self._in_flight_count.get(req.task_type, 0) >= 1:
+        asr_coexist = bool(getattr(self.cfg, "asr_coexist", True))
+
+        # Audio (ASR) is a warm, concurrent, VRAM-budgeted tenant — NOT a
+        # single-slot one-shot. Admit up to the budget-derived concurrency.
+        if req.task_type == "audio":
+            from .config import asr_max_concurrent
+            # coexist=off runs an ephemeral, exclusive worker (1 at a time);
+            # coexist=on is warm + concurrent up to the VRAM budget.
+            cap = asr_max_concurrent(self.cfg) if asr_coexist else 1
+            if audio_in >= cap:
                 return False
-            # When concurrency is off, a one-shot task is mutually exclusive
-            # with text *and* the other one-shot family.
-            if not self.cfg.allow_concurrent:
-                others = text_in + image_in + audio_in
-                if others - self._in_flight_count.get(req.task_type, 0) > 0:
-                    return False
+            # coexist=off → ASR takes the GPU exclusively (unloads the text
+            # server for the request); block while text/image run.
+            if not asr_coexist and (text_in > 0 or image_in > 0):
+                return False
             return True
+
+        # Image is still a heavy one-shot with a hard 1-slot ceiling.
+        if req.task_type == "image":
+            if image_in >= 1:
+                return False
+            if not self.cfg.allow_concurrent and text_in > 0:
+                return False
+            if not asr_coexist and audio_in > 0:
+                return False
+            return True
+
         # text
         if text_in >= max(1, self.cfg.max_concurrent):
             return False
-        if not self.cfg.allow_concurrent and (image_in > 0 or audio_in > 0):
+        if not self.cfg.allow_concurrent and image_in > 0:
+            return False
+        # coexist=off makes ASR and text mutually exclusive.
+        if not asr_coexist and audio_in > 0:
             return False
         return True
 

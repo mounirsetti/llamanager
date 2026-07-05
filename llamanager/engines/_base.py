@@ -57,6 +57,9 @@ class AudioRequest:
     language: str | None = None
     # ``"transcribe"`` (same language) or ``"translate"`` (to English).
     task: str = "transcribe"
+    # When True, return word-level output ({w,t0,t1,p}) + audio_ms in the
+    # ``{type:"transcript", …}`` envelope. Heavier (cross-attentions).
+    word_timestamps: bool = False
 
 
 @dataclass

@@ -156,6 +156,40 @@
     </form>
   </div>
 
+  {# ---- GPU budget & coexistence ---- #}
+  <div class="lm-asr-engine-card">
+    <p style="font-size: 0.8125rem; color: var(--fg-2); margin: 0 0 8px;">
+      ASR runs a warm worker serving concurrent transcriptions.
+      {% if asr_defaults %}Current budget allows <strong>≈ {{ asr_defaults.max_concurrent }}</strong> concurrent task(s).{% endif %}
+    </p>
+    <form method="post" action="/ui/setup/audio/asr-defaults" class="lm-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="lm-dm-field">
+        <label class="lm-dm-field__label">VRAM budget (GB)</label>
+        <input class="lm-input lm-input--mono" type="number" step="0.5" min="0"
+               name="asr_vram_budget_gb" value="{{ asr_defaults.vram_budget_gb if asr_defaults }}">
+        <span class="lm-dm-field__help">Cap ASR VRAM so it leaves room for the LLM/diffusion. 0 = uncapped.</span>
+      </div>
+      <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8125rem; margin: 8px 0;">
+        <input type="checkbox" name="asr_coexist" value="on" {% if asr_defaults and asr_defaults.coexist %}checked{% endif %}>
+        <span>Run alongside the LLM (coexist). Off = unload the LLM for each transcription.</span>
+      </label>
+      <div class="lm-dm-field">
+        <label class="lm-dm-field__label">Worker idle timeout (s)</label>
+        <input class="lm-input lm-input--mono" type="number" min="0"
+               name="asr_idle_timeout_s" value="{{ asr_defaults.idle_timeout_s if asr_defaults }}">
+        <span class="lm-dm-field__help">Stop the warm worker after this many idle seconds to reclaim VRAM. 0 = never.</span>
+      </div>
+      <div class="lm-dm-field">
+        <label class="lm-dm-field__label">Streaming decode interval (s)</label>
+        <input class="lm-input lm-input--mono" type="number" step="0.05" min="0.05"
+               name="asr_decode_interval_s" value="{{ asr_defaults.decode_interval_s if asr_defaults }}">
+        <span class="lm-dm-field__help">Live-streaming partial cadence (WebSocket mode). Env <code>ASR_DECODE_INTERVAL_S</code> overrides.</span>
+      </div>
+      <button type="submit" class="lm-btn lm-btn--ghost lm-btn--sm">Save GPU settings</button>
+    </form>
+  </div>
+
   {% if not eng.rows %}
   <p class="lm-dm-empty">No speech-to-text models found in
     <code>{{ asr_models_dir }}</code>. Download a Whisper checkpoint

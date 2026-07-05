@@ -134,6 +134,44 @@ def build_command(
     return argv, env
 
 
+def _rocm_env() -> dict[str, str]:
+    """Base env for a Python worker/runner: UTF-8 + the system ROCm libs on
+    LD_LIBRARY_PATH so torch imports and sees the GPU (no-op off AMD)."""
+    env: dict[str, str] = {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+    from ..gpu_detect import rocm_lib_dirs
+    rocm_dirs = rocm_lib_dirs()
+    if rocm_dirs:
+        prior = os.environ.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(
+            rocm_dirs + ([prior] if prior else []))
+    return env
+
+
+def build_worker_command(
+    cfg: Config, model_path: Path, port: int, max_concurrent: int,
+) -> tuple[list[str], dict[str, str]]:
+    """Return (argv, env) to launch the persistent warm ASR worker
+    (``_asr_worker.py``) for ``model_path`` on ``port``. Managed by
+    ``audio_runner.AudioTaskRunner``."""
+    if not cfg.asr_python:
+        raise RuntimeError(
+            "image.asr_python is not configured — install the ASR engine "
+            "dependencies on the ASR models page.")
+    python = Path(cfg.asr_python).expanduser()
+    if not python.exists():
+        raise RuntimeError(f"asr python not found: {python}")
+    worker = Path(__file__).with_name("_asr_worker.py")
+    if not worker.exists():
+        raise RuntimeError(f"asr worker missing: {worker}")
+    argv = [
+        str(python), "-u", str(worker),
+        "--model_path", str(model_path),
+        "--host", "127.0.0.1", "--port", str(int(port)),
+        "--max-concurrent", str(max(1, int(max_concurrent))),
+    ]
+    return argv, _rocm_env()
+
+
 def parse_progress(line: str) -> ProgressEvent | None:
     if not line:
         return None
@@ -161,6 +199,21 @@ def profile_schema() -> list[ProfileField]:
             key="audio_task", label="Task", kind="select",
             default=_DEFAULT_TASK, options=_TASKS,
             help="transcribe = same language · translate = into English.",
+        ),
+        ProfileField(
+            key="audio_word_timestamps", label="Word timestamps", kind="select",
+            default="off", options=["off", "on"],
+            help="Return per-word timing + confidence ({w,t0,t1,p}). Heavier.",
+        ),
+        ProfileField(
+            key="audio_decode_interval_s", label="Decode interval (s)",
+            kind="float", default=None,
+            help="Streaming partial cadence (live WebSocket mode).",
+        ),
+        ProfileField(
+            key="audio_transport", label="Transport", kind="select",
+            default="http", options=["http", "websocket"],
+            help="Preferred transport; websocket enables live streaming.",
         ),
     ]
 

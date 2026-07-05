@@ -5141,10 +5141,18 @@ def _asr_models_ctx(request: Request) -> dict[str, Any]:
             "plan": {"packages": plan.packages, "notes": plan.notes} if plan else None,
         })
 
+    from .config import asr_max_concurrent
     return _ctx(
         request, active="asr-models", engines=engines_view,
         asr_models_dir=str(cfg.asr_models_dir),
         asr_models_dir_is_default=(cfg.asr_models_dir_override is None),
+        asr_defaults={
+            "vram_budget_gb": cfg.asr_vram_budget_gb,
+            "coexist": cfg.asr_coexist,
+            "idle_timeout_s": cfg.asr_idle_timeout_s,
+            "decode_interval_s": cfg.asr_decode_interval_s,
+            "max_concurrent": asr_max_concurrent(cfg),
+        },
     )
 
 
@@ -5192,6 +5200,44 @@ async def setup_asr(request: Request, asr_python: str = Form(""),
     cfg = request.app.state.cfg
     cfg.asr_python = asr_python.strip()
     update_image_config(cfg.config_path, asr_python=cfg.asr_python)
+    return RedirectResponse("/ui/asr-models", status_code=303)
+
+
+@router.post("/setup/audio/asr-defaults", response_class=HTMLResponse)
+async def setup_asr_defaults(request: Request,
+                            asr_vram_budget_gb: str = Form(""),
+                            asr_coexist: str = Form(""),
+                            asr_idle_timeout_s: str = Form(""),
+                            asr_decode_interval_s: str = Form(""),
+                            _: None = Depends(require_csrf)) -> Response:
+    """Set the ASR GPU budget + coexistence + idle/decode defaults."""
+    from .config import update_image_config
+    cfg = request.app.state.cfg
+    def _f(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    def _i(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+    budget = _f(asr_vram_budget_gb)
+    idle = _i(asr_idle_timeout_s)
+    interval = _f(asr_decode_interval_s)
+    coexist = (asr_coexist or "") == "on"
+    update_image_config(cfg.config_path, asr_vram_budget_gb=budget,
+                        asr_coexist=coexist, asr_idle_timeout_s=idle,
+                        asr_decode_interval_s=interval)
+    # Mutate the shared cfg in place so the queue + worker manager pick it up.
+    if budget is not None:
+        cfg.asr_vram_budget_gb = budget
+    cfg.asr_coexist = coexist
+    if idle is not None:
+        cfg.asr_idle_timeout_s = idle
+    if interval is not None:
+        cfg.asr_decode_interval_s = interval
     return RedirectResponse("/ui/asr-models", status_code=303)
 
 

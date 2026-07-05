@@ -62,6 +62,8 @@ The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silic
 - [Speech-to-text (ASR)](#speech-to-text-asr)
   - [Install the engine](#install-the-engine)
   - [Add a model](#add-a-model)
+  - [GPU budget, concurrency & coexistence](#gpu-budget-concurrency--coexistence)
+  - [Word-level output](#word-level-output)
   - [Transcribe from the API](#transcribe-from-the-api)
   - [Transcribe from the CLI](#transcribe-from-the-cli)
   - [Profiles](#asr-profiles)
@@ -92,8 +94,8 @@ What you get out of the box:
 - **Per-engine install flow** in the web UI. Click `Install dependencies` for HiDream or Z-Image and llamanager creates a Python venv under `~/.llamanager/venvs/<engine>/` and pip-installs the right packages. The disk footprint and live install log are visible on the page.
 - **Model download manager** that pulls whole HF repos (or a single subfolder, useful for monster repos like SeeSee21/Z-Anime where only the `diffusers/` subtree is needed). Progress streams to the UI every 2 s.
 - **Per-origin priority queue** with cancellation that propagates all the way to the running subprocess. A long batch can't block your editor; cancelling a queued or in-flight image task actually stops the work.
-- **Speech-to-text (ASR).** Run Whisper-class transcription models (Hugging Face `transformers` format) for `POST /v1/audio/transcriptions`. The ASR engine reuses the diffusion venv's torch + transformers — one click, no multi-GB re-download — and audio is decoded through the system `ffmpeg`. See [Speech-to-text (ASR)](#speech-to-text-asr).
-- **Family-aware concurrency.** Text, image, and audio are mutually exclusive by default (they fight over the same GPU), but the policy is one toggle to switch when you have the VRAM headroom. A transcription unloads the loaded LLM, runs, then restores it — exactly like an image task.
+- **Speech-to-text (ASR).** Run Whisper-class transcription models (Hugging Face `transformers` format) for `POST /v1/audio/transcriptions`, with word-level timing + confidence. A **warm worker** serves **many concurrent** transcriptions bounded by a **VRAM budget**, and by default **coexists with a loaded LLM** (or unloads it — your choice). Reuses the diffusion venv's torch + transformers; audio decoded via system `ffmpeg`. See [Speech-to-text (ASR)](#speech-to-text-asr).
+- **Family-aware concurrency.** Text and image are mutually exclusive by default (they fight over the same GPU), but the policy is one toggle to switch when you have the VRAM headroom. ASR is the multi-tenant tenant: budgeted, concurrent, and coexisting.
 - **Hot-swap by header.** Requests can name a specific model via `X-Llamanager-Model`; the queue swaps the loaded model in-flight without dropping in-flight work.
 - **Multi-slot LLM (beta, since 0.3.9).** Opt-in mode that keeps several models warm in parallel slots, each on its own port. Requests route by model id — no swap penalty. Mutually exclusive with the host-wide "exclusive mode" sweep; managed from the **Slots** page or the `llamanager slots` CLI. See [Multi-slot LLM (beta)](#multi-slot-llm-beta).
 - **Crash supervisor** with a 3-in-5-minutes restart cap, applied to text servers and image engines alike.
@@ -738,7 +740,9 @@ Cancellation: cancelling a queued image request removes it before it starts. Can
 
 ## Speech-to-text (ASR)
 
-llamanager runs Whisper-class speech-to-text models as a third engine family (`audio`), alongside text and diffusion. Like the diffusion engines, the ASR engine is a **one-shot subprocess** — it holds no VRAM between requests — and every transcription flows through the same queue, so the single-slot invariant and text/image/audio coexistence are all honoured.
+llamanager runs Whisper-class speech-to-text models as a third engine family (`audio`), alongside text and diffusion. Unlike the one-shot diffusion engines, ASR is a **multi-tenant GPU service**: a **warm worker** keeps the model loaded and serves **many concurrent transcriptions**, bounded by a **VRAM budget** so it always leaves headroom for the LLM. It can **run alongside a loaded LLM** or unload it — your choice, editable in the UI and CLI. Everything flows through the same queue, and the worker idle-stops to reclaim VRAM when ASR is quiet.
+
+It also does **word-level output** — per-word timing + confidence — and (Phase 2) live streaming over WebSocket.
 
 The engine targets Hugging Face `transformers` checkpoints (`WhisperForConditionalGeneration` + safetensors): the OpenAI `whisper-large-v3` family, `whisper-large-v3-turbo`, distil-whisper, and fine-tunes such as [`naazimsnh02/whisper-large-v3-turbo-ar-quran`](https://huggingface.co/naazimsnh02/whisper-large-v3-turbo-ar-quran). Audio is decoded with the system **`ffmpeg`** (wav/mp3/m4a/ogg/flac/…), so no audio Python packages are pulled in.
 
@@ -781,6 +785,35 @@ llamanager asr models-dir                            # blank → revert to the s
 ```
 
 A dedicated folder is scanned independently of the LLM registry, so those models never show up under LLM models. (Models are sandboxed under the folder; a symlink pointing outside it is refused, same as for LLM/diffusion models.)
+
+### GPU budget, concurrency & coexistence
+
+ASR is designed to serve many clients at once without starving the LLM. Three settings on the **ASR models** page (and `llamanager asr defaults`) control it:
+
+| setting | meaning |
+|---|---|
+| **VRAM budget (GB)** | ASR may use up to this much VRAM. The queue admits concurrent transcriptions only while the estimated footprint stays under it (→ an effective max-concurrent). `0` = uncapped. |
+| **Coexist with the LLM** | **on** (default): the warm worker runs *alongside* a loaded LLM, bounded by the budget — no unloading. **off**: each transcription unloads the text server, runs exclusively (1 at a time), then restores it. |
+| **Worker idle timeout (s)** | stop the warm worker after N idle seconds to hand its VRAM back. `0` = keep it warm. |
+
+```bash
+llamanager asr defaults --vram-budget-gb 6 --coexist on --idle-timeout-s 600
+# → {"asr_vram_budget_gb":6.0,"asr_coexist":true,"max_concurrent":4,...}
+```
+
+Concurrency is real: with the budget allowing 4, four simultaneous requests show four `audio` tasks in flight (`/admin/queue`) and finish together via the one warm model — no per-request reload. Lower the budget and they serialize; the LLM stays loaded the whole time when coexist is on.
+
+### Word-level output
+
+Add `word_timestamps` (or `response_format=words`) to get the streaming-shaped envelope — the same shape the Phase-2 live WebSocket will push, so client code won't change:
+
+```json
+{"type":"transcript","rev":1,"final":true,"audio_ms":6635,
+ "words":[{"w":"أَلَمْ","t0":0,"t1":829,"p":1.0},
+          {"w":"تَرَ","t0":829,"t1":1382,"p":1.0}]}
+```
+
+`p` is per-word confidence; `t0`/`t1` are millisecond offsets. Timing uses the model's cross-attention alignment heads; heavily fine-tuned models whose attention has drifted get a bounded, proportional fallback (flagged `approx_timing`) so `w` and `p` stay reliable. Word decoding is heavier (cross-attentions) — it's why the VRAM budget + coexistence choice matter.
 
 ### Transcribe from the API
 
@@ -1237,7 +1270,8 @@ llamanager diffusion profiles set-default <model_id> [--profile NAME]
 llamanager diffusion profiles materialize-defaults <model_id> <engine>
 
 llamanager asr transcribe <file> --model M [--language ar] [--task transcribe|translate]
-        [--profile NAME] [--format text|json] [--key ORIGIN_KEY]   # uploads to /v1; origin key (not admin)
+        [--profile NAME] [--format text|json|words] [--word-timestamps] [--key ORIGIN_KEY]  # uploads to /v1; origin key
+llamanager asr defaults [--vram-budget-gb X] [--coexist on|off] [--idle-timeout-s N] [--decode-interval-s S]
 llamanager asr engines                                   # ASR engine status (configured? installed?)
 llamanager asr install [--backend auto|rocm|cuda|cpu]    # reuse the diffusion venv, or build one
 llamanager asr cancel-install
@@ -1322,6 +1356,10 @@ lock_model_loading = false
 # z_image_python     = "/path/to/.venv-z-image/bin/python"
 # asr_python         = "~/.llamanager/venvs/z_image/bin/python"  # ASR reuses a torch+transformers venv
 # asr_models_dir     = "/path/to/whisper-models"  # ASR-only model folder (blank = shared models dir)
+# asr_vram_budget_gb   = 6.0    # cap ASR VRAM → concurrent-task admission (0 = uncapped)
+# asr_coexist          = true   # run ASR alongside a loaded LLM (false = unload LLM per task)
+# asr_idle_timeout_s   = 600    # stop the warm worker after N idle seconds (0 = never)
+# asr_decode_interval_s = 1.0   # streaming decode cadence (env ASR_DECODE_INTERVAL_S wins)
 max_disk_gb = 10                          # cap for the on-disk image gallery
 
 [coexistence]

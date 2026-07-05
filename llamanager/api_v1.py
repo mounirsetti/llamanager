@@ -975,6 +975,13 @@ async def audio_transcriptions(request: Request) -> Response:
         raise HTTPException(status_code=400,
                             detail="task must be 'transcribe' or 'translate'")
     response_format = (form.get("response_format") or "json").strip()
+    # Word-level output ({w,t0,t1,p}) when requested explicitly or implied by
+    # the ``words``/``verbose_json`` formats. Also honored via the profile
+    # (resolved in the runner).
+    word_timestamps = (
+        str(form.get("word_timestamps") or "").strip().lower()
+        in ("1", "true", "yes", "on")
+        or response_format in ("words", "verbose_json"))
 
     try:
         qr = await qm.enqueue(
@@ -1012,7 +1019,7 @@ async def audio_transcriptions(request: Request) -> Response:
             )
 
     audio_req = AudioRequest(audio_path=audio_path, language=language,
-                             task=task)
+                             task=task, word_timestamps=word_timestamps)
     try:
         result = await execute_transcription(
             qm, runner, qr=qr, engine=engine, model_id=model_required,
@@ -1022,7 +1029,9 @@ async def audio_transcriptions(request: Request) -> Response:
         if response_format == "text":
             return Response(content=result.text, media_type="text/plain",
                             headers=headers)
-        if response_format == "verbose_json":
+        # ``words`` and ``verbose_json`` return the full worker envelope
+        # ({type,rev,final,audio_ms,words|segments,text,language}).
+        if response_format in ("words", "verbose_json"):
             return JSONResponse(content=result.raw, headers=headers)
         return JSONResponse(content={"text": result.text}, headers=headers)
     except AudioError as e:

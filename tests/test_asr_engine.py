@@ -172,6 +172,64 @@ def test_audio_profile_roundtrips_through_toml(tmp_path: Path):
     assert p.audio_task == "transcribe"
 
 
+def test_asr_streaming_profile_fields_roundtrip(tmp_path: Path):
+    from llamanager.config import (
+        DEFAULT_CONFIG_TOML, Profile, load_config, save_profile)
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(DEFAULT_CONFIG_TOML, encoding="utf-8")
+    import tomlkit
+    doc = tomlkit.load(cfg_path.open("rb"))
+    doc["server"]["data_dir"] = tmp_path.as_posix()
+    cfg_path.write_bytes(tomlkit.dumps(doc).encode("utf-8"))
+    prof = Profile(name="live", audio_word_timestamps="on",
+                   audio_decode_interval_s=0.75, audio_transport="websocket")
+    save_profile(cfg_path, "whisper-x", "live", prof)
+    p = load_config(cfg_path).get_model("whisper-x").profiles["live"]
+    assert p.audio_word_timestamps == "on"
+    assert p.audio_decode_interval_s == 0.75
+    assert p.audio_transport == "websocket"
+
+
+def test_asr_service_settings_roundtrip(tmp_path: Path):
+    from llamanager.config import (
+        DEFAULT_CONFIG_TOML, load_config, update_image_config)
+    import tomlkit
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(DEFAULT_CONFIG_TOML, encoding="utf-8")
+    doc = tomlkit.load(cfg_path.open("rb"))
+    doc["server"]["data_dir"] = tmp_path.as_posix()
+    cfg_path.write_bytes(tomlkit.dumps(doc).encode("utf-8"))
+    update_image_config(cfg_path, asr_vram_budget_gb=10.0, asr_coexist=False,
+                        asr_idle_timeout_s=90)
+    cfg = load_config(cfg_path)
+    assert cfg.asr_vram_budget_gb == 10.0
+    assert cfg.asr_coexist is False
+    assert cfg.asr_idle_timeout_s == 90
+
+
+def test_asr_decode_interval_env_wins(tmp_path: Path, monkeypatch):
+    from llamanager.config import load_config
+    monkeypatch.setenv("ASR_DECODE_INTERVAL_S", "0.25")
+    cfg = load_config(tmp_path / "missing.toml")
+    assert cfg.asr_decode_interval_s == 0.25
+
+
+def test_asr_worker_command_built(tmp_path: Path):
+    from llamanager.engines import asr
+    from llamanager.config import Config
+    py = tmp_path / "python"
+    py.write_text(""); py.chmod(0o755)
+    model = tmp_path / "whisper"
+    _make_whisper_dir(model)
+    cfg = Config(data_dir=tmp_path, asr_python=str(py))
+    argv, env = asr.build_worker_command(cfg, model, 8123, 4)
+    assert argv[0] == str(py)
+    assert "_asr_worker.py" in argv[2]
+    assert "--port" in argv and "8123" in argv
+    assert "--max-concurrent" in argv and "4" in argv
+    assert env["PYTHONUTF8"] == "1"
+
+
 def test_asr_python_config_roundtrip(tmp_path: Path):
     from llamanager.config import (
         DEFAULT_CONFIG_TOML, load_config, update_image_config,
@@ -195,28 +253,55 @@ def test_infer_task_type_audio(tmp_path: Path):
     assert _infer_task_type(cfg, "whisper") == "audio"
 
 
-def test_queue_audio_has_one_slot_ceiling():
-    """A second audio request can't dispatch while one is in flight."""
-    from llamanager.config import Config
-    from llamanager.db import DB
-    from llamanager.queue_mgr import QueueManager, QueuedRequest
+def _audio_req():
+    from llamanager.queue_mgr import QueuedRequest
+    return QueuedRequest(request_id="r1", origin=None, priority=0,
+                         model_required="whisper", enqueued_at=0.0, seq=0,
+                         task_type="audio")
 
-    cfg = Config(allow_concurrent=True)
+
+def test_queue_audio_concurrent_by_vram_budget():
+    """coexist=on: audio admits up to the budget-derived concurrency and runs
+    alongside text; the cap blocks beyond it."""
+    from llamanager.config import Config, asr_max_concurrent
+    from llamanager.queue_mgr import QueueManager
+    cfg = Config(asr_coexist=True, asr_vram_budget_gb=6.0)  # → ~4 concurrent
+    cap = asr_max_concurrent(cfg)
+    assert cap >= 2
+    qm = QueueManager.__new__(QueueManager)
+    qm.cfg = cfg
+    qm._in_flight_count = {"text": 3, "image": 0, "audio": 0}  # text loaded
+    req = _audio_req()
+    # Runs alongside text (coexist), up to the cap.
+    qm._in_flight_count["audio"] = cap - 1
+    assert qm._can_dispatch(req) is True
+    qm._in_flight_count["audio"] = cap
+    assert qm._can_dispatch(req) is False
+
+
+def test_queue_audio_coexist_off_is_exclusive_single():
+    """coexist=off: cap 1 and mutually exclusive with text."""
+    from llamanager.config import Config
+    from llamanager.queue_mgr import QueueManager
+    cfg = Config(asr_coexist=False, asr_vram_budget_gb=8.0)
     qm = QueueManager.__new__(QueueManager)
     qm.cfg = cfg
     qm._in_flight_count = {"text": 0, "image": 0, "audio": 0}
-    audio_req = QueuedRequest(
-        request_id="r1", origin=None, priority=0, model_required="whisper",
-        enqueued_at=0.0, seq=0, task_type="audio",
-    )
-    assert qm._can_dispatch(audio_req) is True
+    req = _audio_req()
+    assert qm._can_dispatch(req) is True
+    # a second audio is blocked (cap 1 in exclusive mode)
     qm._in_flight_count["audio"] = 1
-    assert qm._can_dispatch(audio_req) is False
-    # image in flight also blocks a new audio task when concurrency is off.
-    cfg2 = Config(allow_concurrent=False)
-    qm.cfg = cfg2
-    qm._in_flight_count = {"text": 0, "image": 1, "audio": 0}
-    assert qm._can_dispatch(audio_req) is False
+    assert qm._can_dispatch(req) is False
+    # text in flight blocks audio (exclusive)
+    qm._in_flight_count = {"text": 1, "image": 0, "audio": 0}
+    assert qm._can_dispatch(req) is False
+
+
+def test_asr_max_concurrent_from_budget():
+    from llamanager.config import Config, asr_max_concurrent
+    assert asr_max_concurrent(Config(asr_vram_budget_gb=6.0)) == 4   # (6-2)/1
+    assert asr_max_concurrent(Config(asr_vram_budget_gb=3.0)) == 1
+    assert asr_max_concurrent(Config(asr_vram_budget_gb=0.0)) >= 1   # uncapped
 
 
 # ---------- installer reuse plan ----------
