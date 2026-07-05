@@ -70,6 +70,24 @@ def _load_pipeline(model_path: Path, gguf: Path | None, dtype_name: str,
     )
 
 
+def _apply_lora(pipe, lora: str, scale: float | None) -> None:
+    if not lora:
+        return
+    kwargs = {"adapter_name": "krea_lora"}
+    try:
+        pipe.load_lora_weights(lora, **kwargs)
+    except TypeError:
+        pipe.load_lora_weights(lora)
+        kwargs["adapter_name"] = "default"
+    if scale is None:
+        return
+    try:
+        pipe.set_adapters([kwargs["adapter_name"]], adapter_weights=[float(scale)])
+    except Exception as exc:  # noqa: BLE001 - older diffusers APIs vary here
+        print(f"[krea] warning: could not set LoRA scale {scale}: {exc}",
+              file=sys.stderr)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Krea 2 Turbo runner")
     p.add_argument("--model_path", required=True, type=Path)
@@ -86,6 +104,8 @@ def main() -> int:
     p.add_argument("--device", default=None)
     p.add_argument("--dtype", default=None)
     p.add_argument("--base-repo", default=BASE_REPO)
+    p.add_argument("--lora", default="")
+    p.add_argument("--lora-scale", type=float, default=None)
     args = p.parse_args()
 
     model_path = args.model_path.expanduser().resolve()
@@ -106,6 +126,10 @@ def main() -> int:
 
     import torch
     pipe = _load_pipeline(model_path, gguf, dtype_name, args.base_repo)
+    if args.lora:
+        print(f"[krea] loading LoRA {args.lora} scale={args.lora_scale}",
+              file=sys.stderr)
+        _apply_lora(pipe, args.lora, args.lora_scale)
     pipe.to(device)
     for fn in ("enable_tiling", "enable_slicing"):
         try:

@@ -265,6 +265,8 @@ def test_krea_adapter_builds_argv_for_selected_quant(tmp_path: Path):
         image_steps=8,
         image_guidance=1.0,
         image_negative_prompt="blur",
+        image_lora_weights="gokaygokay/Krea-2-Realism-LoRA",
+        image_lora_scale=0.8,
     )
     req = ImageRequest(
         prompt="test", width=1024, height=1024,
@@ -276,6 +278,10 @@ def test_krea_adapter_builds_argv_for_selected_quant(tmp_path: Path):
     assert argv[argv.index("--gguf") + 1].endswith("krea2_turbo-Q8_0.gguf")
     assert "--negative_prompt" in argv
     assert "blur" in argv
+    assert "--lora" in argv
+    assert argv[argv.index("--lora") + 1] == "gokaygokay/Krea-2-Realism-LoRA"
+    assert "--lora-scale" in argv
+    assert float(argv[argv.index("--lora-scale") + 1]) == 0.8
     assert env["PYTHONIOENCODING"] == "utf-8"
 
 
@@ -300,6 +306,30 @@ def test_krea_adapter_builds_argv_for_original_repo(tmp_path: Path):
     assert "--model_path" in argv
     assert argv[argv.index("--model_path") + 1] == str(model)
     assert "--gguf" not in argv
+
+
+def test_krea_lora_profile_fields_roundtrip(tmp_path: Path):
+    from llamanager.config import (
+        DEFAULT_CONFIG_TOML, Profile, load_config, save_profile,
+    )
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(DEFAULT_CONFIG_TOML, encoding="utf-8")
+    import tomlkit
+    doc = tomlkit.load(cfg_path.open("rb"))
+    doc["server"]["data_dir"] = tmp_path.as_posix()
+    cfg_path.write_bytes(tomlkit.dumps(doc).encode("utf-8"))
+
+    prof = Profile(
+        name="krea-realism",
+        image_model_type="original",
+        image_lora_weights="gokaygokay/Krea-2-Realism-LoRA",
+        image_lora_scale=1.0,
+    )
+    save_profile(cfg_path, "krea/Krea-2-Turbo", "krea-realism", prof)
+    cfg = load_config(cfg_path)
+    p = cfg.models["krea/Krea-2-Turbo"].profiles["krea-realism"]
+    assert p.image_lora_weights == "gokaygokay/Krea-2-Realism-LoRA"
+    assert p.image_lora_scale == 1.0
 
 
 # ---------- queue routing ----------

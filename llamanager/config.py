@@ -374,6 +374,8 @@ class Profile:
     image_size: str = ""              # "WxH" — engine adapters validate/snap
     image_seed: int | None = None
     image_negative_prompt: str = ""
+    image_lora_weights: str = ""      # HF repo id or local LoRA .safetensors
+    image_lora_scale: float | None = None
     # Reference-image knobs. ``image_editing_scheduler`` is HiDream's
     # --editing_scheduler flag ("flow_match" | "flash"); only meaningful
     # when exactly one reference image is passed with --model_type dev.
@@ -769,6 +771,8 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
         image_size=str(body.get("image_size", "") or ""),
         image_seed=_coerce_int(body.get("image_seed")),
         image_negative_prompt=str(body.get("image_negative_prompt", "") or ""),
+        image_lora_weights=str(body.get("image_lora_weights", "") or ""),
+        image_lora_scale=_coerce_float(body.get("image_lora_scale")),
         image_editing_scheduler=str(body.get("image_editing_scheduler", "") or ""),
         image_strength=_coerce_float(body.get("image_strength")),
         audio_language=str(body.get("audio_language", "") or ""),
@@ -1125,6 +1129,10 @@ def _profile_to_tomlkit(prof: Profile):
         tbl.add("image_seed", prof.image_seed)
     if prof.image_negative_prompt:
         tbl.add("image_negative_prompt", prof.image_negative_prompt)
+    if prof.image_lora_weights:
+        tbl.add("image_lora_weights", prof.image_lora_weights)
+    if prof.image_lora_scale is not None:
+        tbl.add("image_lora_scale", prof.image_lora_scale)
     if prof.image_editing_scheduler:
         tbl.add("image_editing_scheduler", prof.image_editing_scheduler)
     if prof.image_strength is not None:

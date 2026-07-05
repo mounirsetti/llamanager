@@ -247,6 +247,24 @@
 </form>
 
 <div class="lm-engine-section__head">
+  <span>LoRA adapters</span>
+  <span class="lm-engine-section__meta">optional style adapters for Krea profiles</span>
+</div>
+<p class="lm-engine-section__note">
+  Krea 2 Realism LoRA can be used by setting a profile's LoRA field to
+  <code>gokaygokay/Krea-2-Realism-LoRA</code>. Recommended settings are
+  8 steps, guidance 0.0, LoRA scale 1.0; lower scale to 0.7-0.8 for a subtler effect.
+</p>
+<form method="post" action="/ui/setup-diffusion/engine/krea/download-model"
+      style="display: inline-flex; gap: 8px; align-items: center; margin-bottom: 16px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="repo" value="gokaygokay/Krea-2-Realism-LoRA">
+  <input type="hidden" name="filename" value="krea2_realism_lora.safetensors">
+  <button type="submit" class="lm-btn lm-btn--ghost lm-btn--sm">Download realism LoRA</button>
+  <span style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.75rem; color: var(--fg-2);">469.3 MB</span>
+</form>
+
+<div class="lm-engine-section__head">
   <span>Quantized weights</span>
   <span class="lm-engine-section__meta">single-file downloads from vantagewithai/Krea-2-Turbo-GGUF</span>
 </div>

@@ -24,6 +24,8 @@ LABEL = "Krea 2 Turbo"
 
 KREA_GGUF_REPO = "vantagewithai/Krea-2-Turbo-GGUF"
 KREA_ORIGINAL_REPO = "krea/Krea-2-Turbo"
+KREA_REALISM_LORA_REPO = "gokaygokay/Krea-2-Realism-LoRA"
+KREA_REALISM_LORA_FILE = "krea2_realism_lora.safetensors"
 BASE_REPO = KREA_ORIGINAL_REPO
 
 QUANT_FILES = [
@@ -195,6 +197,10 @@ def build_command(
         argv += ["--device", profile.image_editing_scheduler]
     if profile.image_strength is not None:
         argv += ["--true-cfg", str(float(profile.image_strength))]
+    if profile.image_lora_weights:
+        argv += ["--lora", profile.image_lora_weights]
+    if profile.image_lora_scale is not None:
+        argv += ["--lora-scale", str(float(profile.image_lora_scale))]
 
     for k, v in (profile.args or {}).items():
         flag = "--" + str(k).replace("_", "-")
@@ -256,6 +262,16 @@ def profile_schema() -> list[ProfileField]:
             default="", help="Optional negative prompt.",
         ),
         ProfileField(
+            key="image_lora_weights", label="LoRA", kind="text",
+            default="",
+            help="HF repo id or local .safetensors path. Example: gokaygokay/Krea-2-Realism-LoRA.",
+        ),
+        ProfileField(
+            key="image_lora_scale", label="LoRA scale", kind="float",
+            default=None,
+            help="1.0 for full effect; 0.7-0.8 for a subtler realism push.",
+        ),
+        ProfileField(
             key="image_seed", label="Seed", kind="int",
             default=None, help="Leave blank for a fresh seed each run.",
         ),
@@ -279,6 +295,14 @@ def default_profiles(model_dir: Path | None = None) -> dict[str, dict[str, Any]]
                 "image_size": _DEFAULT_SIZE,
                 "image_steps": _DEFAULT_STEPS_QUALITY,
                 "image_guidance": 0.0,
+            },
+            "krea-realism-lora": {
+                "image_model_type": _ORIGINAL_SENTINEL,
+                "image_size": _DEFAULT_SIZE,
+                "image_steps": _DEFAULT_STEPS_QUALITY,
+                "image_guidance": 0.0,
+                "image_lora_weights": KREA_REALISM_LORA_REPO,
+                "image_lora_scale": 1.0,
             },
         }
     return {
