@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from . import asr, flux2, hidream, krea, z_image
+from . import asr, flux2, hidream, ideogram4, krea, z_image
 
 # Public registry. Keys match ``engine_type`` strings used in config.py.
 ADAPTERS = {
@@ -22,6 +22,7 @@ ADAPTERS = {
     "flux2": flux2,
     "z_image": z_image,
     "krea": krea,
+    "ideogram4": ideogram4,
     "asr": asr,
 }
 
@@ -61,5 +62,5 @@ def capabilities(engine: str) -> dict:
 
 __all__ = [
     "ADAPTERS", "get", "capabilities",
-    "hidream", "flux2", "z_image", "krea", "asr",
+    "hidream", "flux2", "z_image", "krea", "ideogram4", "asr",
 ]

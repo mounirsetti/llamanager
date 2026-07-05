@@ -765,6 +765,7 @@ async def diffusion_engines(request: Request,
             "hidream": bool(cfg.hidream_python and cfg.hidream_repo),
             "z_image": bool(cfg.z_image_python),
             "krea":    bool(cfg.z_image_python),
+            "ideogram4": bool(cfg.ideogram4_python),
             "flux2":   bool(cfg.flux2_sd_cli),
         }.get(eng_id, False)
         plan = resolve_plan(eng_id, gpu, emit=None, cfg=cfg)

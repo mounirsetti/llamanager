@@ -65,7 +65,7 @@ AMD_ROCM_INDEX = f"https://repo.radeon.com/rocm/manylinux/{AMD_ROCM_REL}/"
 CPU_TORCH_INDEX = "https://download.pytorch.org/whl/cpu"
 
 # Engines whose AMD path we know how to wire to repo.radeon.com wheels.
-AMD_WHEEL_ENGINES = {"hidream", "z_image", "krea", "asr"}
+AMD_WHEEL_ENGINES = {"hidream", "z_image", "krea", "ideogram4", "asr"}
 # Valid values for the UI/CLI torch-backend selector.
 TORCH_BACKENDS = ("auto", "rocm", "cuda", "cpu")
 
@@ -178,6 +178,21 @@ ENGINE_PLANS: dict[str, EnginePackages] = {
             "and Z-Image. Krea needs a recent diffusers build with Qwen-Image "
             "GGUF loader support; use the version picker here if the shipped "
             "pin is behind upstream support."
+        ),
+    ),
+    "ideogram4": EnginePackages(
+        engine="ideogram4",
+        label="Ideogram 4",
+        packages=[
+            "torch",
+            "git+https://github.com/ideogram-oss/ideogram4.git",
+        ],
+        space_mb=9500,
+        notes=(
+            "Installs the official ideogram-oss/ideogram4 package. On AMD "
+            "AI PRO R9700, use the fp8 model: Ideogram marks fp8 as all-"
+            "hardware, while nf4 is CUDA-only. The model repos are gated; "
+            "accept the Hugging Face license and set HF_TOKEN before download."
         ),
     ),
     "hidream": EnginePackages(
@@ -1168,6 +1183,9 @@ class EngineInstaller:
         if engine in ("z_image", "krea"):
             kwargs["z_image_python"] = python_path
             self.cfg.z_image_python = python_path
+        elif engine == "ideogram4":
+            kwargs["ideogram4_python"] = python_path
+            self.cfg.ideogram4_python = python_path
         elif engine == "hidream":
             kwargs["hidream_python"] = python_path
             self.cfg.hidream_python = python_path

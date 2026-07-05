@@ -152,6 +152,7 @@
 
     {# diffusers version picker — install (or roll back to) a specific
        diffusers release. Fetched on demand. #}
+    {% if plan.has_diffusers %}
     {% set dv = diffusers_versions.get(engine) if diffusers_versions else none %}
     <div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--bg-2);">
       <div class="lm-engine-section__head"><span>diffusers version</span></div>
@@ -197,6 +198,7 @@
       {% endif %}
       {% endif %}
     </div>
+    {% endif %}
   {% else %}
   <p class="lm-engine-section__note">
     Auto-install isn't wired for this engine — the binary is too
@@ -248,21 +250,65 @@
 
 <div class="lm-engine-section__head">
   <span>LoRA adapters</span>
-  <span class="lm-engine-section__meta">optional style adapters for Krea profiles</span>
+  <span class="lm-engine-section__meta">dynamic Hugging Face collection check</span>
 </div>
 <p class="lm-engine-section__note">
-  Krea 2 Realism LoRA can be used by setting a profile's LoRA field to
-  <code>gokaygokay/Krea-2-Realism-LoRA</code>. Recommended settings are
-  8 steps, guidance 0.0, LoRA scale 1.0; lower scale to 0.7-0.8 for a subtler effect.
+  Refresh pulls the current contents of
+  <code>huggingface.co/collections/krea/krea-2-loras</code>. Downloaded LoRAs
+  can be used by setting a profile's LoRA field to the HF repo id or the local
+  <code>.safetensors</code> path; 8 steps, guidance 0.0, LoRA scale 1.0 is a
+  good starting point.
 </p>
-<form method="post" action="/ui/setup-diffusion/engine/krea/download-model"
-      style="display: inline-flex; gap: 8px; align-items: center; margin-bottom: 16px;">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <input type="hidden" name="repo" value="gokaygokay/Krea-2-Realism-LoRA">
-  <input type="hidden" name="filename" value="krea2_realism_lora.safetensors">
-  <button type="submit" class="lm-btn lm-btn--ghost lm-btn--sm">Download realism LoRA</button>
-  <span style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.75rem; color: var(--fg-2);">469.3 MB</span>
-</form>
+<div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;">
+  <button type="button" class="lm-btn lm-btn--ghost lm-btn--sm"
+          hx-get="/ui/setup-diffusion/krea-loras"
+          hx-target="#setup-diffusion-body" hx-swap="morph">
+    Refresh Krea LoRAs
+  </button>
+  {% if krea_lora_collection.last_checked %}
+  <span style="font-size: 0.75rem; color: var(--fg-2);">
+    Last checked {{ krea_lora_collection.last_checked | localdt }}
+    {% if krea_lora_collection.items %} · {{ krea_lora_collection.items|length }} found{% endif %}
+  </span>
+  {% endif %}
+</div>
+{% if krea_lora_collection.error %}
+<p class="lm-engine-section__note" style="color: var(--danger);">
+  Could not refresh Krea LoRAs: {{ krea_lora_collection.error }}
+</p>
+{% endif %}
+{% if krea_lora_collection.items %}
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; margin-bottom: 16px;">
+  {% for lora in krea_lora_collection.items %}
+  <div style="display: grid; grid-template-columns: 48px 1fr auto; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid var(--bg-3); background: var(--bg-2);">
+    {% if lora.preview %}
+    <img src="{{ lora.preview }}" alt="" loading="lazy"
+         style="width: 48px; height: 48px; object-fit: cover; border-radius: 4px;">
+    {% else %}
+    <div style="width: 48px; height: 48px; border: 1px solid var(--bg-3); background: var(--bg-1);"></div>
+    {% endif %}
+    <div style="min-width: 0;">
+      <code style="font-size: 0.75rem; display: block; overflow-wrap: anywhere;">{{ lora.repo }}</code>
+      <span style="font-size: 0.6875rem; color: var(--fg-2);">
+        {{ lora.filename or 'safetensors file not detected' }}
+        {% if lora.size_gb %} · {{ '%.2f GB' % lora.size_gb }}{% endif %}
+      </span>
+    </div>
+    <form method="post" action="/ui/setup-diffusion/engine/krea/download-model"
+          style="display: inline-flex;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="repo" value="{{ lora.repo }}">
+      {% if lora.filename %}<input type="hidden" name="filename" value="{{ lora.filename }}">{% endif %}
+      <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Download</button>
+    </form>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="lm-engine-section__note" style="margin-bottom: 16px;">
+  Click refresh to list the current Krea 2 LoRA collection.
+</p>
+{% endif %}
 
 <div class="lm-engine-section__head">
   <span>Quantized weights</span>
@@ -464,6 +510,73 @@
     {{ krea_quant_downloads() }}
     {{ download_progress() }}
     {{ engine_models_list('krea') }}
+  </div>
+</div>
+
+
+{# ===================================================================
+   IDEOGRAM 4
+   =================================================================== #}
+{% set ig_state = 'ready' if image_cfg.ideogram4_python else 'idle' %}
+<div class="lm-engine-card" data-engine="ideogram4">
+  <div class="lm-engine-card__head">
+    <h2 class="lm-engine-card__name">Ideogram 4</h2>
+    <span class="lm-engine-card__tag">Comfy-Org fp8 package</span>
+  </div>
+  <div class="lm-engine-card__status" data-state="{{ ig_state }}">
+    {% if image_cfg.ideogram4_python %}
+      Ready — Python at <code style="margin-left: 4px;">{{ image_cfg.ideogram4_python }}</code>
+    {% else %}
+      Not configured. Install dependencies below or point at an existing Ideogram 4 Python.
+    {% endif %}
+  </div>
+
+  <form class="lm-form" method="post" action="/ui/setup/image/ideogram4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-field">
+      <label class="lm-field-label" for="ideogram4-python">Python executable</label>
+      <div style="display: flex; gap: 8px; align-items: flex-end;">
+        <input id="ideogram4-python" class="lm-input lm-input--mono" type="text"
+               name="ideogram4_python" value="{{ image_cfg.ideogram4_python }}"
+               placeholder="{{ engine_venv_python.ideogram4 }}"
+               style="flex: 1; min-width: 0;">
+        <button type="button"
+                class="lm-btn lm-btn--ghost lm-btn--xs"
+                hx-get="/ui/fs/browse?kind=file&target=ideogram4-python"
+                data-fs-prefill="ideogram4-python"
+                hx-target="[data-fs-host='ideogram4-python']"
+                hx-swap="innerHTML">Browse…</button>
+      </div>
+      <div class="lm-fs-host" data-fs-host="ideogram4-python"></div>
+      <p class="lm-engine-section__note">
+        Downloads now target <code>Comfy-Org/Ideogram-4</code>, a ComfyUI
+        repack of Ideogram 4 fp8. The installed folder is detected by this
+        engine; generation support still depends on a compatible runner for
+        that ComfyUI layout.
+      </p>
+    </div>
+    <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Save path</button>
+  </form>
+
+  {{ install_section('ideogram4') }}
+
+  <div class="lm-engine-section">
+    <div class="lm-engine-section__head"><span>Models</span></div>
+    {{ model_download_form(
+        'ideogram4',
+        'Comfy-Org/Ideogram-4',
+        'leave blank',
+        'Recommended for AMD AI PRO R9700: <code>Comfy-Org/Ideogram-4</code>, the ComfyUI fp8 repack. Full repo size is shown by Hugging Face as about 65.9 GB.'
+    ) }}
+    <form method="post" action="/ui/setup-diffusion/engine/ideogram4/download-model"
+          style="display: inline-flex; gap: 8px; align-items: center; margin-bottom: 12px;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="repo" value="Comfy-Org/Ideogram-4">
+      <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Download Comfy-Org package</button>
+      <span style="font-size: 0.75rem; color: var(--fg-2);">fp8 · ~65.9 GB</span>
+    </form>
+    {{ download_progress() }}
+    {{ engine_models_list('ideogram4') }}
   </div>
 </div>
 

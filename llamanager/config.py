@@ -171,6 +171,7 @@ ENGINE_FAMILY: dict[str, str] = {
     "flux2":   "image",
     "z_image": "image",
     "krea":    "image",
+    "ideogram4": "image",
     "asr":     "audio",
 }
 
@@ -255,6 +256,28 @@ def _looks_like_krea(d: Path) -> bool:
                for p in d.iterdir())
 
 
+def _looks_like_ideogram4(d: Path) -> bool:
+    """Ideogram 4 official pipeline or Comfy-Org repack layout."""
+    if not d.is_dir():
+        return False
+    mi = d / "model_index.json"
+    if mi.is_file():
+        try:
+            import json as _json
+            data = _json.loads(mi.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        if (data.get("_class_name") or "").strip() == "Ideogram4Pipeline":
+            return True
+    comfy_markers = (
+        d / "diffusion_models" / "ideogram4_fp8_scaled.safetensors",
+        d / "diffusion_models" / "ideogram4_unconditional_fp8_scaled.safetensors",
+        d / "text_encoders" / "qwen3vl_8b_fp8_scaled.safetensors",
+        d / "vae" / "ae.safetensors",
+    )
+    return any(p.is_file() for p in comfy_markers)
+
+
 def _looks_like_asr(d: Path) -> bool:
     """Whisper / speech-to-text checkpoint directory shape: a Hugging Face
     ``config.json`` whose ``model_type`` is ``whisper`` (or whose
@@ -296,6 +319,8 @@ def detect_engine_for_path(model_path: Path) -> str:
             return "z_image"
         if _looks_like_krea(model_path):
             return "krea"
+        if _looks_like_ideogram4(model_path):
+            return "ideogram4"
         if _looks_like_hidream(model_path):
             return "hidream"
         if _looks_like_flux2(model_path):
@@ -542,6 +567,9 @@ class Config:
     # with llamanager (engines/_z_image_runner.py), so there's no
     # separate source folder to clone.
     z_image_python: str = ""
+    # Ideogram 4 uses the official ideogram-oss/ideogram4 package and a
+    # local runner shipped with llamanager.
+    ideogram4_python: str = ""
     # ASR (Whisper / speech-to-text) only needs a Python interpreter with
     # ``torch`` + ``transformers``; the runner ships with llamanager
     # (engines/_asr_runner.py). The installer typically points this at the
@@ -834,6 +862,7 @@ def load_config(path: Path | None = None) -> Config:
         flux2_sd_cli=str(image_cfg.get("flux2_sd_cli", "") or ""),
         flux2_device_index=_coerce_int(image_cfg.get("flux2_device_index")),
         z_image_python=str(image_cfg.get("z_image_python", "") or ""),
+        ideogram4_python=str(image_cfg.get("ideogram4_python", "") or ""),
         asr_python=str(image_cfg.get("asr_python", "") or ""),
         asr_models_dir_override=(
             expand(str(image_cfg["asr_models_dir"]))
@@ -1300,6 +1329,7 @@ def update_image_config(cfg_path: Path, *,
                         flux2_device_index: int | None = None,
                         clear_flux2_device_index: bool = False,
                         z_image_python: str | None = None,
+                        ideogram4_python: str | None = None,
                         asr_python: str | None = None,
                         asr_models_dir: str | None = None,
                         asr_vram_budget_gb: float | None = None,
@@ -1331,6 +1361,8 @@ def update_image_config(cfg_path: Path, *,
         img["flux2_device_index"] = int(flux2_device_index)
     if z_image_python is not None:
         img["z_image_python"] = z_image_python
+    if ideogram4_python is not None:
+        img["ideogram4_python"] = ideogram4_python
     if asr_python is not None:
         img["asr_python"] = asr_python
     if asr_models_dir is not None:

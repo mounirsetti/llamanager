@@ -32,7 +32,7 @@ class CatalogEntry:
     "downloading".
     """
     canonical_id: str
-    engine: str            # 'hidream' | 'z_image' | 'krea' | 'flux2'
+    engine: str            # 'hidream' | 'z_image' | 'krea' | 'ideogram4' | 'flux2'
     label: str             # human-readable name
     hf_repo: str           # 'org/name'
     subfolder: str = ""    # optional HF subfolder
@@ -107,6 +107,19 @@ CATALOG: list[CatalogEntry] = [
             "more VRAM and disk than the GGUF downloads."
         ),
         homepage="https://huggingface.co/krea/Krea-2-Turbo",
+    ),
+    CatalogEntry(
+        canonical_id="Comfy-Org/Ideogram-4",
+        engine="ideogram4",
+        label="Ideogram 4 (Comfy-Org)",
+        hf_repo="Comfy-Org/Ideogram-4",
+        approx_size_gb=65.9,
+        description=(
+            "ComfyUI-style repack of the Ideogram 4 fp8 weights. This is "
+            "the practical AMD/R9700 download target; it includes the "
+            "diffusion models, text encoders, and VAE folders used by ComfyUI."
+        ),
+        homepage="https://huggingface.co/Comfy-Org/Ideogram-4",
     ),
     CatalogEntry(
         canonical_id="FLUX.2-dev",

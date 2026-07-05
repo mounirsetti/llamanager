@@ -23,6 +23,7 @@ def test_engine_family_lookup():
     assert ENGINE_FAMILY["hidream"] == "image"
     assert ENGINE_FAMILY["flux2"] == "image"
     assert ENGINE_FAMILY["krea"] == "image"
+    assert ENGINE_FAMILY["ideogram4"] == "image"
     assert engine_family("llama") == "text"
     assert engine_family("hidream") == "image"
     # Unknown engines fall back to text so legacy configs keep working.
@@ -62,6 +63,22 @@ def test_detect_engine_for_original_krea_dir(tmp_path: Path):
     d.mkdir()
     (d / "model_index.json").write_text('{"_class_name":"Krea2Pipeline"}')
     assert detect_engine_for_path(d) == "krea"
+
+
+def test_detect_engine_for_ideogram4_dir(tmp_path: Path):
+    from llamanager.config import detect_engine_for_path
+    d = tmp_path / "ideogram-4-fp8"
+    d.mkdir()
+    (d / "model_index.json").write_text('{"_class_name":"Ideogram4Pipeline"}')
+    assert detect_engine_for_path(d) == "ideogram4"
+
+
+def test_detect_engine_for_comfy_ideogram4_dir(tmp_path: Path):
+    from llamanager.config import detect_engine_for_path
+    d = tmp_path / "Comfy-Org" / "Ideogram-4"
+    (d / "diffusion_models").mkdir(parents=True)
+    (d / "diffusion_models" / "ideogram4_fp8_scaled.safetensors").write_bytes(b"")
+    assert detect_engine_for_path(d) == "ideogram4"
 
 
 def test_detect_engine_for_mlx_dir_still_works(tmp_path: Path):
@@ -330,6 +347,43 @@ def test_krea_lora_profile_fields_roundtrip(tmp_path: Path):
     p = cfg.models["krea/Krea-2-Turbo"].profiles["krea-realism"]
     assert p.image_lora_weights == "gokaygokay/Krea-2-Realism-LoRA"
     assert p.image_lora_scale == 1.0
+
+
+def test_ideogram4_adapter_builds_argv(tmp_path: Path):
+    from llamanager.engines import ideogram4
+    from llamanager.config import Config, Profile
+    from llamanager.engines._base import ImageRequest
+
+    fake_py = tmp_path / "python"
+    fake_py.write_bytes(b"")
+    cfg = Config()
+    cfg.ideogram4_python = str(fake_py)
+    model = tmp_path / "ideogram-ai" / "ideogram-4-fp8"
+    model.mkdir(parents=True)
+    (model / "model_index.json").write_text('{"_class_name":"Ideogram4Pipeline"}')
+    prof = Profile(
+        name="ideogram4-fp8",
+        image_model_type="fp8",
+        image_size="1024x1024",
+        image_editing_scheduler="V4_QUALITY_48",
+        image_seed=7,
+        args={"magic_prompt": False, "warn_on_caption_issues": True},
+    )
+    req = ImageRequest(
+        prompt='{"high_level_description":"poster"}',
+        width=0, height=0, steps=None, seed=None, n=1,
+    )
+    argv, env = ideogram4.build_command(cfg, model, prof, req, tmp_path / "out.png")
+    assert "_ideogram4_runner.py" in argv[2]
+    assert "--weights-repo" in argv
+    assert argv[argv.index("--weights-repo") + 1] == str(model)
+    assert "--quantization" in argv
+    assert argv[argv.index("--quantization") + 1] == "fp8"
+    assert "--sampler-preset" in argv
+    assert argv[argv.index("--sampler-preset") + 1] == "V4_QUALITY_48"
+    assert "--no-magic-prompt" in argv
+    assert "--warn-on-caption-issues" in argv
+    assert env["PYTHONIOENCODING"] == "utf-8"
 
 
 # ---------- queue routing ----------
