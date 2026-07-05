@@ -268,7 +268,7 @@
   {% if krea_lora_collection.last_checked %}
   <span style="font-size: 0.75rem; color: var(--fg-2);">
     Last checked {{ krea_lora_collection.last_checked | localdt }}
-    {% if krea_lora_collection.items %} · {{ krea_lora_collection.items|length }} found{% endif %}
+    {% if krea_lora_collection['items'] %} · {{ krea_lora_collection['items']|length }} found{% endif %}
   </span>
   {% endif %}
 </div>
@@ -277,9 +277,9 @@
   Could not refresh Krea LoRAs: {{ krea_lora_collection.error }}
 </p>
 {% endif %}
-{% if krea_lora_collection.items %}
+{% if krea_lora_collection['items'] %}
 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; margin-bottom: 16px;">
-  {% for lora in krea_lora_collection.items %}
+  {% for lora in krea_lora_collection['items'] %}
   <div style="display: grid; grid-template-columns: 48px 1fr auto; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid var(--bg-3); background: var(--bg-2);">
     {% if lora.preview %}
     <img src="{{ lora.preview }}" alt="" loading="lazy"
@@ -314,11 +314,12 @@
   <span>Quantized weights</span>
   <span class="lm-engine-section__meta">single-file downloads from vantagewithai/Krea-2-Turbo-GGUF</span>
 </div>
-<p class="lm-engine-section__note">
-  Krea 2 Turbo is a 13B Qwen-Image architecture model. For a 32 GB VRAM GPU:
-  start with <code>Q6_K</code> for comfortable everyday use; use
-  <code>Q8_0</code> when the GPU is dedicated to image generation and you want
-  the best quality from this repo.
+<p class="lm-engine-section__note" style="color: var(--danger);">
+  Heads up (2026-07-05): these GGUF quants use Krea 2's own tensor layout,
+  which diffusers cannot load (no Krea2 single-file/GGUF loader upstream) —
+  they only work in ComfyUI. For llamanager, download the original
+  <code>krea/Krea-2-Turbo</code> checkpoint above instead (needs
+  diffusers&nbsp;&ge;&nbsp;0.39; runs with CPU offload on a 32 GB GPU).
 </p>
 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; margin-bottom: 12px;">
   {% for quant in krea_quant_files %}
@@ -573,7 +574,17 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="repo" value="Comfy-Org/Ideogram-4">
       <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Download Comfy-Org package</button>
-      <span style="font-size: 0.75rem; color: var(--fg-2);">fp8 · ~65.9 GB</span>
+      <span style="font-size: 0.75rem; color: var(--fg-2);">fp8 · ~65.9 GB · ComfyUI layout (no runner support yet)</span>
+    </form>
+    <form method="post" action="/ui/setup-diffusion/engine/ideogram4/download-model"
+          style="display: inline-flex; gap: 8px; align-items: center; margin-bottom: 12px;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="repo" value="ideogram-ai/ideogram-4-fp8">
+      <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Download official fp8 weights</button>
+      <span style="font-size: 0.75rem; color: var(--fg-2);">
+        ~27.5 GB · works with the official runner · gated repo: accept the
+        license on Hugging Face and set an HF token first · non-commercial license
+      </span>
     </form>
     {{ download_progress() }}
     {{ engine_models_list('ideogram4') }}

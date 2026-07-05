@@ -1294,12 +1294,19 @@ async def images_generations(request: Request) -> Response:
 
     # Engine-specific arity guard. Adapters re-check too, but we want a
     # clear 400 before we burn a queue slot or decode bytes.
-    if engine == "flux2" and len(raw_ref_payloads) > 1:
-        raise HTTPException(
-            status_code=400,
-            detail=("flux2 supports at most one reference image (img2img); "
-                    f"got {len(raw_ref_payloads)}"),
-        )
+    if raw_ref_payloads:
+        try:
+            from . import engines as _engines
+            ref_max = int(
+                _engines.get(engine).capabilities().get("ref_images_max", 0))
+        except Exception:
+            ref_max = None
+        if ref_max is not None and len(raw_ref_payloads) > ref_max:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"{engine} supports at most {ref_max} reference "
+                        f"image(s); got {len(raw_ref_payloads)}"),
+            )
 
     keep_original_aspect = bool(body.get("keep_original_aspect", False))
     layout_bboxes_raw = body.get("layout_bboxes")

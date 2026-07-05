@@ -136,11 +136,25 @@ def build_command(
     if profile.image_model_type:
         argv += ["--dtype", profile.image_model_type]
 
+    # One reference image → img2img via ZImageImg2ImgPipeline. The
+    # strength knob (request `strength`, else profile.image_strength)
+    # controls how much of the init image survives.
+    if req.ref_images:
+        if len(req.ref_images) != 1:
+            raise RuntimeError(
+                "z_image img2img accepts exactly one reference image; "
+                f"got {len(req.ref_images)}"
+            )
+        argv += ["--init-image", str(req.ref_images[0])]
+        strength = req.strength
+        if strength is None and profile.image_strength is not None:
+            strength = float(profile.image_strength)
+        if strength is not None:
+            argv += ["--strength", f"{float(strength):.4f}"]
+
     # Honour profile.args as raw passthrough (snake_case → --kebab-case),
     # so power users can flip --device or --dtype overrides without code
-    # changes. Reference-image inputs are not supported by Z-Image's
-    # base pipeline today; ignore ``req.ref_images`` silently rather
-    # than failing the whole request.
+    # changes.
     for k, v in (profile.args or {}).items():
         flag = "--" + str(k).replace("_", "-")
         if isinstance(v, bool):
@@ -229,6 +243,13 @@ def profile_schema() -> list[ProfileField]:
             default="", help="Optional negative prompt forwarded to the pipeline.",
         ),
         ProfileField(
+            key="image_strength", label="Img2img strength", kind="float",
+            default=None,
+            help="Only used with a reference image: 0 keeps it exactly, "
+                 "1 ignores it. 0.5-0.7 re-lights/re-stages while keeping "
+                 "the subject. Request 'strength' overrides this.",
+        ),
+        ProfileField(
             key="image_model_type", label="Torch dtype", kind="select",
             default="", options=["", "bfloat16", "float16", "float32"],
             help="Advanced override. Blank auto-selects bfloat16 on CUDA, float16 on MPS, float32 on CPU.",
@@ -237,8 +258,14 @@ def profile_schema() -> list[ProfileField]:
 
 
 def capabilities() -> dict[str, Any]:
-    """Z-Image's base pipeline is text-to-image only (no reference inputs)."""
-    return {"ref_images_max": 0}
+    """One reference image supported via img2img (denoise strength)."""
+    return {
+        "ref_images_max": 1,
+        "ref_label": "Init image (img2img)",
+        "ref_help": "One image to transform. Lower strength keeps more of it.",
+        "strength": True,
+        "strength_default": 0.6,
+    }
 
 
 def default_profiles() -> dict[str, dict[str, Any]]:

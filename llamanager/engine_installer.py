@@ -51,7 +51,7 @@ MAX_LOG_BYTES = 200_000  # cap stored log size so the DB doesn't bloat
 # when moving the engines to a newer diffusers release. 0.38.0 is the first
 # release line that exports ``ZImagePipeline`` (verified against the
 # v0.38.0 tag), so Z-Image runs on the pinned release, not git main.
-DIFFUSERS_PIN = "0.38.0"
+DIFFUSERS_PIN = "0.39.0"  # Krea 2 needs Krea2Pipeline (added in 0.39)
 
 # AMD ROCm wheel index. Single curated release we test against; the
 # scraper picks the latest paired (torch, torchvision, triton) under

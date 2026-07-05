@@ -363,6 +363,12 @@ def main() -> int:
                         "'auto' keeps it on the main device except on AMD ROCm, "
                         "where it defaults to cpu (the conv decode hits unstable "
                         "MIOpen kernel paths on new archs like gfx1201).")
+    p.add_argument("--init-image", default=None, type=Path,
+                   help="Reference image: switches to img2img "
+                        "(ZImageImg2ImgPipeline).")
+    p.add_argument("--strength", type=float, default=0.6,
+                   help="Img2img denoise strength: 0 keeps the init image, "
+                        "1 ignores it.")
     args = p.parse_args()
 
     model_path = args.model_path.expanduser().resolve()
@@ -376,6 +382,15 @@ def main() -> int:
     dtype_name = args.dtype or default_dtype
     print(f"[z-image] device={device} dtype={dtype_name}", file=sys.stderr)
 
+    init_image = None
+    if args.init_image is not None:
+        init_path = args.init_image.expanduser().resolve()
+        if not init_path.is_file():
+            print(f"[z-image] init image not found: {init_path}", file=sys.stderr)
+            return 2
+        from PIL import Image
+        init_image = Image.open(init_path).convert("RGB")
+
     import torch
     pipe = _load_pipeline(
         model_path, dtype_name,
@@ -385,6 +400,10 @@ def main() -> int:
         scaffold=args.scaffold,
         scaffold_repo=args.scaffold_repo,
     )
+    if init_image is not None:
+        # Same components, img2img sampler.
+        from diffusers import ZImageImg2ImgPipeline
+        pipe = ZImageImg2ImgPipeline(**pipe.components)
     pipe.to(device)
 
     # VAE memory/stability hardening: tile + slice the decode so conv
@@ -403,7 +422,12 @@ def main() -> int:
     if split_decode:
         print(f"[z-image] VAE decode on {vae_device} (transformer on {device})",
               file=sys.stderr)
-        pipe.vae.to(vae_device)
+        if init_image is None:
+            pipe.vae.to(vae_device)
+        # img2img: the pipeline VAE-encodes the init image up front on the
+        # main device. Tiled encode is small enough to be safe there, so
+        # keep the VAE on the GPU through the denoise loop and only move
+        # it to vae_device for the (riskier) full-image decode below.
 
     generator = None
     if args.seed is not None:
@@ -413,36 +437,38 @@ def main() -> int:
         except (RuntimeError, ValueError):
             generator = torch.Generator("cpu").manual_seed(int(args.seed))
 
+    mode = f"img2img strength={args.strength}" if init_image is not None else "t2i"
     print(
         f"[z-image] generating {args.width}x{args.height} "
-        f"steps={args.steps} cfg={args.guidance} seed={args.seed}",
+        f"steps={args.steps} cfg={args.guidance} seed={args.seed} ({mode})",
         file=sys.stderr,
     )
+
+    call_kwargs = dict(
+        prompt=args.prompt,
+        negative_prompt=args.negative_prompt or None,
+        height=args.height,
+        width=args.width,
+        num_inference_steps=args.steps,
+        guidance_scale=args.guidance,
+        generator=generator,
+    )
+    if init_image is not None:
+        # The img2img pipeline derives latent dims from the init image, so
+        # resize it to the requested output size ourselves.
+        if init_image.size != (args.width, args.height):
+            init_image = init_image.resize(
+                (args.width, args.height), Image.LANCZOS)
+        call_kwargs["image"] = init_image
+        call_kwargs["strength"] = args.strength
 
     if split_decode:
         # Run the transformer/scheduler loop on the GPU, get raw latents,
         # then decode them with the off-device VAE.
-        result = pipe(
-            prompt=args.prompt,
-            negative_prompt=args.negative_prompt or None,
-            height=args.height,
-            width=args.width,
-            num_inference_steps=args.steps,
-            guidance_scale=args.guidance,
-            generator=generator,
-            output_type="latent",
-        )
+        result = pipe(output_type="latent", **call_kwargs)
         image = _decode_latents(pipe, result.images, vae_device)
     else:
-        result = pipe(
-            prompt=args.prompt,
-            negative_prompt=args.negative_prompt or None,
-            height=args.height,
-            width=args.width,
-            num_inference_steps=args.steps,
-            guidance_scale=args.guidance,
-            generator=generator,
-        )
+        result = pipe(**call_kwargs)
         image = result.images[0]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     image.save(str(args.output))

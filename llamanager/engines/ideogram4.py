@@ -25,7 +25,7 @@ SIZE_BUCKETS = [
     "1536x1024", "1024x1536",
     "2048x2048",
 ]
-PRESETS = ["V4_FAST_12", "V4_BALANCED_20", "V4_QUALITY_48"]
+PRESETS = ["V4_TURBO_12", "V4_DEFAULT_20", "V4_QUALITY_48"]
 QUANTIZATIONS = ["fp8", "nf4"]
 
 _STEP_RE = re.compile(r"(\d+)\s*/\s*(\d+)")

@@ -62,6 +62,33 @@ def main() -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
+    # The official package resolves every weight file through
+    # hf_hub_download(repo_id=...), which rejects local paths. When the
+    # operator points --weights-repo at an on-disk folder (a downloaded
+    # snapshot of ideogram-ai/ideogram-4-fp8), reroute those lookups to
+    # plain filesystem joins and leave real repo ids untouched.
+    if Path(args.weights_repo).expanduser().is_dir():
+        from ideogram4 import pipeline_ideogram4 as _pi
+        _real_hf_hub_download = _pi.hf_hub_download
+
+        def _local_or_hub(*a, repo_id: str = "", filename: str = "", **kw):
+            if a:  # tolerate positional (repo_id, filename) call styles
+                repo_id = a[0]
+                if len(a) > 1:
+                    filename = a[1]
+            root = Path(repo_id).expanduser()
+            if root.is_dir():
+                p = root / filename
+                if not p.is_file():
+                    raise FileNotFoundError(
+                        f"[ideogram4] {filename} not found in local "
+                        f"weights dir {root}")
+                return str(p)
+            return _real_hf_hub_download(repo_id=repo_id, filename=filename,
+                                         **kw)
+
+        _pi.hf_hub_download = _local_or_hub
+
     device = args.device or _select_device()
     dtype = _torch_dtype(args.dtype)
     magic_model = args.magic_prompt_model or DEFAULT_MAGIC_PROMPT

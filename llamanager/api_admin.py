@@ -923,6 +923,16 @@ async def diffusion_activate(request: Request,
     return JSONResponse({"ok": True, "default_image_model": new.default_image_model})
 
 
+def _refresh_cfg(request: Request) -> None:
+    """Re-read config.toml into app.state.cfg after an on-disk profile edit,
+    keeping the live bind/port."""
+    from .config import load_config
+    cfg = request.app.state.cfg
+    new = load_config(cfg.path)
+    new.bind = cfg.bind; new.port = cfg.port
+    request.app.state.cfg = new
+
+
 @router.get("/diffusion/profiles")
 async def diffusion_profiles_list(request: Request,
                                   model: str = "",
@@ -1000,6 +1010,7 @@ async def diffusion_profile_create(request: Request,
         raise HTTPException(status_code=400, detail=str(e))
     if body.make_default:
         set_model_default_profile(cfg.config_path, body.model_id, name)
+    _refresh_cfg(request)
     return JSONResponse({"ok": True, "name": name})
 
 
@@ -1048,6 +1059,7 @@ async def diffusion_profile_update(request: Request, name: str,
         save_profile(cfg.config_path, body.model_id, target, Profile(**kwargs))
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _refresh_cfg(request)
     return JSONResponse({"ok": True, "name": target})
 
 
@@ -1060,6 +1072,7 @@ async def diffusion_profile_delete(request: Request, name: str,
     if not model_id:
         raise HTTPException(status_code=400, detail="model_id required")
     delete_profile(cfg.config_path, model_id, name)
+    _refresh_cfg(request)
     return JSONResponse({"ok": True})
 
 
@@ -1095,6 +1108,7 @@ async def diffusion_profile_clone(request: Request, name: str,
         save_profile(cfg.config_path, body.model_id, new, Profile(**kwargs))
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _refresh_cfg(request)
     return JSONResponse({"ok": True, "name": new})
 
 
@@ -1114,6 +1128,7 @@ async def diffusion_set_model_default(request: Request,
     if body.profile_name and cfg.get_profile(body.model_id, body.profile_name) is None:
         raise HTTPException(status_code=400, detail="unknown profile")
     set_model_default_profile(cfg.config_path, body.model_id, body.profile_name)
+    _refresh_cfg(request)
     return JSONResponse({"ok": True})
 
 
@@ -1150,6 +1165,7 @@ async def diffusion_materialize_defaults(request: Request,
             written.append(prof_name)
         except (ValueError, TypeError) as e:
             raise HTTPException(status_code=400, detail=str(e))
+    _refresh_cfg(request)
     return JSONResponse({"ok": True, "materialized": written})
 
 

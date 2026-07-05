@@ -202,6 +202,12 @@ def build_command(
     if profile.image_lora_scale is not None:
         argv += ["--lora-scale", str(float(profile.image_lora_scale))]
 
+    if req.ref_images:
+        raise RuntimeError(
+            "krea does not support reference images: diffusers has no "
+            "Krea2 img2img pipeline yet. Use Z-Image for img2img."
+        )
+
     for k, v in (profile.args or {}).items():
         flag = "--" + str(k).replace("_", "-")
         if isinstance(v, bool):
@@ -210,7 +216,25 @@ def build_command(
         else:
             argv += [flag, str(v)]
 
-    return argv, {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+    env: dict[str, str] = {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+    # AMD ROCm: the lightweight torch wheels dlopen system ROCm libs that
+    # aren't on the default linker path — same treatment as z_image.
+    from ..gpu_detect import rocm_lib_dirs
+    rocm_dirs = rocm_lib_dirs()
+    if rocm_dirs:
+        import os as _os
+        prior = _os.environ.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = _os.pathsep.join(
+            rocm_dirs + ([prior] if prior else []))
+        env.setdefault("MIOPEN_FIND_MODE", "FAST")
+        cache = cfg.data_dir / "cache" / "miopen"
+        try:
+            cache.mkdir(parents=True, exist_ok=True)
+            env.setdefault("MIOPEN_USER_DB_PATH", str(cache))
+            env.setdefault("MIOPEN_CUSTOM_CACHE_DIR", str(cache))
+        except OSError:
+            pass
+    return argv, env
 
 
 def parse_progress(line: str) -> ProgressEvent | None:
@@ -284,6 +308,7 @@ def profile_schema() -> list[ProfileField]:
 
 
 def capabilities() -> dict[str, Any]:
+    """Text-to-image only: diffusers has no Krea2 img2img pipeline yet."""
     return {"ref_images_max": 0}
 
 

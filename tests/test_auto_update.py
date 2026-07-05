@@ -275,8 +275,8 @@ def test_diffusion_target_versions():
 
 @pytest.mark.parametrize("installed,expected", [
     ("0.36.0", True),       # older than the pin -> update
-    ("0.38.0", False),      # exactly the pin -> no update
-    ("0.39.0.dev0", False), # newer (e.g. someone on git main) -> never downgrade
+    ("0.39.0", False),      # exactly the pin -> no update
+    ("0.40.0.dev0", False), # newer (e.g. someone on git main) -> never downgrade
     (None, False),          # not installed -> never first-install
 ])
 def test_diffusion_update_info(tmp_path, monkeypatch, installed, expected):
