@@ -129,6 +129,12 @@ def build_command(
     ]
     if seed is not None:
         argv += ["--seed", str(int(seed))]
+    if profile.image_negative_prompt:
+        argv += ["--negative_prompt", profile.image_negative_prompt]
+    if profile.image_editing_scheduler:
+        argv += ["--vae-device", profile.image_editing_scheduler]
+    if profile.image_model_type:
+        argv += ["--dtype", profile.image_model_type]
 
     # Honour profile.args as raw passthrough (snake_case → --kebab-case),
     # so power users can flip --device or --dtype overrides without code
@@ -212,6 +218,20 @@ def profile_schema() -> list[ProfileField]:
         ProfileField(
             key="image_seed", label="Seed", kind="int",
             default=None, help="Leave blank for a fresh seed each run.",
+        ),
+        ProfileField(
+            key="image_editing_scheduler", label="VAE device", kind="select",
+            default="auto", options=["auto", "cuda", "cpu", "mps"],
+            help="Advanced: decode on CPU/cuda/mps. Auto keeps ROCm VAE decode on CPU for stability.",
+        ),
+        ProfileField(
+            key="image_negative_prompt", label="Negative prompt", kind="text",
+            default="", help="Optional negative prompt forwarded to the pipeline.",
+        ),
+        ProfileField(
+            key="image_model_type", label="Torch dtype", kind="select",
+            default="", options=["", "bfloat16", "float16", "float32"],
+            help="Advanced override. Blank auto-selects bfloat16 on CUDA, float16 on MPS, float32 on CPU.",
         ),
     ]
 

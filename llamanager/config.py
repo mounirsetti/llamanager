@@ -170,6 +170,7 @@ ENGINE_FAMILY: dict[str, str] = {
     "hidream": "image",
     "flux2":   "image",
     "z_image": "image",
+    "krea":    "image",
     "asr":     "audio",
 }
 
@@ -235,6 +236,25 @@ def _looks_like_z_image(d: Path) -> bool:
     return (data.get("_class_name") or "").strip() == "ZImagePipeline"
 
 
+def _looks_like_krea(d: Path) -> bool:
+    """Krea 2 Turbo directory shapes: original Diffusers or GGUF quants."""
+    if not d.is_dir():
+        return False
+    mi = d / "model_index.json"
+    if mi.is_file():
+        try:
+            import json as _json
+            data = _json.loads(mi.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        if (data.get("_class_name") or "").strip() == "Krea2Pipeline":
+            return True
+    return any(p.is_file()
+               and p.name.lower().startswith("krea2_turbo-")
+               and p.suffix.lower() == ".gguf"
+               for p in d.iterdir())
+
+
 def _looks_like_asr(d: Path) -> bool:
     """Whisper / speech-to-text checkpoint directory shape: a Hugging Face
     ``config.json`` whose ``model_type`` is ``whisper`` (or whose
@@ -274,6 +294,8 @@ def detect_engine_for_path(model_path: Path) -> str:
             return "asr"
         if _looks_like_z_image(model_path):
             return "z_image"
+        if _looks_like_krea(model_path):
+            return "krea"
         if _looks_like_hidream(model_path):
             return "hidream"
         if _looks_like_flux2(model_path):
@@ -351,6 +373,7 @@ class Profile:
     image_guidance: float | None = None
     image_size: str = ""              # "WxH" — engine adapters validate/snap
     image_seed: int | None = None
+    image_negative_prompt: str = ""
     # Reference-image knobs. ``image_editing_scheduler`` is HiDream's
     # --editing_scheduler flag ("flow_match" | "flash"); only meaningful
     # when exactly one reference image is passed with --model_type dev.
@@ -745,6 +768,7 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
         image_guidance=_coerce_float(body.get("image_guidance")),
         image_size=str(body.get("image_size", "") or ""),
         image_seed=_coerce_int(body.get("image_seed")),
+        image_negative_prompt=str(body.get("image_negative_prompt", "") or ""),
         image_editing_scheduler=str(body.get("image_editing_scheduler", "") or ""),
         image_strength=_coerce_float(body.get("image_strength")),
         audio_language=str(body.get("audio_language", "") or ""),
@@ -1099,6 +1123,8 @@ def _profile_to_tomlkit(prof: Profile):
         tbl.add("image_size", prof.image_size)
     if prof.image_seed is not None:
         tbl.add("image_seed", prof.image_seed)
+    if prof.image_negative_prompt:
+        tbl.add("image_negative_prompt", prof.image_negative_prompt)
     if prof.image_editing_scheduler:
         tbl.add("image_editing_scheduler", prof.image_editing_scheduler)
     if prof.image_strength is not None:

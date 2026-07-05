@@ -168,6 +168,7 @@
    survive each tick. Without morph, every poll wiped the inline
    engine-paths and download forms. #}
 {% set _any_install_busy = (engine_installs.z_image and engine_installs.z_image.status in ('pending','running'))
+                       or (engine_installs.krea and engine_installs.krea.status in ('pending','running'))
                        or (engine_installs.hidream and engine_installs.hidream.status in ('pending','running')) %}
 {% set _any_download_busy = (downloads | selectattr('status', 'equalto', 'running') | list)
                          or (downloads | selectattr('status', 'equalto', 'pending') | list) %}

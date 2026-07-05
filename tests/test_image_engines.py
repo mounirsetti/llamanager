@@ -22,6 +22,7 @@ def test_engine_family_lookup():
     assert ENGINE_FAMILY["mlx"] == "text"
     assert ENGINE_FAMILY["hidream"] == "image"
     assert ENGINE_FAMILY["flux2"] == "image"
+    assert ENGINE_FAMILY["krea"] == "image"
     assert engine_family("llama") == "text"
     assert engine_family("hidream") == "image"
     # Unknown engines fall back to text so legacy configs keep working.
@@ -45,6 +46,22 @@ def test_detect_engine_for_flux2_dir(tmp_path: Path):
     (d / "flux2-dev-Q6_K.gguf").write_bytes(b"")
     (d / "ae.safetensors").write_bytes(b"")
     assert detect_engine_for_path(d) == "flux2"
+
+
+def test_detect_engine_for_krea_dir(tmp_path: Path):
+    from llamanager.config import detect_engine_for_path
+    d = tmp_path / "Krea-2-Turbo-GGUF"
+    d.mkdir()
+    (d / "krea2_turbo-Q6_K.gguf").write_bytes(b"")
+    assert detect_engine_for_path(d) == "krea"
+
+
+def test_detect_engine_for_original_krea_dir(tmp_path: Path):
+    from llamanager.config import detect_engine_for_path
+    d = tmp_path / "Krea-2-Turbo"
+    d.mkdir()
+    (d / "model_index.json").write_text('{"_class_name":"Krea2Pipeline"}')
+    assert detect_engine_for_path(d) == "krea"
 
 
 def test_detect_engine_for_mlx_dir_still_works(tmp_path: Path):
@@ -227,6 +244,62 @@ def test_flux2_progress_parser():
     assert ev is not None
     assert ev.step == 3
     assert ev.total == 28
+
+
+def test_krea_adapter_builds_argv_for_selected_quant(tmp_path: Path):
+    from llamanager.engines import krea
+    from llamanager.config import Config, Profile
+    from llamanager.engines._base import ImageRequest
+
+    fake_py = tmp_path / "python"
+    fake_py.write_bytes(b"")
+    cfg = Config()
+    cfg.z_image_python = str(fake_py)
+    model = tmp_path / "vantagewithai" / "Krea-2-Turbo-GGUF"
+    model.mkdir(parents=True)
+    (model / "krea2_turbo-Q6_K.gguf").write_bytes(b"")
+    (model / "krea2_turbo-Q8_0.gguf").write_bytes(b"")
+    prof = Profile(
+        name="krea",
+        image_model_type="krea2_turbo-Q8_0.gguf",
+        image_steps=8,
+        image_guidance=1.0,
+        image_negative_prompt="blur",
+    )
+    req = ImageRequest(
+        prompt="test", width=1024, height=1024,
+        steps=None, seed=123, n=1,
+    )
+    argv, env = krea.build_command(cfg, model, prof, req, tmp_path / "out.png")
+    assert "_krea_runner.py" in argv[2]
+    assert "--gguf" in argv
+    assert argv[argv.index("--gguf") + 1].endswith("krea2_turbo-Q8_0.gguf")
+    assert "--negative_prompt" in argv
+    assert "blur" in argv
+    assert env["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_krea_adapter_builds_argv_for_original_repo(tmp_path: Path):
+    from llamanager.engines import krea
+    from llamanager.config import Config, Profile
+    from llamanager.engines._base import ImageRequest
+
+    fake_py = tmp_path / "python"
+    fake_py.write_bytes(b"")
+    cfg = Config()
+    cfg.z_image_python = str(fake_py)
+    model = tmp_path / "krea" / "Krea-2-Turbo"
+    model.mkdir(parents=True)
+    (model / "model_index.json").write_text('{"_class_name":"Krea2Pipeline"}')
+    prof = Profile(name="krea-original", image_model_type="original")
+    req = ImageRequest(
+        prompt="test", width=1024, height=1024,
+        steps=None, seed=None, n=1,
+    )
+    argv, _env = krea.build_command(cfg, model, prof, req, tmp_path / "out.png")
+    assert "--model_path" in argv
+    assert argv[argv.index("--model_path") + 1] == str(model)
+    assert "--gguf" not in argv
 
 
 # ---------- queue routing ----------

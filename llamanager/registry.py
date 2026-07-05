@@ -717,7 +717,12 @@ class Registry:
             return
         model_id = repo  # directory-style id
         existing_model = self.cfg.get_model(model_id)
-        defaults = adapter.default_profiles() if hasattr(adapter, "default_profiles") else {}
+        defaults = {}
+        if hasattr(adapter, "default_profiles"):
+            try:
+                defaults = adapter.default_profiles(repo_dir)
+            except TypeError:
+                defaults = adapter.default_profiles()
         for pname, body in defaults.items():
             if existing_model and pname in existing_model.profiles:
                 continue

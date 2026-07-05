@@ -228,6 +228,54 @@
 {% endif %}
 {% endmacro %}
 
+{% macro krea_quant_downloads() %}
+<div class="lm-engine-section__head">
+  <span>Original weights</span>
+  <span class="lm-engine-section__meta">whole-repo download from krea/Krea-2-Turbo</span>
+</div>
+<p class="lm-engine-section__note">
+  Original Krea 2 Turbo is the full Diffusers checkpoint, with
+  <code>turbo.safetensors</code> at about 26.28 GB. Use it when you want the
+  official weights and have enough VRAM/disk headroom.
+</p>
+<form method="post" action="/ui/setup-diffusion/engine/krea/download-model"
+      style="display: inline-flex; gap: 8px; align-items: center; margin-bottom: 16px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="repo" value="krea/Krea-2-Turbo">
+  <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Download original</button>
+  <span style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.75rem; color: var(--fg-2);">~26.28 GB+</span>
+</form>
+
+<div class="lm-engine-section__head">
+  <span>Quantized weights</span>
+  <span class="lm-engine-section__meta">single-file downloads from vantagewithai/Krea-2-Turbo-GGUF</span>
+</div>
+<p class="lm-engine-section__note">
+  Krea 2 Turbo is a 13B Qwen-Image architecture model. For a 32 GB VRAM GPU:
+  start with <code>Q6_K</code> for comfortable everyday use; use
+  <code>Q8_0</code> when the GPU is dedicated to image generation and you want
+  the best quality from this repo.
+</p>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; margin-bottom: 12px;">
+  {% for quant in krea_quant_files %}
+  <form method="post" action="/ui/setup-diffusion/engine/krea/download-model"
+        style="display: flex; gap: 6px; align-items: center; padding: 8px 10px; border: 1px solid var(--bg-3); background: var(--bg-2);">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="repo" value="vantagewithai/Krea-2-Turbo-GGUF">
+    <input type="hidden" name="filename" value="{{ quant.filename }}">
+    <code style="font-size: 0.75rem; flex: 1; min-width: 0; overflow-wrap: anywhere;">{{ quant.label }}</code>
+    {% if quant.size_gb %}
+    <span style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.6875rem; color: var(--fg-2); white-space: nowrap;">{{ '%.2f GB' % quant.size_gb }}</span>
+    {% endif %}
+    {% if quant.label == 'Q8_0' %}
+    <span class="lm-pill" style="font-size: 0.625rem;">max quality</span>
+    {% endif %}
+    <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Download</button>
+  </form>
+  {% endfor %}
+</div>
+{% endmacro %}
+
 {% macro download_progress() %}
 {% set active = downloads | selectattr('status', 'in', ['running', 'pending']) | list %}
 {% if active %}
@@ -345,6 +393,59 @@
     ) }}
     {{ download_progress() }}
     {{ engine_models_list('z_image') }}
+  </div>
+</div>
+
+
+{# ===================================================================
+   KREA 2 TURBO
+   =================================================================== #}
+{% set kr_state = 'ready' if image_cfg.z_image_python else 'idle' %}
+<div class="lm-engine-card" data-engine="krea">
+  <div class="lm-engine-card__head">
+    <h2 class="lm-engine-card__name">Krea 2 Turbo</h2>
+    <span class="lm-engine-card__tag">Diffusers · original + GGUF</span>
+  </div>
+  <div class="lm-engine-card__status" data-state="{{ kr_state }}">
+    {% if image_cfg.z_image_python %}
+      Ready — shared Python at <code style="margin-left: 4px;">{{ image_cfg.z_image_python }}</code>
+    {% else %}
+      Not configured. Install the shared dependencies below or set the Z-Image/Krea Python path.
+    {% endif %}
+  </div>
+
+  <form class="lm-form" method="post" action="/ui/setup/image/z-image">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-field">
+      <label class="lm-field-label" for="krea-python">Shared Python executable</label>
+      <div style="display: flex; gap: 8px; align-items: flex-end;">
+        <input id="krea-python" class="lm-input lm-input--mono" type="text"
+               name="z_image_python" value="{{ image_cfg.z_image_python }}"
+               placeholder="{{ engine_venv_python.krea }}"
+               style="flex: 1; min-width: 0;">
+        <button type="button"
+                class="lm-btn lm-btn--ghost lm-btn--xs"
+                hx-get="/ui/fs/browse?kind=file&target=krea-python"
+                data-fs-prefill="krea-python"
+                hx-target="[data-fs-host='krea-python']"
+                hx-swap="innerHTML">Browse…</button>
+      </div>
+      <div class="lm-fs-host" data-fs-host="krea-python"></div>
+      <p class="lm-engine-section__note">
+        Krea shares the Z-Image dependency venv. It needs torch, transformers,
+        diffusers with Qwen-Image GGUF support, and <code>gguf</code>.
+      </p>
+    </div>
+    <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Save path</button>
+  </form>
+
+  {{ install_section('krea') }}
+
+  <div class="lm-engine-section">
+    <div class="lm-engine-section__head"><span>Models</span></div>
+    {{ krea_quant_downloads() }}
+    {{ download_progress() }}
+    {{ engine_models_list('krea') }}
   </div>
 </div>
 

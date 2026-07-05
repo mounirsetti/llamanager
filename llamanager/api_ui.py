@@ -3288,7 +3288,7 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
 
     # Per-engine install state — surface the most-relevant row so the
     # card can show "running 42%", "done", or "click to install".
-    engines = ("z_image", "hidream", "flux2")
+    engines = ("z_image", "krea", "hidream", "flux2")
     install_state: dict[str, Any] = {}
     for eng in engines:
         active = installer.active_for_engine(eng)
@@ -3335,6 +3335,18 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
     ctx["engine_venv_python"] = {
         e: str(venv_python(cfg, e)) for e in engines
     }
+    try:
+        from .engines import krea as _krea
+        ctx["krea_quant_files"] = [
+            {
+                "filename": fn,
+                "label": fn.removeprefix("krea2_turbo-").removesuffix(".gguf"),
+                "size_gb": _krea.QUANT_SIZE_GB.get(fn),
+            }
+            for fn in _krea.QUANT_FILES
+        ]
+    except Exception:
+        ctx["krea_quant_files"] = []
 
     # Index downloads by repo so each engine card can show in-flight
     # pulls for its own models.
@@ -3507,8 +3519,9 @@ async def cancel_engine_install(request: Request, engine: str,
 async def download_engine_model(request: Request, engine: str,
                                 repo: str = Form(...),
                                 subfolder: str = Form(""),
+                                filename: str = Form(""),
                                 _: None = Depends(require_csrf)) -> Response:
-    """Start an HF whole-repo (or subfolder) download for a diffusion engine."""
+    """Start an HF whole-repo, subfolder, or single-file diffusion download."""
     reg: Registry = request.app.state.registry
     repo_clean = repo.strip()
     if not repo_clean:
@@ -3521,13 +3534,20 @@ async def download_engine_model(request: Request, engine: str,
         # Strip an accidental hf:// prefix; we'll re-add canonically.
         source = "hf://" + repo_clean.removeprefix("hf://").removeprefix("hf:")
     sub = subfolder.strip().strip("/") or None
+    fn = filename.strip()
     try:
         # Estimate size up-front so the progress bar can show a total.
         bare_repo = source.removeprefix("hf://").removeprefix("hf:")
-        size = await reg.estimate_repo_size(bare_repo, sub)
-        reg.start_pull(source=source, files=None,
-                       subfolder=sub, whole_repo=True,
-                       bytes_total=size)
+        if fn:
+            size = await reg.estimate_repo_size(bare_repo, files=[fn])
+            reg.start_pull(source=source, files=[fn],
+                           subfolder=None, whole_repo=False,
+                           bytes_total=size)
+        else:
+            size = await reg.estimate_repo_size(bare_repo, sub)
+            reg.start_pull(source=source, files=None,
+                           subfolder=sub, whole_repo=True,
+                           bytes_total=size)
     except Exception as e:
         return _error_html(f"pull failed: {e}", status_code=400)
     return RedirectResponse("/ui/setup-diffusion", status_code=303)
@@ -4751,6 +4771,7 @@ def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
         configured = {
             "hidream": bool(cfg.hidream_python and cfg.hidream_repo),
             "z_image": bool(cfg.z_image_python),
+            "krea":    bool(cfg.z_image_python),
             "flux2":   bool(cfg.flux2_sd_cli),
         }.get(eng_id, False)
 
@@ -4758,6 +4779,7 @@ def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
         label = {
             "hidream": "HiDream-O1-Image",
             "z_image": "Z-Image (Tongyi-MAI / Z-Anime)",
+            "krea":    "Krea 2 Turbo GGUF",
             "flux2":   "FLUX 2 Dev",
         }.get(eng_id, eng_id)
 
@@ -5427,4 +5449,3 @@ async def slots_ui_coex(request: Request,
     new_cfg.port = cfg.port
     request.app.state.cfg = new_cfg
     return RedirectResponse("/ui/slots", status_code=303)
-

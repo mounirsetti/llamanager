@@ -65,7 +65,7 @@ AMD_ROCM_INDEX = f"https://repo.radeon.com/rocm/manylinux/{AMD_ROCM_REL}/"
 CPU_TORCH_INDEX = "https://download.pytorch.org/whl/cpu"
 
 # Engines whose AMD path we know how to wire to repo.radeon.com wheels.
-AMD_WHEEL_ENGINES = {"hidream", "z_image", "asr"}
+AMD_WHEEL_ENGINES = {"hidream", "z_image", "krea", "asr"}
 # Valid values for the UI/CLI torch-backend selector.
 TORCH_BACKENDS = ("auto", "rocm", "cuda", "cpu")
 
@@ -162,6 +162,22 @@ ENGINE_PLANS: dict[str, EnginePackages] = {
             "official ROCm torch wheels from repo.radeon.com, NVIDIA the CUDA "
             "wheel, otherwise a CPU build. Override with the PyTorch-build "
             "selector."
+        ),
+    ),
+    "krea": EnginePackages(
+        engine="krea",
+        label="Krea 2 Turbo GGUF",
+        packages=[
+            "torch", "transformers", "accelerate", "huggingface_hub",
+            "safetensors", "Pillow", "sentencepiece", "gguf",
+            f"diffusers=={DIFFUSERS_PIN}",
+        ],
+        space_mb=8500,
+        notes=(
+            "Installs the shared torch/diffusers stack used by Krea GGUF "
+            "and Z-Image. Krea needs a recent diffusers build with Qwen-Image "
+            "GGUF loader support; use the version picker here if the shipped "
+            "pin is behind upstream support."
         ),
     ),
     "hidream": EnginePackages(
@@ -1149,7 +1165,7 @@ class EngineInstaller:
         is ready to use without the operator having to copy/paste the path."""
         from .config import update_image_config
         kwargs: dict[str, Any] = {}
-        if engine == "z_image":
+        if engine in ("z_image", "krea"):
             kwargs["z_image_python"] = python_path
             self.cfg.z_image_python = python_path
         elif engine == "hidream":

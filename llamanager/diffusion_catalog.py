@@ -32,7 +32,7 @@ class CatalogEntry:
     "downloading".
     """
     canonical_id: str
-    engine: str            # 'hidream' | 'z_image' | 'flux2'
+    engine: str            # 'hidream' | 'z_image' | 'krea' | 'flux2'
     label: str             # human-readable name
     hf_repo: str           # 'org/name'
     subfolder: str = ""    # optional HF subfolder
@@ -81,6 +81,32 @@ CATALOG: list[CatalogEntry] = [
             "subfolder is the runnable variant for llamanager (~12-20 GB)."
         ),
         homepage="https://huggingface.co/SeeSee21/Z-Anime",
+    ),
+    CatalogEntry(
+        canonical_id="vantagewithai/Krea-2-Turbo-GGUF",
+        engine="krea",
+        label="Krea 2 Turbo GGUF",
+        hf_repo="vantagewithai/Krea-2-Turbo-GGUF",
+        approx_size_gb=13.7,
+        description=(
+            "Krea 2 Turbo as GGUF-quantized Qwen-Image transformer weights. "
+            "Use the quant picker on the Diffusion engines page to download "
+            "one file at a time instead of the full 108 GB repo."
+        ),
+        homepage="https://huggingface.co/vantagewithai/Krea-2-Turbo-GGUF",
+    ),
+    CatalogEntry(
+        canonical_id="krea/Krea-2-Turbo",
+        engine="krea",
+        label="Krea 2 Turbo (original)",
+        hf_repo="krea/Krea-2-Turbo",
+        approx_size_gb=26.3,
+        description=(
+            "The original open-weight Krea 2 Turbo Diffusers checkpoint. "
+            "Higher quality ceiling than smaller quants, but it needs much "
+            "more VRAM and disk than the GGUF downloads."
+        ),
+        homepage="https://huggingface.co/krea/Krea-2-Turbo",
     ),
     CatalogEntry(
         canonical_id="FLUX.2-dev",
