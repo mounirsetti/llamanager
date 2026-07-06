@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% set active = 'setup-asr' %}
+{% block title %}ASR engines - llamanager{% endblock %}
+{% block content %}
+
+<style>
+  /* Reuse the diffusion-models / ASR-models visual language. */
+  .lm-dm-engine { display: flex; flex-direction: column; gap: 8px; margin-bottom: 24px; }
+  .lm-dm-engine__head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 8px; padding: 4px 0 8px; border-bottom: 1px solid var(--bg-3);
+  }
+  .lm-dm-engine__title { font-size: 0.875rem; color: var(--fg-1); }
+  .lm-dm-engine__meta { font-size: 0.75rem; color: var(--fg-2); }
+  .lm-dm-pill {
+    display: inline-block; padding: 1px 7px; font-size: 0.6875rem;
+    text-transform: uppercase; letter-spacing: 0.1em;
+    border: 1px solid var(--bg-3); color: var(--fg-2); border-radius: 2px;
+  }
+  .lm-dm-pill--ok { color: var(--ok); border-color: var(--ok); }
+  .lm-dm-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+  .lm-dm-field__label { font-size: 0.75rem; color: var(--fg-2); text-transform: uppercase; letter-spacing: 0.1em; }
+  .lm-dm-field__help { font-size: 0.75rem; color: var(--fg-3); }
+  .lm-dm-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .lm-dm-actions form { display: inline; }
+  .lm-asr-engine-card { background: var(--bg-0); border: 1px dashed var(--bg-3); padding: 12px 14px; margin-bottom: 16px; }
+  /* Install/build progress bar (live-polled). */
+  .lm-asr-bar { height: 4px; background: var(--bg-3); border-radius: 2px; overflow: hidden; margin: 0 0 8px; }
+  .lm-asr-bar__fill { height: 100%; background: var(--accent); transition: width 250ms ease; }
+  .lm-asr-log {
+    margin: 6px 0 0; padding: 8px 10px; max-height: 200px; overflow: auto;
+    background: var(--bg-2); border: 1px solid var(--bg-3); border-radius: 2px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.6875rem;
+    color: var(--fg-1); white-space: pre; line-height: 1.45;
+  }
+</style>
+
+<header class="lm-section-head" style="margin-bottom: 16px;">
+  <span class="lm-section-marker">ASR engines</span>
+  <span class="lm-section-meta">install / configure speech-to-text engines and the shared GPU budget</span>
+</header>
+
+<p style="font-size: 0.875rem; color: var(--fg-1); max-width: 80ch; margin-bottom: 24px;">
+  Pick and install an ASR engine, then point it at its interpreter or built binary.
+  Which engine actually serves a model is <strong>detected from the model on disk</strong>
+  — manage your models on the <a href="/ui/asr-models">ASR models</a> page.
+</p>
+
+{# Poll this wrapper every 2s while an install/build is in flight so progress
+   updates without a manual refresh. Morph reconciles the fragment in place so
+   open forms + focus survive each tick; hx-disinherit stops the boosted forms
+   inside from inheriting the morph swap (which would morph <body> and crash
+   htmx — see the htmx-morph-body-swapError note). #}
+<div id="setup-asr-body"
+     {% if asr_install_busy %}
+     hx-get="/ui/setup-asr/_partial"
+     hx-trigger="every 2s"
+     hx-swap="morph"
+     {% endif %}
+     hx-disinherit="hx-swap">
+  {% include "_setup_asr_partial.html" %}
+</div>
+
+{% endblock %}

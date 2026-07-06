@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.4.1-green.svg" alt="Version 0.4.1">
+  <img src="https://img.shields.io/badge/version-0.4.11-green.svg" alt="Version 0.4.11">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -116,9 +116,11 @@ Full design notes are in [`llamanager-spec.md`](llamanager-spec.md).
 | diffusion | `hidream` (HiDream-O1-Image) | one-shot Python subprocess              | auto-install venv + deps                    |
 | diffusion | `flux2` (FLUX 2 via sd.cpp)  | one-shot `sd-cli` binary                | manual: download from sd.cpp releases       |
 | diffusion | `z_image` (Z-Image / Z-Anime)| one-shot Python subprocess (diffusers)  | auto-install venv + deps                    |
-| audio     | `asr` (Whisper, transformers)| one-shot Python subprocess (transformers)| reuse the diffusion venv (1 click), or build a dedicated one |
+| audio     | `asr` (Whisper, transformers)| warm HTTP worker (transformers)          | reuse the diffusion venv (1 click), or build a dedicated one |
+| audio     | `whispercpp` (whisper.cpp / GGML)| warm HTTP worker (native `whisper-cli`) | **Build from source with Vulkan** (1 click) |
+| audio     | `sherpa` (sherpa-onnx, streaming)| warm HTTP worker (onnxruntime)          | pip install (torch-free, 1 click)          |
 
-Adding a new engine is a single Python module in [`llamanager/engines/`](llamanager/engines/) plus three lines of registration. The existing engines live there as references.
+Adding a new engine is a single Python module in [`llamanager/engines/`](llamanager/engines/) plus three lines of registration. The existing engines live there as references — the three audio engines all speak one warm-worker protocol (`/healthz`, `/transcribe`, `/transcribe_pcm`), so the runner, streaming, and UI stay engine-agnostic.
 
 ## Platforms and GPUs
 
@@ -253,7 +255,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.4.1" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.4.11" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -743,29 +745,61 @@ Cancellation: cancelling a queued image request removes it before it starts. Can
 
 llamanager runs Whisper-class speech-to-text models as a third engine family (`audio`), alongside text and diffusion. Unlike the one-shot diffusion engines, ASR is a **multi-tenant GPU service**: a **warm worker** keeps the model loaded and serves **many concurrent transcriptions**, bounded by a **VRAM budget** so it always leaves headroom for the LLM. It can **run alongside a loaded LLM** or unload it — your choice, editable in the UI and CLI. Everything flows through the same queue, and the worker idle-stops to reclaim VRAM when ASR is quiet.
 
+Two pages cover ASR, mirroring the LLM and diffusion split. The **ASR engines** page (`/ui/setup-asr`) is where you install/build each engine, point it at its interpreter or binary, and set the shared GPU budget / coexistence. The **ASR models** page (`/ui/asr-models`) is where you manage what's installed: models grouped by their detected engine, the per-model profile editor, and the live-mic transcription panel.
+
 It also does **word-level output** (per-word timing + confidence) and **live streaming over WebSocket** — stream your mic and get revised partials as you speak.
 
-The engine targets Hugging Face `transformers` checkpoints (`WhisperForConditionalGeneration` + safetensors): the OpenAI `whisper-large-v3` family, `whisper-large-v3-turbo`, distil-whisper, and fine-tunes such as [`naazimsnh02/whisper-large-v3-turbo-ar-quran`](https://huggingface.co/naazimsnh02/whisper-large-v3-turbo-ar-quran). Audio is decoded with the system **`ffmpeg`** (wav/mp3/m4a/ogg/flac/…), so no audio Python packages are pulled in.
+#### Choose an ASR engine
 
-### Install the engine
+Like the LLM and diffusion families, the audio family lets you **pick an engine** per model — detected automatically from the model's on-disk shape and served through the same warm-worker protocol, so word timing, streaming, budgets, and the queue behave identically whichever you run:
 
-The ASR engine needs a Python environment with `torch` + `transformers`. Rather than rebuild a multi-GB torch install, it **reuses the diffusion venv** (`z_image` or `hidream`) when one exists — it probes for `import torch, transformers` and, on a hit, layers only the small extras on top without touching the host venv's pins. If no reusable venv is found, it builds a dedicated `~/.llamanager/venvs/asr/` with the GPU-appropriate torch (AMD ROCm wheels / CUDA / CPU).
+| Engine | What it is | Model shape | Best for |
+| --- | --- | --- | --- |
+| **`asr`** | Whisper via Hugging Face `transformers` (`torch`) | HF checkpoint dir (`config.json` → `model_type: whisper`) | Accuracy, fine-tunes, the OpenAI `whisper-large-v3` family |
+| **`whispercpp`** | whisper.cpp / GGML, **built from source with Vulkan** | folder with a `ggml-*.bin` | **Reliable GPU on AMD/Intel via Vulkan** — no torch, no ROCm fuss |
+| **`sherpa`** | sherpa-onnx transducer (onnxruntime) | folder with `tokens.txt` + `*.onnx` | **True low-latency streaming** for live mic; tiny, torch-free install |
 
-From the **ASR models** page (`/ui/asr-models`), click **Install dependencies**. Or from the CLI:
+The transformers engine targets `WhisperForConditionalGeneration` + safetensors: the OpenAI `whisper-large-v3` family, `whisper-large-v3-turbo`, distil-whisper, and fine-tunes such as [`naazimsnh02/whisper-large-v3-turbo-ar-quran`](https://huggingface.co/naazimsnh02/whisper-large-v3-turbo-ar-quran). Audio is decoded with the system **`ffmpeg`** (wav/mp3/m4a/ogg/flac/…), so no audio Python packages are pulled in.
+
+**whisper.cpp (Vulkan)** is the standout on GPUs where the torch stack is painful (AMD ROCm, Intel iGPU): it's a native binary, so the **ASR engines** page has a **Build (Vulkan)** button that clones whisper.cpp and runs `cmake -DGGML_VULKAN=1` (needs `git`, `cmake`, and the Vulkan SDK). Drop a `ggml-*.bin` into your ASR models folder and it's detected as a `whispercpp` model. **sherpa-onnx** installs from pip (`sherpa-onnx` + onnxruntime, no torch) and, uniquely, feeds the live-mic path a **stateful streaming recognizer** instead of re-decoding a rolling window.
+
+### Choose and install an engine
+
+List the audio engines and see which are ready — `asr engines` reports each one's availability, whether it's configured, its setup path, and the last install/build:
 
 ```bash
-llamanager asr install                 # reuse the diffusion venv if present
-llamanager asr install --backend rocm  # dedicated-venv fallback: force a torch build
-llamanager asr engines                 # show status: configured? which python? last install
+llamanager asr engines
+# → asr (Whisper/transformers), whispercpp (whisper.cpp/Vulkan), sherpa (sherpa-onnx)
+#   with configured? · setup path · last install status
 ```
 
-To point the engine at an existing interpreter instead of installing:
+Every install/setup verb takes `--engine` to pick which engine you're working with (default `asr`):
 
 ```bash
-llamanager asr setup ~/.llamanager/venvs/z_image/bin/python
+# asr (Whisper via transformers) — reuses the diffusion torch+transformers venv
+llamanager asr install                         # reuse the diffusion venv if present
+llamanager asr install --backend rocm          # dedicated-venv fallback: force a torch build
+
+# whisper.cpp — build the native binary from source with Vulkan (git + cmake + Vulkan SDK)
+llamanager asr install --engine whispercpp
+
+# sherpa-onnx — pip install (onnxruntime, no torch)
+llamanager asr install --engine sherpa
+
+llamanager asr cancel-install --engine whispercpp   # stop an in-progress install/build
 ```
 
-This sets `image.asr_python` in `config.toml`. GPU **ordering** (which card the runner uses) is governed by your normal llamanager GPU settings — the ASR runner only prepends the ROCm runtime libraries on AMD; it does not pick a device on its own.
+The `asr` engine reuses the diffusion venv (`z_image` or `hidream`) when one exists — it probes for `import torch, transformers` and, on a hit, layers only the small extras on top without rebuilding a multi-GB torch install; otherwise it builds a dedicated `~/.llamanager/venvs/asr/` with the GPU-appropriate torch (AMD ROCm wheels / CUDA / CPU). `sherpa` builds a tiny torch-free `~/.llamanager/venvs/sherpa/`. `whispercpp` clones and `cmake`-builds whisper.cpp under `~/.llamanager/whispercpp/` with `-DGGML_VULKAN=1`.
+
+To point an engine at an existing interpreter (asr/sherpa) or a pre-built binary (whispercpp) instead of installing:
+
+```bash
+llamanager asr setup ~/.llamanager/venvs/z_image/bin/python              # asr (default)
+llamanager asr setup ~/.llamanager/venvs/sherpa/bin/python --engine sherpa
+llamanager asr setup ~/.llamanager/whispercpp/build/bin/whisper-cli --engine whispercpp
+```
+
+This writes `image.asr_python` / `image.sherpa_python` / `image.whispercpp_binary` in `config.toml`. Which engine actually serves a given model is **detected from the model on disk** (transformers checkpoint → `asr`, `ggml-*.bin` → `whispercpp`, `tokens.txt` + `*.onnx` → `sherpa`) — so once an engine is installed, dropping a matching model into the ASR folder is all it takes. GPU **ordering** (which card the runner uses) is governed by your normal llamanager GPU settings — the ASR runner only prepends the ROCm runtime libraries on AMD; it does not pick a device on its own.
 
 ### Add a model
 
@@ -789,7 +823,7 @@ A dedicated folder is scanned independently of the LLM registry, so those models
 
 ### GPU budget, concurrency & coexistence
 
-ASR is designed to serve many clients at once without starving the LLM. Three settings on the **ASR models** page (and `llamanager asr defaults`) control it:
+ASR is designed to serve many clients at once without starving the LLM. Three settings on the **ASR engines** page (and `llamanager asr defaults`) control it:
 
 | setting | meaning |
 |---|---|
@@ -1361,7 +1395,7 @@ llamanager slots unload <slot_id>                         # stop the model in a 
 llamanager slots coex on|off                              # diffusion-coexistence (on = image keeps LLMs loaded)
 ```
 
-The CLI mirrors the web UI feature-for-feature: every page that lets you click something has a `llamanager` verb that does the same thing against `/admin/*`. `llamanager profiles` covers the LLM-profile editor on `/ui/models`, `llamanager diffusion` covers the Diffusion engines + Diffusion models pages, `llamanager asr` covers the ASR models page (install/setup, model list, profiles) and adds `transcribe` for one-shot speech-to-text, `llamanager setup` covers paths/coexistence/autolaunch and the llama-server installer, `llamanager slots` (beta, see [Multi-slot LLM (beta)](#multi-slot-llm-beta)) covers the parallel-model dashboard, `llamanager models {set-default,add-existing,set-dir}` covers the LLM-model housekeeping rows, and `llamanager queue cancel-all` + `llamanager origins update` round out the existing groups. `update` runs `pip install --upgrade llamanager` against the service's venv and SIGTERMs so the supervisor restarts it — exactly what the `/ui/about` Update button does. `--check` reports the latest GitHub tag plus the detected install mode without doing anything. If the service was installed in editable / developer mode (`pip install -e .` from a git checkout), the auto-update refuses with instructions to run `git pull && pip install -e .` in the checkout yourself — the operator's checkout is the source of truth in that case.
+The CLI mirrors the web UI feature-for-feature: every page that lets you click something has a `llamanager` verb that does the same thing against `/admin/*`. `llamanager profiles` covers the LLM-profile editor on `/ui/models`, `llamanager diffusion` covers the Diffusion engines + Diffusion models pages, `llamanager asr` covers the ASR engines page (install/build/setup, GPU budget) and the ASR models page (model list, profiles) and adds `transcribe` for one-shot speech-to-text, `llamanager setup` covers paths/coexistence/autolaunch and the llama-server installer, `llamanager slots` (beta, see [Multi-slot LLM (beta)](#multi-slot-llm-beta)) covers the parallel-model dashboard, `llamanager models {set-default,add-existing,set-dir}` covers the LLM-model housekeeping rows, and `llamanager queue cancel-all` + `llamanager origins update` round out the existing groups. `update` runs `pip install --upgrade llamanager` against the service's venv and SIGTERMs so the supervisor restarts it — exactly what the `/ui/about` Update button does. `--check` reports the latest GitHub tag plus the detected install mode without doing anything. If the service was installed in editable / developer mode (`pip install -e .` from a git checkout), the auto-update refuses with instructions to run `git pull && pip install -e .` in the checkout yourself — the operator's checkout is the source of truth in that case.
 
 Example, an agent that wants to swap models before a long batch and revert after:
 

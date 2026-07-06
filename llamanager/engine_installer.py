@@ -28,6 +28,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import sys
 import time
 from dataclasses import dataclass, field
@@ -43,6 +44,49 @@ from .gpu_detect import GpuProfile, detect_gpu, render_group_ok, rocm_lib_dirs
 log = logging.getLogger(__name__)
 
 MAX_LOG_BYTES = 200_000  # cap stored log size so the DB doesn't bloat
+
+
+def _has_command(name: str) -> bool:
+    """Is ``name`` an executable on PATH? Used by the native-build preflight."""
+    return shutil.which(name) is not None
+
+
+def _vulkan_dev_present() -> bool:
+    """Are the Vulkan *development* files (headers) installed? cmake's
+    ``find_package(Vulkan)`` needs ``vulkan/vulkan.h`` (Vulkan_INCLUDE_DIR) and
+    the ``libvulkan.so`` dev symlink — the runtime ``libvulkan.so.1`` alone is
+    not enough. Checking for the header is the reliable, distro-agnostic signal
+    (they ship together in the -dev package)."""
+    from pathlib import Path
+    candidates = ["/usr/include/vulkan/vulkan.h",
+                  "/usr/local/include/vulkan/vulkan.h"]
+    sdk = os.environ.get("VULKAN_SDK")
+    if sdk:
+        candidates.append(str(Path(sdk) / "include" / "vulkan" / "vulkan.h"))
+    return any(Path(p).is_file() for p in candidates)
+
+
+def _spirv_headers_present() -> bool:
+    """Is the SPIRV-Headers CMake config installed? ggml-vulkan does
+    ``find_package(SPIRV-Headers CONFIG REQUIRED)``. Best-effort: glob the
+    common install prefixes for ``SPIRV-HeadersConfig.cmake`` (paths vary by
+    distro, so a miss only warns — cmake stays authoritative)."""
+    from pathlib import Path
+    roots = ["/usr/lib", "/usr/lib64", "/usr/share", "/usr/local/lib",
+             "/usr/local/share"]
+    sdk = os.environ.get("VULKAN_SDK")
+    if sdk:
+        roots.append(sdk)
+    for root in roots:
+        p = Path(root)
+        if not p.is_dir():
+            continue
+        try:
+            if next(p.glob("**/SPIRV-Headers*onfig.cmake"), None) is not None:
+                return True
+        except OSError:
+            continue
+    return False
 
 # The diffusers release both diffusion engines are pinned to and tested
 # against. This is the single source of truth for the version: it's what
@@ -107,6 +151,10 @@ class EnginePackages:
     # Import probe that decides whether a candidate venv is reusable. Run as
     # ``python -c "import <reuse_probe>"`` in the candidate interpreter.
     reuse_probe: str = ""
+    # Whether this engine's stack is built on torch. False for pure-pip engines
+    # like sherpa-onnx (onnxruntime) — the installer then skips the CPU
+    # torch-index step and the torch import verification.
+    needs_torch: bool = True
 
 
 @dataclass(frozen=True)
@@ -228,6 +276,23 @@ ENGINE_PLANS: dict[str, EnginePackages] = {
             "present (no multi-GB re-download); otherwise builds a dedicated "
             "venv with the GPU-appropriate torch. Audio is decoded via the "
             "system ffmpeg."
+        ),
+    ),
+    "sherpa": EnginePackages(
+        engine="sherpa",
+        label="sherpa-onnx — streaming speech-to-text",
+        # Pure pip: sherpa-onnx bundles onnxruntime. No torch → a small,
+        # dedicated venv that installs in seconds and never touches the GPU
+        # torch stack. numpy is used by the worker for PCM handling.
+        packages=["sherpa-onnx", "numpy"],
+        needs_torch=False,
+        space_mb=400,
+        notes=(
+            "Runs sherpa-onnx transducer / Paraformer / CTC models. Offers TRUE "
+            "low-latency streaming for the live-mic path (a stateful online "
+            "recognizer), unlike the whisper re-decode loop. CPU by default via "
+            "onnxruntime; no torch, so the install is tiny and GPU-agnostic. "
+            "Audio is decoded via the system ffmpeg."
         ),
     ),
 }
@@ -454,6 +519,15 @@ def resolve_plan(engine: str, gpu: GpuProfile, emit=None,
 
     # ---- CPU-only build ------------------------------------------------
     if eff == "cpu":
+        # Pure-pip engines (sherpa-onnx) don't use torch — install their
+        # packages straight from pypi with no dedicated torch-index step.
+        if not base.needs_torch:
+            return ResolvedPlan(
+                engine=engine, label=base.label,
+                notes=base.notes + " CPU (onnxruntime, no torch).",
+                space_mb=base.space_mb, target="cpu",
+                packages=list(base.packages),
+                extra_index_url=base.extra_index_url)
         return ResolvedPlan(
             engine=engine,
             label=base.label,
@@ -667,6 +741,34 @@ class EngineInstaller:
                            "options": options or {}})
         return install_id
 
+    def start_build(self, engine: str, *,
+                    options: dict[str, Any] | None = None) -> str:
+        """Start a native from-source build (currently only ``whispercpp``:
+        git clone + cmake with Vulkan). Shares the ``engine_installs`` table,
+        log streaming, and cancel machinery with the pip installer."""
+        if engine != "whispercpp":
+            raise ValueError(f"no build recipe for engine {engine!r}")
+        active = self.active_for_engine(engine)
+        if active:
+            raise RuntimeError(
+                f"a build for {engine} is already running (id={active['id']})")
+        install_id = secrets.token_urlsafe(8)
+        opts_json = json.dumps(options or {}, sort_keys=True)
+        self.db.execute(
+            "INSERT INTO engine_installs(id, engine, kind, status, "
+            "message, started_at, options_json) "
+            "VALUES (?, ?, 'cmake', 'pending', ?, ?, ?)",
+            (install_id, engine, "queued", time.time(), opts_json),
+        )
+        cancel = asyncio.Event()
+        self._cancel_flags[install_id] = cancel
+        task = asyncio.create_task(
+            self._run_cmake_build(install_id, engine, options or {}, cancel))
+        self._tasks[install_id] = task
+        self.db.log_event("install_started",
+                          {"id": install_id, "engine": engine, "kind": "cmake"})
+        return install_id
+
     def cancel(self, install_id: str) -> bool:
         ev = self._cancel_flags.get(install_id)
         if not ev:
@@ -847,6 +949,17 @@ class EngineInstaller:
             if rc != 0:
                 raise RuntimeError(f"pip install failed (exit {rc})")
 
+            base_plan = ENGINE_PLANS.get(engine)
+            if base_plan is not None and not base_plan.needs_torch:
+                # Pure-pip engine (sherpa-onnx): no torch to verify.
+                self._persist_engine_python(engine, str(python_path))
+                set_progress(100, f"Installed at {python_path}")
+                self._set(install_id, status="done", finished_at=time.time())
+                self.db.log_event("install_done", {
+                    "id": install_id, "engine": engine,
+                    "python": str(python_path), "target": plan.target})
+                return
+
             set_progress(90, "Verifying torch imports")
             # On AMD, the torch process needs the system ROCm libs on its
             # path (same as the runtime spawn env) or the import fails with
@@ -904,6 +1017,134 @@ class EngineInstaller:
             emit(f"[error] {e}")
             self._set(install_id, status="failed",
                       finished_at=time.time(), error=str(e))
+            self.db.log_event("install_failed",
+                              {"id": install_id, "error": str(e)})
+        finally:
+            self._cancel_flags.pop(install_id, None)
+            self._tasks.pop(install_id, None)
+
+    async def _run_cmake_build(self, install_id: str, engine: str,
+                               options: dict[str, Any],
+                               cancel: asyncio.Event) -> None:
+        """Build whisper.cpp from source with Vulkan and persist the resulting
+        ``whisper-cli`` path into config. Mirrors ``_run``'s log/cancel shape."""
+        log_buf: list[str] = []
+
+        def emit(line: str) -> None:
+            log_buf.append(line)
+            joined = "\n".join(log_buf)
+            if len(joined) > MAX_LOG_BYTES:
+                joined = joined[-MAX_LOG_BYTES:]
+                log_buf[:] = joined.splitlines()
+            self._set(install_id, log=joined)
+
+        def set_progress(pct: int, message: str) -> None:
+            self._set(install_id, progress_pct=int(pct), message=message)
+            emit(f"[{pct:3d}%] {message}")
+
+        try:
+            self._set(install_id, status="running", message="Preparing build")
+            # Preflight: git + cmake are hard requirements. glslc is needed too:
+            # the ggml Vulkan backend compiles its compute shaders to SPIR-V at
+            # build time via glslc, so a missing glslc fails the build deep in
+            # (not at configure). Fail early with an actionable message.
+            for tool in ("git", "cmake"):
+                if not _has_command(tool):
+                    raise RuntimeError(
+                        f"{tool!r} not found on PATH — install it to build "
+                        "whisper.cpp from source.")
+            if not _has_command("glslc"):
+                raise RuntimeError(
+                    "glslc not found on PATH — the Vulkan backend compiles its "
+                    "shaders with it at build time. Install the shader compiler: "
+                    "Debian/Ubuntu `sudo apt install glslc` (or `glslang-tools` / "
+                    "`shaderc`), Arch `sudo pacman -S shaderc`, Fedora "
+                    "`sudo dnf install glslc`, or the LunarG Vulkan SDK.")
+            if not _vulkan_dev_present():
+                raise RuntimeError(
+                    "Vulkan development files not found (no vulkan/vulkan.h) — "
+                    "cmake's find_package(Vulkan) needs the loader + headers, "
+                    "not just the runtime libvulkan.so.1. Install them: "
+                    "Debian/Ubuntu `sudo apt install libvulkan-dev`, "
+                    "Arch `sudo pacman -S vulkan-headers vulkan-icd-loader`, "
+                    "Fedora `sudo dnf install vulkan-loader-devel vulkan-headers`, "
+                    "or set VULKAN_SDK from the LunarG SDK.")
+            if not _spirv_headers_present():
+                emit("[warn] SPIRV-Headers CMake config not found — ggml-vulkan "
+                     "requires it (find_package(SPIRV-Headers)). If configure "
+                     "fails, install it: Debian/Ubuntu `sudo apt install "
+                     "spirv-headers glslang-tools`, Arch `sudo pacman -S "
+                     "spirv-headers glslang`, Fedora `sudo dnf install "
+                     "spirv-headers-devel glslang`.")
+            if not _has_command("vulkaninfo"):
+                emit("[warn] vulkaninfo not found — the build should still "
+                     "succeed, but install `vulkan-tools` to confirm the GPU is "
+                     "visible to Vulkan at runtime.")
+
+            src_dir = venv_root(self.cfg).parent / "whispercpp"
+            src_dir.parent.mkdir(parents=True, exist_ok=True)
+            repo = str(options.get("repo")
+                       or "https://github.com/ggml-org/whisper.cpp")
+
+            set_progress(5, f"Fetching whisper.cpp into {src_dir}")
+            if (src_dir / ".git").is_dir():
+                rc = await self._run_subprocess(
+                    ["git", "-C", str(src_dir), "pull", "--ff-only"],
+                    cancel, emit)
+            else:
+                rc = await self._run_subprocess(
+                    ["git", "clone", "--depth", "1", repo, str(src_dir)],
+                    cancel, emit)
+            if cancel.is_set():
+                raise asyncio.CancelledError()
+            if rc != 0:
+                raise RuntimeError(f"git fetch failed (exit {rc})")
+
+            build_dir = src_dir / "build"
+            set_progress(25, "Configuring (cmake, Vulkan)")
+            rc = await self._run_subprocess(
+                ["cmake", "-B", str(build_dir), "-S", str(src_dir),
+                 "-DGGML_VULKAN=1", "-DWHISPER_BUILD_EXAMPLES=ON",
+                 "-DCMAKE_BUILD_TYPE=Release"],
+                cancel, emit)
+            if cancel.is_set():
+                raise asyncio.CancelledError()
+            if rc != 0:
+                raise RuntimeError(f"cmake configure failed (exit {rc})")
+
+            set_progress(45, "Building whisper-cli (this can take a few minutes)")
+            rc = await self._run_subprocess(
+                ["cmake", "--build", str(build_dir), "--config", "Release",
+                 "-j"],
+                cancel, emit)
+            if cancel.is_set():
+                raise asyncio.CancelledError()
+            if rc != 0:
+                raise RuntimeError(f"cmake build failed (exit {rc})")
+
+            binary = build_dir / "bin" / "whisper-cli"
+            if not binary.exists():
+                raise RuntimeError(
+                    f"build finished but {binary} is missing — "
+                    "check the log for errors")
+
+            from .config import update_image_config
+            self.cfg.whispercpp_binary = str(binary)
+            update_image_config(self.cfg.config_path,
+                                whispercpp_binary=str(binary))
+            set_progress(100, f"Built {binary}")
+            self._set(install_id, status="done", finished_at=time.time())
+            self.db.log_event("install_done",
+                              {"id": install_id, "engine": engine,
+                               "binary": str(binary), "kind": "cmake"})
+        except asyncio.CancelledError:
+            emit("[cancelled] build stopped")
+            self._set(install_id, status="cancelled", finished_at=time.time())
+        except Exception as e:  # noqa: BLE001
+            log.exception("whispercpp build %s failed", install_id)
+            emit(f"[error] {e}")
+            self._set(install_id, status="failed", finished_at=time.time(),
+                      error=str(e))
             self.db.log_event("install_failed",
                               {"id": install_id, "error": str(e)})
         finally:
@@ -1192,6 +1433,9 @@ class EngineInstaller:
         elif engine == "asr":
             kwargs["asr_python"] = python_path
             self.cfg.asr_python = python_path
+        elif engine == "sherpa":
+            kwargs["sherpa_python"] = python_path
+            self.cfg.sherpa_python = python_path
         else:
             return
         try:

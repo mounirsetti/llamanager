@@ -1160,8 +1160,9 @@ async def audio_stream(websocket: WebSocket) -> None:
         await qm.wait_for_slot(qr)
         session = AsrStreamSession(
             cfg=cfg, runner=runner, sm=runner.sm, ws=websocket,
-            model_id=model, model_path=model_path, language=language,
-            task=task, decode_interval_s=interval, prebuffer=prebuffer)
+            model_id=model, model_path=model_path, engine=engine,
+            language=language, task=task, decode_interval_s=interval,
+            prebuffer=prebuffer)
         await session.run()
     except WebSocketDisconnect:
         pass

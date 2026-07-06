@@ -31,7 +31,7 @@ import httpx
 
 from . import engines, runtime_state as rt
 from .config import (Config, Profile, ENGINE_FAMILY, asr_max_concurrent,
-                     detect_engine_for_path)
+                     detect_audio_engine_for_path)
 from .db import DB
 from .engines._base import AudioRequest, ProgressEvent
 from .server_manager import _safe_under, _validate_model_id
@@ -68,8 +68,8 @@ def resolve_audio_engine(cfg: Config, model_id: str) -> str:
     model_path = _safe_under(base, base / model_id)
     if not model_path.exists():
         raise AudioError(f"model not found: {model_id}")
-    engine = detect_engine_for_path(model_path)
-    if ENGINE_FAMILY.get(engine, "text") != "audio":
+    engine = detect_audio_engine_for_path(model_path)
+    if engine is None or ENGINE_FAMILY.get(engine, "text") != "audio":
         raise AudioError(
             f"model {model_id!r} is not a speech-to-text model "
             f"(detected engine: {engine})")
@@ -77,18 +77,29 @@ def resolve_audio_engine(cfg: Config, model_id: str) -> str:
 
 
 def scan_asr_models(cfg: Config) -> list[dict[str, Any]]:
-    """List Whisper model folders under ``cfg.asr_models_dir`` (see the
-    Registry-independent scan; symlinked dirs are skipped to match the
-    ``_safe_under`` sandbox the transcription path enforces)."""
+    """List audio model folders under ``cfg.asr_models_dir``, tagged by engine.
+
+    Registry-independent scan across all three audio-engine shapes: transformers
+    Whisper (``config.json``), whisper.cpp GGML (``ggml-*.bin``), and sherpa-onnx
+    (``tokens.txt``). Symlinked dirs are skipped to match the ``_safe_under``
+    sandbox the transcription path enforces."""
     base = cfg.asr_models_dir
     out: list[dict[str, Any]] = []
     if not base.is_dir():
         return out
-    adapter = engines.get("asr")
+    # Collect candidate model dirs from each engine's marker file, then detect.
     seen: set[Path] = set()
-    for cfg_file in base.rglob("config.json"):
-        d = cfg_file.parent
-        if d in seen or not adapter.detect(d):
+    marker_globs = ("config.json", "ggml-*.bin", "*.gguf", "tokens.txt")
+    candidates: set[Path] = set()
+    for pattern in marker_globs:
+        for marker in base.rglob(pattern):
+            if marker.is_file():
+                candidates.add(marker.parent)
+    for d in candidates:
+        if d in seen:
+            continue
+        engine = detect_audio_engine_for_path(d)
+        if engine is None:
             continue
         seen.add(d)
         try:
@@ -99,7 +110,8 @@ def scan_asr_models(cfg: Config) -> list[dict[str, Any]]:
             size = sum(f.stat().st_size for f in d.iterdir() if f.is_file())
         except OSError:
             size = 0
-        out.append({"model_id": rel, "path": str(d), "size_bytes": size})
+        out.append({"model_id": rel, "path": str(d), "size_bytes": size,
+                    "engine": engine})
     out.sort(key=lambda m: m["model_id"])
     return out
 
@@ -159,6 +171,7 @@ class AudioTaskRunner:
         self._start_lock = asyncio.Lock()     # serialises worker start/stop only
         self._proc: asyncio.subprocess.Process | None = None
         self._worker_model: str | None = None
+        self._worker_engine: str | None = None
         self._base_url: str = ""
         self._client: httpx.AsyncClient | None = None
         self._active = 0                       # in-flight transcriptions
@@ -214,7 +227,7 @@ class AudioTaskRunner:
 
         if self.cfg.asr_coexist:
             # Warm, concurrent: keep the worker loaded alongside the LLM.
-            await self._ensure_worker(model_id, model_path)
+            await self._ensure_worker(model_id, model_path, engine)
             return await self._proxy(model_id, engine, profile, req, request_id, word_ts)
         # coexist=off: ASR takes the GPU exclusively. Unload the text server
         # for this request (queue caps audio at 1 here), run an ephemeral
@@ -223,7 +236,7 @@ class AudioTaskRunner:
               if self.sm is not None else _nullcontext())
         async with cm:
             try:
-                await self._ensure_worker(model_id, model_path)
+                await self._ensure_worker(model_id, model_path, engine)
                 return await self._proxy(model_id, engine, profile, req,
                                          request_id, word_ts)
             finally:
@@ -268,10 +281,11 @@ class AudioTaskRunner:
                 self._set_state("idle", None, None, None, None)
 
     # ---- streaming helpers (Phase 2) ----
-    async def ensure_worker(self, model_id: str, model_path: Path) -> None:
+    async def ensure_worker(self, model_id: str, model_path: Path,
+                            engine: str = "asr") -> None:
         """Public: make sure the warm worker for ``model_id`` is up. Used by a
         streaming session, which owns its own queue slot + coexistence."""
-        await self._ensure_worker(model_id, model_path)
+        await self._ensure_worker(model_id, model_path, engine)
 
     async def transcribe_pcm(self, pcm: bytes, *, language: str | None,
                              task: str, word_timestamps: bool = True) -> dict:
@@ -291,20 +305,43 @@ class AudioTaskRunner:
             raise AudioError(env.get("error") or f"worker {resp.status_code}")
         return env
 
+    async def stream_pcm(self, pcm: bytes, *, sid: str, final: bool,
+                         language: str | None, task: str,
+                         word_timestamps: bool = True) -> dict:
+        """Feed the *new* PCM for session ``sid`` into the worker's stateful
+        native-streaming endpoint (``/stream_pcm``). Only valid for engines that
+        advertise ``native_streaming`` (sherpa-onnx). The caller must have
+        ensured the worker."""
+        assert self._client is not None and self._base_url
+        from urllib.parse import urlencode
+        qs = urlencode({"sid": sid, "final": "1" if final else "0",
+                        "language": language or "", "task": task,
+                        "word_timestamps": "1" if word_timestamps else "0"})
+        self._last_used = time.time()
+        resp = await self._client.post(
+            f"{self._base_url}/stream_pcm?{qs}", content=pcm,
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=TRANSCRIBE_TIMEOUT_S)
+        env = resp.json()
+        if resp.status_code != 200:
+            raise AudioError(env.get("error") or f"worker {resp.status_code}")
+        return env
+
     # ---- worker lifecycle ----
-    async def _ensure_worker(self, model_id: str, model_path: Path) -> None:
+    async def _ensure_worker(self, model_id: str, model_path: Path,
+                             engine: str = "asr") -> None:
         if (self._proc is not None and self._worker_model == model_id
-                and await self._healthy()):
+                and self._worker_engine == engine and await self._healthy()):
             return
         async with self._start_lock:
             if (self._proc is not None and self._worker_model == model_id
-                    and await self._healthy()):
+                    and self._worker_engine == engine and await self._healthy()):
                 return
             await self._stop_worker_locked()
             if self._client is None:
                 self._client = httpx.AsyncClient()
             port = _free_port()
-            argv, env = engines.get("asr").build_worker_command(
+            argv, env = engines.get(engine).build_worker_command(
                 self.cfg, model_path, port, asr_max_concurrent(self.cfg))
             log_path = self.cfg.logs_dir / "asr.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -315,7 +352,9 @@ class AudioTaskRunner:
                 env={**__import__("os").environ, **env})
             self._base_url = f"http://127.0.0.1:{port}"
             self._worker_model = model_id
-            log.info("asr worker starting for %s on %s", model_id, self._base_url)
+            self._worker_engine = engine
+            log.info("asr worker (%s) starting for %s on %s",
+                     engine, model_id, self._base_url)
             try:
                 await self._wait_healthy(WORKER_START_TIMEOUT_S)
             except Exception:
@@ -370,6 +409,7 @@ class AudioTaskRunner:
                     self._proc.kill()
             self._proc = None
         self._worker_model = None
+        self._worker_engine = None
         self._base_url = ""
         if self._yield_cm is not None:
             with contextlib.suppress(Exception):

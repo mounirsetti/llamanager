@@ -612,14 +612,17 @@ class AdminClient:
     def asr_engines(self) -> dict[str, Any]:
         return self._get("/admin/asr/engines")
 
-    def asr_install(self, *, torch_backend: str = "auto") -> dict[str, Any]:
-        return self._post("/admin/asr/install", {"torch_backend": torch_backend})
+    def asr_install(self, *, engine: str = "asr",
+                    torch_backend: str = "auto") -> dict[str, Any]:
+        return self._post("/admin/asr/install",
+                          {"engine": engine, "torch_backend": torch_backend})
 
-    def asr_cancel_install(self) -> dict[str, Any]:
-        return self._post("/admin/asr/cancel-install")
+    def asr_cancel_install(self, *, engine: str = "asr") -> dict[str, Any]:
+        return self._post("/admin/asr/cancel-install", {"engine": engine})
 
-    def asr_setup(self, python: str) -> dict[str, Any]:
-        return self._post("/admin/asr/setup", {"python": python})
+    def asr_setup(self, python: str, *, engine: str = "asr") -> dict[str, Any]:
+        return self._post("/admin/asr/setup",
+                          {"python": python, "engine": engine})
 
     def asr_models(self) -> dict[str, Any]:
         return self._get("/admin/asr/models")

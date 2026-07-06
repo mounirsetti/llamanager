@@ -9,7 +9,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .config import expand, load_config, write_default_config
+from .config import AUDIO_ENGINES, expand, load_config, write_default_config
+
+# Selectable ASR engines for `llamanager asr {install,setup,cancel-install}`.
+# Derived from the engine registry so new audio engines appear automatically;
+# ``asr`` (the default) is listed first.
+AUDIO_ENGINE_CHOICES = ["asr"] + sorted(AUDIO_ENGINES - {"asr"})
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
@@ -1137,17 +1142,18 @@ def cmd_asr_engines(args):
 
 def cmd_asr_install(args):
     c = _make_admin_client(args)
-    return _run_admin(lambda: c.asr_install(torch_backend=args.backend))
+    return _run_admin(lambda: c.asr_install(engine=args.engine,
+                                            torch_backend=args.backend))
 
 
 def cmd_asr_cancel_install(args):
     c = _make_admin_client(args)
-    return _run_admin(lambda: c.asr_cancel_install())
+    return _run_admin(lambda: c.asr_cancel_install(engine=args.engine))
 
 
 def cmd_asr_setup(args):
     c = _make_admin_client(args)
-    return _run_admin(lambda: c.asr_setup(args.python))
+    return _run_admin(lambda: c.asr_setup(args.python, engine=args.engine))
 
 
 def cmd_asr_models(args):
@@ -1952,22 +1958,37 @@ def main(argv: list[str] | None = None) -> int:
                          "[cli].api_key, or the admin key). Any enabled origin works.")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_transcribe)
 
-    sp = afp.add_parser("engines", help="ASR engine status (configured? installed?)")
+    sp = afp.add_parser("engines",
+                        help="list ASR engines and their status "
+                             "(available? configured? installed?)")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_engines)
 
     sp = afp.add_parser("install",
-                        help="install/reuse the ASR engine dependencies "
-                             "(reuses the diffusion torch+transformers venv)")
+                        help="install/build a chosen ASR engine's dependencies")
+    sp.add_argument("--engine", default="asr", choices=AUDIO_ENGINE_CHOICES,
+                    help="which engine to install: asr (Whisper/transformers), "
+                         "whispercpp (whisper.cpp, built with Vulkan), or "
+                         "sherpa (sherpa-onnx streaming). Default: asr")
     sp.add_argument("--backend", default="auto",
                     choices=["auto", "rocm", "cuda", "cpu"],
-                    help="torch build for the dedicated-venv fallback")
+                    help="torch build for the dedicated-venv fallback "
+                         "(asr only; ignored by whispercpp/sherpa)")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_install)
 
-    sp = afp.add_parser("cancel-install", help="cancel an in-progress ASR install")
+    sp = afp.add_parser("cancel-install",
+                        help="cancel an in-progress ASR install/build")
+    sp.add_argument("--engine", default="asr", choices=AUDIO_ENGINE_CHOICES,
+                    help="which engine's install to cancel (default: asr)")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_cancel_install)
 
-    sp = afp.add_parser("setup", help="point the ASR engine at a Python interpreter")
-    sp.add_argument("python", help="path to a python with torch + transformers")
+    sp = afp.add_parser("setup",
+                        help="point a chosen ASR engine at its interpreter "
+                             "(asr/sherpa) or built binary (whispercpp)")
+    sp.add_argument("python",
+                    help="path: a python with the engine's deps, or the "
+                         "whisper-cli binary for whispercpp")
+    sp.add_argument("--engine", default="asr", choices=AUDIO_ENGINE_CHOICES,
+                    help="which engine to point (default: asr)")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_setup)
 
     sp = afp.add_parser("models", help="list installed speech-to-text models")

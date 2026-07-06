@@ -1,0 +1,120 @@
+{# ASR engines page body — polled every 2s while an install/build is in
+   flight so progress updates live. Kept in its own partial (like
+   _setup_diffusion_partial.html) so the HTMX morph reconciles just this
+   fragment, preserving open forms + focus. #}
+{% for eng in engines %}
+<section class="lm-dm-engine">
+  <div class="lm-dm-engine__head">
+    <span class="lm-dm-engine__title">{{ eng.label }}
+      <span class="lm-dm-engine__meta">· engine <code>{{ eng.id }}</code></span>
+    </span>
+    <span class="lm-dm-engine__meta">
+      {% if eng.configured %}<span class="lm-dm-pill lm-dm-pill--ok">configured</span>{% else %}not configured{% endif %}
+    </span>
+  </div>
+
+  {# ---- Engine setup card: install/build + interpreter/binary path ---- #}
+  <div class="lm-asr-engine-card">
+    {% if eng.install and eng.install.status in ('pending', 'running') %}
+      <p style="font-size: 0.8125rem; color: var(--fg-1); margin: 0 0 8px;">
+        {% if eng.setup_kind == 'binary' %}Building{% else %}Installing dependencies{% endif %} —
+        {{ eng.install.message or 'working…' }} ({{ eng.install.progress_pct }}%)
+      </p>
+      <div class="lm-asr-bar"><div class="lm-asr-bar__fill" style="width: {{ eng.install.progress_pct or 0 }}%;"></div></div>
+      <form method="post" action="/ui/asr-models/install-deps/{{ eng.install.id }}/cancel">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Cancel</button>
+      </form>
+    {% else %}
+      <p style="font-size: 0.8125rem; color: var(--fg-2); margin: 0 0 8px;">
+        {% if eng.plan %}{{ eng.plan.notes }}
+        {% elif eng.setup_kind == 'binary' %}Builds whisper.cpp from source with Vulkan (<code>-DGGML_VULKAN=1</code>). Requires <code>git</code>, <code>cmake</code>, and <code>glslc</code> (the Vulkan shader compiler). No Python venv — the worker runs under llamanager's own interpreter.{% endif %}
+        {% if eng.install and eng.install.status == 'failed' %}
+        <br><span style="color: var(--err);">Last {% if eng.setup_kind == 'binary' %}build{% else %}install{% endif %} failed: {{ eng.install.error }}</span>
+        {% elif eng.install and eng.install.status == 'done' %}
+        <br><span style="color: var(--ok);">Last {% if eng.setup_kind == 'binary' %}build{% else %}install{% endif %} succeeded.</span>
+        {% endif %}
+      </p>
+      {% if eng.install and eng.install.status == 'failed' and eng.install.log %}
+      <details style="margin: 0 0 8px;">
+        <summary style="cursor: pointer; font-size: 0.75rem; color: var(--fg-2);">Show build log (last lines)</summary>
+        <pre class="lm-asr-log">{{ '\n'.join(eng.install.log.splitlines()[-40:]) }}</pre>
+      </details>
+      {% endif %}
+      <div class="lm-dm-actions">
+        <form method="post" action="/ui/asr-models/install-deps">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="engine" value="{{ eng.id }}">
+          <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">
+            {% if eng.setup_kind == 'binary' %}{% if eng.configured %}Rebuild (Vulkan){% else %}Build (Vulkan){% endif %}{% else %}{% if eng.configured %}Reinstall / refresh dependencies{% else %}Install dependencies{% endif %}{% endif %}
+          </button>
+        </form>
+      </div>
+    {% endif %}
+
+    <form method="post" action="/ui/setup/audio/asr" class="lm-form" style="margin-top: 12px;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="engine" value="{{ eng.id }}">
+      {% if eng.setup_kind == 'binary' %}
+      <div class="lm-dm-field">
+        <label class="lm-dm-field__label">whisper-cli binary (<code>whispercpp_binary</code>)</label>
+        <input class="lm-input lm-input--mono" type="text" name="asr_python"
+               value="{{ eng.binary_path }}"
+               placeholder="~/.llamanager/whispercpp/build/bin/whisper-cli">
+        <span class="lm-dm-field__help">The Vulkan-built whisper-cli. Auto-filled by the Build button; set manually to point at an existing build.</span>
+      </div>
+      {% else %}
+      <div class="lm-dm-field">
+        <label class="lm-dm-field__label">Python interpreter (<code>{{ eng.id }}_python</code>)</label>
+        <input class="lm-input lm-input--mono" type="text" name="asr_python"
+               value="{{ eng.python_path }}"
+               placeholder="~/.llamanager/venvs/{{ eng.id }}/bin/python">
+        <span class="lm-dm-field__help">{% if eng.id == 'sherpa' %}A Python with sherpa-onnx installed. Auto-filled by the installer.{% else %}A Python with torch + transformers. Auto-filled by the installer; set manually to reuse an existing venv.{% endif %}</span>
+      </div>
+      {% endif %}
+      <button type="submit" class="lm-btn lm-btn--ghost lm-btn--sm">Save path</button>
+    </form>
+  </div>
+</section>
+{% endfor %}
+
+{# ---- Shared service settings: GPU budget & coexistence ---- #}
+<section class="lm-dm-engine">
+  <div class="lm-dm-engine__head">
+    <span class="lm-dm-engine__title">GPU budget &amp; coexistence
+      <span class="lm-dm-engine__meta">· applies to whichever engine is warm</span>
+    </span>
+  </div>
+  <div class="lm-asr-engine-card">
+    <p style="font-size: 0.8125rem; color: var(--fg-2); margin: 0 0 8px;">
+      ASR runs a warm worker serving concurrent transcriptions.
+      {% if asr_defaults %}Current budget allows <strong>≈ {{ asr_defaults.max_concurrent }}</strong> concurrent task(s).{% endif %}
+    </p>
+    <form method="post" action="/ui/setup/audio/asr-defaults" class="lm-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="lm-dm-field">
+        <label class="lm-dm-field__label">VRAM budget (GB)</label>
+        <input class="lm-input lm-input--mono" type="number" step="0.5" min="0"
+               name="asr_vram_budget_gb" value="{{ asr_defaults.vram_budget_gb if asr_defaults }}">
+        <span class="lm-dm-field__help">Cap ASR VRAM so it leaves room for the LLM/diffusion. 0 = uncapped.</span>
+      </div>
+      <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8125rem; margin: 8px 0;">
+        <input type="checkbox" name="asr_coexist" value="on" {% if asr_defaults and asr_defaults.coexist %}checked{% endif %}>
+        <span>Run alongside the LLM (coexist). Off = unload the LLM for each transcription.</span>
+      </label>
+      <div class="lm-dm-field">
+        <label class="lm-dm-field__label">Worker idle timeout (s)</label>
+        <input class="lm-input lm-input--mono" type="number" min="0"
+               name="asr_idle_timeout_s" value="{{ asr_defaults.idle_timeout_s if asr_defaults }}">
+        <span class="lm-dm-field__help">Stop the warm worker after this many idle seconds to reclaim VRAM. 0 = never.</span>
+      </div>
+      <div class="lm-dm-field">
+        <label class="lm-dm-field__label">Streaming decode interval (s)</label>
+        <input class="lm-input lm-input--mono" type="number" step="0.05" min="0.05"
+               name="asr_decode_interval_s" value="{{ asr_defaults.decode_interval_s if asr_defaults }}">
+        <span class="lm-dm-field__help">Live-streaming partial cadence (WebSocket mode). Env <code>ASR_DECODE_INTERVAL_S</code> overrides.</span>
+      </div>
+      <button type="submit" class="lm-btn lm-btn--ghost lm-btn--sm">Save GPU settings</button>
+    </form>
+  </div>
+</section>

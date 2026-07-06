@@ -109,7 +109,9 @@ lock_model_loading = false
 # hidream_repo      = "/path/to/HiDream-O1-Image"
 # flux2_sd_cli      = "/path/to/sd-cli"
 # flux2_device_index = 1     # GGML_VK_VISIBLE_DEVICES for the AMD card
-# asr_python        = "~/.llamanager/venvs/z_image/bin/python"  # Whisper STT
+# asr_python        = "~/.llamanager/venvs/z_image/bin/python"  # Whisper STT (transformers)
+# whispercpp_binary = "~/.llamanager/whispercpp/build/bin/whisper-cli"  # whisper.cpp (Vulkan) STT
+# sherpa_python     = "~/.llamanager/venvs/sherpa/bin/python"  # sherpa-onnx (streaming) STT
 # asr_models_dir    = "/path/to/whisper-models"   # ASR-only model folder; blank = shared models dir
 # ASR runs a warm worker (model loaded once) serving concurrent transcriptions:
 # asr_vram_budget_gb   = 6.0     # cap ASR VRAM; admits tasks while under it (0 = uncapped)
@@ -173,6 +175,8 @@ ENGINE_FAMILY: dict[str, str] = {
     "krea":    "image",
     "ideogram4": "image",
     "asr":     "audio",
+    "whispercpp": "audio",
+    "sherpa":  "audio",
 }
 
 # Text engines that are still managed by the existing HTTP-server path.
@@ -301,6 +305,53 @@ def _looks_like_asr(d: Path) -> bool:
         return True
     archs = data.get("architectures") or []
     return any("WhisperForConditionalGeneration" in str(a) for a in archs)
+
+
+def _looks_like_whispercpp(d: Path) -> bool:
+    """whisper.cpp / GGML model shape: a folder containing a ``ggml-*.bin``
+    checkpoint (the canonical whisper.cpp layout, e.g. ``ggml-large-v3-turbo.bin``)
+    or a ``.gguf`` whose file name marks it as a whisper conversion.
+
+    whisper.cpp models are single files with no ``config.json`` — the opposite
+    of the transformers ``asr`` shape — so the two never collide."""
+    if not d.is_dir():
+        return False
+    for p in d.iterdir():
+        if not p.is_file():
+            continue
+        name = p.name.lower()
+        if name.startswith("ggml-") and name.endswith(".bin"):
+            return True
+        if name.endswith(".gguf") and "whisper" in name:
+            return True
+    return False
+
+
+def _looks_like_sherpa(d: Path) -> bool:
+    """sherpa-onnx model shape: a folder with a ``tokens.txt`` symbol table and
+    at least one ``*.onnx`` graph (transducer encoder/decoder/joiner, or a
+    single ``model.onnx`` for Paraformer / CTC)."""
+    if not d.is_dir():
+        return False
+    names = {p.name.lower() for p in d.iterdir() if p.is_file()}
+    return "tokens.txt" in names and any(n.endswith(".onnx") for n in names)
+
+
+def detect_audio_engine_for_path(model_path: Path) -> str | None:
+    """Return the audio engine (``asr`` / ``whispercpp`` / ``sherpa``) for a
+    model directory under ``asr_models_dir``, or ``None`` if it isn't an audio
+    model. Kept separate from ``detect_engine_for_path`` so the audio subsystem
+    can recognise single-file GGML and ONNX shapes without perturbing the global
+    (LLM/image) detector — in particular the early ``.gguf → "llama"`` return."""
+    if not model_path.is_dir():
+        return None
+    if _looks_like_asr(model_path):
+        return "asr"
+    if _looks_like_whispercpp(model_path):
+        return "whispercpp"
+    if _looks_like_sherpa(model_path):
+        return "sherpa"
+    return None
 
 
 def detect_engine_for_path(model_path: Path) -> str:
@@ -575,6 +626,15 @@ class Config:
     # (engines/_asr_runner.py). The installer typically points this at the
     # shared z_image venv rather than rebuilding torch.
     asr_python: str = ""
+    # whisper.cpp / GGML engine: path to the Vulkan-built ``whisper-cli``
+    # binary (produced by the from-source build on the ASR models page). The
+    # worker shim (engines/_whispercpp_worker.py) is stdlib-only and runs under
+    # llamanager's own interpreter, so no venv is needed — just this binary.
+    whispercpp_binary: str = ""
+    # sherpa-onnx engine: path to a Python interpreter with ``sherpa-onnx``
+    # installed (a dedicated pip venv; onnxruntime, no torch). Mirrors
+    # ``asr_python``; the runner ships with llamanager (engines/_sherpa_worker.py).
+    sherpa_python: str = ""
     # ---- ASR (speech-to-text) service settings ----
     # ASR runs as a persistent *warm worker* (model loaded once) serving many
     # concurrent transcriptions, unlike the one-shot image engines. These caps
@@ -864,6 +924,8 @@ def load_config(path: Path | None = None) -> Config:
         z_image_python=str(image_cfg.get("z_image_python", "") or ""),
         ideogram4_python=str(image_cfg.get("ideogram4_python", "") or ""),
         asr_python=str(image_cfg.get("asr_python", "") or ""),
+        whispercpp_binary=str(image_cfg.get("whispercpp_binary", "") or ""),
+        sherpa_python=str(image_cfg.get("sherpa_python", "") or ""),
         asr_models_dir_override=(
             expand(str(image_cfg["asr_models_dir"]))
             if image_cfg.get("asr_models_dir") else None),
@@ -1331,6 +1393,8 @@ def update_image_config(cfg_path: Path, *,
                         z_image_python: str | None = None,
                         ideogram4_python: str | None = None,
                         asr_python: str | None = None,
+                        whispercpp_binary: str | None = None,
+                        sherpa_python: str | None = None,
                         asr_models_dir: str | None = None,
                         asr_vram_budget_gb: float | None = None,
                         asr_coexist: bool | None = None,
@@ -1365,6 +1429,10 @@ def update_image_config(cfg_path: Path, *,
         img["ideogram4_python"] = ideogram4_python
     if asr_python is not None:
         img["asr_python"] = asr_python
+    if whispercpp_binary is not None:
+        img["whispercpp_binary"] = whispercpp_binary
+    if sherpa_python is not None:
+        img["sherpa_python"] = sherpa_python
     if asr_models_dir is not None:
         img["asr_models_dir"] = asr_models_dir
     if asr_vram_budget_gb is not None:

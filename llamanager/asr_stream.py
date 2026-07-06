@@ -44,13 +44,14 @@ def _ms_to_bytes(ms: int) -> int:
 class AsrStreamSession:
     def __init__(self, *, cfg, runner, sm, ws, model_id: str, model_path: Path,
                  language: str | None, task: str, decode_interval_s: float,
-                 prebuffer: bytes = b""):
+                 prebuffer: bytes = b"", engine: str = "asr"):
         self.cfg = cfg
         self.runner = runner
         self.sm = sm
         self.ws = ws
         self.model_id = model_id
         self.model_path = model_path
+        self.engine = engine
         self.language = language
         self.task = task
         self.interval = max(0.2, float(decode_interval_s or 1.0))
@@ -61,6 +62,13 @@ class AsrStreamSession:
         self._eof = asyncio.Event()
         self._ffmpeg: asyncio.subprocess.Process | None = None
         self._prebuffer = prebuffer
+        # Native streaming (sherpa-onnx): feed only *new* audio into a stateful
+        # worker stream instead of re-decoding a rolling window each tick.
+        from . import engines as _engines
+        self._native = bool(
+            _engines.capabilities(engine).get("native_streaming"))
+        self._sid = f"{id(self):x}"
+        self._stream_sent_bytes = 0      # PCM already pushed to the native stream
 
     async def run(self) -> None:
         # coexist=off → hold the text server yielded for the whole session.
@@ -68,7 +76,8 @@ class AsrStreamSession:
               if (self.sm is not None and not self.cfg.asr_coexist)
               else _nullcontext())
         async with cm:
-            await self.runner.ensure_worker(self.model_id, self.model_path)
+            await self.runner.ensure_worker(
+                self.model_id, self.model_path, self.engine)
             self._ffmpeg = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
                 # low-latency input: don't buffer/probe ahead, emit PCM as
@@ -146,7 +155,10 @@ class AsrStreamSession:
     async def _decode_loop(self) -> None:
         while True:
             done = self._eof.is_set()
-            if len(self._buf) >= BYTES_PER_SAMPLE:
+            if self._native:
+                if len(self._buf) >= BYTES_PER_SAMPLE or done:
+                    await self._decode_native(final=done)
+            elif len(self._buf) >= BYTES_PER_SAMPLE:
                 await self._decode_and_emit(final=done)
                 self._maybe_commit()
             if done:
@@ -160,6 +172,25 @@ class AsrStreamSession:
             except asyncio.TimeoutError:
                 pass
         await self._send({"type": "done"})
+
+    async def _decode_native(self, *, final: bool) -> None:
+        """Native-streaming tick (sherpa-onnx): push only the *new* PCM into the
+        worker's stateful session and relay its running hypothesis. The worker
+        holds decoder state, so we drop the audio we've sent."""
+        new = bytes(self._buf)
+        del self._buf[:len(new)]
+        try:
+            env = await self.runner.stream_pcm(
+                new, sid=self._sid, final=final, language=self.language,
+                task=self.task, word_timestamps=True)
+        except Exception as e:  # noqa: BLE001
+            await self._send({"type": "error", "error": str(e)})
+            return
+        self._rev += 1
+        await self._send({
+            "type": "transcript", "rev": self._rev, "final": final,
+            "audio_ms": int(env.get("audio_ms", 0)),
+            "text": env.get("text", ""), "words": env.get("words", [])})
 
     async def _decode_and_emit(self, *, final: bool) -> None:
         window = bytes(self._buf)

@@ -1935,68 +1935,120 @@ async def asr_engines(request: Request,
     for eng_id in _engines.ADAPTERS.keys():
         if ENGINE_FAMILY.get(eng_id, "text") != "audio":
             continue
-        configured = bool(cfg.asr_python) if eng_id == "asr" else False
+        mod = _engines.get(eng_id)
+        cfg_fn = getattr(mod, "configured", None)
+        configured = bool(cfg_fn(cfg)) if cfg_fn else False
+        # whisper.cpp is a native binary (built with Vulkan); the others point
+        # at a Python interpreter.
+        if eng_id == "whispercpp":
+            setup_kind, path = "binary", cfg.whispercpp_binary
+        elif eng_id == "sherpa":
+            setup_kind, path = "python", cfg.sherpa_python
+        elif eng_id == "asr":
+            setup_kind, path = "python", cfg.asr_python
+        else:
+            setup_kind, path = "python", ""
         active = installer.active_for_engine(eng_id)
         last = active or (installer.list_for_engine(eng_id, limit=1) or [None])[0]
         plan = ENGINE_PLANS.get(eng_id)
         out.append({
             "engine": eng_id,
-            "label": getattr(_engines.get(eng_id), "LABEL", eng_id),
+            "label": getattr(mod, "LABEL", eng_id),
             "configured": configured,
-            "python": cfg.asr_python if eng_id == "asr" else "",
+            "setup_kind": setup_kind,
+            "path": path,
+            "python": path if setup_kind == "python" else "",
+            "install_kind": ("cmake" if eng_id == "whispercpp" else "pip"),
             "packages": (plan.packages if plan else []),
             "reuse_from": list(plan.reuse_from) if plan else [],
-            "notes": (plan.notes if plan else ""),
+            "notes": (plan.notes if plan
+                      else ("Built from source with Vulkan (git + cmake)."
+                            if eng_id == "whispercpp" else "")),
             "last_install": last,
         })
     return JSONResponse({"engines": out})
 
 
 class AsrInstallBody(BaseModel):
+    engine: str = "asr"
     torch_backend: str = "auto"
+
+
+def _require_audio_engine(engine: str) -> str:
+    from .config import ENGINE_FAMILY
+    eng = (engine or "asr").strip()
+    if ENGINE_FAMILY.get(eng, "text") != "audio":
+        raise HTTPException(status_code=400,
+                            detail=f"not an audio engine: {eng!r}")
+    return eng
 
 
 @router.post("/asr/install")
 async def asr_install(request: Request, body: AsrInstallBody | None = None,
                       _: Origin = Depends(admin_origin)) -> JSONResponse:
-    """Install (or reuse a diffusion venv for) the ASR engine dependencies."""
+    """Install/build an audio engine's dependencies. ``asr``/``sherpa`` are pip
+    installs; ``whispercpp`` is a native Vulkan build (git clone + cmake)."""
     from .engine_installer import TORCH_BACKENDS
     installer = request.app.state.engine_installer
-    options: dict[str, Any] = {}
-    tb = ((body.torch_backend if body else "auto") or "auto").strip().lower()
-    if tb in TORCH_BACKENDS and tb != "auto":
-        options["torch_backend"] = tb
+    engine = _require_audio_engine(body.engine if body else "asr")
     try:
-        install_id = installer.start("asr", options=options)
+        if engine == "whispercpp":
+            install_id = installer.start_build(engine)
+        else:
+            options: dict[str, Any] = {}
+            tb = ((body.torch_backend if body else "auto") or "auto").strip().lower()
+            if tb in TORCH_BACKENDS and tb != "auto":
+                options["torch_backend"] = tb
+            install_id = installer.start(engine, options=options)
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return JSONResponse({"ok": True, "install_id": install_id}, status_code=202)
+    return JSONResponse({"ok": True, "engine": engine, "install_id": install_id},
+                        status_code=202)
+
+
+class AsrCancelBody(BaseModel):
+    engine: str = "asr"
 
 
 @router.post("/asr/cancel-install")
-async def asr_cancel_install(request: Request,
+async def asr_cancel_install(request: Request, body: AsrCancelBody | None = None,
                              _: Origin = Depends(admin_origin)) -> JSONResponse:
     installer = request.app.state.engine_installer
-    active = installer.active_for_engine("asr")
+    engine = _require_audio_engine(body.engine if body else "asr")
+    active = installer.active_for_engine(engine)
     if active:
         installer.cancel(active["id"])
-        return JSONResponse({"ok": True, "cancelled": active["id"]})
-    return JSONResponse({"ok": True, "cancelled": None})
+        return JSONResponse({"ok": True, "engine": engine,
+                             "cancelled": active["id"]})
+    return JSONResponse({"ok": True, "engine": engine, "cancelled": None})
 
 
 class AsrSetupBody(BaseModel):
     python: str
+    engine: str = "asr"
 
 
 @router.post("/asr/setup")
 async def asr_setup(request: Request, body: AsrSetupBody,
                     _: Origin = Depends(admin_origin)) -> JSONResponse:
-    """Point the ASR engine at a Python interpreter (torch + transformers)."""
+    """Point an audio engine at its interpreter (asr/sherpa) or built binary
+    (whispercpp). ``python`` carries whichever path the engine needs."""
     from .config import update_image_config
     cfg = request.app.state.cfg
-    cfg.asr_python = body.python.strip()
-    update_image_config(cfg.config_path, asr_python=cfg.asr_python)
-    return JSONResponse({"ok": True, "asr_python": cfg.asr_python})
+    engine = _require_audio_engine(body.engine)
+    val = body.python.strip()
+    if engine == "sherpa":
+        cfg.sherpa_python = val
+        update_image_config(cfg.config_path, sherpa_python=val)
+        return JSONResponse({"ok": True, "engine": engine, "sherpa_python": val})
+    if engine == "whispercpp":
+        cfg.whispercpp_binary = val
+        update_image_config(cfg.config_path, whispercpp_binary=val)
+        return JSONResponse({"ok": True, "engine": engine,
+                             "whispercpp_binary": val})
+    cfg.asr_python = val
+    update_image_config(cfg.config_path, asr_python=val)
+    return JSONResponse({"ok": True, "engine": engine, "asr_python": val})
 
 
 @router.get("/asr/models")
@@ -2009,7 +2061,7 @@ async def asr_models(request: Request,
     for m in scan_asr_models(cfg):
         mc = cfg.get_model(m["model_id"])
         on_disk.append({
-            "model_id": m["model_id"], "engine": "asr",
+            "model_id": m["model_id"], "engine": m.get("engine", "asr"),
             "size_bytes": m["size_bytes"], "path": m["path"],
             "default_profile": (mc.default_profile if mc else ""),
             "profiles": sorted(mc.profiles.keys()) if mc else [],

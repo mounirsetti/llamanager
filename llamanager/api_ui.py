@@ -5216,6 +5216,74 @@ async def diffusion_profiles_materialize_defaults(
 
 # ---- ASR (speech-to-text) models page ---------------------------------
 
+def _asr_engine_setup_fields(cfg, eng_id: str, eng_mod) -> dict[str, Any]:
+    """Per-engine setup descriptor shared by the ASR *engines* page and the
+    ASR *models* page. Reads the adapter (not a hardcoded map) so new audio
+    engines light up both pages. whisper.cpp is a native binary (Build button);
+    the others point at a Python interpreter."""
+    cfg_fn = getattr(eng_mod, "configured", None)
+    configured = bool(cfg_fn(cfg)) if cfg_fn else False
+    setup_kind = "binary" if eng_id == "whispercpp" else "python"
+    python_path = ""
+    binary_path = ""
+    if eng_id == "asr":
+        python_path = cfg.asr_python
+    elif eng_id == "sherpa":
+        python_path = cfg.sherpa_python
+    elif eng_id == "whispercpp":
+        binary_path = cfg.whispercpp_binary
+    return {
+        "label": getattr(eng_mod, "LABEL", eng_id),
+        "configured": configured, "setup_kind": setup_kind,
+        "python_path": python_path, "binary_path": binary_path,
+    }
+
+
+def _asr_defaults_view(cfg) -> dict[str, Any]:
+    from .config import asr_max_concurrent
+    return {
+        "vram_budget_gb": cfg.asr_vram_budget_gb,
+        "coexist": cfg.asr_coexist,
+        "idle_timeout_s": cfg.asr_idle_timeout_s,
+        "decode_interval_s": cfg.asr_decode_interval_s,
+        "max_concurrent": asr_max_concurrent(cfg),
+    }
+
+
+def _setup_asr_ctx(request: Request) -> dict[str, Any]:
+    """Context for the ASR *engines* page (`/ui/setup-asr`): per-engine
+    install/build + interpreter/binary setup, plus the shared GPU budget /
+    coexistence service settings. Mirrors ``_setup_diffusion_ctx``; the model
+    list lives on the separate ASR *models* page."""
+    cfg = request.app.state.cfg
+    installer = request.app.state.engine_installer
+    from .engine_installer import ENGINE_PLANS
+
+    engines_view: list[dict[str, Any]] = []
+    any_busy = False
+    for eng_id, eng_mod in image_engines.ADAPTERS.items():
+        if ENGINE_FAMILY.get(eng_id, "text") != "audio":
+            continue
+        fields = _asr_engine_setup_fields(cfg, eng_id, eng_mod)
+        active = installer.active_for_engine(eng_id)
+        if active:
+            any_busy = True
+        else:
+            recent = installer.list_for_engine(eng_id, limit=1)
+            active = recent[0] if recent else None
+        plan = ENGINE_PLANS.get(eng_id)
+        engines_view.append({
+            "id": eng_id, **fields, "install": active,
+            "plan": {"packages": plan.packages, "notes": plan.notes} if plan else None,
+        })
+    return _ctx(
+        request, active="setup-asr", engines=engines_view,
+        asr_models_dir=str(cfg.asr_models_dir),
+        asr_defaults=_asr_defaults_view(cfg),
+        asr_install_busy=any_busy,
+    )
+
+
 def _asr_models_ctx(request: Request) -> dict[str, Any]:
     """Context for the ASR models page: installed audio models + profiles,
     plus the audio-engine install/setup state.
@@ -5225,8 +5293,6 @@ def _asr_models_ctx(request: Request) -> dict[str, Any]:
     reuses the shared /ui/diffusion-models/profiles/* endpoints, which
     redirect back here via ``_models_page_for``."""
     cfg = request.app.state.cfg
-    installer = request.app.state.engine_installer
-    from .engine_installer import ENGINE_PLANS
     from .audio_runner import scan_asr_models
 
     # Scan the (possibly dedicated) ASR models directory, not the Registry —
@@ -5234,7 +5300,7 @@ def _asr_models_ctx(request: Request) -> dict[str, Any]:
     on_disk: dict[str, dict[str, Any]] = {}
     for m in scan_asr_models(cfg):
         on_disk[m["model_id"]] = {
-            "model_id": m["model_id"], "engine": "asr",
+            "model_id": m["model_id"], "engine": m.get("engine", "asr"),
             "size_bytes": m["size_bytes"], "path": m["path"],
         }
 
@@ -5242,8 +5308,7 @@ def _asr_models_ctx(request: Request) -> dict[str, Any]:
     for eng_id, eng_mod in image_engines.ADAPTERS.items():
         if ENGINE_FAMILY.get(eng_id, "text") != "audio":
             continue
-        configured = bool(cfg.asr_python) if eng_id == "asr" else False
-        label = {"asr": "Whisper (transformers)"}.get(eng_id, eng_id)
+        fields = _asr_engine_setup_fields(cfg, eng_id, eng_mod)
         schema = [_serialize_profile_field(f) for f in eng_mod.profile_schema()]
         try:
             default_profiles_dict = eng_mod.default_profiles()
@@ -5274,61 +5339,78 @@ def _asr_models_ctx(request: Request) -> dict[str, Any]:
                 "default_profile": (model_cfg.default_profile if model_cfg else ""),
             })
 
-        # Install state + plan for the engine card.
-        active = installer.active_for_engine(eng_id)
-        if not active:
-            recent = installer.list_for_engine(eng_id, limit=1)
-            active = recent[0] if recent else None
-        plan = ENGINE_PLANS.get(eng_id)
         engines_view.append({
-            "id": eng_id, "label": label, "configured": configured,
+            "id": eng_id, **fields,
             "schema": schema, "default_profiles": default_profiles_view,
-            "rows": rows, "python_path": cfg.asr_python if eng_id == "asr" else "",
-            "install": active,
-            "plan": {"packages": plan.packages, "notes": plan.notes} if plan else None,
+            "rows": rows,
         })
 
-    from .config import asr_max_concurrent
     return _ctx(
         request, active="asr-models", engines=engines_view,
         asr_models_dir=str(cfg.asr_models_dir),
         asr_models_dir_is_default=(cfg.asr_models_dir_override is None),
-        asr_defaults={
-            "vram_budget_gb": cfg.asr_vram_budget_gb,
-            "coexist": cfg.asr_coexist,
-            "idle_timeout_s": cfg.asr_idle_timeout_s,
-            "decode_interval_s": cfg.asr_decode_interval_s,
-            "max_concurrent": asr_max_concurrent(cfg),
-        },
+        asr_defaults=_asr_defaults_view(cfg),
     )
 
 
 @router.get("/asr-models", response_class=HTMLResponse)
 async def asr_models_view(request: Request,
                           _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    """List installed speech-to-text models, manage profiles, and install /
-    point the ASR engine at a Python environment."""
+    """List installed speech-to-text models and manage their profiles. Engine
+    install/setup lives on the separate ASR engines page (`/ui/setup-asr`)."""
     return templates.TemplateResponse(
         request, "asr_models.html", _asr_models_ctx(request),
     )
 
 
+@router.get("/setup-asr", response_class=HTMLResponse)
+async def setup_asr_view(request: Request,
+                         _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """ASR *engines* page: install/build each engine, point it at its
+    interpreter/binary, and set the shared GPU budget / coexistence — the
+    audio-family analogue of the LLM engines (`/ui/setup`) and Diffusion
+    engines (`/ui/setup-diffusion`) pages."""
+    return templates.TemplateResponse(
+        request, "setup_asr.html", _setup_asr_ctx(request),
+    )
+
+
+@router.get("/setup-asr/_partial", response_class=HTMLResponse)
+async def setup_asr_partial(request: Request,
+                            _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """HTMX-polled fragment so ASR engine install/build progress updates live
+    on the ASR engines page without a full reload."""
+    return templates.TemplateResponse(
+        request, "_setup_asr_partial.html", _setup_asr_ctx(request),
+    )
+
+
 @router.post("/asr-models/install-deps", response_class=HTMLResponse)
 async def asr_install_deps(request: Request,
+                           engine: str = Form("asr"),
                            torch_backend: str = Form("auto"),
                            _: None = Depends(require_csrf)) -> Response:
-    """Install (or reuse a diffusion venv for) the ASR engine deps."""
+    """Install (or reuse a diffusion venv for) an audio engine's deps.
+
+    ``asr``/``sherpa`` are pip installs; ``whispercpp`` is a native Vulkan
+    build (git clone + cmake)."""
     from .engine_installer import TORCH_BACKENDS
     installer = request.app.state.engine_installer
-    options: dict[str, Any] = {}
-    tb = (torch_backend or "auto").strip().lower()
-    if tb in TORCH_BACKENDS and tb != "auto":
-        options["torch_backend"] = tb
+    eng = (engine or "asr").strip()
+    if ENGINE_FAMILY.get(eng, "text") != "audio":
+        return _error_html(f"not an audio engine: {eng!r}", status_code=400)
     try:
-        installer.start("asr", options=options)
+        if eng == "whispercpp":
+            installer.start_build(eng)
+        else:
+            options: dict[str, Any] = {}
+            tb = (torch_backend or "auto").strip().lower()
+            if tb in TORCH_BACKENDS and tb != "auto":
+                options["torch_backend"] = tb
+            installer.start(eng, options=options)
     except (ValueError, RuntimeError) as e:
         return _error_html(f"install failed: {e}", status_code=400)
-    return RedirectResponse("/ui/asr-models", status_code=303)
+    return RedirectResponse("/ui/setup-asr", status_code=303)
 
 
 @router.post("/asr-models/install-deps/{install_id}/cancel",
@@ -5336,18 +5418,29 @@ async def asr_install_deps(request: Request,
 async def asr_cancel_install(request: Request, install_id: str,
                              _: None = Depends(require_csrf)) -> Response:
     request.app.state.engine_installer.cancel(install_id)
-    return RedirectResponse("/ui/asr-models", status_code=303)
+    return RedirectResponse("/ui/setup-asr", status_code=303)
 
 
 @router.post("/setup/audio/asr", response_class=HTMLResponse)
 async def setup_asr(request: Request, asr_python: str = Form(""),
+                    engine: str = Form("asr"),
                     _: None = Depends(require_csrf)) -> Response:
-    """Point the ASR engine at an existing Python interpreter (one with
-    torch + transformers, e.g. the z_image venv)."""
+    """Point an audio engine at its interpreter (asr/sherpa) or built binary
+    (whispercpp). The single ``asr_python`` form field carries whichever path
+    the engine's setup card exposes."""
     cfg = request.app.state.cfg
-    cfg.asr_python = asr_python.strip()
-    update_image_config(cfg.config_path, asr_python=cfg.asr_python)
-    return RedirectResponse("/ui/asr-models", status_code=303)
+    val = asr_python.strip()
+    eng = (engine or "asr").strip()
+    if eng == "sherpa":
+        cfg.sherpa_python = val
+        update_image_config(cfg.config_path, sherpa_python=val)
+    elif eng == "whispercpp":
+        cfg.whispercpp_binary = val
+        update_image_config(cfg.config_path, whispercpp_binary=val)
+    else:
+        cfg.asr_python = val
+        update_image_config(cfg.config_path, asr_python=val)
+    return RedirectResponse("/ui/setup-asr", status_code=303)
 
 
 @router.post("/setup/audio/asr-defaults", response_class=HTMLResponse)
@@ -5385,7 +5478,7 @@ async def setup_asr_defaults(request: Request,
         cfg.asr_idle_timeout_s = idle
     if interval is not None:
         cfg.asr_decode_interval_s = interval
-    return RedirectResponse("/ui/asr-models", status_code=303)
+    return RedirectResponse("/ui/setup-asr", status_code=303)
 
 
 @router.post("/setup/audio/asr-models-dir", response_class=HTMLResponse)

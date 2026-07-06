@@ -223,6 +223,12 @@ def capabilities() -> dict[str, Any]:
     return {"ref_images_max": 0}
 
 
+def configured(cfg: Config) -> bool:
+    """Is the transformers Whisper engine ready? It needs a Python interpreter
+    with torch + transformers (``image.asr_python``)."""
+    return bool(cfg.asr_python)
+
+
 def default_profiles() -> dict[str, dict[str, Any]]:
     return {
         "quran-ar": {"audio_language": "ar", "audio_task": "transcribe"},

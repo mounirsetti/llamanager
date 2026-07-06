@@ -380,6 +380,171 @@ def test_asr_stream_ms_conversions():
     assert _bytes_to_ms(_ms_to_bytes(500)) == 500
 
 
+# ---------- whisper.cpp + sherpa-onnx engines ----------
+
+def _make_whispercpp_dir(d: Path) -> None:
+    """A whisper.cpp model folder: a single ggml-*.bin, no config.json."""
+    d.mkdir(parents=True)
+    (d / "ggml-large-v3-turbo.bin").write_bytes(b"\x00" * 32)
+
+
+def _make_sherpa_dir(d: Path) -> None:
+    """A sherpa-onnx transducer folder: tokens.txt + encoder/decoder/joiner."""
+    d.mkdir(parents=True)
+    (d / "tokens.txt").write_text("a 1\n")
+    for part in ("encoder", "decoder", "joiner"):
+        (d / f"{part}.onnx").write_bytes(b"\x00")
+
+
+def test_audio_engine_families():
+    from llamanager.config import ENGINE_FAMILY, AUDIO_ENGINES
+    assert ENGINE_FAMILY["whispercpp"] == "audio"
+    assert ENGINE_FAMILY["sherpa"] == "audio"
+    assert {"asr", "whispercpp", "sherpa"} <= AUDIO_ENGINES
+
+
+def test_detect_audio_engine_shapes(tmp_path: Path):
+    from llamanager.config import detect_audio_engine_for_path
+    w = tmp_path / "whisper-hf"
+    _make_whisper_dir(w)
+    gg = tmp_path / "ggml"
+    _make_whispercpp_dir(gg)
+    sp = tmp_path / "zipformer"
+    _make_sherpa_dir(sp)
+    assert detect_audio_engine_for_path(w) == "asr"
+    assert detect_audio_engine_for_path(gg) == "whispercpp"
+    assert detect_audio_engine_for_path(sp) == "sherpa"
+    # A non-audio dir → None.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert detect_audio_engine_for_path(plain) is None
+
+
+def test_gguf_file_still_detects_llama(tmp_path: Path):
+    """A plain .gguf must stay an LLM — the whisper.cpp detector only fires on
+    ggml-*.bin or a whisper-named .gguf inside a folder, not the global path."""
+    from llamanager.config import detect_engine_for_path
+    f = tmp_path / "qwen3.gguf"
+    f.write_bytes(b"GGUF")
+    assert detect_engine_for_path(f) == "llama"
+
+
+def test_whispercpp_worker_command_built(tmp_path: Path):
+    import sys
+    from llamanager.engines import whispercpp
+    from llamanager.config import Config
+    binary = tmp_path / "whisper-cli"
+    binary.write_text(""); binary.chmod(0o755)
+    model = tmp_path / "ggml"
+    _make_whispercpp_dir(model)
+    cfg = Config(data_dir=tmp_path, whispercpp_binary=str(binary))
+    argv, env = whispercpp.build_worker_command(cfg, model, 8200, 3)
+    assert argv[0] == sys.executable          # stdlib shim → own interpreter
+    assert "_whispercpp_worker.py" in argv[2]
+    assert "--whisper-cli" in argv and str(binary) in argv
+    assert "--port" in argv and "8200" in argv
+    # The GGML file inside the folder is resolved for --model.
+    assert str(model / "ggml-large-v3-turbo.bin") in argv
+    assert env["PYTHONUTF8"] == "1"
+
+
+def test_whispercpp_worker_command_unconfigured_raises(tmp_path: Path):
+    import pytest
+    from llamanager.engines import whispercpp
+    from llamanager.config import Config
+    cfg = Config(data_dir=tmp_path, whispercpp_binary="")
+    with pytest.raises(RuntimeError, match="whispercpp_binary"):
+        whispercpp.build_worker_command(cfg, tmp_path / "m", 8200, 1)
+
+
+def test_sherpa_worker_command_built(tmp_path: Path):
+    from llamanager.engines import sherpa
+    from llamanager.config import Config
+    py = tmp_path / "python"
+    py.write_text(""); py.chmod(0o755)
+    model = tmp_path / "zipformer"
+    _make_sherpa_dir(model)
+    cfg = Config(data_dir=tmp_path, sherpa_python=str(py))
+    argv, env = sherpa.build_worker_command(cfg, model, 8300, 2)
+    assert argv[0] == str(py)
+    assert "_sherpa_worker.py" in argv[2]
+    assert "--model_path" in argv and str(model) in argv
+    assert "--port" in argv and "8300" in argv
+    assert env["PYTHONUTF8"] == "1"
+
+
+def test_sherpa_worker_command_unconfigured_raises(tmp_path: Path):
+    import pytest
+    from llamanager.engines import sherpa
+    from llamanager.config import Config
+    cfg = Config(data_dir=tmp_path, sherpa_python="")
+    with pytest.raises(RuntimeError, match="sherpa_python"):
+        sherpa.build_worker_command(cfg, tmp_path / "m", 8300, 1)
+
+
+def test_engine_configured_predicates(tmp_path: Path):
+    from llamanager.engines import asr, sherpa, whispercpp
+    from llamanager.config import Config
+    binary = tmp_path / "whisper-cli"
+    binary.write_text(""); binary.chmod(0o755)
+    cfg = Config(data_dir=tmp_path, asr_python="/x/py",
+                 sherpa_python="/y/py", whispercpp_binary=str(binary))
+    assert asr.configured(cfg) is True
+    assert sherpa.configured(cfg) is True
+    assert whispercpp.configured(cfg) is True
+    # whispercpp requires the binary to actually exist.
+    cfg2 = Config(data_dir=tmp_path, whispercpp_binary=str(tmp_path / "missing"))
+    assert whispercpp.configured(cfg2) is False
+
+
+def test_sherpa_advertises_native_streaming():
+    from llamanager.engines import capabilities
+    assert capabilities("sherpa").get("native_streaming") is True
+    assert capabilities("whispercpp").get("native_streaming") in (None, False)
+    assert capabilities("asr").get("native_streaming") in (None, False)
+
+
+def test_scan_asr_models_tags_all_engines(tmp_path: Path):
+    from llamanager.config import Config
+    from llamanager.audio_runner import scan_asr_models
+    store = tmp_path / "asr-store"
+    _make_whisper_dir(store / "hf-whisper")
+    _make_whispercpp_dir(store / "ggml-model")
+    _make_sherpa_dir(store / "zipformer")
+    cfg = Config(data_dir=tmp_path, asr_models_dir_override=store)
+    found = {m["model_id"]: m["engine"] for m in scan_asr_models(cfg)}
+    assert found == {"hf-whisper": "asr", "ggml-model": "whispercpp",
+                     "zipformer": "sherpa"}
+
+
+def test_sherpa_install_plan_is_pure_pip():
+    from llamanager.engine_installer import ENGINE_PLANS
+    plan = ENGINE_PLANS["sherpa"]
+    assert plan.needs_torch is False
+    assert "sherpa-onnx" in plan.packages
+    assert not any("torch" in p for p in plan.packages)
+
+
+def test_whispercpp_binary_config_roundtrip(tmp_path: Path):
+    from llamanager.config import (
+        DEFAULT_CONFIG_TOML, load_config, update_image_config)
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(DEFAULT_CONFIG_TOML, encoding="utf-8")
+    update_image_config(cfg_path, whispercpp_binary="/opt/whisper/whisper-cli",
+                        sherpa_python="/opt/sherpa/bin/python")
+    cfg = load_config(cfg_path)
+    assert cfg.whispercpp_binary == "/opt/whisper/whisper-cli"
+    assert cfg.sherpa_python == "/opt/sherpa/bin/python"
+
+
+def test_whispercpp_sherpa_schema_keys_are_profile_attrs():
+    from llamanager.engines import whispercpp, sherpa
+    from llamanager.config import Profile
+    for mod in (whispercpp, sherpa):
+        for f in mod.profile_schema():
+            assert hasattr(Profile(name="p"), f.key), (mod.ENGINE, f.key)
+
+
 def test_ws_stream_requires_auth(app):
     """The streaming WebSocket rejects an unauthenticated handshake."""
     from fastapi.testclient import TestClient
@@ -400,3 +565,166 @@ def test_resolve_audio_engine_rejects_non_audio(tmp_path: Path):
     cfg = Config(data_dir=tmp_path)
     with pytest.raises(AudioError):
         resolve_audio_engine(cfg, "x.gguf")
+
+
+# ---------- CLI / admin engine selection ----------
+
+def _admin_headers(app):
+    am = app.state.auth
+    key = am.rotate_key(am.get_origin_by_name("bootstrap").id)
+    return {"Authorization": f"Bearer {key}"}
+
+
+def test_admin_asr_engines_lists_all_three(app):
+    from fastapi.testclient import TestClient
+    with TestClient(app) as client:
+        r = client.get("/admin/asr/engines", headers=_admin_headers(app))
+        assert r.status_code == 200
+        engs = {e["engine"]: e for e in r.json()["engines"]}
+        assert set(engs) == {"asr", "whispercpp", "sherpa"}
+        assert engs["whispercpp"]["setup_kind"] == "binary"
+        assert engs["whispercpp"]["install_kind"] == "cmake"
+        assert engs["sherpa"]["install_kind"] == "pip"
+
+
+def test_admin_asr_setup_per_engine_writes_right_field(app):
+    from fastapi.testclient import TestClient
+    h = _admin_headers(app)
+    with TestClient(app) as client:
+        r = client.post("/admin/asr/setup", headers=h,
+                        json={"engine": "sherpa", "python": "/opt/s/py"})
+        assert r.status_code == 200 and r.json()["sherpa_python"] == "/opt/s/py"
+        r = client.post("/admin/asr/setup", headers=h,
+                        json={"engine": "whispercpp", "python": "/opt/w/whisper-cli"})
+        assert r.status_code == 200
+        assert r.json()["whispercpp_binary"] == "/opt/w/whisper-cli"
+        # asr + sherpa now configured (paths set); whispercpp needs the binary
+        # to exist on disk, so it stays unconfigured.
+        engs = {e["engine"]: e for e in
+                client.get("/admin/asr/engines", headers=h).json()["engines"]}
+        assert engs["sherpa"]["configured"] is True
+        assert engs["whispercpp"]["configured"] is False
+
+
+def test_admin_asr_install_rejects_non_audio_engine(app):
+    from fastapi.testclient import TestClient
+    with TestClient(app) as client:
+        r = client.post("/admin/asr/install", headers=_admin_headers(app),
+                        json={"engine": "llama"})
+        assert r.status_code == 400
+
+
+def test_cli_audio_engine_choices_include_new_engines():
+    from llamanager.cli import AUDIO_ENGINE_CHOICES
+    assert AUDIO_ENGINE_CHOICES[0] == "asr"       # default listed first
+    assert set(AUDIO_ENGINE_CHOICES) == {"asr", "whispercpp", "sherpa"}
+
+
+def _ui_admin_client(app):
+    """Logged-in UI client (cookie session), mirroring the mem-guard UI tests."""
+    from fastapi.testclient import TestClient
+    from llamanager.api_ui import COOKIE_NAME
+    am = app.state.auth
+    key = am.rotate_key(am.get_origin_by_name("bootstrap").id)
+    client = TestClient(app)
+    r = client.post("/ui/login", data={"api_key": key}, follow_redirects=False)
+    assert r.status_code == 303 and COOKIE_NAME in r.headers.get("set-cookie", "")
+    return client
+
+
+def test_asr_engines_and_models_are_separate_pages(app):
+    """ASR engines (setup) and ASR models live on separate pages, mirroring the
+    LLM engines (/ui/setup) vs LLM models (/ui/models) split."""
+    with _ui_admin_client(app) as client:
+        eng = client.get("/ui/setup-asr")
+        assert eng.status_code == 200
+        # Engines page: every engine's setup/build card + shared GPU settings.
+        for n in ("engine <code>asr</code>", "engine <code>whispercpp</code>",
+                  "engine <code>sherpa</code>", "Build (Vulkan)",
+                  "whisper-cli binary", "VRAM budget"):
+            assert n in eng.text, f"engines page missing {n!r}"
+        # …but not the models folder (that's a models-page concern).
+        assert "ASR models folder" not in eng.text
+
+        mod = client.get("/ui/asr-models")
+        assert mod.status_code == 200
+        assert "ASR models folder" in mod.text
+        assert 'href="/ui/setup-asr"' in mod.text        # cross-link
+        # …but no engine install/build/setup controls.
+        for n in ("Build (Vulkan)", "Install dependencies", "Save GPU settings",
+                  "whisper-cli binary"):
+            assert n not in mod.text, f"models page should not contain {n!r}"
+
+
+def test_asr_engine_config_posts_redirect_to_engines_page(app):
+    import re
+    with _ui_admin_client(app) as client:
+        tok = re.search(r'name="csrf_token" value="([^"]+)"',
+                        client.get("/ui/setup-asr").text).group(1)
+        # Engine setup + install redirect to the engines page…
+        r = client.post("/ui/setup/audio/asr",
+                        data={"engine": "sherpa", "asr_python": "/x/py",
+                              "csrf_token": tok}, follow_redirects=False)
+        assert r.headers["location"] == "/ui/setup-asr"
+        # …but the models folder stays on the models page.
+        tok2 = re.search(r'name="csrf_token" value="([^"]+)"',
+                         client.get("/ui/asr-models").text).group(1)
+        r = client.post("/ui/setup/audio/asr-models-dir",
+                        data={"asr_models_dir": "", "csrf_token": tok2},
+                        follow_redirects=False)
+        assert r.headers["location"] == "/ui/asr-models"
+
+
+def test_asr_engines_page_polls_while_install_in_flight(app):
+    import time
+    with _ui_admin_client(app) as client:
+        # Idle → no auto-refresh.
+        idle = client.get("/ui/setup-asr").text
+        assert 'hx-trigger="every 2s"' not in idle
+
+        # A running build row makes the page live-poll the fragment.
+        app.state.engine_installer.db.execute(
+            "INSERT INTO engine_installs(id,engine,kind,status,message,"
+            "progress_pct,started_at) VALUES "
+            "('bld_t','whispercpp','cmake','running','Configuring',25,?)",
+            (time.time(),))
+        busy = client.get("/ui/setup-asr").text
+        assert 'hx-get="/ui/setup-asr/_partial"' in busy
+        assert 'hx-trigger="every 2s"' in busy
+        assert 'hx-disinherit="hx-swap"' in busy   # morph-crash guard
+        assert "Configuring" in busy and "25%" in busy
+
+        # The polled fragment is a bare fragment (no full-page <html>).
+        frag = client.get("/ui/setup-asr/_partial").text
+        assert "Configuring" in frag and "<html" not in frag.lower()
+
+
+def test_vulkan_build_preflight_helpers():
+    """The whisper.cpp build preflight distinguishes runtime Vulkan from the
+    dev files cmake needs."""
+    from llamanager.engine_installer import (
+        _has_command, _vulkan_dev_present, _spirv_headers_present)
+    # All return bools without raising on any host.
+    assert isinstance(_has_command("git"), bool)
+    assert isinstance(_vulkan_dev_present(), bool)
+    assert isinstance(_spirv_headers_present(), bool)
+
+
+def test_asr_engines_page_shows_failed_build_log(app):
+    """A failed native build surfaces its log tail in the UI so the real cmake
+    error is visible without digging in the DB."""
+    import time
+    with _ui_admin_client(app) as client:
+        log = "\n".join("line %d" % i for i in range(60)) + \
+            "\nCMake Error: Could not find SPIRV-Headers"
+        app.state.engine_installer.db.execute(
+            "INSERT INTO engine_installs(id,engine,kind,status,message,error,"
+            "progress_pct,started_at,finished_at,log) VALUES "
+            "('f_t','whispercpp','cmake','failed','Configuring',"
+            "'cmake configure failed (exit 1)',25,?,?,?)",
+            (time.time(), time.time(), log))
+        page = client.get("/ui/setup-asr").text
+        assert "Last build failed: cmake configure failed (exit 1)" in page
+        assert "Show build log" in page
+        assert "Could not find SPIRV-Headers" in page   # tail rendered
+        assert "line 0" not in page                     # trimmed to last 40
