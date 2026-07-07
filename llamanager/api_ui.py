@@ -5240,9 +5240,11 @@ def _asr_engine_setup_fields(cfg, eng_id: str, eng_mod) -> dict[str, Any]:
 
 
 def _asr_defaults_view(cfg) -> dict[str, Any]:
-    from .config import asr_max_concurrent
+    from .config import asr_max_concurrent, asr_budget_gb
     return {
         "vram_budget_gb": cfg.asr_vram_budget_gb,
+        "budget_auto": getattr(cfg, "asr_vram_budget_auto", True),
+        "budget_effective_gb": round(asr_budget_gb(cfg), 1),
         "coexist": cfg.asr_coexist,
         "idle_timeout_s": cfg.asr_idle_timeout_s,
         "decode_interval_s": cfg.asr_decode_interval_s,
@@ -5529,11 +5531,12 @@ async def setup_asr(request: Request, asr_python: str = Form(""),
 @router.post("/setup/audio/asr-defaults", response_class=HTMLResponse)
 async def setup_asr_defaults(request: Request,
                             asr_vram_budget_gb: str = Form(""),
+                            asr_vram_budget_auto: str = Form(""),
                             asr_coexist: str = Form(""),
                             asr_idle_timeout_s: str = Form(""),
                             asr_decode_interval_s: str = Form(""),
                             _: None = Depends(require_csrf)) -> Response:
-    """Set the ASR GPU budget + coexistence + idle/decode defaults."""
+    """Set the ASR GPU budget (auto or fixed) + coexistence + idle/decode."""
     from .config import update_image_config
     cfg = request.app.state.cfg
     def _f(v):
@@ -5547,15 +5550,18 @@ async def setup_asr_defaults(request: Request,
         except (TypeError, ValueError):
             return None
     budget = _f(asr_vram_budget_gb)
+    budget_auto = (asr_vram_budget_auto or "") == "on"
     idle = _i(asr_idle_timeout_s)
     interval = _f(asr_decode_interval_s)
     coexist = (asr_coexist or "") == "on"
     update_image_config(cfg.config_path, asr_vram_budget_gb=budget,
+                        asr_vram_budget_auto=budget_auto,
                         asr_coexist=coexist, asr_idle_timeout_s=idle,
                         asr_decode_interval_s=interval)
     # Mutate the shared cfg in place so the queue + worker manager pick it up.
     if budget is not None:
         cfg.asr_vram_budget_gb = budget
+    cfg.asr_vram_budget_auto = budget_auto
     cfg.asr_coexist = coexist
     if idle is not None:
         cfg.asr_idle_timeout_s = idle

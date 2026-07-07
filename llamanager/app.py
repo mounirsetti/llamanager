@@ -235,22 +235,51 @@ def create_app(config_path: Path | None = None,
 
         vram_task = asyncio.create_task(_detect_vram())
 
-        # Memory watchdog: watches host RAM/swap and, under pressure, asks the
-        # queue to reset the engine to baseline at the next task boundary. Only
-        # stops a live engine if mem_hard_stop_enabled is set (default off).
+        # Memory watchdog: watches host RAM/swap and acts under pressure. The
+        # guard is *strong by default*: on WARN it schedules a between-task
+        # reclaim; on CRITICAL it immediately reclaims the coexisting tenants
+        # (the ASR warm worker first — it's the add-on to a healthy LLM, and
+        # the tenant that caused the real OOM incident), then resets the engine
+        # cache. The LLM itself is only stopped when the operator opts in with
+        # mem_hard_stop_enabled — "don't kill the model that was working" is the
+        # default; we shed the *extra* load instead.
         from .mem_guard import MemoryWatchdog, Pressure
 
         async def _on_mem_pressure(level, state) -> None:
-            if level >= Pressure.WARN:
+            if level < Pressure.WARN:
+                return
+            if level == Pressure.WARN:
                 queue.request_reclaim()
-            if (level == Pressure.CRITICAL
-                    and getattr(app.state.cfg, "mem_hard_stop_enabled", False)):
-                log.error("memory CRITICAL + hard-stop enabled — stopping "
-                          "engine (%s)", state.summary())
+                return
+            # CRITICAL — act now.
+            log.error("memory CRITICAL — reclaiming to avoid OOM (%s)",
+                      state.summary())
+            reclaimed = []
+            # 1) Stop the ASR warm worker if one is loaded (frees its VRAM +
+            #    host torch buffers). Safe: the next transcription re-warms it.
+            ar = getattr(app.state, "audio_runner", None)
+            if ar is not None and getattr(ar, "_proc", None) is not None:
+                try:
+                    await ar.stop()
+                    reclaimed.append("asr-worker")
+                except Exception as e:  # noqa: BLE001
+                    log.warning("mem reclaim: stopping ASR worker failed: %s", e)
+            # 2) Ask the queue to reset the text engine cache at the next
+            #    boundary (non-destructive — clears host prompt cache bloat).
+            queue.request_reclaim()
+            reclaimed.append("engine-cache")
+            # 3) Only stop the LLM itself when the operator opted in — the model
+            #    that runs fine alone shouldn't be killed for a transient spike.
+            if getattr(app.state.cfg, "mem_hard_stop_enabled", False):
+                log.error("memory CRITICAL + hard-stop enabled — stopping LLM")
                 try:
                     await sm.stop()
+                    reclaimed.append("llm")
                 except Exception as e:  # noqa: BLE001
                     log.warning("memory hard-stop failed: %s", e)
+            db.log_event("memory_reclaim",
+                         {"level": "critical", "reclaimed": reclaimed,
+                          "ram_available_gb": round(state.ram_available_gb, 1)})
 
         mem_watchdog = MemoryWatchdog(cfg, on_pressure=_on_mem_pressure)
         mem_watchdog.start()

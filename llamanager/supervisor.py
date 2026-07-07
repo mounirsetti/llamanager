@@ -114,6 +114,37 @@ class Supervisor:
         if hasattr(target, "mark_degraded"):
             target.mark_degraded(reason)
 
+    async def _await_mem_recovery(self, slot_id: int, *,
+                                  timeout_s: float = 180.0,
+                                  poll_s: float = 5.0) -> None:
+        """After an OOM kill (rc -9), block the restart until host memory is no
+        longer under pressure — so we don't reload straight back into an OOM.
+        Bounded by ``timeout_s`` so a persistently-tight box still eventually
+        retries (and hits the normal crash-window cooldown)."""
+        try:
+            from .mem_guard import (read_mem_state, classify_pressure,
+                                    MemThresholds, Pressure)
+        except Exception:  # noqa: BLE001 — never block restart on an import error
+            return
+        th = MemThresholds.from_cfg(self.cfg)
+        if classify_pressure(read_mem_state(), th) < Pressure.WARN:
+            return  # memory already fine — restart normally
+        self._mark_degraded(slot_id, "OOM-killed; waiting for memory to recover")
+        log.error("supervisor: slot %d was OOM-killed (rc=-9) and host memory "
+                  "is still tight — pausing restart up to %.0fs to avoid an "
+                  "OOM restart loop", slot_id, timeout_s)
+        waited = 0.0
+        while waited < timeout_s:
+            await asyncio.sleep(poll_s)
+            waited += poll_s
+            if classify_pressure(read_mem_state(), th) < Pressure.WARN:
+                log.info("supervisor: slot %d — memory recovered after %.0fs, "
+                         "proceeding with restart", slot_id, waited)
+                return
+        log.warning("supervisor: slot %d — memory still tight after %.0fs; "
+                    "proceeding (crash-window cooldown will bound retries)",
+                    slot_id, timeout_s)
+
     # ----- core logic -----
     async def _handle_exit(self, slot_id: int, rc: int) -> None:
         if not self.enabled:
@@ -124,6 +155,14 @@ class Supervisor:
                 slot_id, rc,
             )
             return
+
+        # OOM restart-loop guard. rc == -9 is a SIGKILL — almost always the
+        # kernel OOM-killer reaping llama-server. Restarting immediately reloads
+        # the same oversized footprint and re-OOMs: a doom loop that pins the
+        # box (this is exactly what drove a machine to a hard reboot). If host
+        # memory is still tight, wait for it to recover before restarting.
+        if rc == -9:
+            await self._await_mem_recovery(slot_id)
 
         st = self._state[slot_id]
         now = time.time()

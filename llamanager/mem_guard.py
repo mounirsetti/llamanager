@@ -374,6 +374,12 @@ class MemoryWatchdog:
         self.enabled = bool(getattr(cfg, "mem_guard_enabled", True))
         self._task: asyncio.Task | None = None
         self._last = Pressure.OK
+        # While memory stays CRITICAL, re-fire the callback on this cadence so
+        # the caller can *escalate* reclaim if the first action didn't relieve
+        # pressure (the box is actively thrashing — one edge-triggered callback
+        # isn't enough). 0 disables the repeat (pure edge-triggered).
+        self._crit_repeat_s = float(getattr(cfg, "mem_crit_repeat_s", 15.0))
+        self._crit_elapsed = 0.0
 
     @property
     def last_level(self) -> Pressure:
@@ -402,8 +408,16 @@ class MemoryWatchdog:
                 level = classify_pressure(state, th)
                 if level != self._last:
                     prev, self._last = self._last, level
+                    self._crit_elapsed = 0.0
                     # Report on any rise, and on the return to OK.
                     if level > prev or level == Pressure.OK:
+                        await self._emit(level, state)
+                elif level == Pressure.CRITICAL and self._crit_repeat_s > 0:
+                    # Sustained CRITICAL — re-fire on the repeat cadence so the
+                    # caller keeps (and escalates) reclaim while the box thrashes.
+                    self._crit_elapsed += self.interval_s
+                    if self._crit_elapsed >= self._crit_repeat_s:
+                        self._crit_elapsed = 0.0
                         await self._emit(level, state)
             except asyncio.CancelledError:
                 raise

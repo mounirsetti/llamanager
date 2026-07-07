@@ -114,8 +114,9 @@ lock_model_loading = false
 # sherpa_python     = "~/.llamanager/venvs/sherpa/bin/python"  # sherpa-onnx (streaming) STT
 # asr_models_dir    = "/path/to/whisper-models"   # ASR-only model folder; blank = shared models dir
 # ASR runs a warm worker (model loaded once) serving concurrent transcriptions:
-# asr_vram_budget_gb   = 6.0     # cap ASR VRAM; admits tasks while under it (0 = uncapped)
-# asr_coexist          = true    # run ASR alongside a loaded LLM (false = unload LLM per task)
+# asr_vram_budget_auto = true    # size the ASR VRAM budget from the card − reserve (default; adapts to what's loaded)
+# asr_vram_budget_gb   = 6.0     # fixed ASR VRAM budget when auto is off (0 = uncapped)
+# asr_coexist          = false   # run ASR alongside a loaded LLM (default false = unload LLM per task; true only if both fit)
 # asr_idle_timeout_s   = 600     # stop the warm worker after N idle seconds (0 = never)
 # asr_decode_interval_s = 1.0    # streaming decode cadence (env ASR_DECODE_INTERVAL_S wins)
 # images_dir        = "~/.llamanager/images"
@@ -642,15 +643,24 @@ class Config:
     #   * asr_vram_budget_gb: how much VRAM ASR may use. The dispatcher admits
     #     concurrent transcriptions only while the estimated footprint stays
     #     under this, leaving headroom for the LLM/diffusion. 0 = uncapped.
-    #   * asr_coexist: when True, ASR runs *alongside* a loaded LLM (no unload,
-    #     bounded by the budget). When False, an ASR task unloads the text
-    #     server for its duration and restores it (the legacy image-like path).
+    #   * asr_coexist: when True, ASR runs *alongside* a loaded LLM (bounded by
+    #     the budget AND a live feasibility check — if host memory is already
+    #     tight it unloads the LLM for the task anyway, to avoid an OOM). When
+    #     False (default), an ASR task always unloads the text server for its
+    #     duration and restores it. Defaults to False after a real incident
+    #     where a 27B LLM + a coexisting Whisper worker exhausted host RAM and
+    #     the box thrashed to a reboot — concurrent by default was too risky on
+    #     a single card. Opt back in only when you know both fit.
     #   * asr_idle_timeout_s: stop the warm worker after this many idle seconds
     #     to reclaim its VRAM. 0 = never idle-stop.
     #   * asr_decode_interval_s: streaming decode cadence (Phase 2); honors env
     #     ASR_DECODE_INTERVAL_S. Stored now so it's editable in UI/CLI.
     asr_vram_budget_gb: float = 6.0
-    asr_coexist: bool = True
+    # When True (default), the ASR VRAM budget is sized automatically from the
+    # card minus a system reserve (see ``asr_budget_gb``), adapting to whatever
+    # is loaded; ``asr_vram_budget_gb`` is then only used when this is False.
+    asr_vram_budget_auto: bool = True
+    asr_coexist: bool = False
     asr_idle_timeout_s: int = 600
     asr_decode_interval_s: float = 1.0
     # Per-engine diffusers version override (engine name → version), set when
@@ -805,15 +815,44 @@ def _coerce_float(v: Any) -> float | None:
 # activation cost. Deliberately conservative — the budget is the hard guarantee.
 ASR_MODEL_GB_EST = 2.0
 ASR_PER_REQ_GB_EST = 1.0
+# VRAM left free for the OS / display when the budget is "auto" (sized from the
+# card instead of a fixed number).
+ASR_VRAM_RESERVE_GB = 3.0
+# Ceiling on the derived concurrency so a huge card doesn't admit an absurd
+# number of simultaneous decodes.
+ASR_MAX_CONCURRENT_CEIL = 8
 
 
-def asr_max_concurrent(cfg: "Config") -> int:
-    """Effective max concurrent ASR transcriptions the VRAM budget allows.
-    ``asr_vram_budget_gb <= 0`` means uncapped (a generous ceiling)."""
-    budget = getattr(cfg, "asr_vram_budget_gb", 0.0) or 0.0
+def asr_budget_gb(cfg: "Config", free_vram_gb: float | None = None) -> float:
+    """The VRAM (GB) ASR may use, resolving the ``auto`` budget.
+
+    Auto sizes to the card minus a system reserve, adapting to what's actually
+    free — which naturally accounts for *whatever* GPU tenant is loaded (LLM or
+    diffusion):
+      * coexist **off** (default): ASR unloads the other engine and owns the
+        card, so the budget is total VRAM − reserve;
+      * coexist **on**: ASR shares, so it's *free* VRAM − reserve (pass
+        ``free_vram_gb`` from a live probe; falls back to total when unknown).
+    When auto is off, the operator's fixed ``asr_vram_budget_gb`` is used
+    verbatim (0 = uncapped)."""
+    if not getattr(cfg, "asr_vram_budget_auto", False):
+        return getattr(cfg, "asr_vram_budget_gb", 0.0) or 0.0
+    total = float(getattr(cfg, "vram_total_gb", 0.0) or 0.0)
+    coexist = bool(getattr(cfg, "asr_coexist", False))
+    avail = free_vram_gb if (coexist and free_vram_gb is not None) else total
+    if not avail:
+        return 0.0                       # no VRAM info → treat as uncapped
+    return max(0.0, avail - ASR_VRAM_RESERVE_GB)
+
+
+def asr_max_concurrent(cfg: "Config", free_vram_gb: float | None = None) -> int:
+    """Effective max concurrent ASR transcriptions the (auto or fixed) VRAM
+    budget allows. A 0/unknown budget means uncapped (a generous ceiling)."""
+    budget = asr_budget_gb(cfg, free_vram_gb)
     if budget <= 0:
-        return 8
-    return max(1, int((budget - ASR_MODEL_GB_EST) / ASR_PER_REQ_GB_EST))
+        return ASR_MAX_CONCURRENT_CEIL
+    cap = int((budget - ASR_MODEL_GB_EST) / ASR_PER_REQ_GB_EST)
+    return max(1, min(ASR_MAX_CONCURRENT_CEIL, cap))
 
 
 def _asr_decode_interval_default(image_cfg: dict[str, Any]) -> float:
@@ -930,7 +969,8 @@ def load_config(path: Path | None = None) -> Config:
             expand(str(image_cfg["asr_models_dir"]))
             if image_cfg.get("asr_models_dir") else None),
         asr_vram_budget_gb=float(image_cfg.get("asr_vram_budget_gb", 6.0) or 0.0),
-        asr_coexist=bool(image_cfg.get("asr_coexist", True)),
+        asr_vram_budget_auto=bool(image_cfg.get("asr_vram_budget_auto", True)),
+        asr_coexist=bool(image_cfg.get("asr_coexist", False)),
         asr_idle_timeout_s=int(image_cfg.get("asr_idle_timeout_s", 600) or 0),
         asr_decode_interval_s=_asr_decode_interval_default(image_cfg),
         images_max_disk_gb=int(image_cfg.get("max_disk_gb", 10)),
@@ -1397,6 +1437,7 @@ def update_image_config(cfg_path: Path, *,
                         sherpa_python: str | None = None,
                         asr_models_dir: str | None = None,
                         asr_vram_budget_gb: float | None = None,
+                        asr_vram_budget_auto: bool | None = None,
                         asr_coexist: bool | None = None,
                         asr_idle_timeout_s: int | None = None,
                         asr_decode_interval_s: float | None = None,
@@ -1437,6 +1478,8 @@ def update_image_config(cfg_path: Path, *,
         img["asr_models_dir"] = asr_models_dir
     if asr_vram_budget_gb is not None:
         img["asr_vram_budget_gb"] = float(asr_vram_budget_gb)
+    if asr_vram_budget_auto is not None:
+        img["asr_vram_budget_auto"] = bool(asr_vram_budget_auto)
     if asr_coexist is not None:
         img["asr_coexist"] = bool(asr_coexist)
     if asr_idle_timeout_s is not None:

@@ -92,11 +92,17 @@
     </p>
     <form method="post" action="/ui/setup/audio/asr-defaults" class="lm-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8125rem; margin: 4px 0;">
+        <input type="checkbox" name="asr_vram_budget_auto" value="on"
+               {% if asr_defaults and asr_defaults.budget_auto %}checked{% endif %}>
+        <span>Auto VRAM budget — size ASR concurrency to the card minus a system reserve
+          {% if asr_defaults %}(now ≈ <strong>{{ asr_defaults.budget_effective_gb }} GB</strong> → up to <strong>{{ asr_defaults.max_concurrent }}</strong> concurrent){% endif %}. Adapts to whatever's loaded (LLM or diffusion).</span>
+      </label>
       <div class="lm-dm-field">
-        <label class="lm-dm-field__label">VRAM budget (GB)</label>
+        <label class="lm-dm-field__label">Fixed VRAM budget (GB) — used only when Auto is off</label>
         <input class="lm-input lm-input--mono" type="number" step="0.5" min="0"
                name="asr_vram_budget_gb" value="{{ asr_defaults.vram_budget_gb if asr_defaults }}">
-        <span class="lm-dm-field__help">Cap ASR VRAM so it leaves room for the LLM/diffusion. 0 = uncapped.</span>
+        <span class="lm-dm-field__help">Manual cap on ASR VRAM. 0 = uncapped. Ignored while Auto is on.</span>
       </div>
       <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8125rem; margin: 8px 0;">
         <input type="checkbox" name="asr_coexist" value="on" {% if asr_defaults and asr_defaults.coexist %}checked{% endif %}>

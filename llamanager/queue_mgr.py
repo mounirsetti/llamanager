@@ -499,16 +499,19 @@ class QueueManager:
         asr_coexist = bool(getattr(self.cfg, "asr_coexist", True))
 
         # Audio (ASR) is a warm, concurrent, VRAM-budgeted tenant — NOT a
-        # single-slot one-shot. Admit up to the budget-derived concurrency.
+        # single-slot one-shot. Concurrency is its own handle now (the VRAM
+        # budget → asr_max_concurrent), decoupled from coexistence: ASR runs
+        # several transcriptions at once in *both* modes. coexist only decides
+        # whether the LLM/diffusion stays loaded (on) or is unloaded for the
+        # duration (off) — in coexist=off ASR still runs concurrently, just with
+        # the other engine yielded and mutually exclusive.
         if req.task_type == "audio":
             from .config import asr_max_concurrent
-            # coexist=off runs an ephemeral, exclusive worker (1 at a time);
-            # coexist=on is warm + concurrent up to the VRAM budget.
-            cap = asr_max_concurrent(self.cfg) if asr_coexist else 1
+            cap = asr_max_concurrent(self.cfg)
             if audio_in >= cap:
                 return False
-            # coexist=off → ASR takes the GPU exclusively (unloads the text
-            # server for the request); block while text/image run.
+            # coexist=off → ASR unloads the other engine and owns the GPU for
+            # its run; block while text/image are still in flight.
             if not asr_coexist and (text_in > 0 or image_in > 0):
                 return False
             return True

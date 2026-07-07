@@ -178,6 +178,12 @@ class AudioTaskRunner:
         self._last_used = 0.0
         self._idle_task: asyncio.Task | None = None
         self._yield_cm = None                  # held yield_to_image (coexist=off)
+        # Refcount for the coexist=off LLM/diffusion yield: the other engine is
+        # unloaded once while ANY audio task is in flight and restored when the
+        # last one finishes, so concurrent transcriptions share a single unload
+        # (not a per-task unload/restore thrash).
+        self._yield_refs = 0
+        self._yield_lock = asyncio.Lock()
         self._failures: deque[float] = deque()
         self._cooldown_until = 0.0
 
@@ -189,6 +195,25 @@ class AudioTaskRunner:
     @property
     def is_busy(self) -> bool:
         return self._active > 0
+
+    def _coexist_feasible(self) -> bool:
+        """Is it safe to run the ASR worker *alongside* the loaded LLM right now?
+
+        The concurrent path only makes sense when there's real headroom. Host
+        RAM is the signal that matters — the OOM incident was host-RAM
+        exhaustion (a big LLM partially offloaded to CPU + a coexisting Whisper
+        worker), not VRAM (GPU OOM there was caught and returned an error). If
+        host memory is already tight (WARN or worse), refuse coexistence so the
+        caller unloads the LLM for the task instead of stacking on top."""
+        try:
+            from .mem_guard import (read_mem_state, classify_pressure,
+                                    MemThresholds, Pressure)
+            th = MemThresholds.from_cfg(self.cfg)
+            if classify_pressure(read_mem_state(), th) >= Pressure.WARN:
+                return False
+        except Exception:  # noqa: BLE001 — never let a probe error block ASR
+            pass
+        return True
 
     def status(self) -> dict[str, Any]:
         state = rt.load(self.cfg.runtime_path).audio
@@ -225,23 +250,29 @@ class AudioTaskRunner:
         word_ts = bool(req.word_timestamps) or (
             (profile.audio_word_timestamps or "").lower() == "on")
 
-        if self.cfg.asr_coexist:
+        # Coexist alongside the LLM only when configured AND currently feasible.
+        # The feasibility check is what prevents the OOM that took the box down:
+        # if host memory is already tight, running Whisper next to a big LLM
+        # will thrash — so we fall through to the exclusive path (unload the LLM
+        # for this task) instead of stacking on top of it.
+        if self.cfg.asr_coexist and self._coexist_feasible():
             # Warm, concurrent: keep the worker loaded alongside the LLM.
             await self._ensure_worker(model_id, model_path, engine)
             return await self._proxy(model_id, engine, profile, req, request_id, word_ts)
-        # coexist=off: ASR takes the GPU exclusively. Unload the text server
-        # for this request (queue caps audio at 1 here), run an ephemeral
-        # worker, then tear it down so VRAM is freed before text is restored.
-        cm = (self.sm.yield_to_image(reason="asr")
-              if self.sm is not None else _nullcontext())
-        async with cm:
-            try:
-                await self._ensure_worker(model_id, model_path, engine)
-                return await self._proxy(model_id, engine, profile, req,
-                                         request_id, word_ts)
-            finally:
-                async with self._start_lock:
-                    await self._stop_worker_locked()
+        if self.cfg.asr_coexist:
+            log.info("asr: coexist requested but host memory is tight — "
+                     "unloading the LLM for this transcription instead")
+        # coexist=off (or not feasible): ASR owns the GPU — the other engine is
+        # unloaded (refcounted, so concurrent transcriptions share one unload)
+        # and the warm worker serves them all. The worker + yield are released
+        # when the last concurrent task finishes (or the worker idle-stops).
+        await self._acquire_llm_yield()
+        try:
+            await self._ensure_worker(model_id, model_path, engine)
+            return await self._proxy(model_id, engine, profile, req,
+                                     request_id, word_ts)
+        finally:
+            await self._release_llm_yield()
 
     async def _proxy(self, model_id, engine, profile, req, request_id,
                      word_ts) -> AudioResult:
@@ -398,6 +429,36 @@ class AudioTaskRunner:
                         await self._stop_worker_locked()
                         return
 
+    async def _acquire_llm_yield(self) -> None:
+        """Ensure the other engine (LLM / diffusion) is unloaded while audio is
+        in flight. Refcounted: the first concurrent task performs the unload;
+        later ones just bump the count. No-op when there's no ServerManager."""
+        async with self._yield_lock:
+            self._yield_refs += 1
+            if self._yield_refs == 1 and self.sm is not None and self._yield_cm is None:
+                cm = self.sm.yield_to_image(reason="asr")
+                await cm.__aenter__()
+                self._yield_cm = cm
+
+    async def _release_llm_yield(self) -> None:
+        """Drop one audio in-flight ref. When the last finishes, stop the warm
+        worker (free its VRAM) and restore the yielded engine."""
+        async with self._yield_lock:
+            self._yield_refs = max(0, self._yield_refs - 1)
+            if self._yield_refs == 0:
+                async with self._start_lock:
+                    await self._stop_worker_locked()   # free the worker's VRAM
+                await self._exit_yield()               # restore the other engine
+
+    async def _exit_yield(self) -> None:
+        """Restore the yielded LLM/diffusion engine (coexist=off). Separate from
+        worker teardown so ``_ensure_worker``'s stop-then-start doesn't
+        accidentally restore the engine mid-transcription."""
+        if self._yield_cm is not None:
+            with contextlib.suppress(Exception):
+                await self._yield_cm.__aexit__(None, None, None)
+            self._yield_cm = None
+
     async def _stop_worker_locked(self) -> None:
         if self._proc is not None:
             with contextlib.suppress(ProcessLookupError):
@@ -411,13 +472,9 @@ class AudioTaskRunner:
         self._worker_model = None
         self._worker_engine = None
         self._base_url = ""
-        if self._yield_cm is not None:
-            with contextlib.suppress(Exception):
-                await self._yield_cm.__aexit__(None, None, None)
-            self._yield_cm = None
 
     async def stop(self) -> None:
-        """Shutdown hook: stop the worker + restore any yielded text server."""
+        """Shutdown hook: stop the worker + restore any yielded engine."""
         if self._idle_task is not None:
             self._idle_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -425,6 +482,8 @@ class AudioTaskRunner:
             self._idle_task = None
         async with self._start_lock:
             await self._stop_worker_locked()
+        await self._exit_yield()
+        self._yield_refs = 0
         if self._client is not None:
             await self._client.aclose()
             self._client = None

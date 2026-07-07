@@ -222,3 +222,59 @@ def test_watchdog_disabled_does_not_start(monkeypatch):
     wd = mg.MemoryWatchdog(Cfg(), on_pressure=lambda *a: None)
     wd.start()
     assert wd._task is None
+
+
+def test_watchdog_repeats_while_critical(monkeypatch):
+    """Sustained CRITICAL re-fires the callback on the repeat cadence so the
+    caller can keep/escalate reclaim — not just once on the rising edge."""
+    monkeypatch.setattr(mg, "read_mem_state", lambda: _state(0.03, 0.8))  # CRITICAL
+    calls = []
+
+    async def cb(level, state):
+        calls.append(level)
+
+    class Cfg:
+        mem_guard_enabled = True
+        mem_guard_interval_s = 0.02
+        mem_crit_repeat_s = 0.05
+
+    async def run():
+        wd = mg.MemoryWatchdog(Cfg(), on_pressure=cb, interval_s=0.02)
+        wd.start()
+        await asyncio.sleep(0.3)
+        await wd.stop()
+
+    asyncio.run(run())
+    # One edge-triggered CRITICAL plus several repeats over ~0.3s at 0.05s.
+    assert calls and all(c == mg.Pressure.CRITICAL for c in calls)
+    assert len(calls) >= 3, calls
+
+
+def test_coexist_feasibility_gate(tmp_path, monkeypatch):
+    """ASR refuses to coexist with the LLM when host memory is already tight."""
+    from llamanager.audio_runner import AudioTaskRunner
+    from llamanager.config import Config
+    from llamanager.db import DB
+    r = AudioTaskRunner(Config(data_dir=tmp_path, asr_coexist=True),
+                        DB(tmp_path / "s.db"))
+    monkeypatch.setattr(mg, "read_mem_state", lambda: _state(0.50, 0.0))  # OK
+    assert r._coexist_feasible() is True
+    monkeypatch.setattr(mg, "read_mem_state", lambda: _state(0.03, 0.8))  # CRITICAL
+    assert r._coexist_feasible() is False
+
+
+def test_supervisor_oom_wait_returns_when_memory_ok(tmp_path, monkeypatch):
+    """The OOM restart-guard returns immediately when memory is healthy (so a
+    normal crash still restarts promptly), and is only invoked for rc == -9."""
+    import asyncio
+    from llamanager.supervisor import Supervisor
+    from llamanager.config import Config
+
+    class _StubSM:
+        def add_exit_listener(self, q): pass
+        def mark_degraded(self, reason): pass
+
+    monkeypatch.setattr(mg, "read_mem_state", lambda: _state(0.50, 0.0))  # OK
+    sup = Supervisor(Config(data_dir=tmp_path), _StubSM())
+    # Should return promptly (no wait) since memory is fine.
+    asyncio.run(asyncio.wait_for(sup._await_mem_recovery(0), timeout=1.0))

@@ -279,29 +279,75 @@ def test_queue_audio_concurrent_by_vram_budget():
     assert qm._can_dispatch(req) is False
 
 
-def test_queue_audio_coexist_off_is_exclusive_single():
-    """coexist=off: cap 1 and mutually exclusive with text."""
-    from llamanager.config import Config
+def test_queue_audio_coexist_off_concurrent_but_exclusive_with_text():
+    """coexist=off: ASR runs *concurrently* (budget-derived cap, decoupled from
+    the coexist toggle) but stays mutually exclusive with text/image — it
+    unloads them and owns the GPU for the duration."""
+    from llamanager.config import Config, asr_max_concurrent
     from llamanager.queue_mgr import QueueManager
-    cfg = Config(asr_coexist=False, asr_vram_budget_gb=8.0)
+    cfg = Config(asr_coexist=False, asr_vram_budget_auto=False,
+                 asr_vram_budget_gb=8.0)          # cap (8-2)/1 = 6
+    cap = asr_max_concurrent(cfg)
+    assert cap == 6
     qm = QueueManager.__new__(QueueManager)
     qm.cfg = cfg
     qm._in_flight_count = {"text": 0, "image": 0, "audio": 0}
     req = _audio_req()
     assert qm._can_dispatch(req) is True
-    # a second audio is blocked (cap 1 in exclusive mode)
-    qm._in_flight_count["audio"] = 1
+    # concurrent audio allowed up to the cap (NOT 1).
+    qm._in_flight_count["audio"] = cap - 1
+    assert qm._can_dispatch(req) is True
+    qm._in_flight_count["audio"] = cap
     assert qm._can_dispatch(req) is False
-    # text in flight blocks audio (exclusive)
+    # text in flight blocks audio (exclusive — the other engine must clear).
     qm._in_flight_count = {"text": 1, "image": 0, "audio": 0}
     assert qm._can_dispatch(req) is False
 
 
+def test_coexist_off_yield_is_refcounted(tmp_path):
+    """Concurrent coexist-off transcriptions share ONE LLM unload: the yield is
+    entered on the first and exited only after the last releases."""
+    import asyncio
+    from llamanager.audio_runner import AudioTaskRunner
+    from llamanager.config import Config
+    from llamanager.db import DB
+
+    events = []
+
+    class _CM:
+        async def __aenter__(self): events.append("enter"); return self
+        async def __aexit__(self, *a): events.append("exit")
+
+    class _SM:
+        def yield_to_image(self, reason=""): return _CM()
+
+    async def run():
+        r = AudioTaskRunner(Config(data_dir=tmp_path), DB(tmp_path / "s.db"),
+                            sm=_SM())
+        await r._acquire_llm_yield()      # task A → unload
+        await r._acquire_llm_yield()      # task B → shares (no 2nd unload)
+        assert events == ["enter"], events
+        await r._release_llm_yield()      # A done → still held (B in flight)
+        assert events == ["enter"], events
+        await r._release_llm_yield()      # B done → restore
+        assert events == ["enter", "exit"], events
+        assert r._yield_refs == 0
+
+    asyncio.run(run())
+
+
 def test_asr_max_concurrent_from_budget():
     from llamanager.config import Config, asr_max_concurrent
-    assert asr_max_concurrent(Config(asr_vram_budget_gb=6.0)) == 4   # (6-2)/1
-    assert asr_max_concurrent(Config(asr_vram_budget_gb=3.0)) == 1
-    assert asr_max_concurrent(Config(asr_vram_budget_gb=0.0)) >= 1   # uncapped
+    # Manual (auto off) → derived from the fixed GB budget.
+    m = lambda gb: Config(asr_vram_budget_auto=False, asr_vram_budget_gb=gb)
+    assert asr_max_concurrent(m(6.0)) == 4   # (6-2)/1
+    assert asr_max_concurrent(m(3.0)) == 1
+    assert asr_max_concurrent(m(0.0)) >= 1   # uncapped
+    # Auto (default): no VRAM info → generous ceiling; a card → sized to it.
+    c = Config()
+    assert asr_max_concurrent(c) == 8
+    c.vram_total_gb = 12.0                    # (12-3-2)/1 = 7
+    assert asr_max_concurrent(c) == 7
 
 
 # ---------- installer reuse plan ----------

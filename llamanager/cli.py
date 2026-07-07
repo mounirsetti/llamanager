@@ -1196,8 +1196,21 @@ def cmd_asr_models_dir(args):
 def cmd_asr_defaults(args):
     c = _make_admin_client(args)
     coexist = None if args.coexist is None else (args.coexist == "on")
+    # --vram-budget accepts "auto" or a GB number.
+    budget_gb = args.vram_budget_gb
+    budget_auto = None
+    if args.vram_budget is not None:
+        if str(args.vram_budget).strip().lower() == "auto":
+            budget_auto = True
+        else:
+            try:
+                budget_gb = float(args.vram_budget)
+                budget_auto = False
+            except ValueError:
+                print("--vram-budget must be 'auto' or a number of GB", file=sys.stderr)
+                return 2
     return _run_admin(lambda: c.asr_defaults(
-        vram_budget_gb=args.vram_budget_gb, coexist=coexist,
+        vram_budget_gb=budget_gb, vram_budget_auto=budget_auto, coexist=coexist,
         idle_timeout_s=args.idle_timeout_s,
         decode_interval_s=args.decode_interval_s))
 
@@ -2067,10 +2080,14 @@ def main(argv: list[str] | None = None) -> int:
     sp = afp.add_parser("defaults",
                         help="set ASR service defaults: VRAM budget, coexistence, "
                              "idle timeout, streaming decode cadence")
+    sp.add_argument("--vram-budget", default=None, metavar="auto|GB",
+                    help="'auto' (size to the card − reserve; default) or a fixed "
+                         "GB number. Drives ASR concurrency.")
     sp.add_argument("--vram-budget-gb", type=float, default=None,
-                    help="cap ASR VRAM (GB); admits concurrent tasks under it (0 = uncapped)")
+                    help="(legacy) set the fixed GB budget; use --vram-budget auto for auto")
     sp.add_argument("--coexist", choices=["on", "off"], default=None,
-                    help="on = run ASR alongside the LLM; off = unload the LLM per task")
+                    help="on = run ASR alongside the LLM (only if it fits); "
+                         "off (default) = unload the LLM while ASR runs")
     sp.add_argument("--idle-timeout-s", type=int, default=None,
                     help="stop the warm worker after N idle seconds (0 = never)")
     sp.add_argument("--decode-interval-s", type=float, default=None,

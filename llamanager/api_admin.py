@@ -2152,6 +2152,7 @@ async def asr_job_cancel(request: Request, job_id: str,
 
 class AsrDefaultsBody(BaseModel):
     vram_budget_gb: float | None = None
+    vram_budget_auto: bool | None = None
     coexist: bool | None = None
     idle_timeout_s: int | None = None
     decode_interval_s: float | None = None
@@ -2160,13 +2161,14 @@ class AsrDefaultsBody(BaseModel):
 @router.post("/asr/defaults")
 async def asr_defaults(request: Request, body: AsrDefaultsBody,
                        _: Origin = Depends(admin_origin)) -> JSONResponse:
-    """Set the ASR service defaults: VRAM budget, coexistence, idle timeout,
-    streaming decode cadence. Reloads config so they take effect live."""
-    from .config import update_image_config, asr_max_concurrent
+    """Set the ASR service defaults: VRAM budget (auto or fixed), coexistence,
+    idle timeout, streaming decode cadence. Reloads config to take effect live."""
+    from .config import update_image_config, asr_max_concurrent, asr_budget_gb
     cfg = request.app.state.cfg
     update_image_config(
         cfg.config_path,
         asr_vram_budget_gb=body.vram_budget_gb,
+        asr_vram_budget_auto=body.vram_budget_auto,
         asr_coexist=body.coexist,
         asr_idle_timeout_s=body.idle_timeout_s,
         asr_decode_interval_s=body.decode_interval_s)
@@ -2183,6 +2185,8 @@ async def asr_defaults(request: Request, body: AsrDefaultsBody,
     return JSONResponse({
         "ok": True,
         "asr_vram_budget_gb": cfg.asr_vram_budget_gb,
+        "asr_vram_budget_auto": getattr(cfg, "asr_vram_budget_auto", True),
+        "asr_vram_budget_effective_gb": round(asr_budget_gb(cfg), 1),
         "asr_coexist": cfg.asr_coexist,
         "asr_idle_timeout_s": cfg.asr_idle_timeout_s,
         "asr_decode_interval_s": cfg.asr_decode_interval_s,
