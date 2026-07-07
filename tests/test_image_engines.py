@@ -325,6 +325,59 @@ def test_krea_adapter_builds_argv_for_original_repo(tmp_path: Path):
     assert "--gguf" not in argv
 
 
+def test_krea_adapter_emits_init_image_and_strength(tmp_path: Path):
+    """One ref image => --init-image <path> --strength <s> (img2img)."""
+    from llamanager.engines import krea
+    from llamanager.config import Config, Profile
+    from llamanager.engines._base import ImageRequest
+
+    fake_py = tmp_path / "python"
+    fake_py.write_bytes(b"")
+    cfg = Config()
+    cfg.z_image_python = str(fake_py)
+    model = tmp_path / "krea" / "Krea-2-Turbo"
+    model.mkdir(parents=True)
+    (model / "model_index.json").write_text('{"_class_name":"Krea2Pipeline"}')
+    prof = Profile(name="krea-original", image_model_type="original")
+    req = ImageRequest(
+        prompt="test", width=1024, height=1024, steps=None, seed=None, n=1,
+        ref_images=[tmp_path / "ref.png"], strength=0.45,
+    )
+    argv, _env = krea.build_command(cfg, model, prof, req, tmp_path / "out.png")
+    assert argv[argv.index("--init-image") + 1] == str(tmp_path / "ref.png")
+    assert argv[argv.index("--strength") + 1] == "0.4500"
+
+
+def test_krea_capabilities_advertise_one_reference():
+    from llamanager.engines import krea
+
+    caps = krea.capabilities()
+    assert caps["ref_images_max"] == 1
+    assert caps["strength"] is True
+
+
+def test_krea_adapter_rejects_multiple_references(tmp_path: Path):
+    from llamanager.engines import krea
+    from llamanager.config import Config, Profile
+    from llamanager.engines._base import ImageRequest
+    import pytest
+
+    fake_py = tmp_path / "python"
+    fake_py.write_bytes(b"")
+    cfg = Config()
+    cfg.z_image_python = str(fake_py)
+    model = tmp_path / "krea" / "Krea-2-Turbo"
+    model.mkdir(parents=True)
+    (model / "model_index.json").write_text('{"_class_name":"Krea2Pipeline"}')
+    prof = Profile(name="krea-original", image_model_type="original")
+    req = ImageRequest(
+        prompt="test", width=1024, height=1024, steps=None, seed=None, n=1,
+        ref_images=[tmp_path / "a.png", tmp_path / "b.png"],
+    )
+    with pytest.raises(RuntimeError, match="exactly one reference image"):
+        krea.build_command(cfg, model, prof, req, tmp_path / "out.png")
+
+
 def test_krea_lora_profile_fields_roundtrip(tmp_path: Path):
     from llamanager.config import (
         DEFAULT_CONFIG_TOML, Profile, load_config, save_profile,

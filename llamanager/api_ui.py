@@ -5294,6 +5294,8 @@ def _asr_models_ctx(request: Request) -> dict[str, Any]:
     redirect back here via ``_models_page_for``."""
     cfg = request.app.state.cfg
     from .audio_runner import scan_asr_models
+    from . import asr_catalog
+    jobs = request.app.state.asr_model_jobs
 
     # Scan the (possibly dedicated) ASR models directory, not the Registry —
     # ASR models may live in their own folder outside the LLM models_dir.
@@ -5303,6 +5305,7 @@ def _asr_models_ctx(request: Request) -> dict[str, Any]:
             "model_id": m["model_id"], "engine": m.get("engine", "asr"),
             "size_bytes": m["size_bytes"], "path": m["path"],
         }
+    installed_ids = set(on_disk)
 
     engines_view: list[dict[str, Any]] = []
     for eng_id, eng_mod in image_engines.ADAPTERS.items():
@@ -5331,18 +5334,41 @@ def _asr_models_ctx(request: Request) -> dict[str, Any]:
                         "fields": {s["key"]: _profile_field_value(p, s["key"])
                                    for s in schema},
                     })
-            rows.append({
+            row = {
                 "catalog": None, "installed": True, "model_id": mid,
                 "size_bytes": meta.get("size_bytes", 0),
                 "is_active_default": False,
                 "profiles": profs,
                 "default_profile": (model_cfg.default_profile if model_cfg else ""),
+                "job": jobs.job_for_model(mid),
+            }
+            # A transformers Whisper can be converted to whisper.cpp GGML. The
+            # sherpa target is gated until the HF→Whisper-ONNX path lands (P3).
+            if eng_id == "asr":
+                row["convert_targets"] = [
+                    {"engine": "whispercpp", "label": "whisper.cpp",
+                     "out_id": f"{mid}-ggml",
+                     "job": jobs.job_for_model(f"{mid}-ggml")},
+                ]
+            rows.append(row)
+
+        # Catalog: known models for this engine that aren't installed yet.
+        catalog_rows: list[dict[str, Any]] = []
+        for e in asr_catalog.catalog_for(eng_id):
+            if e.canonical_id in installed_ids:
+                continue
+            catalog_rows.append({
+                "canonical_id": e.canonical_id, "label": e.label,
+                "language": e.language, "approx_gb": e.approx_size_gb,
+                "description": e.description,
+                "langs": " ".join(e.langs).lower(),
+                "job": jobs.job_for_model(e.canonical_id),
             })
 
         engines_view.append({
             "id": eng_id, **fields,
             "schema": schema, "default_profiles": default_profiles_view,
-            "rows": rows,
+            "rows": rows, "catalog": catalog_rows,
         })
 
     return _ctx(
@@ -5350,6 +5376,9 @@ def _asr_models_ctx(request: Request) -> dict[str, Any]:
         asr_models_dir=str(cfg.asr_models_dir),
         asr_models_dir_is_default=(cfg.asr_models_dir_override is None),
         asr_defaults=_asr_defaults_view(cfg),
+        asr_languages=asr_catalog.languages(),
+        asr_jobs_busy=bool(jobs.active_jobs()),
+        _installed_ids=list(installed_ids),
     )
 
 
@@ -5361,6 +5390,60 @@ async def asr_models_view(request: Request,
     return templates.TemplateResponse(
         request, "asr_models.html", _asr_models_ctx(request),
     )
+
+
+@router.get("/asr-models/_partial", response_class=HTMLResponse)
+async def asr_models_partial(request: Request,
+                             _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """HTMX-polled fragment so catalog download / conversion progress updates
+    live on the ASR models page without a full reload."""
+    return templates.TemplateResponse(
+        request, "_asr_models_partial.html", _asr_models_ctx(request),
+    )
+
+
+@router.post("/asr-models/pull", response_class=HTMLResponse)
+async def asr_models_pull(request: Request,
+                          canonical_id: str = Form(""),
+                          repo: str = Form(""), file: str = Form(""),
+                          subfolder: str = Form(""), name: str = Form(""),
+                          _: None = Depends(require_csrf)) -> Response:
+    """Download a catalog model (``canonical_id``) or a free-form HF repo/file
+    into the ASR models directory as a tracked job."""
+    from .asr_model_jobs import AsrJobError
+    jobs = request.app.state.asr_model_jobs
+    try:
+        jobs.start_download(
+            canonical_id=(canonical_id or "").strip() or None,
+            repo=repo, file=file, subfolder=subfolder, name=name)
+    except (AsrJobError, ValueError) as e:
+        return _error_html(f"download failed: {e}", status_code=400)
+    return RedirectResponse("/ui/asr-models", status_code=303)
+
+
+@router.post("/asr-models/convert", response_class=HTMLResponse)
+async def asr_models_convert(request: Request,
+                             model_id: str = Form(...),
+                             engine: str = Form(...),
+                             quantize: str = Form("none"),
+                             _: None = Depends(require_csrf)) -> Response:
+    """Convert an installed transformers Whisper model to another engine
+    (``whispercpp`` GGML or ``sherpa`` ONNX) as a tracked job."""
+    from .asr_model_jobs import AsrJobError
+    jobs = request.app.state.asr_model_jobs
+    try:
+        jobs.start_convert(model_id.strip(), engine.strip(),
+                           quantize=(quantize or "none").strip())
+    except (AsrJobError, ValueError) as e:
+        return _error_html(f"convert failed: {e}", status_code=400)
+    return RedirectResponse("/ui/asr-models", status_code=303)
+
+
+@router.post("/asr-models/jobs/{job_id}/cancel", response_class=HTMLResponse)
+async def asr_models_cancel_job(request: Request, job_id: str,
+                                _: None = Depends(require_csrf)) -> Response:
+    request.app.state.asr_model_jobs.cancel(job_id)
+    return RedirectResponse("/ui/asr-models", status_code=303)
 
 
 @router.get("/setup-asr", response_class=HTMLResponse)

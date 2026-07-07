@@ -699,6 +699,127 @@ def test_asr_engines_page_polls_while_install_in_flight(app):
         assert "Configuring" in frag and "<html" not in frag.lower()
 
 
+def test_asr_catalog_integrity():
+    from llamanager import asr_catalog as cat
+    from llamanager.config import ENGINE_FAMILY
+    ids = [e.canonical_id for e in cat.CATALOG]
+    assert len(ids) == len(set(ids)), "duplicate canonical_id"
+    for e in cat.CATALOG:
+        assert ENGINE_FAMILY.get(e.engine) == "audio", e
+        assert e.hf_repo, e
+        # GGML entries pull a single file; snapshot entries don't.
+        if e.engine == "whispercpp":
+            assert e.hf_file.endswith(".bin"), e
+    assert cat.catalog_for("whispercpp"), "no whispercpp catalog"
+    assert cat.catalog_for("sherpa"), "no sherpa catalog"
+    assert cat.get("ggml-large-v3-turbo").engine == "whispercpp"
+    # Languages come from the sherpa entries' langs and include Arabic.
+    langs = cat.languages()
+    assert "Arabic" in langs and "English" in langs
+
+
+def test_asr_admin_catalog_endpoint(app):
+    from fastapi.testclient import TestClient
+    am = app.state.auth
+    key = am.rotate_key(am.get_origin_by_name("bootstrap").id)
+    with TestClient(app) as client:
+        r = client.get("/admin/asr/catalog",
+                       headers={"Authorization": f"Bearer {key}"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["catalog"] and "Arabic" in body["languages"]
+        assert all("installed" in e for e in body["catalog"])
+        # The streaming Quran model is in the catalog.
+        assert any(e["canonical_id"] == "sherpa-quran-ar-fastconformer"
+                   and e["engine"] == "sherpa" for e in body["catalog"])
+
+
+def test_asr_model_endpoints_require_admin(app):
+    """Downloading / converting models is admin-only (no bearer → 401)."""
+    from fastapi.testclient import TestClient
+    with TestClient(app) as client:
+        assert client.post("/admin/asr/pull",
+                           json={"canonical_id": "ggml-tiny"}).status_code == 401
+        assert client.post("/admin/asr/convert",
+                           json={"model_id": "x", "engine": "whispercpp"}).status_code == 401
+        assert client.get("/admin/asr/catalog").status_code == 401
+
+
+def test_asr_job_manager_download(tmp_path, monkeypatch):
+    """A download job runs to completion and the file lands engine-detected."""
+    import asyncio, sys, types
+    from llamanager.config import Config
+    from llamanager.db import DB
+    from llamanager.asr_model_jobs import AsrModelJobs
+
+    hub = types.ModuleType("huggingface_hub")
+    def hf_hub_download(repo_id, filename, local_dir, token=None):
+        p = Path(local_dir) / filename
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"\x00" * 2048)
+        return str(p)
+    def snapshot_download(repo_id, local_dir, allow_patterns=None, token=None):
+        (Path(local_dir) / "tokens.txt").write_text("a 1\n")
+        (Path(local_dir) / "encoder.onnx").write_bytes(b"\x00")
+        (Path(local_dir) / "decoder.onnx").write_bytes(b"\x00")
+        (Path(local_dir) / "joiner.onnx").write_bytes(b"\x00")
+        return local_dir
+    hub.hf_hub_download = hf_hub_download
+    hub.snapshot_download = snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+
+    async def run():
+        cfg = Config(data_dir=tmp_path, asr_models_dir_override=tmp_path / "asr")
+        jobs = AsrModelJobs(cfg, DB(tmp_path / "s.db"))
+        # catalog GGML → whispercpp
+        jid = jobs.start_download(canonical_id="ggml-large-v3-turbo")
+        for _ in range(80):
+            if jobs.get(jid)["status"] in ("done", "failed", "cancelled"):
+                break
+            await asyncio.sleep(0.02)
+        assert jobs.get(jid)["status"] == "done", jobs.get(jid)
+        # free-form snapshot → sherpa
+        jid2 = jobs.start_download(repo="some/streaming-zipformer", name="sherpa-x")
+        for _ in range(80):
+            if jobs.get(jid2)["status"] in ("done", "failed", "cancelled"):
+                break
+            await asyncio.sleep(0.02)
+        assert jobs.get(jid2)["status"] == "done"
+        from llamanager.audio_runner import scan_asr_models
+        found = {m["model_id"]: m["engine"] for m in scan_asr_models(cfg)}
+        assert found.get("ggml-large-v3-turbo") == "whispercpp"
+        assert found.get("sherpa-x") == "sherpa"
+
+    asyncio.run(run())
+
+
+def test_asr_convert_validation(tmp_path):
+    from llamanager.config import Config
+    from llamanager.db import DB
+    from llamanager.asr_model_jobs import AsrModelJobs, AsrJobError
+    import pytest
+    cfg = Config(data_dir=tmp_path, asr_models_dir_override=tmp_path / "asr")
+    jobs = AsrModelJobs(cfg, DB(tmp_path / "s.db"))
+    with pytest.raises(AsrJobError):
+        jobs.start_convert("x", "llama")               # not a target engine
+    with pytest.raises(AsrJobError):
+        jobs.start_convert("missing", "whispercpp")    # source not on disk
+
+
+def test_sherpa_worker_find_prefers_full_precision(tmp_path):
+    """When a repo ships both fp32 and int8, _find picks the full-precision one
+    so the transducer graphs stay consistent."""
+    from llamanager.engines import _sherpa_worker as w
+    for n in ("encoder-epoch-99.int8.onnx", "encoder-epoch-99.onnx"):
+        (tmp_path / n).write_bytes(b"\x00")
+    got = w._find(tmp_path, "encoder")
+    assert got.endswith("encoder-epoch-99.onnx"), got
+    # int8-only repo → falls back to int8.
+    d2 = tmp_path / "only_int8"; d2.mkdir()
+    (d2 / "encoder.int8.onnx").write_bytes(b"\x00")
+    assert w._find(d2, "encoder").endswith("encoder.int8.onnx")
+
+
 def test_vulkan_build_preflight_helpers():
     """The whisper.cpp build preflight distinguishes runtime Vulkan from the
     dev files cmake needs."""

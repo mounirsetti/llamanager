@@ -63,16 +63,28 @@ def _decode_audio(path: Path):
 # ---- recognizer construction -------------------------------------------
 
 def _find(model_dir: Path, *needles: str) -> str | None:
-    for p in sorted(model_dir.iterdir()):
+    """First ``*.onnx`` whose name contains all ``needles``. When a repo ships
+    multiple precisions (e.g. both ``…onnx`` and ``…int8.onnx``), prefer the
+    full-precision file so the three transducer graphs stay consistent."""
+    matches = [p for p in model_dir.iterdir()
+               if p.is_file() and p.name.lower().endswith(".onnx")
+               and all(x in p.name.lower() for x in needles)]
+    if not matches:
+        return None
+
+    def rank(p: Path):
         n = p.name.lower()
-        if p.is_file() and n.endswith(".onnx") and all(x in n for x in needles):
-            return str(p)
-    return None
+        quantized = (".int8." in n) or (".fp16." in n) or (".quant." in n)
+        return (1 if quantized else 0, n)
+
+    matches.sort(key=rank)
+    return str(matches[0])
 
 
 def _build_recognizer(model_dir: Path, num_threads: int):
-    """Build an online (streaming) recognizer if the model supports it, else an
-    offline one. Returns (recognizer, is_online)."""
+    """Build the right sherpa-onnx recognizer for the model on disk. Returns
+    (recognizer, is_online). Streaming transducers → online (native streaming);
+    Whisper-ONNX / Paraformer / CTC → offline."""
     import sherpa_onnx
     tokens = str(model_dir / "tokens.txt")
     enc = _find(model_dir, "encoder")
@@ -94,6 +106,12 @@ def _build_recognizer(model_dir: Path, num_threads: int):
                 encoder=enc, decoder=dec, joiner=joiner,
                 decoding_method="greedy_search", **common)
             return rec, False
+    if enc and dec and not joiner:
+        # Whisper-ONNX (encoder + decoder, no joiner) → offline whisper.
+        _log("[sherpa-worker] Whisper-ONNX layout → OfflineRecognizer.from_whisper")
+        rec = sherpa_onnx.OfflineRecognizer.from_whisper(
+            encoder=enc, decoder=dec, tokens=tokens, num_threads=num_threads)
+        return rec, False
     # Paraformer / CTC single-graph → offline.
     para = _find(model_dir, "model") or _find(model_dir)
     if para:

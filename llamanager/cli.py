@@ -1161,6 +1161,33 @@ def cmd_asr_models(args):
     return _run_admin(lambda: c.asr_models())
 
 
+def cmd_asr_catalog(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.asr_catalog())
+
+
+def cmd_asr_pull(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.asr_pull(
+        canonical_id=(args.model or ""), repo=(args.repo or ""),
+        file=(args.file or ""), subfolder=(args.subfolder or ""),
+        name=(args.name or "")))
+
+
+def cmd_asr_convert(args):
+    c = _make_admin_client(args)
+    engine = "whispercpp" if args.to in ("whispercpp", "ggml") else "sherpa"
+    return _run_admin(lambda: c.asr_convert(
+        args.model_id, engine, quantize=args.quantize))
+
+
+def cmd_asr_jobs(args):
+    c = _make_admin_client(args)
+    if args.cancel:
+        return _run_admin(lambda: c.asr_job_cancel(args.cancel))
+    return _run_admin(lambda: c.asr_jobs())
+
+
 def cmd_asr_models_dir(args):
     c = _make_admin_client(args)
     return _run_admin(lambda: c.asr_models_dir(args.path or ""))
@@ -1993,6 +2020,43 @@ def main(argv: list[str] | None = None) -> int:
 
     sp = afp.add_parser("models", help="list installed speech-to-text models")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_models)
+
+    sp = afp.add_parser("catalog",
+                        help="list the curated ASR model catalog (installed?)")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_catalog)
+
+    sp = afp.add_parser("pull",
+                        help="download a catalog model (by id) or a free-form "
+                             "HF repo/file into the ASR models folder")
+    sp.add_argument("model", nargs="?", default="",
+                    help="catalog canonical_id (see `asr catalog`)")
+    sp.add_argument("--repo", default="",
+                    help="free-form: Hugging Face repo (org/name)")
+    sp.add_argument("--file", default="",
+                    help="free-form: single file to pull (e.g. a GGML .bin)")
+    sp.add_argument("--subfolder", default="",
+                    help="free-form: restrict a snapshot to this HF subfolder")
+    sp.add_argument("--name", default="",
+                    help="free-form: on-disk folder name (defaults to repo/file)")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_pull)
+
+    sp = afp.add_parser("convert",
+                        help="convert an installed transformers Whisper to "
+                             "another engine (whisper.cpp GGML / sherpa ONNX)")
+    sp.add_argument("model_id", help="installed transformers model id")
+    sp.add_argument("--to", required=True,
+                    choices=["whispercpp", "ggml", "sherpa"],
+                    help="target engine")
+    sp.add_argument("--quantize", default="none",
+                    choices=["none", "q5_0", "q8_0"],
+                    help="whisper.cpp only: quantize the produced GGML")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_convert)
+
+    sp = afp.add_parser("jobs",
+                        help="list ASR model download/convert jobs (or cancel one)")
+    sp.add_argument("--cancel", default="", metavar="JOB_ID",
+                    help="cancel the job with this id")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_asr_jobs)
 
     sp = afp.add_parser("models-dir",
                         help="set the dedicated ASR models folder (blank = shared LLM models dir)")

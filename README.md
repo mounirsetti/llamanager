@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/version-0.4.11-green.svg" alt="Version 0.4.11">
+  <img src="https://img.shields.io/badge/version-0.4.12-green.svg" alt="Version 0.4.12">
   <img src="https://img.shields.io/badge/python-3.11+-3776ab.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platforms">
 </p>
@@ -255,7 +255,7 @@ cd Llamanager
 Pin to a tagged release:
 
 ```bash
-git clone --branch "v0.4.11" --depth 1 https://github.com/mounirsetti/Llamanager.git
+git clone --branch "v0.4.12" --depth 1 https://github.com/mounirsetti/Llamanager.git
 cd Llamanager
 ```
 
@@ -803,14 +803,31 @@ This writes `image.asr_python` / `image.sherpa_python` / `image.whispercpp_binar
 
 ### Add a model
 
-Download a Whisper checkpoint in `transformers` format into your models directory (the same dir as your GGUFs and diffusion models). For example, with the HF CLI or `huggingface_hub`:
+Three ways to get models onto the **ASR models** page, all landing in the ASR models folder and engine-detected from disk shape. Downloads and conversions run as **tracked jobs** with live progress (the page polls while any job runs) and surface their log on failure. **All model management — catalog download, free-form pull, and conversion — requires an admin origin** (the web UI already runs as admin; the CLI needs an admin key, see below).
+
+**1. Catalog (one click).** Each engine has a curated list of known-good models. whisper.cpp ships the official GGML Whisper builds (`large-v3-turbo` and friends, plain or quantized). sherpa-onnx ships **streaming** transducers across a dozen languages — including a multilingual Arabic model and a **streaming Quran-recitation model** (`fastconformer-quran-ar`, fine-tuned on tarteel everyayah) — with a **language autocomplete** to filter the list. Click **Download**.
+
+**2. Free-form pull.** The **Add a model from Hugging Face** box takes any repo (whole-snapshot: transformers or sherpa folders) or a single file (whisper.cpp GGML `ggml-*.bin`). Or from the CLI:
 
 ```bash
-huggingface-cli download naazimsnh02/whisper-large-v3-turbo-ar-quran \
-  --local-dir "$MODELS_DIR/whisper-large-v3-turbo-ar-quran"
+llamanager asr catalog                                   # list the catalog (installed?)
+llamanager asr pull ggml-large-v3-turbo                  # a catalog model by id
+llamanager asr pull --repo openai/whisper-large-v3-turbo # any transformers repo (snapshot)
+llamanager asr pull --repo ggerganov/whisper.cpp --file ggml-medium.bin   # a single GGML file
+llamanager asr jobs                                      # watch download/convert jobs
 ```
 
-llamanager auto-detects the folder as an `asr` model (it reads `config.json` → `model_type: whisper`) and lists it on the **ASR models** page and under `llamanager asr models`. No catalog entry or manual registration is needed. Like diffusion models, ASR models are **kept out of the LLM model list and picker** — they live only on the ASR page.
+**3. Reuse a model on another engine (convert).** Any installed transformers Whisper (e.g. the Arabic Quran fine-tune) can be converted to **whisper.cpp GGML** so it runs on the Vulkan GPU — the **Make available for whisper.cpp** button on the model's row (pick f16 / q5_0 / q8_0), or:
+
+```bash
+llamanager asr convert whisper-large-v3-turbo-ar-quran --to whispercpp --quantize q5_0
+```
+
+This runs whisper.cpp's `convert-h5-to-ggml.py` in the transformers venv (auto-installing `openai-whisper` for its mel filters), then optionally `whisper-quantize`, producing a `…-ggml` model folder.
+
+> **sherpa-onnx from a fine-tune:** there is no one-click convert to sherpa. sherpa's Whisper exporter loads *openai-whisper* checkpoints, not HF transformers fine-tunes, and sherpa-whisper runs offline anyway (no streaming gain). If you specifically want a Whisper model on sherpa, export it yourself with sherpa-onnx's [`scripts/whisper/export-onnx.py`](https://github.com/k2-fsa/sherpa-onnx/blob/master/scripts/whisper/export-onnx.py) (needs an openai-whisper-format checkpoint) and drop the resulting `*-encoder.onnx` + `*-decoder.onnx` + `tokens.txt` into the ASR models folder — llamanager detects and runs it. For live Arabic, prefer the streaming sherpa model in the catalog.
+
+You can also just drop a model folder in by hand — llamanager auto-detects the shape (transformers `config.json`→`whisper`, whisper.cpp `ggml-*.bin`, or sherpa `tokens.txt`+`*.onnx`) and lists it under the right engine. Like diffusion models, ASR models are **kept out of the LLM model list and picker** — they live only on the ASR page.
 
 By default ASR scans the same `models_dir` as everything else. If you keep Whisper models somewhere separate (a shared HF cache, a different disk), point ASR at that folder — the **ASR models folder** field on the ASR page, or:
 
@@ -1375,6 +1392,13 @@ llamanager asr install [--backend auto|rocm|cuda|cpu]    # reuse the diffusion v
 llamanager asr cancel-install
 llamanager asr setup <python_path>                       # point asr_python at a torch+transformers venv
 llamanager asr models                                    # installed speech-to-text models
+llamanager asr catalog                                   # curated model catalog (installed?)
+llamanager asr pull <catalog-id | --repo R [--file F] [--name N]>   # download a model (tracked job)
+llamanager asr pull sherpa-quran-ar-fastconformer        #   e.g. streaming Quran model for sherpa (live mic)
+llamanager asr pull ggml-large-v3-turbo                  #   e.g. official GGML Whisper for whisper.cpp
+llamanager asr convert <model_id> --to whispercpp [--quantize none|q5_0|q8_0]   # reuse a transformers Whisper on whisper.cpp
+llamanager asr convert whisper-large-v3-turbo-ar-quran --to whispercpp --quantize q5_0   # Quran fine-tune → GGML (Vulkan)
+llamanager asr jobs [--cancel JOB_ID]                    # ASR download/convert jobs (admin)
 llamanager asr models-dir [<path>]                       # dedicated ASR models folder (blank = shared dir)
 llamanager asr profiles list <model_id>
 llamanager asr profiles create <model_id> <name> [--field K=V ...] [--make-default]   # e.g. --field audio_language=ar
@@ -1395,7 +1419,7 @@ llamanager slots unload <slot_id>                         # stop the model in a 
 llamanager slots coex on|off                              # diffusion-coexistence (on = image keeps LLMs loaded)
 ```
 
-The CLI mirrors the web UI feature-for-feature: every page that lets you click something has a `llamanager` verb that does the same thing against `/admin/*`. `llamanager profiles` covers the LLM-profile editor on `/ui/models`, `llamanager diffusion` covers the Diffusion engines + Diffusion models pages, `llamanager asr` covers the ASR engines page (install/build/setup, GPU budget) and the ASR models page (model list, profiles) and adds `transcribe` for one-shot speech-to-text, `llamanager setup` covers paths/coexistence/autolaunch and the llama-server installer, `llamanager slots` (beta, see [Multi-slot LLM (beta)](#multi-slot-llm-beta)) covers the parallel-model dashboard, `llamanager models {set-default,add-existing,set-dir}` covers the LLM-model housekeeping rows, and `llamanager queue cancel-all` + `llamanager origins update` round out the existing groups. `update` runs `pip install --upgrade llamanager` against the service's venv and SIGTERMs so the supervisor restarts it — exactly what the `/ui/about` Update button does. `--check` reports the latest GitHub tag plus the detected install mode without doing anything. If the service was installed in editable / developer mode (`pip install -e .` from a git checkout), the auto-update refuses with instructions to run `git pull && pip install -e .` in the checkout yourself — the operator's checkout is the source of truth in that case.
+The CLI mirrors the web UI feature-for-feature: every page that lets you click something has a `llamanager` verb that does the same thing against `/admin/*`. `llamanager profiles` covers the LLM-profile editor on `/ui/models`, `llamanager diffusion` covers the Diffusion engines + Diffusion models pages, `llamanager asr` covers the ASR engines page (install/build/setup, GPU budget) and the ASR models page (catalog/pull/convert, model list, profiles) and adds `transcribe` for one-shot speech-to-text, `llamanager setup` covers paths/coexistence/autolaunch and the llama-server installer, `llamanager slots` (beta, see [Multi-slot LLM (beta)](#multi-slot-llm-beta)) covers the parallel-model dashboard, `llamanager models {set-default,add-existing,set-dir}` covers the LLM-model housekeeping rows, and `llamanager queue cancel-all` + `llamanager origins update` round out the existing groups. `update` runs `pip install --upgrade llamanager` against the service's venv and SIGTERMs so the supervisor restarts it — exactly what the `/ui/about` Update button does. `--check` reports the latest GitHub tag plus the detected install mode without doing anything. If the service was installed in editable / developer mode (`pip install -e .` from a git checkout), the auto-update refuses with instructions to run `git pull && pip install -e .` in the checkout yourself — the operator's checkout is the source of truth in that case.
 
 Example, an agent that wants to swap models before a long batch and revert after:
 

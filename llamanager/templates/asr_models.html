@@ -47,6 +47,14 @@
   .lm-dm-actions form { display: inline; }
   .lm-dm-empty { color: var(--fg-3); font-size: 0.8125rem; padding: 8px 0; }
   .lm-asr-engine-card { background: var(--bg-0); border: 1px dashed var(--bg-3); padding: 12px 14px; margin-bottom: 16px; }
+  .lm-asr-bar { height: 4px; background: var(--bg-3); border-radius: 2px; overflow: hidden; margin: 6px 0; }
+  .lm-asr-bar__fill { height: 100%; background: var(--accent); transition: width 250ms ease; }
+  .lm-asr-log {
+    margin: 6px 0 0; padding: 8px 10px; max-height: 200px; overflow: auto;
+    background: var(--bg-2); border: 1px solid var(--bg-3); border-radius: 2px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.6875rem;
+    color: var(--fg-1); white-space: pre; line-height: 1.45;
+  }
 </style>
 
 {% from "_diffusion_fields.html" import field_input, schema_fields %}
@@ -212,160 +220,61 @@
 </script>
 {% endif %}
 
-{% for eng in engines %}
+{# ---- Add a model from Hugging Face (free-form) ---- #}
 <section class="lm-dm-engine">
   <div class="lm-dm-engine__head">
-    <span class="lm-dm-engine__title">{{ eng.label }}
-      <span class="lm-dm-engine__meta">· engine <code>{{ eng.id }}</code></span>
-    </span>
-    <span class="lm-dm-engine__meta">
-      {% if eng.configured %}<span class="lm-dm-pill lm-dm-pill--ok">configured</span>{% else %}<a href="/ui/setup-asr">not configured — set up →</a>{% endif %}
+    <span class="lm-dm-engine__title">Add a model from Hugging Face
+      <span class="lm-dm-engine__meta">· any repo, or a single GGML file</span>
     </span>
   </div>
-
-  {% if not eng.rows %}
-  <p class="lm-dm-empty">No <code>{{ eng.id }}</code> models found in
-    <code>{{ asr_models_dir }}</code>. Drop
-    {% if eng.id == 'whispercpp' %}a whisper.cpp <code>ggml-*.bin</code>{% elif eng.id == 'sherpa' %}a sherpa-onnx model folder (<code>tokens.txt</code> + <code>*.onnx</code>){% else %}a Whisper checkpoint (HF <code>transformers</code> format){% endif %}
-    into that folder, or point the <strong>ASR models folder</strong> above at where your models sit.</p>
-  {% endif %}
-
-  {% for row in eng.rows %}
-  <article class="lm-dm-model">
-    <div class="lm-dm-model__head">
-      <h3 class="lm-dm-model__name">{{ row.model_id }}</h3>
-      <span class="lm-dm-pill lm-dm-pill--ok">Installed</span>
-      {% if row.size_bytes %}
-      <span class="lm-dm-engine__meta">{{ '%.1f GB' % (row.size_bytes / (1024**3)) }}</span>
-      {% endif %}
-    </div>
-
-    {% if not eng.configured %}
-    <p style="font-size: 0.8125rem; color: var(--fg-2);">
-      The engine isn't configured yet — transcription requests will fail until
-      dependencies are installed / a Python path is set above.
-    </p>
-    {% endif %}
-
-    {# ---- Per-model default-profile picker ---- #}
-    <form method="post" action="/ui/diffusion-models/profiles/set-model-default"
-          class="lm-form" style="display: inline-block;">
+  <div class="lm-asr-engine-card">
+    <form method="post" action="/ui/asr-models/pull" class="lm-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="model_id" value="{{ row.model_id }}">
-      <label class="lm-dm-engine__meta">Default profile:</label>
-      <select class="lm-input lm-input--mono" name="profile_name" onchange="this.form.submit()">
-        <option value="" {% if not row.default_profile %}selected{% endif %}>— none —</option>
-        {% for p in row.profiles %}
-        <option value="{{ p.name }}" {% if row.default_profile == p.name %}selected{% endif %}>{{ p.name }}</option>
-        {% endfor %}
-      </select>
-      <noscript><button type="submit" class="lm-btn lm-btn--xs">Save</button></noscript>
-    </form>
-
-    {# ---- Existing profiles ---- #}
-    <div class="lm-dm-section">
-      <div class="lm-dm-section__head">
-        <span>Profiles</span>
-        <span class="lm-dm-engine__meta">{{ row.profiles|length }} saved</span>
+      <div class="lm-dm-field">
+        <label class="lm-dm-field__label">HF repo</label>
+        <input class="lm-input lm-input--mono" type="text" name="repo"
+               placeholder="e.g. openai/whisper-large-v3-turbo  ·  ggerganov/whisper.cpp" required>
+        <span class="lm-dm-field__help">A transformers checkpoint or sherpa-onnx repo (whole snapshot), or a whisper.cpp repo when you name a file below.</span>
       </div>
-
-      {% if row.profiles %}
-        {% for prof in row.profiles %}
-        <details class="lm-dm-profile {% if row.default_profile == prof.name %}is-default{% endif %}">
-          <summary>
-            <strong class="lm-dm-profile__name">{{ prof.name }}</strong>
-            {% if row.default_profile == prof.name %}<span class="lm-dm-pill lm-dm-pill--accent">default</span>{% endif %}
-            <span class="lm-dm-profile__summary">{{ profile_summary(prof) }}</span>
-          </summary>
-          <div class="lm-dm-profile__body">
-            <form method="post" action="/ui/diffusion-models/profiles/{{ prof.name }}/update" class="lm-form">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <input type="hidden" name="model_id" value="{{ row.model_id }}">
-              <input type="hidden" name="engine" value="{{ eng.id }}">
-              <div class="lm-dm-field">
-                <label class="lm-dm-field__label">Profile name</label>
-                <input class="lm-input lm-input--mono" type="text" name="new_name"
-                       value="{{ prof.name }}" pattern="[a-z0-9._-]+" required>
-              </div>
-              {{ schema_fields(eng.schema, prof) }}
-              <div class="lm-dm-actions">
-                <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Save changes</button>
-              </div>
-            </form>
-            <div class="lm-dm-actions" style="margin-top: 12px;">
-              <form method="post" action="/ui/diffusion-models/profiles/{{ prof.name }}/clone">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <input type="hidden" name="model_id" value="{{ row.model_id }}">
-                <input class="lm-input lm-input--mono" type="text" name="new_name"
-                       placeholder="new-profile-name" pattern="[a-z0-9._-]+" required
-                       style="display: inline-block; width: 220px;">
-                <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Clone</button>
-              </form>
-              <form method="post" action="/ui/diffusion-models/profiles/{{ prof.name }}/delete">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <input type="hidden" name="model_id" value="{{ row.model_id }}">
-                <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs"
-                        data-confirm="Delete profile '{{ prof.name }}' from {{ row.model_id }}?">Delete</button>
-              </form>
-            </div>
-          </div>
-        </details>
-        {% endfor %}
-      {% elif eng.default_profiles %}
-        <div style="background: var(--bg-0); border: 1px dashed var(--bg-3); padding: 10px 12px; margin-bottom: 8px;">
-          <p style="font-size: 0.8125rem; color: var(--fg-2); margin: 0 0 8px;">
-            No saved profiles. The <code>{{ eng.id }}</code> engine ships
-            {{ eng.default_profiles|length }} built-in default{% if eng.default_profiles|length != 1 %}s{% endif %}:
-          </p>
-          <ul style="margin: 0 0 10px; font-size: 0.8125rem;">
-            {% for d in eng.default_profiles %}
-            <li><strong>{{ d.name }}</strong>:
-              {% set parts = [] %}
-              {% for k, v in d.fields.items() %}{% set _ = parts.append(k + '=' + v|string) %}{% endfor %}
-              <span class="lm-dm-profile__summary">{{ parts|join(' · ') }}</span>
-            </li>
-            {% endfor %}
-          </ul>
-          <form method="post" action="/ui/diffusion-models/profiles/materialize-defaults">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="model_id" value="{{ row.model_id }}">
-            <input type="hidden" name="engine" value="{{ eng.id }}">
-            <button type="submit" class="lm-btn lm-btn--ghost lm-btn--sm"
-                    data-confirm="Write the built-in default profile(s) to config.toml so they become editable?">
-              Materialize defaults as editable
-            </button>
-          </form>
-        </div>
-      {% else %}
-        <p class="lm-dm-empty">No profiles saved.</p>
-      {% endif %}
-
-      {# ---- Add a new profile ---- #}
-      <details style="margin-top: 10px;">
-        <summary class="lm-dm-section__head" style="cursor: pointer;"><span>+ Add profile</span></summary>
-        <div style="border: 1px dashed var(--bg-3); padding: 12px; margin-top: 4px;">
-          <form method="post" action="/ui/diffusion-models/profiles/create" class="lm-form">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="model_id" value="{{ row.model_id }}">
-            <input type="hidden" name="engine" value="{{ eng.id }}">
-            <div class="lm-dm-field">
-              <label class="lm-dm-field__label">Profile name</label>
-              <input class="lm-input lm-input--mono" type="text" name="name"
-                     pattern="[a-z0-9._-]+" required placeholder="e.g. quran-ar">
-            </div>
-            {{ schema_fields(eng.schema) }}
-            <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8125rem; margin: 6px 0;">
-              <input type="checkbox" name="make_default" value="on">
-              <span>Make this the default profile for {{ row.model_id }}</span>
-            </label>
-            <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Create profile</button>
-          </form>
-        </div>
-      </details>
-    </div>
-  </article>
-  {% endfor %}
+      <div class="lm-dm-field">
+        <label class="lm-dm-field__label">File (optional)</label>
+        <input class="lm-input lm-input--mono" type="text" name="file"
+               placeholder="e.g. ggml-large-v3-turbo.bin">
+        <span class="lm-dm-field__help">Set to pull a single file (whisper.cpp GGML). Leave blank to snapshot the whole repo.</span>
+      </div>
+      <div class="lm-dm-field">
+        <label class="lm-dm-field__label">Folder name (optional)</label>
+        <input class="lm-input lm-input--mono" type="text" name="name"
+               placeholder="defaults to the repo / file name">
+      </div>
+      <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Download</button>
+    </form>
+  </div>
 </section>
-{% endfor %}
+
+{# Poll while any model download/convert job runs so progress + installed state
+   update without a manual refresh. Morph keeps open profile <details> + focus;
+   hx-disinherit stops boosted forms inside from inheriting the morph swap (the
+   htmx-morph-body-swapError guard). #}
+<div id="asr-models-body"
+     {% if asr_jobs_busy %}
+     hx-get="/ui/asr-models/_partial"
+     hx-trigger="every 2s"
+     hx-swap="morph"
+     {% endif %}
+     hx-disinherit="hx-swap">
+  {% include "_asr_models_partial.html" %}
+</div>
+
+<script>
+  // sherpa catalog language filter: show only rows whose data-lang contains the
+  // typed text (matches the datalist autocomplete). Empty = show all.
+  function asrFilterLang(q) {
+    q = (q || '').trim().toLowerCase();
+    document.querySelectorAll('[data-asr-catalog="sherpa"] [data-lang]').forEach(function (el) {
+      el.style.display = (!q || el.getAttribute('data-lang').indexOf(q) !== -1) ? '' : 'none';
+    });
+  }
+</script>
 
 {% endblock %}

@@ -109,6 +109,28 @@ SCHEMA_VERSIONS: list[str] = [
     """
     ALTER TABLE origins ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
     """,
+    # v7: ASR model-acquisition jobs — downloads (catalog / free-form HF pull)
+    # and cross-engine conversions (transformers Whisper → GGML / sherpa ONNX).
+    # Mirrors engine_installs' shape but keyed by the target model, since many
+    # can run concurrently (unlike the one-per-engine install).
+    """
+    CREATE TABLE asr_model_jobs (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,              -- 'download' | 'convert_ggml' | 'convert_sherpa'
+        engine TEXT NOT NULL,            -- target engine of the produced model
+        model_id TEXT NOT NULL,          -- on-disk canonical_id under asr_models_dir
+        status TEXT NOT NULL,
+        progress_pct INTEGER NOT NULL DEFAULT 0,
+        message TEXT NOT NULL DEFAULT '',
+        log TEXT NOT NULL DEFAULT '',
+        started_at REAL NOT NULL,
+        finished_at REAL,
+        error TEXT,
+        options_json TEXT
+    );
+    CREATE INDEX idx_asr_model_jobs_model ON asr_model_jobs(model_id);
+    CREATE INDEX idx_asr_model_jobs_status ON asr_model_jobs(status);
+    """,
 ]
 
 

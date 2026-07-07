@@ -360,6 +360,8 @@ def create_app(config_path: Path | None = None,
     app.state.audio_runner = audio_runner
     from .engine_installer import EngineInstaller
     app.state.engine_installer = EngineInstaller(cfg, db)
+    from .asr_model_jobs import AsrModelJobs
+    app.state.asr_model_jobs = AsrModelJobs(cfg, db)
     # One InstallState per installable variant (source + backend), so the UI
     # can poll progress per variant independently.
     app.state.install_states = {v["id"]: InstallState() for v in list_variants()}

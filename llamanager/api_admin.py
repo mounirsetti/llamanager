@@ -2074,6 +2074,82 @@ async def asr_models(request: Request,
     })
 
 
+@router.get("/asr/catalog")
+async def asr_catalog_list(request: Request,
+                           _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """The curated ASR model catalog, joined with what's installed on disk."""
+    from . import asr_catalog
+    from .audio_runner import scan_asr_models
+    cfg = request.app.state.cfg
+    installed = {m["model_id"] for m in scan_asr_models(cfg)}
+    out = [{
+        "canonical_id": e.canonical_id, "engine": e.engine, "label": e.label,
+        "language": e.language, "approx_gb": e.approx_size_gb,
+        "description": e.description, "installed": e.canonical_id in installed,
+    } for e in asr_catalog.CATALOG]
+    return JSONResponse({"catalog": out, "languages": asr_catalog.languages()})
+
+
+class AsrPullBody(BaseModel):
+    canonical_id: str = ""
+    repo: str = ""
+    file: str = ""
+    subfolder: str = ""
+    name: str = ""
+
+
+@router.post("/asr/pull")
+async def asr_pull(request: Request, body: AsrPullBody,
+                   _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Download a catalog model (``canonical_id``) or a free-form HF repo/file
+    into the ASR models directory as a tracked job."""
+    from .asr_model_jobs import AsrJobError
+    jobs = request.app.state.asr_model_jobs
+    try:
+        job_id = jobs.start_download(
+            canonical_id=(body.canonical_id or "").strip() or None,
+            repo=body.repo, file=body.file, subfolder=body.subfolder,
+            name=body.name)
+    except (AsrJobError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse({"ok": True, "job_id": job_id}, status_code=202)
+
+
+class AsrConvertBody(BaseModel):
+    model_id: str
+    engine: str
+    quantize: str = "none"
+
+
+@router.post("/asr/convert")
+async def asr_convert(request: Request, body: AsrConvertBody,
+                      _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Convert an installed transformers Whisper to ``whispercpp`` or ``sherpa``."""
+    from .asr_model_jobs import AsrJobError
+    jobs = request.app.state.asr_model_jobs
+    try:
+        job_id = jobs.start_convert(body.model_id.strip(), body.engine.strip(),
+                                    quantize=(body.quantize or "none").strip())
+    except (AsrJobError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse({"ok": True, "job_id": job_id}, status_code=202)
+
+
+@router.get("/asr/jobs")
+async def asr_jobs(request: Request,
+                   _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Recent ASR model download / conversion jobs."""
+    jobs = request.app.state.asr_model_jobs
+    return JSONResponse({"jobs": jobs.list_jobs(limit=25)})
+
+
+@router.post("/asr/jobs/{job_id}/cancel")
+async def asr_job_cancel(request: Request, job_id: str,
+                         _: Origin = Depends(admin_origin)) -> JSONResponse:
+    cancelled = request.app.state.asr_model_jobs.cancel(job_id)
+    return JSONResponse({"ok": True, "cancelled": cancelled})
+
+
 class AsrDefaultsBody(BaseModel):
     vram_budget_gb: float | None = None
     coexist: bool | None = None

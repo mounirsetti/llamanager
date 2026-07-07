@@ -202,11 +202,23 @@ def build_command(
     if profile.image_lora_scale is not None:
         argv += ["--lora-scale", str(float(profile.image_lora_scale))]
 
+    # One reference image → img2img. Upstream has no Krea2Img2ImgPipeline, so
+    # the runner builds one from the loaded components (Krea 2 is a Qwen-Image
+    # architecture model). The strength knob controls how much of the init
+    # image survives.
     if req.ref_images:
-        raise RuntimeError(
-            "krea does not support reference images: diffusers has no "
-            "Krea2 img2img pipeline yet. Use Z-Image for img2img."
-        )
+        if len(req.ref_images) != 1:
+            raise RuntimeError(
+                "krea img2img accepts exactly one reference image; "
+                f"got {len(req.ref_images)}"
+            )
+        argv += ["--init-image", str(req.ref_images[0])]
+        # Denoise strength comes from the request slider only. Krea's
+        # ``image_strength`` profile field is repurposed as True CFG (above),
+        # so it must not double as img2img strength; when the request omits
+        # it, the runner's 0.6 default applies.
+        if req.strength is not None:
+            argv += ["--strength", f"{float(req.strength):.4f}"]
 
     for k, v in (profile.args or {}).items():
         flag = "--" + str(k).replace("_", "-")
@@ -308,8 +320,18 @@ def profile_schema() -> list[ProfileField]:
 
 
 def capabilities() -> dict[str, Any]:
-    """Text-to-image only: diffusers has no Krea2 img2img pipeline yet."""
-    return {"ref_images_max": 0}
+    """One reference image via img2img (denoise strength).
+
+    Upstream diffusers has no Krea2Img2ImgPipeline, so the runner builds one
+    from the loaded components (Krea 2 is a Qwen-Image-architecture model).
+    """
+    return {
+        "ref_images_max": 1,
+        "ref_label": "Init image (img2img)",
+        "ref_help": "One image to transform. Lower strength keeps more of it.",
+        "strength": True,
+        "strength_default": 0.6,
+    }
 
 
 def default_profiles(model_dir: Path | None = None) -> dict[str, dict[str, Any]]:

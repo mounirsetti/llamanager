@@ -627,6 +627,27 @@ class AdminClient:
     def asr_models(self) -> dict[str, Any]:
         return self._get("/admin/asr/models")
 
+    def asr_catalog(self) -> dict[str, Any]:
+        return self._get("/admin/asr/catalog")
+
+    def asr_pull(self, *, canonical_id: str = "", repo: str = "",
+                 file: str = "", subfolder: str = "",
+                 name: str = "") -> dict[str, Any]:
+        return self._post("/admin/asr/pull", {
+            "canonical_id": canonical_id, "repo": repo, "file": file,
+            "subfolder": subfolder, "name": name})
+
+    def asr_convert(self, model_id: str, engine: str, *,
+                    quantize: str = "none") -> dict[str, Any]:
+        return self._post("/admin/asr/convert", {
+            "model_id": model_id, "engine": engine, "quantize": quantize})
+
+    def asr_jobs(self) -> dict[str, Any]:
+        return self._get("/admin/asr/jobs")
+
+    def asr_job_cancel(self, job_id: str) -> dict[str, Any]:
+        return self._post(f"/admin/asr/jobs/{job_id}/cancel")
+
     def asr_models_dir(self, path: str = "") -> dict[str, Any]:
         return self._post("/admin/asr/models-dir", {"path": path})
 
