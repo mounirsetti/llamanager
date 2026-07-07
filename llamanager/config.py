@@ -329,13 +329,15 @@ def _looks_like_whispercpp(d: Path) -> bool:
 
 
 def _looks_like_sherpa(d: Path) -> bool:
-    """sherpa-onnx model shape: a folder with a ``tokens.txt`` symbol table and
-    at least one ``*.onnx`` graph (transducer encoder/decoder/joiner, or a
-    single ``model.onnx`` for Paraformer / CTC)."""
+    """sherpa-onnx model shape: a folder with a tokens table (``tokens.txt`` or
+    a prefixed ``*-tokens.txt``, as some Whisper exports ship) and at least one
+    ``*.onnx`` graph (transducer encoder/decoder/joiner, a Whisper
+    encoder+decoder, or a single ``model.onnx`` for Paraformer / CTC)."""
     if not d.is_dir():
         return False
     names = {p.name.lower() for p in d.iterdir() if p.is_file()}
-    return "tokens.txt" in names and any(n.endswith(".onnx") for n in names)
+    has_tokens = any(n.endswith("tokens.txt") for n in names)
+    return has_tokens and any(n.endswith(".onnx") for n in names)
 
 
 def detect_audio_engine_for_path(model_path: Path) -> str | None:

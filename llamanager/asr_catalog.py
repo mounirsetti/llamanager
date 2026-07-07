@@ -95,15 +95,14 @@ CATALOG: list[AsrCatalogEntry] = [
     # Verified k2-fsa/csukuangfj HF repos; each is a full model folder
     # (tokens.txt + encoder/decoder/joiner ONNX) → snapshot download.
     AsrCatalogEntry(
-        canonical_id="sherpa-quran-ar-fastconformer", engine="sherpa",
-        label="Streaming FastConformer — Quran (Arabic)", language="Arabic (Quran)",
+        canonical_id="sherpa-quran-ar-whisper-tiny", engine="sherpa",
+        label="Whisper-tiny — Quran (Arabic)", language="Arabic (Quran)",
         langs=("Arabic",),
-        hf_repo="mohammed/fastconformer-quran-ar-onnx-int8",
-        approx_size_gb=0.15,
-        description="Streaming Quran-recitation transducer (fine-tuned on "
-                    "tarteel everyayah). True low-latency Arabic Quran ASR for "
-                    "the live mic — the sherpa counterpart of the Whisper "
-                    "Quran fine-tune."),
+        hf_repo="kasimyazan/sherpa-tarteel-whisper-tiny-ar-quran",
+        approx_size_gb=0.05,
+        description="Quran-recitation Whisper-tiny fine-tune (tarteel) exported "
+                    "for sherpa-onnx — offline decode. Small and fast; for "
+                    "true streaming Arabic use the multilingual model below."),
     AsrCatalogEntry(
         canonical_id="sherpa-streaming-multi-ar", engine="sherpa",
         label="Streaming Zipformer — Arabic + 7 languages",

@@ -280,11 +280,14 @@ class AsrModelJobs:
 
             progress(10, "Ensuring mel-filter assets (openai-whisper)")
             mel_dir = await self._ensure_whisper_assets(py, cancel, emit)
+            _patch_convert_bf16(script, emit)
 
             progress(30, "Converting Hugging Face checkpoint → GGML")
+            # The converter imports torch to load the checkpoint; on AMD that
+            # needs the system ROCm libs on LD_LIBRARY_PATH (no-op off AMD).
             rc = await _run_subprocess(
                 [str(py), str(script), str(src), str(mel_dir), str(out)],
-                cancel, emit)
+                cancel, emit, env=_rocm_env())
             if cancel.is_set():
                 raise asyncio.CancelledError()
             if rc != 0:
@@ -346,12 +349,17 @@ class AsrModelJobs:
                                      emit) -> Path:
         """Return a dir containing ``whisper/assets/mel_filters.npz`` (needed by
         the converter). Uses openai-whisper's package assets; installs it into
-        the asr venv on first use."""
-        probe = ("import os,whisper;"
-                 "print(os.path.dirname(os.path.dirname(whisper.__file__)))")
+        the asr venv on first use.
+
+        The probe locates the package via ``importlib.util.find_spec`` — WITHOUT
+        importing ``whisper`` (which pulls in torch, and on AMD would fail to
+        import unless the ROCm libs are on LD_LIBRARY_PATH). We only need the
+        file location, not the loaded module."""
+        probe = ("import importlib.util as u,os;s=u.find_spec('whisper');"
+                 "print(os.path.dirname(s.origin) if s and s.origin else '')")
         rc, outs = await _run_subprocess_capture([str(py), "-c", probe], cancel)
-        site = outs.strip().splitlines()[-1] if rc == 0 and outs.strip() else ""
-        if not site or not (Path(site) / "whisper" / "assets" / "mel_filters.npz").is_file():
+        pkg = outs.strip().splitlines()[-1] if rc == 0 and outs.strip() else ""
+        if not pkg or not (Path(pkg) / "assets" / "mel_filters.npz").is_file():
             emit("[assets] installing openai-whisper for mel filters")
             rc = await _run_subprocess(
                 [str(py), "-m", "pip", "install", "--upgrade",
@@ -359,11 +367,12 @@ class AsrModelJobs:
             if rc != 0:
                 raise AsrJobError(f"failed to install openai-whisper (exit {rc})")
             rc, outs = await _run_subprocess_capture([str(py), "-c", probe], cancel)
-            site = outs.strip().splitlines()[-1] if rc == 0 and outs.strip() else ""
-        mel = Path(site) / "whisper" / "assets" / "mel_filters.npz"
-        if not mel.is_file():
+            pkg = outs.strip().splitlines()[-1] if rc == 0 and outs.strip() else ""
+        if not pkg or not (Path(pkg) / "assets" / "mel_filters.npz").is_file():
             raise AsrJobError("could not locate whisper/assets/mel_filters.npz")
-        return Path(site)
+        # The converter wants a dir CONTAINING ``whisper/assets/…``, i.e. the
+        # site-packages root (parent of the ``whisper`` package dir).
+        return Path(pkg).parent
 
 
 # ---- module helpers ----
@@ -389,12 +398,44 @@ def _dir_size_gb(d: Path) -> float:
     return total / (1024 ** 3)
 
 
-async def _run_subprocess(argv: list[str], cancel: asyncio.Event, emit) -> int:
+def _patch_convert_bf16(script: Path, emit) -> None:
+    """Idempotently patch whisper.cpp's ``convert-h5-to-ggml.py`` so bfloat16
+    checkpoints convert. The upstream script does ``tensor.squeeze().numpy()``,
+    which raises ``unsupported ScalarType BFloat16`` on bf16 fine-tunes (many HF
+    Whisper models, incl. the Quran one). Casting to fp32 first is safe for
+    fp16/fp32 too (the next line down-casts to fp16 as before)."""
+    try:
+        text = script.read_text(encoding="utf-8")
+    except OSError:
+        return
+    old = "list_vars[src].squeeze().numpy()"
+    new = "list_vars[src].squeeze().float().numpy()"
+    if old in text and new not in text:
+        script.write_text(text.replace(old, new), encoding="utf-8")
+        emit("[patch] convert-h5-to-ggml.py: cast bf16 tensors to fp32 for numpy")
+
+
+def _rocm_env() -> dict[str, str] | None:
+    """Full env for a torch subprocess on AMD: the system ROCm libs on
+    LD_LIBRARY_PATH so ``import torch`` succeeds (mirrors engines/asr.py). None
+    off AMD (rocm_lib_dirs() empty) so the child inherits the plain environment."""
+    from .gpu_detect import rocm_lib_dirs
+    dirs = rocm_lib_dirs()
+    if not dirs:
+        return None
+    prior = os.environ.get("LD_LIBRARY_PATH", "")
+    return {**os.environ,
+            "LD_LIBRARY_PATH": os.pathsep.join(dirs + ([prior] if prior else []))}
+
+
+async def _run_subprocess(argv: list[str], cancel: asyncio.Event, emit,
+                          env: dict[str, str] | None = None) -> int:
     """Run a subprocess, streaming stdout/stderr lines into the job log. Honours
     ``cancel`` by terminating the child. Returns the exit code."""
     emit(f"$ {' '.join(argv)}")
     proc = await asyncio.create_subprocess_exec(
-        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        env=env)
 
     async def reader() -> None:
         assert proc.stdout is not None

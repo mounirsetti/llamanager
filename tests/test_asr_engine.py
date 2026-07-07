@@ -304,6 +304,39 @@ def test_queue_audio_coexist_off_concurrent_but_exclusive_with_text():
     assert qm._can_dispatch(req) is False
 
 
+def test_asr_transcription_is_origin_gated_not_admin(app):
+    """A non-admin origin can pick an audio model (engine is derived from it)
+    and transcribe — access is gated by the origin's model allowlist, NOT by
+    admin. A disallowed model → 403; no key → 401."""
+    import io, json
+    from fastapi.testclient import TestClient
+    from llamanager.api_v1 import _model_allowed
+    from llamanager.audio_runner import resolve_audio_engine
+
+    cfg = app.state.cfg
+    store = cfg.asr_models_dir
+    _make_whisper_dir(store / "whisper-x")
+    am = app.state.auth
+    o_all, key_all = am.create_origin(name="u-all", allowed_models=["*"])
+    o_lim, key_lim = am.create_origin(name="u-lim", allowed_models=["other"])
+    assert o_all.is_admin is False and o_lim.is_admin is False
+
+    # The only gate is the per-origin allowlist (not admin); engine is derived.
+    assert _model_allowed(o_all, "whisper-x") is True
+    assert _model_allowed(o_lim, "whisper-x") is False
+    assert resolve_audio_engine(cfg, "whisper-x") == "asr"
+
+    with TestClient(app) as c:
+        f = {"file": ("a.wav", io.BytesIO(b"x"), "audio/wav")}
+        # disallowed model → 403 (permission, not admin); no key → 401.
+        r = c.post("/v1/audio/transcriptions",
+                   headers={"Authorization": f"Bearer {key_lim}"},
+                   files=f, data={"model": "whisper-x"})
+        assert r.status_code == 403 and "not allowed" in r.json()["detail"].lower()
+        assert c.post("/v1/audio/transcriptions", files=f,
+                      data={"model": "whisper-x"}).status_code == 401
+
+
 def test_coexist_off_yield_is_refcounted(tmp_path):
     """Concurrent coexist-off transcriptions share ONE LLM unload: the yield is
     entered on the first and exited only after the last releases."""
@@ -776,7 +809,7 @@ def test_asr_admin_catalog_endpoint(app):
         assert body["catalog"] and "Arabic" in body["languages"]
         assert all("installed" in e for e in body["catalog"])
         # The streaming Quran model is in the catalog.
-        assert any(e["canonical_id"] == "sherpa-quran-ar-fastconformer"
+        assert any(e["canonical_id"] == "sherpa-quran-ar-whisper-tiny"
                    and e["engine"] == "sherpa" for e in body["catalog"])
 
 

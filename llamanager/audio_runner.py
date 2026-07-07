@@ -89,7 +89,7 @@ def scan_asr_models(cfg: Config) -> list[dict[str, Any]]:
         return out
     # Collect candidate model dirs from each engine's marker file, then detect.
     seen: set[Path] = set()
-    marker_globs = ("config.json", "ggml-*.bin", "*.gguf", "tokens.txt")
+    marker_globs = ("config.json", "ggml-*.bin", "*.gguf", "*tokens.txt")
     candidates: set[Path] = set()
     for pattern in marker_globs:
         for marker in base.rglob(pattern):

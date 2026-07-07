@@ -81,12 +81,24 @@ def _find(model_dir: Path, *needles: str) -> str | None:
     return str(matches[0])
 
 
+def _tokens_file(model_dir: Path) -> str:
+    """The tokens table path. Prefer ``tokens.txt``; fall back to any
+    ``*-tokens.txt`` (some Whisper exports prefix it, e.g. ``tiny-tokens.txt``)."""
+    exact = model_dir / "tokens.txt"
+    if exact.is_file():
+        return str(exact)
+    for p in sorted(model_dir.iterdir()):
+        if p.is_file() and p.name.lower().endswith("tokens.txt"):
+            return str(p)
+    return str(exact)
+
+
 def _build_recognizer(model_dir: Path, num_threads: int):
     """Build the right sherpa-onnx recognizer for the model on disk. Returns
     (recognizer, is_online). Streaming transducers → online (native streaming);
     Whisper-ONNX / Paraformer / CTC → offline."""
     import sherpa_onnx
-    tokens = str(model_dir / "tokens.txt")
+    tokens = _tokens_file(model_dir)
     enc = _find(model_dir, "encoder")
     dec = _find(model_dir, "decoder")
     joiner = _find(model_dir, "joiner")
