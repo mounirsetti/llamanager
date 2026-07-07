@@ -514,17 +514,34 @@ def test_whispercpp_worker_command_built(tmp_path: Path):
     from llamanager.config import Config
     binary = tmp_path / "whisper-cli"
     binary.write_text(""); binary.chmod(0o755)
+    (tmp_path / "whisper-server").write_text(""); (tmp_path / "whisper-server").chmod(0o755)
     model = tmp_path / "ggml"
     _make_whispercpp_dir(model)
     cfg = Config(data_dir=tmp_path, whispercpp_binary=str(binary))
     argv, env = whispercpp.build_worker_command(cfg, model, 8200, 3)
     assert argv[0] == sys.executable          # stdlib shim → own interpreter
     assert "_whispercpp_worker.py" in argv[2]
+    # Drives the warm whisper-server (sibling of whisper-cli).
+    assert "--whisper-server" in argv and str(tmp_path / "whisper-server") in argv
     assert "--whisper-cli" in argv and str(binary) in argv
     assert "--port" in argv and "8200" in argv
-    # The GGML file inside the folder is resolved for --model.
     assert str(model / "ggml-large-v3-turbo.bin") in argv
     assert env["PYTHONUTF8"] == "1"
+
+
+def test_whispercpp_worker_requires_server_binary(tmp_path: Path):
+    """A whisper-cli without a whisper-server sibling errors clearly (the warm
+    worker needs the server)."""
+    import pytest
+    from llamanager.engines import whispercpp
+    from llamanager.config import Config
+    binary = tmp_path / "whisper-cli"
+    binary.write_text(""); binary.chmod(0o755)   # no whisper-server sibling
+    model = tmp_path / "ggml"
+    _make_whispercpp_dir(model)
+    cfg = Config(data_dir=tmp_path, whispercpp_binary=str(binary))
+    with pytest.raises(RuntimeError, match="whisper-server"):
+        whispercpp.build_worker_command(cfg, model, 8200, 3)
 
 
 def test_whispercpp_worker_command_unconfigured_raises(tmp_path: Path):

@@ -167,9 +167,26 @@ def build_command(
         else:
             argv += [flag, str(v)]
 
+    # GPU pin. sd.cpp is a ggml-Vulkan engine and, unpinned, lands on whatever
+    # ggml calls device 0 — often the *integrated* GPU (see gpu_detect). Resolve
+    # the right device index: an explicit flux2_device_index wins; else derive
+    # it from the operator's GPU pin (llama_gpu_device) via sd.cpp's own ggml
+    # enumeration, preferring the discrete card. If nothing resolves, warn — so
+    # the iGPU trap is never silent.
     env: dict[str, str] = {}
-    if cfg.flux2_device_index is not None:
-        env["GGML_VK_VISIBLE_DEVICES"] = str(int(cfg.flux2_device_index))
+    idx = cfg.flux2_device_index
+    if idx is None and getattr(cfg, "llama_gpu_device", "") and cfg.flux2_sd_cli:
+        from ..gpu_detect import resolve_ggml_vulkan_index
+        idx = resolve_ggml_vulkan_index(
+            cfg.flux2_sd_cli, ["--help"], cfg.llama_gpu_device)
+    if idx is not None:
+        env["GGML_VK_VISIBLE_DEVICES"] = str(int(idx))
+    elif cfg.flux2_device_index is None:
+        log.warning(
+            "flux2: no GPU device pinned — sd.cpp will use ggml's default "
+            "Vulkan device, which is frequently the integrated GPU (slow). "
+            "Set [image].flux2_device_index to the AMD card's ggml index, or "
+            "pin the GPU by name, to avoid the iGPU.")
     return argv, env
 
 

@@ -17,6 +17,7 @@ uniformly.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -75,18 +76,38 @@ def build_worker_command(
     binary = Path(cfg.whispercpp_binary).expanduser()
     if not binary.exists():
         raise RuntimeError(f"whisper-cli not found: {binary}")
+    # The warm worker drives the native whisper-server (sibling of whisper-cli).
+    server = binary.with_name("whisper-server" + binary.suffix)
+    if not server.exists():
+        raise RuntimeError(
+            f"whisper-server not found next to {binary} — rebuild whisper.cpp "
+            "(the Vulkan build ships whisper-server alongside whisper-cli).")
     worker = Path(__file__).with_name("_whispercpp_worker.py")
     if not worker.exists():
         raise RuntimeError(f"whispercpp worker missing: {worker}")
     model_file = _model_file(model_path)
     argv = [
         sys.executable, "-u", str(worker),
+        "--whisper-server", str(server),
         "--whisper-cli", str(binary),
         "--model", str(model_file),
         "--host", "127.0.0.1", "--port", str(int(port)),
         "--max-concurrent", str(max(1, int(max_concurrent))),
+        # Pin the same GPU the text engine uses (resolved to a Vulkan index in
+        # the worker); avoids landing on a slow iGPU.
+        "--device-name", str(getattr(cfg, "llama_gpu_device", "") or ""),
     ]
     env = {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+    # AMD: whisper.cpp's Vulkan path needs the system ROCm/AMD userspace libs on
+    # LD_LIBRARY_PATH to initialise the RADV driver — without them device
+    # enumeration hangs and it falls back to the iGPU. Prepend them (no-op off
+    # AMD, where rocm_lib_dirs() is empty). Mirrors engines/asr.py.
+    from ..gpu_detect import rocm_lib_dirs
+    rocm_dirs = rocm_lib_dirs()
+    if rocm_dirs:
+        prior = os.environ.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(
+            rocm_dirs + ([prior] if prior else []))
     return argv, env
 
 

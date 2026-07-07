@@ -11,12 +11,14 @@ it can be called from request handlers without latency cost.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import platform
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Literal
 
@@ -365,3 +367,124 @@ def render_group_ok(profile: GpuProfile) -> bool:
     if profile.render_gid is None:
         return True  # no render group on this distro; /dev/kfd is presumably world-readable
     return profile.render_gid in os.getgroups()
+
+
+# ---------------------------------------------------------------------------
+# ggml-Vulkan device selection (shared by every Vulkan engine)
+# ---------------------------------------------------------------------------
+#
+# ggml enumerates Vulkan devices in the raw Vulkan-loader order and pins one via
+# GGML_VK_VISIBLE_DEVICES=<index>. That order is NOT the same as vulkaninfo's
+# (which lists discrete GPUs first): on a laptop-class box ggml often lists the
+# integrated GPU as index 0, so an engine that doesn't pin lands on the slow
+# iGPU. The only trustworthy source for the *ggml* index is a ggml binary's own
+# "ggml_vulkan: N = <name> | uma: U | ..." startup line — so we parse that and
+# prefer a discrete (non-integrated) device, or the operator's named GPU.
+
+_GGML_VK_LINE = re.compile(
+    r"ggml_vulkan:\s*(?P<idx>\d+)\s*=\s*(?P<name>.+?)\s*\|(?P<rest>.*)")
+
+# Cache resolved indices for the daemon's lifetime — enumeration spawns the
+# engine binary, which we don't want to repeat per request.
+_GGML_VK_INDEX_CACHE: dict[tuple[str, str], int | None] = {}
+
+
+def parse_ggml_vulkan_devices(text: str) -> list[dict]:
+    """Parse ``ggml_vulkan: N = <name> | uma: U | ...`` lines from a ggml
+    binary's output into ``[{index, name, integrated}]`` (in ggml order)."""
+    out: list[dict] = []
+    for m in _GGML_VK_LINE.finditer(text or ""):
+        rest = m.group("rest").replace(" ", "")
+        out.append({"index": int(m.group("idx")),
+                    "name": m.group("name").strip(),
+                    "integrated": "uma:1" in rest})
+    return out
+
+
+def pick_ggml_vulkan_index(devices: list[dict], device_name: str = "") -> int | None:
+    """Choose the ggml Vulkan index: the operator's named GPU if it matches,
+    else a discrete (non-integrated) device to avoid the iGPU. None when there's
+    nothing to disambiguate (single device / all same class) so ggml keeps its
+    default."""
+    if not devices:
+        return None
+    want = (device_name or "").strip().lower()
+    if want:
+        for d in devices:
+            n = d["name"].lower()
+            if want in n or n in want or _normalize_gpu_name(want) in _normalize_gpu_name(n):
+                return d["index"]
+    discrete = [d for d in devices if not d["integrated"]]
+    if discrete and len(discrete) < len(devices):
+        return discrete[0]["index"]     # prefer the discrete GPU over the iGPU
+    return None
+
+
+def _enumerate_ggml_vulkan(binary: str, probe_args: list[str],
+                           env: dict[str, str] | None,
+                           timeout: float) -> list[dict]:
+    """Run ``binary probe_args`` and read its stderr only until the ggml Vulkan
+    device list is complete, then kill it. The device list prints at backend
+    init — *before* the (slow) model load — so this costs ~1 s instead of a full
+    model load on whatever device ggml defaults to."""
+    proc = subprocess.Popen([str(binary), *probe_args],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            env=env)
+    lines: list[str] = []
+    expected: int | None = None
+    deadline = time.time() + timeout
+    try:
+        assert proc.stderr is not None
+        while time.time() < deadline:
+            raw = proc.stderr.readline()
+            if not raw:
+                if proc.poll() is not None:
+                    break
+                continue
+            lines.append(raw.decode("utf-8", "replace"))
+            m = re.search(r"Found\s+(\d+)\s+Vulkan device", lines[-1])
+            if m:
+                expected = int(m.group(1))
+            devs = parse_ggml_vulkan_devices("".join(lines))
+            # Stop as soon as we've seen all advertised devices (or, if the
+            # build doesn't print a count, once we hit a post-list line).
+            if expected is not None and len(devs) >= expected:
+                break
+            if devs and "whisper_model_load" in lines[-1]:
+                break
+    finally:
+        with contextlib.suppress(Exception):
+            proc.terminate()
+            proc.wait(timeout=5)
+        if proc.poll() is None:
+            with contextlib.suppress(Exception):
+                proc.kill()
+    return parse_ggml_vulkan_devices("".join(lines))
+
+
+def resolve_ggml_vulkan_index(binary: str, probe_args: list[str],
+                              device_name: str = "",
+                              env: dict[str, str] | None = None,
+                              timeout: float = 30.0) -> int | None:
+    """Enumerate a ggml binary's Vulkan devices and return the index to pin,
+    preferring ``device_name`` then a discrete GPU. Cached per (binary,
+    device_name). None on any failure (engine keeps its default) — never raises."""
+    key = (str(binary), device_name or "")
+    if key in _GGML_VK_INDEX_CACHE:
+        return _GGML_VK_INDEX_CACHE[key]
+    idx: int | None = None
+    try:
+        devices = _enumerate_ggml_vulkan(binary, probe_args, env, timeout)
+        idx = pick_ggml_vulkan_index(devices, device_name)
+        if idx is not None:
+            chosen = next((d for d in devices if d["index"] == idx), None)
+            log.info("ggml-vulkan: pinning device %d (%s) for %s", idx,
+                     chosen["name"] if chosen else "?", os.path.basename(str(binary)))
+        elif devices:
+            log.warning("ggml-vulkan: could not pick a device for %r among %s "
+                        "— engine may run on the integrated GPU; set a GPU pin",
+                        device_name, [d["name"] for d in devices])
+    except Exception as e:  # noqa: BLE001 — resolution is best-effort
+        log.debug("ggml-vulkan enumerate failed for %s: %s", binary, e)
+    _GGML_VK_INDEX_CACHE[key] = idx
+    return idx

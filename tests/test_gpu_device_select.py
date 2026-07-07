@@ -286,3 +286,58 @@ def test_engine_env_disable_graphs_and_operator_override(monkeypatch):
     monkeypatch.delenv("GGML_CUDA_DISABLE_GRAPHS", raising=False)
     assert server_manager._engine_env(
         "/x/llama.cpp-vulkan/llama-server", disable_cuda_graphs=False) is None
+
+
+# ---- ggml-Vulkan device selection (iGPU avoidance) ----
+
+_GGML_VK_OUT = """ggml_vulkan: Found 2 Vulkan devices:
+ggml_vulkan: 0 = Intel(R) Graphics (ARL) (Intel open-source Mesa driver) | uma: 1 | fp16: 1 | bf16: 0 | warp size: 32
+ggml_vulkan: 1 = AMD Radeon AI PRO R9700 (RADV GFX1201) (radv) | uma: 0 | fp16: 1 | bf16: 1 | warp size: 64
+whisper_model_load: loading model
+"""
+
+
+def test_parse_ggml_vulkan_devices():
+    from llamanager.gpu_detect import parse_ggml_vulkan_devices
+    devs = parse_ggml_vulkan_devices(_GGML_VK_OUT)
+    assert [(d["index"], d["integrated"]) for d in devs] == [(0, True), (1, False)]
+    assert devs[1]["name"].startswith("AMD Radeon AI PRO R9700")
+
+
+def test_pick_ggml_vulkan_prefers_named_then_discrete():
+    from llamanager.gpu_detect import (parse_ggml_vulkan_devices,
+                                       pick_ggml_vulkan_index)
+    devs = parse_ggml_vulkan_devices(_GGML_VK_OUT)
+    # Operator's named GPU wins.
+    assert pick_ggml_vulkan_index(devs, "AMD Radeon AI PRO R9700") == 1
+    # No/unknown name → prefer the DISCRETE card (avoid the integrated GPU),
+    # even though ggml lists the iGPU first as index 0.
+    assert pick_ggml_vulkan_index(devs, "") == 1
+    assert pick_ggml_vulkan_index(devs, "some other gpu") == 1
+    # A single device (or all same class) → no override (let ggml default).
+    assert pick_ggml_vulkan_index(
+        [{"index": 0, "name": "AMD", "integrated": False}], "") is None
+    assert pick_ggml_vulkan_index([], "") is None
+
+
+def test_enumerate_ggml_vulkan_stops_at_device_list(monkeypatch, tmp_path):
+    """The enumerator reads only until the device list is complete and kills the
+    binary — it must not wait for the (slow) model load."""
+    from llamanager import gpu_detect
+    # A fake 'binary' that prints the device list then sleeps 30s (the model
+    # load we must NOT wait for).
+    fake = tmp_path / "fakewhisper"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "ggml_vulkan: Found 2 Vulkan devices:\\n" 1>&2\n'
+        'printf "ggml_vulkan: 0 = Intel iGPU | uma: 1 |\\n" 1>&2\n'
+        'printf "ggml_vulkan: 1 = AMD Radeon | uma: 0 |\\n" 1>&2\n'
+        "sleep 30\n")
+    fake.chmod(0o755)
+    gpu_detect._GGML_VK_INDEX_CACHE.clear()
+    import time as _t
+    t0 = _t.time()
+    idx = gpu_detect.resolve_ggml_vulkan_index(str(fake), [], "AMD Radeon",
+                                               timeout=25.0)
+    assert idx == 1
+    assert _t.time() - t0 < 10.0, "should not wait for the 30s model-load sleep"
