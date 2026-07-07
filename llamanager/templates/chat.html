@@ -4,32 +4,134 @@
 {% block content %}
 <style>
   /* Chat app: history rail + main column. The main column owns its
-     own messages scroll area and a sticky-on-mobile input row. */
+     own messages scroll area and a floating composer. The conversation
+     itself is held to a comfortable reading column, centred — the calm,
+     single-column feel of a modern assistant rather than an edge-to-edge
+     control panel. */
   .chat-app {
     display: flex; min-height: 0;
     height: calc(100vh - 168px);
   }
   .chat-main-col {
     flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+    background:
+      radial-gradient(120% 60% at 50% 0%, var(--bg-1) 0%, transparent 60%),
+      var(--bg-0);
   }
   .chat-messages {
-    flex: 1; overflow-y: auto; padding: 16px 12px;
-    display: flex; flex-direction: column; gap: 20px;
+    flex: 1; overflow-y: auto;
+    padding: 28px 20px 16px;
+    display: flex; flex-direction: column; gap: 30px;
+    scroll-behavior: smooth;
   }
+  /* Everything inside the scroll area is centred to a reading column. */
+  .chat-messages > * { width: 100%; max-width: 760px; margin-inline: auto; }
+
+  /* ---- Message rows ---- */
+  .chat-msg { display: flex; flex-direction: column; gap: 7px; }
+  .chat-msg--user { align-items: flex-end; }
+  .chat-role {
+    font-size: 0.625rem; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--fg-3); padding-left: 2px;
+  }
+  .chat-msg--user .chat-role { display: none; }
+  .chat-bubble {
+    font-size: 0.9375rem; line-height: 1.7; color: var(--fg-1);
+    word-break: break-word; max-width: 100%;
+  }
+  /* Assistant: clean flowing text, no container. */
+  .chat-bubble--ai { color: var(--fg-1); }
+  /* User: a soft, self-contained bubble aligned to the right. */
+  .chat-bubble--user {
+    max-width: 82%;
+    background: var(--bg-2);
+    border: 1px solid var(--bg-3);
+    border-radius: 16px 16px 5px 16px;
+    padding: 11px 15px;
+    color: var(--fg-0);
+    white-space: pre-wrap;
+  }
+  /* Hover action row under assistant messages. */
+  .chat-msg-actions {
+    display: flex; gap: 4px; margin-top: -1px;
+    opacity: 0; transition: opacity 120ms ease;
+  }
+  .chat-msg:hover .chat-msg-actions,
+  .chat-msg-actions:focus-within { opacity: 1; }
+  .chat-act {
+    display: inline-flex; align-items: center; gap: 5px;
+    background: transparent; border: 0; padding: 3px 6px; border-radius: 6px;
+    font-size: 0.6875rem; color: var(--fg-3); cursor: pointer;
+    transition: color 120ms ease, background 120ms ease;
+  }
+  .chat-act:hover { color: var(--fg-1); background: var(--bg-2); }
+
+  /* ---- Welcome / empty state ---- */
+  .chat-welcome {
+    max-width: 620px !important;
+    margin: auto; padding: 8vh 16px 0;
+    display: flex; flex-direction: column; align-items: center; text-align: center;
+    gap: 22px;
+  }
+  .chat-welcome__title {
+    font-family: 'Fraunces', 'Iowan Old Style', Georgia, serif;
+    font-weight: 400; font-size: clamp(1.6rem, 4vw, 2.15rem);
+    line-height: 1.15; color: var(--fg-0); letter-spacing: -0.01em;
+    font-variation-settings: 'opsz' 120, 'SOFT' 40;
+  }
+  .chat-welcome__sub { font-size: 0.9375rem; color: var(--fg-2); max-width: 42ch; }
+  .chat-suggests { display: flex; flex-wrap: wrap; gap: 9px; justify-content: center; }
+  .chat-suggest {
+    background: var(--bg-1); border: 1px solid var(--bg-3); border-radius: 999px;
+    padding: 8px 15px; font-size: 0.8125rem; color: var(--fg-1); cursor: pointer;
+    transition: border-color 120ms ease, color 120ms ease, transform 120ms ease;
+  }
+  .chat-suggest:hover { border-color: var(--accent); color: var(--fg-0); transform: translateY(-1px); }
+
   .chat-attachments {
-    padding: 8px 12px 0; gap: 8px; flex-wrap: wrap;
-    border-top: 1px solid var(--bg-2);
+    width: 100%; max-width: 760px; margin: 0 auto;
+    padding: 10px 4px 0; gap: 8px; flex-wrap: wrap;
   }
+  /* ---- Composer: a floating, rounded card centred under the column ---- */
   .chat-input-row {
-    padding: 14px 12px; border-top: 1px solid var(--bg-2);
+    width: 100%; max-width: 760px; margin: 0 auto 18px;
+    padding: 7px 7px 7px 14px;
     display: flex; gap: 8px; align-items: flex-end;
-    background: var(--bg-0);
-    transition: background 150ms ease, border-top-color 150ms ease;
+    background: var(--bg-1);
+    border: 1px solid var(--bg-3);
+    border-radius: 22px;
+    box-shadow: 0 6px 24px oklch(0 0 0 / 0.14), 0 1px 0 oklch(1 0 0 / 0.02) inset;
+    transition: border-color 150ms ease, box-shadow 150ms ease, background 150ms ease;
+  }
+  .chat-input-row:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 8px 30px oklch(0 0 0 / 0.20);
   }
   .chat-input-row.is-dragover {
     background: var(--accent-soft);
-    border-top-color: var(--accent);
+    border-color: var(--accent); border-style: dashed;
   }
+  .chat-input-row textarea {
+    flex: 1; resize: none; background: transparent; border: 0 !important;
+    padding: 9px 2px !important; font-size: 0.9375rem; line-height: 1.5;
+    max-height: 200px; overflow-y: auto; color: var(--fg-0);
+  }
+  .chat-input-row textarea:focus { outline: 0; }
+  /* Attach: a quiet round ghost button. */
+  .chat-attach-btn {
+    flex-shrink: 0; width: 38px; height: 38px; padding: 0 !important;
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 50%; border: 0; background: transparent; color: var(--fg-2);
+    font-size: 1.05rem; cursor: pointer; transition: background 120ms ease, color 120ms ease;
+  }
+  .chat-attach-btn:hover { background: var(--bg-2); color: var(--fg-0); }
+  /* Send: a filled circular action, matching the composer radius. */
+  .chat-send-btn {
+    flex-shrink: 0; width: 38px; height: 38px; padding: 0 !important;
+    border-radius: 50% !important; display: inline-flex;
+    align-items: center; justify-content: center; font-size: 1.05rem;
+  }
+  .chat-send-btn__label { display: none; }
 
   /* Toolbar shown on mobile only; contains the History / Settings
      buttons that open the off-canvas drawers. */
@@ -245,13 +347,16 @@
 
     /* Main column fills the screen; messages scroll, input is fixed. */
     .chat-main-col { width: 100%; min-height: 0; }
-    .chat-messages { padding: 12px; gap: 16px; }
+    .chat-messages { padding: 16px 12px; gap: 22px; }
+    .chat-welcome { padding-top: 6vh; }
     .chat-attachments { padding: 8px 12px 0 !important; }
     .chat-input-row {
       position: fixed; left: 0; right: 0; bottom: 0;
-      z-index: 40;
-      border-top: 1px solid var(--bg-3);
-      padding: 10px 12px;
+      z-index: 40; margin: 0; max-width: none;
+      border-radius: 20px 20px 0 0;
+      border-bottom: 0;
+      padding: 8px 8px 8px 12px;
+      box-shadow: 0 -6px 22px oklch(0 0 0 / 0.16);
     }
 
     /* Toolbar visible on mobile. */
@@ -350,9 +455,7 @@
     </div>
 
     {# Messages #}
-    <div id="chat-messages" class="chat-messages">
-      <div id="chat-empty" style="color: var(--fg-3); font-style: italic; padding: 40px 0; text-align: center; font-size: 0.875rem;">Send a message to start chatting.</div>
-    </div>
+    <div id="chat-messages" class="chat-messages"></div>
 
     {# Attachments strip — visible only when the current profile is
        vision-capable AND the user has picked at least one image. #}
@@ -360,19 +463,17 @@
 
     {# Input row — fixed to the bottom of the viewport on mobile. #}
     <div id="chat-input-row" class="chat-input-row">
-      <button id="chat-attach" type="button" class="lm-btn lm-btn--ghost lm-btn--sm"
+      <button id="chat-attach" type="button" class="chat-attach-btn"
               title="Attach an image (only when the loaded profile supports vision)"
-              style="flex-shrink: 0; padding: 9px 11px;"
               hidden>📎</button>
       <input id="chat-attach-input" type="file"
              accept="image/png,image/jpeg,image/webp,image/gif"
              multiple style="display: none;">
-      <textarea id="chat-input" class="lm-input" rows="1" placeholder="Type a message..."
-                style="flex: 1; resize: none; font-size: 0.9375rem; padding: 10px 2px; line-height: 1.5; max-height: 150px; overflow-y: auto; border-bottom-width: 1px;"
+      <textarea id="chat-input" rows="1" placeholder="Message the model…"
                 {% if status.state != 'running' %}disabled{% endif %}></textarea>
-      <button id="chat-send" type="button" class="lm-btn lm-btn--primary"
-              style="flex-shrink: 0; padding: 9px 18px;"
-              {% if status.state != 'running' %}disabled{% endif %}>Send</button>
+      <button id="chat-send" type="button" class="lm-btn lm-btn--primary chat-send-btn"
+              title="Send" aria-label="Send"
+              {% if status.state != 'running' %}disabled{% endif %}>↑</button>
     </div>
   </div>
 
@@ -697,13 +798,42 @@
     }
   }
 
+  // The empty conversation greets the operator and offers a few starter
+  // prompts. Clicking one drops it into the composer, focused.
+  var WELCOME_SUGGESTS = [
+    'Explain a tricky concept simply',
+    'Draft a quick email',
+    'Write a Python snippet',
+    'Summarize this text',
+  ];
+  function buildWelcome() {
+    var wrap = document.createElement('div');
+    wrap.className = 'chat-welcome';
+    var title = document.createElement('div');
+    title.className = 'chat-welcome__title';
+    title.textContent = 'What can I help with?';
+    var sub = document.createElement('div');
+    sub.className = 'chat-welcome__sub';
+    sub.textContent = 'Chatting with the model loaded on this machine — privately, on your own hardware.';
+    var chips = document.createElement('div');
+    chips.className = 'chat-suggests';
+    WELCOME_SUGGESTS.forEach(function (s) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'chat-suggest'; b.textContent = s;
+      b.addEventListener('click', function () {
+        inputEl.value = s; autoResize(); inputEl.focus();
+        if (activeChat) { activeChat.draft = s; saveHistory(); }
+      });
+      chips.appendChild(b);
+    });
+    wrap.appendChild(title); wrap.appendChild(sub); wrap.appendChild(chips);
+    return wrap;
+  }
+
   function renderMessages() {
     messagesEl.innerHTML = '';
     if (!activeChat || !activeChat.messages.length) {
-      var empty = document.createElement('div');
-      empty.style.cssText = 'color:var(--fg-3);font-style:italic;padding:40px 0;text-align:center;font-size:0.875rem;';
-      empty.textContent = 'Send a message to start chatting.';
-      messagesEl.appendChild(empty);
+      messagesEl.appendChild(buildWelcome());
       return;
     }
     for (var i = 0; i < activeChat.messages.length; i++) {
@@ -718,15 +848,17 @@
   function buildMsgEl(role, content, msgStats) {
     var isUser = role === 'user';
     var div = document.createElement('div');
-    div.style.cssText = 'display:flex;gap:12px;' + (isUser ? 'flex-direction:row-reverse;' : '');
-    var badge = document.createElement('div');
-    badge.style.cssText = 'flex-shrink:0;width:28px;height:28px;border-radius:2px;display:flex;align-items:center;justify-content:center;font-size:0.6875rem;font-weight:500;letter-spacing:0.06em;text-transform:uppercase;';
-    badge.style.background = isUser ? 'var(--accent-soft)' : 'var(--bg-2)';
-    badge.style.color = isUser ? 'var(--accent)' : 'var(--fg-2)';
-    badge.textContent = isUser ? 'You' : 'AI';
+    div.className = 'chat-msg' + (isUser ? ' chat-msg--user' : '');
 
-    var wrap = document.createElement('div');
-    wrap.style.cssText = 'flex:1;min-width:0;';
+    // Assistant messages carry a quiet role label above the text.
+    if (!isUser) {
+      var roleLbl = document.createElement('div');
+      roleLbl.className = 'chat-role';
+      roleLbl.textContent = 'Assistant';
+      div.appendChild(roleLbl);
+    }
+
+    var wrap = div;   // container the streaming code appends into
 
     // Thinking block (AI only) — always shown per-message if thinking exists
     var thinkingWrap = null;
@@ -753,10 +885,27 @@
     }
 
     var bubble = document.createElement('div');
-    bubble.style.cssText = 'font-size:0.9375rem;line-height:1.6;color:var(--fg-1);word-break:break-word;';
+    bubble.className = 'chat-bubble ' + (isUser ? 'chat-bubble--user' : 'chat-bubble--ai');
     var displayContent = (!isUser && parsed) ? parsed.content : (content || '');
     setContent(bubble, displayContent, !isUser);
     wrap.appendChild(bubble);
+
+    // Copy action (assistant only, once there's real content to copy).
+    if (!isUser && displayContent) {
+      var actions = document.createElement('div');
+      actions.className = 'chat-msg-actions';
+      var copyBtn = document.createElement('button');
+      copyBtn.type = 'button'; copyBtn.className = 'chat-act';
+      copyBtn.textContent = 'Copy';
+      copyBtn.addEventListener('click', function () {
+        navigator.clipboard.writeText(displayContent).then(function () {
+          var o = copyBtn.textContent; copyBtn.textContent = 'Copied';
+          setTimeout(function () { copyBtn.textContent = o; }, 1400);
+        });
+      });
+      actions.appendChild(copyBtn);
+      wrap.appendChild(actions);
+    }
 
     // On-demand stats (assistant only, if recorded)
     if (!isUser && msgStats && typeof msgStats.tok_s === 'number' && msgStats.tok_s > 0) {
@@ -780,8 +929,6 @@
       wrap.appendChild(statsWrap);
     }
 
-    div.appendChild(badge);
-    div.appendChild(wrap);
     return { el: div, bubble: bubble, wrap: wrap,
              thinkingWrap: thinkingWrap, thinkingContentEl: thinkingContentEl };
   }
@@ -943,8 +1090,8 @@
     activeChat.messages.push({ role: 'user', content: userContent });
     activeChat.draft = '';
     saveHistory();
-    // Remove empty placeholder
-    var emptyPlaceholder = messagesEl.querySelector('[style*="font-style:italic"]');
+    // Remove the welcome/empty placeholder
+    var emptyPlaceholder = messagesEl.querySelector('.chat-welcome');
     if (emptyPlaceholder) emptyPlaceholder.remove();
     var userEl = buildMsgEl('user', text);
     // Show reference filename chips in the bubble so the operator can see
@@ -990,7 +1137,8 @@
     streamController = new AbortController();
     // Repurpose the send button as a Stop control while generating.
     sendBtn.disabled = false;
-    sendBtn.textContent = 'Stop';
+    sendBtn.textContent = '■';
+    sendBtn.title = 'Stop';
     sendBtn.classList.remove('lm-btn--primary');
     sendBtn.classList.add('lm-btn--danger');
 
@@ -1228,7 +1376,8 @@
       }
       streamController = null;
       sendBtn.disabled = false;
-      sendBtn.textContent = 'Send';
+      sendBtn.textContent = '↑';
+      sendBtn.title = 'Send';
       sendBtn.classList.remove('lm-btn--danger');
       sendBtn.classList.add('lm-btn--primary');
       speedEl.style.display = 'none';
@@ -1242,7 +1391,8 @@
   function stop() {
     if (!streaming) return;
     stopped = true;
-    sendBtn.textContent = 'Stopping…';
+    sendBtn.textContent = '⋯';
+    sendBtn.title = 'Stopping…';
     sendBtn.disabled = true;
     if (streamController) { try { streamController.abort(); } catch (e) {} }
   }
