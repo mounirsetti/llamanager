@@ -111,6 +111,37 @@ def build_worker_command(
     return argv, env
 
 
+def reap_orphans() -> int:
+    """Kill any stray ``whisper-server`` processes that are no longer owned by a
+    live worker shim — i.e. orphans reparented away from ``_whispercpp_worker.py``
+    (e.g. left behind by an earlier crash or a pre-fix leak). A healthy server is
+    always a direct child of a running shim, so anything else is safe to reap.
+
+    Returns the number of processes signalled. Called before starting a worker so
+    a fresh start can't inherit a growing pile of orphans."""
+    try:
+        import psutil
+    except Exception:  # noqa: BLE001 — psutil is a dep, but never fail a start
+        return 0
+    reaped = 0
+    for proc in psutil.process_iter(["name"]):
+        try:
+            if (proc.info.get("name") or "") != "whisper-server":
+                continue
+            parent = proc.parent()
+            owned = bool(parent and "_whispercpp_worker.py" in " ".join(
+                parent.cmdline()))
+            if owned:
+                continue
+            proc.terminate()
+            reaped += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    if reaped:
+        log.warning("reaped %d orphaned whisper-server process(es)", reaped)
+    return reaped
+
+
 def parse_progress(line: str) -> ProgressEvent | None:
     if not line:
         return None

@@ -25,6 +25,7 @@ import contextlib
 import json
 import math
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -343,16 +344,41 @@ def main() -> int:
 
     httpd = ThreadingHTTPServer((args.host, args.port), _Handler)
     httpd.daemon_threads = True
+
+    # The manager stops us with SIGTERM (or a group signal). Default SIGTERM
+    # would kill this process before the finally-block below runs, orphaning the
+    # native whisper-server (and leaking its model mmap + Vulkan context). Handle
+    # it so we shut the server down and reap the child. serve_forever() runs in a
+    # background thread because BaseServer.shutdown() deadlocks if called from the
+    # thread running serve_forever() — and signal handlers run in the main thread.
+    stop = threading.Event()
+
+    def _shutdown(signum, _frame):
+        _log(f"[whispercpp-worker] received signal {signum} — shutting down")
+        stop.set()
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(_sig, _shutdown)
+
+    serve = threading.Thread(target=httpd.serve_forever, daemon=True)
+    serve.start()
     _log(f"[whispercpp-worker] ready on http://{args.host}:{args.port}")
     try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
+        while not stop.is_set():
+            # Exit promptly if the native server dies on its own, too.
+            if _proc and _proc.poll() is not None:
+                _log(f"[whispercpp-worker] whisper-server exited rc={_proc.returncode}")
+                break
+            stop.wait(1.0)
     finally:
+        httpd.shutdown()
         if _proc and _proc.poll() is None:
             _proc.terminate()
             with contextlib.suppress(Exception):
                 _proc.wait(timeout=10)
+            if _proc.poll() is None:
+                with contextlib.suppress(Exception):
+                    _proc.kill()
     return 0
 
 

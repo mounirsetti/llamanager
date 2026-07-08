@@ -20,6 +20,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
+import signal
 import socket
 import time
 from collections import deque
@@ -372,15 +374,28 @@ class AudioTaskRunner:
             if self._client is None:
                 self._client = httpx.AsyncClient()
             port = _free_port()
-            argv, env = engines.get(engine).build_worker_command(
+            eng = engines.get(engine)
+            # Defensive: sweep any orphaned native servers left by an earlier
+            # crash before starting a fresh worker (no-op for engines without a
+            # native grandchild). Best-effort — never block a start.
+            reaper = getattr(eng, "reap_orphans", None)
+            if reaper is not None:
+                with contextlib.suppress(Exception):
+                    reaper()
+            argv, env = eng.build_worker_command(
                 self.cfg, model_path, port, asr_max_concurrent(self.cfg))
             log_path = self.cfg.logs_dir / "asr.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
             logf = open(log_path, "a", encoding="utf-8")
+            # start_new_session=True puts the shim in its own process group, so
+            # _stop_worker_locked can signal the whole group and reap the native
+            # grandchild (whisper-server) — not just the Python shim. Without
+            # this, SIGTERM/-KILL hit only the shim and whisper-server orphans,
+            # leaking its model mmap + Vulkan context until the host OOMs.
             self._proc = await asyncio.create_subprocess_exec(
                 *argv, stdout=logf, stderr=logf,
-                stdin=asyncio.subprocess.DEVNULL,
-                env={**__import__("os").environ, **env})
+                stdin=asyncio.subprocess.DEVNULL, start_new_session=True,
+                env={**os.environ, **env})
             self._base_url = f"http://127.0.0.1:{port}"
             self._worker_model = model_id
             self._worker_engine = engine
@@ -459,15 +474,35 @@ class AudioTaskRunner:
                 await self._yield_cm.__aexit__(None, None, None)
             self._yield_cm = None
 
+    def _signal_group(self, sig: int) -> None:
+        """Send ``sig`` to the worker shim's process group (shim + native
+        grandchild). Falls back to signalling just the shim pid if the group is
+        already gone. Best-effort: races where the process exits are ignored."""
+        proc = self._proc
+        if proc is None or proc.returncode is not None:
+            return
+        pid = proc.pid
+        try:
+            os.killpg(os.getpgid(pid), sig)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                os.kill(pid, sig)
+
     async def _stop_worker_locked(self) -> None:
         if self._proc is not None:
-            with contextlib.suppress(ProcessLookupError):
-                self._proc.terminate()
+            # Signal the shim's whole process group (see start_new_session at
+            # spawn) so the native whisper-server grandchild is reaped too, not
+            # just the Python shim. Fall back to the bare process if the group
+            # can't be resolved (already gone).
+            self._signal_group(signal.SIGTERM)
             try:
                 await asyncio.wait_for(self._proc.wait(), timeout=10.0)
             except asyncio.TimeoutError:
-                with contextlib.suppress(ProcessLookupError):
-                    self._proc.kill()
+                self._signal_group(signal.SIGKILL)
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(self._proc.wait(), timeout=5.0)
             self._proc = None
         self._worker_model = None
         self._worker_engine = None
