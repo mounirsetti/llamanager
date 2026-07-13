@@ -166,6 +166,18 @@ def create_app(config_path: Path | None = None,
         except Exception:  # noqa: BLE001 — best-effort, never block startup
             log.exception("startup: orphaned-request reconciliation failed")
 
+        # Same treatment for download rows the previous process left
+        # ``running``: the Registry that owned their cancel Event is gone, so
+        # they show "DOWNLOADING" forever and Cancel can't reach them.
+        try:
+            n = db.reconcile_orphaned_downloads(
+                error="interrupted by daemon restart")
+            if n:
+                log.info("startup: reconciled %d orphaned download row(s) "
+                         "left running by a previous process", n)
+        except Exception:  # noqa: BLE001 — best-effort, never block startup
+            log.exception("startup: orphaned-download reconciliation failed")
+
         queue.start()
         supervisor.start()
 

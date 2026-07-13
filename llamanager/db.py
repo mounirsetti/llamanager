@@ -285,6 +285,41 @@ class DB:
                                                "error": error})
         return cur.rowcount
 
+    # Non-terminal download states. A row left in one of these by a previous
+    # process is orphaned: the in-memory Registry that owned it (and its
+    # asyncio cancel Event) is gone, so the pull will never resume, finish, or
+    # be cancellable — it just shows "DOWNLOADING" forever at a frozen byte
+    # count. See Registry.cancel_pull, which no-ops on such rows.
+    NONTERMINAL_DOWNLOAD_STATES = ("running",)
+
+    def reconcile_orphaned_downloads(self, *, error: str) -> int:
+        """Mark download rows stuck mid-flight as failed.
+
+        Called once at startup, mirroring ``reconcile_orphaned_requests``. A
+        previous process may have crashed or been restarted mid-pull, leaving
+        ``running`` rows the fresh Registry has no cancel handle for — so the
+        models page shows them as ``DOWNLOADING`` forever and Cancel can't
+        touch them. Resolve them to ``failed`` so the UI is truthful.
+
+        Returns the number of rows reconciled.
+        """
+        placeholders = ",".join("?" for _ in self.NONTERMINAL_DOWNLOAD_STATES)
+        rows = self.query(
+            f"SELECT id FROM downloads WHERE status IN ({placeholders})",
+            tuple(self.NONTERMINAL_DOWNLOAD_STATES),
+        )
+        if not rows:
+            return 0
+        now = time.time()
+        cur = self.conn.execute(
+            f"UPDATE downloads SET status='failed', error=?, finished_at=?"
+            f" WHERE status IN ({placeholders})",
+            (error, now, *self.NONTERMINAL_DOWNLOAD_STATES),
+        )
+        self.log_event("downloads_reconciled", {"count": cur.rowcount,
+                                                "error": error})
+        return cur.rowcount
+
     def close(self) -> None:
         try:
             self.conn.close()

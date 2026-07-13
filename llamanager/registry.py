@@ -441,10 +441,23 @@ class Registry:
 
     def cancel_pull(self, download_id: str) -> bool:
         ev = self._cancel_flags.get(download_id)
-        if not ev:
-            return False
-        ev.set()
-        return True
+        if ev:
+            ev.set()
+            return True
+        # No live cancel Event: either the id is bogus, or this is a row a
+        # previous process left ``running`` and the current Registry never
+        # owned (orphaned zombie). In the latter case the pull task is long
+        # dead, so setting a flag would do nothing — resolve the row to
+        # ``failed`` directly so Cancel actually clears the "DOWNLOADING"
+        # state the user sees. Terminal rows are left untouched.
+        row = self.db.query_one(
+            "SELECT status FROM downloads WHERE id=?", (download_id,))
+        if row and row["status"] == "running":
+            self._set_download(
+                did=download_id, status="failed", finished_at=time.time(),
+                error="cancelled (orphaned by a daemon restart)")
+            return True
+        return False
 
     def delete_download(self, download_id: str) -> bool:
         """Remove a download record and clean up any partial files."""

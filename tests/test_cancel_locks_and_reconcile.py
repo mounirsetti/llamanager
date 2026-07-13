@@ -318,6 +318,60 @@ def test_cancel_clears_stale_db_row_not_in_memory(tmp_path):
         db.close()
 
 
+def _insert_download(db: DB, did: str, status: str) -> None:
+    db.execute(
+        "INSERT INTO downloads(id, source, files_json, status, started_at)"
+        " VALUES(?,?,?,?,?)",
+        (did, "hf://x/y", "[]", status, 0.0),
+    )
+
+
+def test_reconcile_orphaned_downloads_marks_failed(tmp_path):
+    cfg = _make_cfg(tmp_path)
+    db = DB(cfg.db_path)
+    try:
+        for did, status in [("a", "running"), ("b", "done"),
+                            ("c", "failed"), ("d", "cancelled")]:
+            _insert_download(db, did, status)
+
+        n = db.reconcile_orphaned_downloads(error="interrupted by daemon restart")
+        assert n == 1
+        rows = {r["id"]: r["status"]
+                for r in db.query("SELECT id, status FROM downloads")}
+        # Only the mid-flight 'running' row is resolved; terminals untouched.
+        assert rows == {"a": "failed", "b": "done",
+                        "c": "failed", "d": "cancelled"}
+        row = db.query_one("SELECT error, finished_at FROM downloads WHERE id='a'")
+        assert "restart" in row["error"]
+        assert row["finished_at"] is not None
+    finally:
+        db.close()
+
+
+def test_cancel_pull_clears_orphaned_download_row(tmp_path):
+    from llamanager.registry import Registry
+
+    cfg = _make_cfg(tmp_path)
+    db = DB(cfg.db_path)
+    try:
+        reg = Registry(cfg, db)
+        # A 'running' row with no in-memory cancel Event (orphaned by a
+        # previous process). Cancel must resolve it, not silently no-op.
+        _insert_download(db, "ghost", "running")
+        assert "ghost" not in reg._cancel_flags
+        assert reg.cancel_pull("ghost") is True
+        assert db.query_one(
+            "SELECT status FROM downloads WHERE id='ghost'")["status"] == "failed"
+
+        # Unknown id still reports failure (404 upstream).
+        assert reg.cancel_pull("does-not-exist") is False
+        # An already-terminal row is not "cancellable" again.
+        _insert_download(db, "finished", "done")
+        assert reg.cancel_pull("finished") is False
+    finally:
+        db.close()
+
+
 # --------------------------------------------------------------------------
 # Per-origin enable switch.
 # --------------------------------------------------------------------------
