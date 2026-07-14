@@ -32,7 +32,7 @@ class CatalogEntry:
     "downloading".
     """
     canonical_id: str
-    engine: str            # 'hidream' | 'z_image' | 'krea' | 'ideogram4' | 'flux2'
+    engine: str            # 'hidream' | 'z_image' | 'krea' | 'ideogram4' | 'flux2' | 'wan'
     label: str             # human-readable name
     hf_repo: str           # 'org/name'
     subfolder: str = ""    # optional HF subfolder
@@ -134,6 +134,21 @@ CATALOG: list[CatalogEntry] = [
             "layout yet — prefer the official fp8 repo."
         ),
         homepage="https://huggingface.co/Comfy-Org/Ideogram-4",
+    ),
+    CatalogEntry(
+        canonical_id="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        engine="wan",
+        label="Wan 2.2 TI2V-5B (text+image→video)",
+        hf_repo="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        approx_size_gb=28.0,
+        description=(
+            "Alibaba Wan 2.2 — a single dense 5B model that does BOTH "
+            "text-to-video and image-to-video. 720p (1280x704), 24fps, ~5s "
+            "clips. Full bf16 diffusers weights (no GGUF — the reliable path "
+            "on ROCm). Runs via the bundled wan runner; supply one reference "
+            "image to animate it as the opening frame."
+        ),
+        homepage="https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers",
     ),
     CatalogEntry(
         canonical_id="FLUX.2-dev",

@@ -612,17 +612,39 @@ def create_app(config_path: Path | None = None,
             **ctx,
         })
 
+    @app.get("/videos")
+    async def videos_public(request: Request):
+        """Public video page — sibling of /images, any valid origin key.
+
+        Same schema-driven context, scoped to the video engine family (Wan),
+        pointed at /v1/videos/generations."""
+        from fastapi.templating import Jinja2Templates
+        from pathlib import Path as _Path
+        from .api_ui import _build_video_page_context
+
+        _templates = Jinja2Templates(directory=str(_Path(__file__).parent / "templates"))
+        ctx = _build_video_page_context(cfg, registry)
+        return _templates.TemplateResponse(request, "videos_public.html", {
+            "request": request,
+            **ctx,
+        })
+
     @app.get("/images/gallery")
     async def images_gallery_public(request: Request,
                                     limit: int = 60,
-                                    before: float | None = None) -> JSONResponse:
+                                    before: float | None = None,
+                                    kind: str | None = None) -> JSONResponse:
         """Public counterpart of /ui/images/gallery, scoped to the bearer's
         origin. Same payload shape; only this origin's subdirectory under
-        ``images_dir`` is enumerated."""
+        ``images_dir`` is enumerated. ``kind`` (image|video) filters the feed
+        so the image and video pages show only their own media."""
         from .api_v1 import _origin_from_request
         from .api_ui import _list_gallery
         if limit < 1 or limit > 500:
             return JSONResponse({"detail": "limit must be 1..500"},
+                                status_code=400)
+        if kind is not None and kind not in ("image", "video"):
+            return JSONResponse({"detail": "kind must be image or video"},
                                 status_code=400)
         origin = await _origin_from_request(request)
         # Mirror the on-disk name produced by image_runner._gallery_dir
@@ -630,7 +652,7 @@ def create_app(config_path: Path | None = None,
                               if c.isalnum() or c in "-_") or "anon"
         payload = _list_gallery(cfg.images_dir,
                                 origin_filter=safe_origin,
-                                limit=limit, before=before)
+                                limit=limit, before=before, kind=kind)
         return JSONResponse(payload)
 
     @app.get("/images/file/{day}/{origin}/{name}")
@@ -641,7 +663,7 @@ def create_app(config_path: Path | None = None,
         is constrained to this origin's own directory to avoid leaking
         other users' galleries."""
         from .api_v1 import _origin_from_request
-        from .api_ui import _safe_path_components
+        from .api_ui import _safe_path_components, _gallery_media_type
         from fastapi.responses import FileResponse as _FileResponse
         bearer_origin = await _origin_from_request(request)
         safe_origin = "".join(c for c in bearer_origin.name
@@ -650,9 +672,10 @@ def create_app(config_path: Path | None = None,
             raise HTTPException(status_code=403,
                                 detail="cannot access another origin's gallery")
         _safe_path_components(day, origin, name)
-        if not name.lower().endswith(".png"):
+        media_type = _gallery_media_type(name)
+        if media_type is None:
             raise HTTPException(status_code=400,
-                                detail="only .png files are served here")
+                                detail="only .png / .mp4 files are served here")
         p = (cfg.images_dir / day / origin / name).resolve()
         try:
             p.relative_to(cfg.images_dir.resolve())
@@ -661,7 +684,7 @@ def create_app(config_path: Path | None = None,
                                 detail="path escapes images_dir")
         if not p.exists() or not p.is_file():
             raise HTTPException(status_code=404, detail="not found")
-        return _FileResponse(p, media_type="image/png")
+        return _FileResponse(p, media_type=media_type)
 
     @app.get("/")
     async def root() -> JSONResponse:

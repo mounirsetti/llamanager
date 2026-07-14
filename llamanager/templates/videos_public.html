@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <title>Images - llamanager</title>
+  <title>Video - llamanager</title>
   <link rel="icon" id="lm-favicon" href="/favicon-dark.svg" type="image/svg+xml">
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" id="lm-theme-color" content="#201e17">
@@ -377,7 +377,7 @@
         <div class="gen-grid" id="gen-grid">
           <p class="gen-empty" id="gen-empty">
             A blank canvas.
-            <small>Describe an image below and hit Generate to begin.</small>
+            <small>Describe a video below and hit Generate to begin.</small>
           </p>
         </div>
         <button type="button" id="gen-loadmore" class="lm-btn lm-btn--ghost lm-btn--sm gen-loadmore" hidden>
@@ -387,7 +387,7 @@
 
       <div class="gen-dock">
         <div class="gen-pop" id="gen-settings" hidden>
-          {% include "_image_composer.html" %}
+          {% include "_video_composer.html" %}
           <div class="gen-settings__foot">
             <button id="logout-btn" type="button" class="lm-btn lm-btn--ghost lm-btn--xs">Sign out</button>
           </div>
@@ -419,7 +419,7 @@
             <span class="gen-modelbtn__name" id="gen-modelbtn-name">—</span>
           </button>
           <textarea id="lm-img-prompt" class="gen-prompt" rows="1"
-                    placeholder="Describe the image you want… (⌘/Ctrl+Enter to generate)"></textarea>
+                    placeholder="Describe the video you want… (⌘/Ctrl+Enter to generate)"></textarea>
           <div class="gen-bar__actions">
             <button type="button" class="gen-iconbtn" id="gen-attach" title="Attach reference image" hidden>📎</button>
             <button type="button" class="gen-iconbtn" id="gen-history-btn" title="Prompt history">🕘</button>
@@ -455,9 +455,10 @@
       defaultModel: {{ default_image_model | tojson }},
       defaultProfile: {{ default_image_profile | tojson }},
       apiKey: "",
+      mediaKind: "video",
       galleryUrl: "/images/gallery",
       fileUrlPrefix: "/images/file/",
-      generationsUrl: "/v1/images/generations",
+      generationsUrl: "/v1/videos/generations",
       storageKey: "lm-images-api-key"
     };
   </script>
@@ -537,7 +538,7 @@
     const state = { nextBefore: null, inFlight: false, abort: null, seenUrls: new Set(), refs: [] };
 
     const modelSel = $("lm-img-model"), profileSel = $("lm-img-profile"), overrides = $("lm-img-overrides");
-    const promptEl = $("lm-img-prompt"), seedEl = $("lm-img-seed"), seedDice = $("lm-img-seed-dice"), nEl = $("lm-img-n");
+    const promptEl = $("lm-img-prompt"), seedEl = $("lm-img-seed"), seedDice = $("lm-img-seed-dice");
     const form = $("lm-img-composer"), submitBtn = $("lm-img-generate"), cancelBtn = $("lm-img-cancel");
     const errorEl = $("lm-img-error"), engineHint = $("lm-img-engine-hint");
     const grid = $("gen-grid"), emptyEl = $("gen-empty"), loadMore = $("gen-loadmore");
@@ -731,6 +732,7 @@
 
     async function fetchGallery({reset=false} = {}) {
       const params = new URLSearchParams({limit: "60"});
+      if (cfg.mediaKind) params.set("kind", cfg.mediaKind);
       if (!reset && state.nextBefore != null) params.set("before", String(state.nextBefore));
       const r = await fetch(`${cfg.galleryUrl}?${params.toString()}`, {headers: AUTH()});
       if (!r.ok) throw new Error(`gallery list failed: ${r.status}`);
@@ -748,7 +750,25 @@
     // ---- Lightbox ----
     function openLightbox(item) {
       const sc = item.sidecar || {};
-      lbImg.src = ""; authObjectUrl(item).then(url => { lbImg.src = url; }).catch(() => {});
+      const isVideo = item.kind === "video" || (item.name || "").toLowerCase().endsWith(".mp4");
+      const wrap = lbImg.parentElement;
+      let lbVid = wrap.querySelector("video");
+      if (isVideo) {
+        lbImg.hidden = true;
+        if (!lbVid) {
+          lbVid = document.createElement("video");
+          lbVid.id = "gen-lb-video"; lbVid.controls = true; lbVid.autoplay = true;
+          lbVid.loop = true; lbVid.playsInline = true;
+          lbVid.style.maxWidth = "100%"; lbVid.style.maxHeight = "86vh";
+          wrap.appendChild(lbVid);
+        }
+        lbVid.hidden = false; lbVid.removeAttribute("src");
+        authObjectUrl(item).then(url => { lbVid.src = url; }).catch(() => {});
+      } else {
+        lbImg.hidden = false; lbImg.src = "";
+        if (lbVid) { lbVid.pause(); lbVid.hidden = true; lbVid.removeAttribute("src"); }
+        authObjectUrl(item).then(url => { lbImg.src = url; }).catch(() => {});
+      }
       lbMeta.innerHTML = "";
       const rows = [
         ["Model", sc.model_id || sc.model || ""], ["Profile", sc.profile || ""], ["Engine", sc.engine || ""],
@@ -769,7 +789,7 @@
       // Download: reuse the already-fetched blob URL.
       authObjectUrl(item).then(url => {
         const dl = document.createElement("a"); dl.className = "lm-btn lm-btn--ghost lm-btn--xs"; dl.textContent = "Download";
-        dl.href = url; dl.download = item.name || "image.png"; lbActions.insertBefore(dl, lbActions.firstChild);
+        dl.href = url; dl.download = item.name || "video.mp4"; lbActions.insertBefore(dl, lbActions.firstChild);
       }).catch(() => {});
       if (sc.prompt) mkBtn("Reuse prompt", () => { promptEl.value = sc.prompt; autosize(); closeLightbox(); promptEl.focus(); });
       if (sc.seed != null) mkBtn("Reuse seed", () => { seedEl.value = String(sc.seed); closeLightbox(); });
@@ -784,7 +804,11 @@
       });
       lightbox.hidden = false;
     }
-    function closeLightbox() { lightbox.hidden = true; lbImg.src = ""; }
+    function closeLightbox() {
+      lightbox.hidden = true; lbImg.src = "";
+      const v = lbImg.parentElement.querySelector("video");
+      if (v) { v.pause(); v.removeAttribute("src"); }
+    }
     $("gen-lb-close").addEventListener("click", closeLightbox);
     lightbox.addEventListener("click", (e) => { if (e.target === lightbox) closeLightbox(); });
     document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeLightbox(); closePops(); } });
@@ -803,22 +827,18 @@
     }
     function buildRequestBody() {
       const body = { model: modelSel.value, prompt: promptEl.value.trim(),
-        n: Math.max(1, parseInt(nEl.value || "1", 10) || 1), stream: true, response_format: "b64_json" };
+        stream: true, response_format: "url" };
       if (profileSel.value) body.profile = profileSel.value;
       if (seedEl.value !== "") body.seed = parseInt(seedEl.value, 10);
       const o = collectOverrides();
       if (o.image_size) body.size = o.image_size;
       if (o.image_steps != null) body.steps = o.image_steps;
       if (o.image_guidance != null) body.guidance = o.image_guidance;
+      if (o.video_num_frames != null) body.num_frames = o.video_num_frames;
+      if (o.video_fps != null) body.fps = o.video_fps;
       if (o.image_seed != null && body.seed == null) body.seed = o.image_seed;
-      if (o.image_model_type) body.model_type = o.image_model_type;
-      if (o.image_editing_scheduler) body.editing_scheduler = o.image_editing_scheduler;
-      if (state.refs.length) {
-        const c = caps();
-        body.images = state.refs.map(r => r.dataUrl);
-        if (c.strength) body.strength = parseFloat(strengthEl.value);
-        if (c.keep_original_aspect && keepAspEl.checked) body.keep_original_aspect = true;
-      }
+      // First-frame image → image-to-video (single reference).
+      if (state.refs.length) body.image = state.refs[0].dataUrl;
       return body;
     }
     function makeLiveCard(prompt) {
@@ -867,7 +887,8 @@
     }
     async function refreshFront() {
       try {
-        const r = await fetch(`${cfg.galleryUrl}?limit=12`, {headers: AUTH()});
+        const _kq = cfg.mediaKind ? `&kind=${cfg.mediaKind}` : "";
+        const r = await fetch(`${cfg.galleryUrl}?limit=12${_kq}`, {headers: AUTH()});
         if (!r.ok) return;
         const p = await r.json();
         const fresh = p.items.filter(it => !state.seenUrls.has(it.url));

@@ -38,6 +38,9 @@ log = logging.getLogger(__name__)
 
 PROGRESS_THROTTLE_S = 0.5      # don't spam runtime.json — update at most twice/sec
 GENERATION_HARD_TIMEOUT_S = 30 * 60   # 30 min — covers FLUX 2 quality runs
+# Video generation is far heavier (a 5B model, dozens of frames, VAE decode of
+# a whole clip) and can legitimately exceed the image budget on a single card.
+VIDEO_GENERATION_HARD_TIMEOUT_S = 90 * 60   # 90 min — Wan 720p / 121-frame runs
 
 
 class ImageError(Exception):
@@ -187,6 +190,12 @@ class ImageTaskRunner:
 
         profile = profile or Profile(name="(none)")
 
+        # Produced-file extension is engine-declared (video engines → "mp4",
+        # everything else → the "png" default). The gallery/serving layers
+        # treat both uniformly by suffix.
+        output_ext = str(
+            engines.capabilities(engine).get("output_ext") or "png").lstrip(".")
+
         gallery = _gallery_dir(self.cfg, origin_name)
         outputs: list[Path] = []
         seed_used: int | None = None
@@ -239,7 +248,8 @@ class ImageTaskRunner:
                             strength=req.strength,
                         )
                         seed_used = per_req.seed
-                        out_path = gallery / _new_image_filename(engine, gallery)
+                        out_path = gallery / _new_image_filename(
+                            engine, gallery, ext=output_ext)
                         argv, env = adapter.build_command(
                             self.cfg, model_path, profile, per_req, out_path,
                         )
@@ -476,9 +486,13 @@ class ImageTaskRunner:
         if cancel_event is not None:
             cancel_watcher = asyncio.create_task(_watch_cancel())
 
+        from .config import engine_family
+        hard_timeout = (VIDEO_GENERATION_HARD_TIMEOUT_S
+                        if engine_family(engine) == "video"
+                        else GENERATION_HARD_TIMEOUT_S)
         try:
             rc = await asyncio.wait_for(
-                proc.wait(), timeout=GENERATION_HARD_TIMEOUT_S,
+                proc.wait(), timeout=hard_timeout,
             )
         except asyncio.TimeoutError:
             with contextlib.suppress(ProcessLookupError):
@@ -560,30 +574,32 @@ def _new_seed() -> int:
     return int.from_bytes(secrets.token_bytes(4), "big") & 0x7FFFFFFF
 
 
-def _new_image_filename(engine: str, gallery: Path) -> str:
-    """Build an output filename of the form ``<eng><hhmm>[-NN].png``.
+def _new_image_filename(engine: str, gallery: Path, ext: str = "png") -> str:
+    """Build an output filename of the form ``<eng><hhmm>[-NN].<ext>``.
 
     ``<eng>`` is the first three letters of the engine name (hidream → hid,
     flux2 → flu) — a short, eyeball-friendly tag rather than an opaque
     hash. ``<hhmm>`` is the local wall-clock time at filename allocation,
     which is what an operator will be looking for when they ask "where's
     the image I just generated at 14:23". An incrementing ``-NN`` suffix
-    breaks ties when more than one image is produced in the same minute
+    breaks ties when more than one output is produced in the same minute
     (n>1 requests, or back-to-back single requests). Falls back to a
     random hex suffix after 99 same-minute collisions so the function
-    cannot get stuck.
+    cannot get stuck. ``ext`` is the produced-file extension ("png" for
+    images, "mp4" for video engines).
     """
     prefix = (engine or "img")[:3].lower()
+    ext = (ext or "png").lstrip(".")
     hhmm = datetime.now().strftime("%H%M")
     base = f"{prefix}{hhmm}"
-    candidate = gallery / f"{base}.png"
+    candidate = gallery / f"{base}.{ext}"
     if not candidate.exists():
         return candidate.name
     for i in range(2, 100):
-        candidate = gallery / f"{base}-{i}.png"
+        candidate = gallery / f"{base}-{i}.{ext}"
         if not candidate.exists():
             return candidate.name
-    return f"{base}-{secrets.token_hex(2)}.png"
+    return f"{base}-{secrets.token_hex(2)}.{ext}"
 
 
 @contextlib.asynccontextmanager
@@ -604,6 +620,22 @@ def resolve_image_engine(cfg: Config, model_id: str) -> str:
     if ENGINE_FAMILY.get(engine, "text") != "image":
         raise ImageError(
             f"model {model_id!r} is not an image-generation model "
+            f"(detected engine: {engine})"
+        )
+    return engine
+
+
+def resolve_video_engine(cfg: Config, model_id: str) -> str:
+    """Resolve which video engine to use for ``model_id``. Raises
+    ``ImageError`` if the model isn't a video-family model."""
+    _validate_model_id(model_id)
+    model_path = _safe_under(cfg.models_dir, cfg.models_dir / model_id)
+    if not model_path.exists():
+        raise ImageError(f"model not found: {model_id}")
+    engine = detect_engine_for_path(model_path)
+    if ENGINE_FAMILY.get(engine, "text") != "video":
+        raise ImageError(
+            f"model {model_id!r} is not a video-generation model "
             f"(detected engine: {engine})"
         )
     return engine

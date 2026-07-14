@@ -109,7 +109,7 @@ AMD_ROCM_INDEX = f"https://repo.radeon.com/rocm/manylinux/{AMD_ROCM_REL}/"
 CPU_TORCH_INDEX = "https://download.pytorch.org/whl/cpu"
 
 # Engines whose AMD path we know how to wire to repo.radeon.com wheels.
-AMD_WHEEL_ENGINES = {"hidream", "z_image", "krea", "ideogram4", "asr"}
+AMD_WHEEL_ENGINES = {"hidream", "z_image", "krea", "ideogram4", "wan", "asr"}
 # Valid values for the UI/CLI torch-backend selector.
 TORCH_BACKENDS = ("auto", "rocm", "cuda", "cpu")
 
@@ -258,6 +258,29 @@ ENGINE_PLANS: dict[str, EnginePackages] = {
             "repo.radeon.com) and offers to patch hidream-source's "
             "pipeline.py to disable flash-attn. On NVIDIA, installs the "
             "generic CUDA torch wheel."
+        ),
+    ),
+    "wan": EnginePackages(
+        engine="wan",
+        label="Wan 2.2 — text/image → video",
+        # Same torch/diffusers stack as Z-Image plus the video export deps
+        # (imageio-ffmpeg writes the mp4; ftfy cleans prompt text). Reuses
+        # the Z-Image / HiDream diffusion venv when present so torch isn't
+        # re-downloaded; otherwise the GPU resolver builds a dedicated venv.
+        packages=[
+            "torch", "transformers", "accelerate", "huggingface_hub",
+            "safetensors", "Pillow", "ftfy", "imageio", "imageio-ffmpeg",
+            f"diffusers=={DIFFUSERS_PIN}",
+        ],
+        reuse_from=("z_image", "hidream"),
+        reuse_probe="torch, diffusers",
+        space_mb=8800,
+        notes=(
+            f"Installs diffusers {DIFFUSERS_PIN} (with the Wan pipelines) plus "
+            "torch and the video-export deps (imageio-ffmpeg). Reuses the "
+            "Z-Image / HiDream diffusion venv's torch when present. If the "
+            "shipped diffusers pin is behind upstream Wan 2.2 support, bump it "
+            "with the version picker. AMD gets the official ROCm torch wheels."
         ),
     ),
     "asr": EnginePackages(
@@ -1427,6 +1450,9 @@ class EngineInstaller:
         elif engine == "ideogram4":
             kwargs["ideogram4_python"] = python_path
             self.cfg.ideogram4_python = python_path
+        elif engine == "wan":
+            kwargs["wan_python"] = python_path
+            self.cfg.wan_python = python_path
         elif engine == "hidream":
             kwargs["hidream_python"] = python_path
             self.cfg.hidream_python = python_path

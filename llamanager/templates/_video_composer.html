@@ -1,0 +1,52 @@
+{# Settings pane content for the video generation page.
+
+   Mirrors _image_composer.html (same element ids so the shared composer JS
+   works unchanged) but drops the image-only "Batch" field — Wan produces a
+   single clip per request. Frame count / fps are schema-driven overrides
+   (video_num_frames / video_fps) rendered into #lm-img-overrides.
+
+   Required globals (set by the parent page):
+     - LM_IMAGES_CFG.imageModels         — [{model_id, engine}, ...] (video models)
+     - LM_IMAGES_CFG.profiles            — [{name, model, fields}, ...]
+     - LM_IMAGES_CFG.enginesSchema       — {engine: [ProfileField, ...]}
+     - LM_IMAGES_CFG.apiKey              — bearer for /v1/videos/generations
+     - LM_IMAGES_CFG.galleryUrl
+     - LM_IMAGES_CFG.fileUrlPrefix
+#}
+
+<div class="lm-img-composer">
+  <div class="lm-img-composer__head">
+    <span class="lm-img-composer__title">Settings</span>
+    <span class="lm-img-composer__hint" id="lm-img-engine-hint"></span>
+  </div>
+
+  <div class="lm-img-field">
+    <label class="lm-img-field__label" for="lm-img-model">Model</label>
+    <select id="lm-img-model" class="lm-input" form="lm-img-composer"></select>
+  </div>
+
+  <div class="lm-img-field">
+    <label class="lm-img-field__label" for="lm-img-profile">Profile</label>
+    <select id="lm-img-profile" class="lm-input" form="lm-img-composer"></select>
+    <span class="lm-img-field__help">
+      The profile's settings are used as defaults. Override individual
+      fields below; leave blank to inherit.
+    </span>
+  </div>
+
+  {# Schema-driven override fields land here. Built by JS from
+     LM_IMAGES_CFG.enginesSchema when the model selection changes. #}
+  <div id="lm-img-overrides" class="lm-img-overrides"></div>
+
+  <div class="lm-img-row">
+    <div class="lm-img-field" style="flex: 1;">
+      <label class="lm-img-field__label" for="lm-img-seed">Seed</label>
+      <div class="lm-img-seed-row">
+        <input id="lm-img-seed" class="lm-input lm-input--mono" type="number"
+               placeholder="random" step="1" min="0" form="lm-img-composer">
+        <button type="button" id="lm-img-seed-dice"
+                class="lm-btn lm-btn--ghost lm-btn--xs" title="Random seed">🎲</button>
+      </div>
+    </div>
+  </div>
+</div>

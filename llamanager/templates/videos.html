@@ -1,6 +1,6 @@
 {% extends "base.html" %}
-{% set active = 'images' %}
-{% block title %}Images - llamanager{% endblock %}
+{% set active = 'videos' %}
+{% block title %}Video - llamanager{% endblock %}
 {% block content %}
 
 {# Image generation workspace — feed-first layout.
@@ -313,8 +313,8 @@
     <div class="gen-feed" id="gen-feed">
       <div class="gen-grid" id="gen-grid">
         <p class="gen-empty" id="gen-empty">
-          A blank canvas.
-          <small>Describe an image below and hit Generate to begin.</small>
+          A blank reel.
+          <small>Describe a video below and hit Generate to begin.</small>
         </p>
       </div>
       <button type="button" id="gen-loadmore" class="lm-btn lm-btn--ghost lm-btn--sm gen-loadmore" hidden>
@@ -327,7 +327,7 @@
 
       {# Settings popover #}
       <div class="gen-pop" id="gen-settings" hidden>
-        {% include "_image_composer.html" %}
+        {% include "_video_composer.html" %}
       </div>
 
       {# Prompt history popover #}
@@ -362,9 +362,9 @@
           <span class="gen-modelbtn__name" id="gen-modelbtn-name">—</span>
         </button>
         <textarea id="lm-img-prompt" class="gen-prompt" rows="1"
-                  placeholder="Describe the image you want… (⌘/Ctrl+Enter to generate)"></textarea>
+                  placeholder="Describe the video you want… (⌘/Ctrl+Enter to generate)"></textarea>
         <div class="gen-bar__actions">
-          <button type="button" class="gen-iconbtn" id="gen-attach" title="Attach reference image" hidden>📎</button>
+          <button type="button" class="gen-iconbtn" id="gen-attach" title="Attach first-frame image" hidden>📎</button>
           <button type="button" class="gen-iconbtn" id="gen-history-btn" title="Prompt history">🕘</button>
           <button type="button" class="gen-iconbtn" id="lm-img-cancel" title="Cancel" hidden>✕</button>
           <button type="submit" class="lm-btn lm-btn--primary gen-generate" id="lm-img-generate">Generate</button>
@@ -398,9 +398,10 @@
     defaultModel: {{ default_image_model | tojson }},
     defaultProfile: {{ default_image_profile | tojson }},
     apiKey: "{{ api_key }}",
+    mediaKind: "video",
     galleryUrl: "/ui/images/gallery",
     fileUrlPrefix: "/ui/images/file/",
-    generationsUrl: "/v1/images/generations"
+    generationsUrl: "/v1/videos/generations"
   };
 </script>
 
@@ -418,7 +419,6 @@
   const promptEl   = $("lm-img-prompt");
   const seedEl     = $("lm-img-seed");
   const seedDice   = $("lm-img-seed-dice");
-  const nEl        = $("lm-img-n");
   const form       = $("lm-img-composer");
   const submitBtn  = $("lm-img-generate");
   const cancelBtn  = $("lm-img-cancel");
@@ -731,6 +731,7 @@
 
   async function fetchGallery({reset=false} = {}) {
     const params = new URLSearchParams({limit: "60"});
+    if (cfg.mediaKind) params.set("kind", cfg.mediaKind);
     if (!reset && state.nextBefore != null) params.set("before", String(state.nextBefore));
     const r = await fetch(`${cfg.galleryUrl}?${params.toString()}`, {
       headers: cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : {},
@@ -805,7 +806,7 @@
     };
     const dl = document.createElement("a");
     dl.className = "lm-btn lm-btn--ghost lm-btn--xs"; dl.textContent = "Download";
-    dl.href = item.url; dl.download = item.name || "image.png"; lbActions.appendChild(dl);
+    dl.href = item.url; dl.download = item.name || "video.mp4"; lbActions.appendChild(dl);
     if (sc.prompt) mkBtn("Reuse prompt", () => { promptEl.value = sc.prompt; autosize(); closeLightbox(); promptEl.focus(); });
     if (sc.seed != null) mkBtn("Reuse seed", () => { seedEl.value = String(sc.seed); closeLightbox(); });
     if ((caps().ref_images_max || 0) > 0) mkBtn("Use as reference", async () => {
@@ -847,8 +848,7 @@
   function buildRequestBody() {
     const body = {
       model: modelSel.value, prompt: promptEl.value.trim(),
-      n: Math.max(1, parseInt(nEl.value || "1", 10) || 1),
-      stream: true, response_format: "b64_json",
+      stream: true, response_format: "url",
     };
     if (profileSel.value) body.profile = profileSel.value;
     if (seedEl.value !== "") body.seed = parseInt(seedEl.value, 10);
@@ -856,15 +856,12 @@
     if (o.image_size) body.size = o.image_size;
     if (o.image_steps != null) body.steps = o.image_steps;
     if (o.image_guidance != null) body.guidance = o.image_guidance;
+    if (o.video_num_frames != null) body.num_frames = o.video_num_frames;
+    if (o.video_fps != null) body.fps = o.video_fps;
     if (o.image_seed != null && body.seed == null) body.seed = o.image_seed;
-    if (o.image_model_type) body.model_type = o.image_model_type;
-    if (o.image_editing_scheduler) body.editing_scheduler = o.image_editing_scheduler;
-    // Reference images (engine-gated by applyCaps()).
+    // First-frame image → image-to-video (single reference).
     if (state.refs.length) {
-      const c = caps();
-      body.images = state.refs.map(r => r.dataUrl);
-      if (c.strength) body.strength = parseFloat(strengthEl.value);
-      if (c.keep_original_aspect && keepAspEl.checked) body.keep_original_aspect = true;
+      body.image = state.refs[0].dataUrl;
     }
     return body;
   }
@@ -949,7 +946,8 @@
 
   async function refreshFront() {
     try {
-      const r = await fetch(`${cfg.galleryUrl}?limit=12`, {
+      const _kq = cfg.mediaKind ? `&kind=${cfg.mediaKind}` : "";
+      const r = await fetch(`${cfg.galleryUrl}?limit=12${_kq}`, {
         headers: cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : {},
         credentials: "same-origin",
       });

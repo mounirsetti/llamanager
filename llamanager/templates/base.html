@@ -1545,6 +1545,7 @@
         <a class="lm-nav-link" href="/ui/slots" {% if active=='slots' %}aria-current="page"{% endif %}>Slots <span class="lm-beta-pill" aria-label="beta">beta</span></a>
         <a class="lm-nav-link" href="/ui/chat" {% if active=='chat' %}aria-current="page"{% endif %}>Chat</a>
         <a class="lm-nav-link" href="/ui/images" {% if active=='images' %}aria-current="page"{% endif %}>Images</a>
+        <a class="lm-nav-link" href="/ui/videos" {% if active=='videos' %}aria-current="page"{% endif %}>Video</a>
         <span class="lm-nav-eyebrow" style="margin-top: 16px;">Configure</span>
         <a class="lm-nav-link" href="/ui/origins" {% if active=='origins' %}aria-current="page"{% endif %}>Origins</a>
         <a class="lm-nav-link" href="/ui/logs" {% if active=='logs' %}aria-current="page"{% endif %}>Logs</a>
@@ -1582,8 +1583,8 @@
     </aside>
 
     <main class="lm-canvas">
-      {# Sticky top bar — pick an LLM and a diffusion model from any page.
-         Two lanes (LLM | DIFF) read like channel strips: status sigil →
+      {# Sticky top bar — pick an LLM and a default image model from any page.
+         Two lanes (LLM | IMG) read like channel strips: status sigil →
          connected field group (model + profile) → action cluster. The
          selected dropdown option *is* the canonical state — no redundant
          "currently loaded" text alongside. #}
@@ -1699,7 +1700,7 @@
 
         <div class="lm-topbar__divider" aria-hidden="true"></div>
 
-        {# ---- Diffusion lane (set-default only — one-shot per request) ---- #}
+        {# ---- Image lane (set-default only — one-shot per request) ---- #}
         <form class="lm-topbar__lane lm-topbar__lane--right"
               method="post" action="/ui/topbar/image/set-default"
               data-topbar-form="image">
@@ -1708,15 +1709,15 @@
           <span class="lm-topbar__sigil"
                 data-topbar-sigil="image"
                 data-state="{% if topbar_default_image %}default{% else %}idle{% endif %}"
-                title="{% if topbar_default_image %}{{ topbar_default_image }} set as default{% else %}no default diffusion model{% endif %}">
-            Diff
+                title="{% if topbar_default_image %}{{ topbar_default_image }} set as default image model{% else %}no default image model{% endif %}">
+            Img
           </span>
 
           <div class="lm-topbar__field lm-topbar__field--model"
                data-topbar-field="image-model">
             <select name="model_id" class="lm-topbar__select"
                     data-topbar-model="image"
-                    title="Default diffusion model — used when image requests omit the model field">
+                    title="Default image model — used when /v1/images/generations omits the model field">
               <option value="" {% if not topbar_default_image %}selected{% endif %}>— none —</option>
               {% for m in topbar_image_models %}
               <option value="{{ m.model_id }}"
@@ -1742,18 +1743,18 @@
             <button type="submit" class="lm-topbar__icon lm-topbar__icon--star"
                     data-topbar-star="image"
                     aria-pressed="{% if topbar_default_image %}true{% else %}false{% endif %}"
-                    aria-label="Toggle default diffusion model"
-                    title="Save as default diffusion model — used by /v1/images/generations when no model is specified">
+                    aria-label="Toggle default image model"
+                    title="Save as default image model — used by /v1/images/generations when no model is specified">
               <svg viewBox="0 0 14 14" aria-hidden="true">
                 <path d="M7 1 L8.85 5.25 L13.4 5.6 L9.9 8.6 L11 13 L7 10.6 L3 13 L4.1 8.6 L0.6 5.6 L5.15 5.25 Z"/>
               </svg>
             </button>
           </div>
           {% else %}
-          <span class="lm-topbar__sigil" data-state="idle">Diff</span>
+          <span class="lm-topbar__sigil" data-state="idle">Img</span>
           <span class="lm-topbar__empty">
-            no diffusion models —
-            <a href="/ui/models">pull one</a>
+            no image models —
+            <a href="/ui/diffusion-models">pull one</a>
           </span>
           {% endif %}
         </form>

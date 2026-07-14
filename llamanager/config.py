@@ -109,6 +109,7 @@ lock_model_loading = false
 # hidream_repo      = "/path/to/HiDream-O1-Image"
 # flux2_sd_cli      = "/path/to/sd-cli"
 # flux2_device_index = 1     # GGML_VK_VISIBLE_DEVICES for the AMD card
+# wan_python        = "~/.llamanager/venvs/z_image/bin/python"  # Wan 2.2 text/image→video (diffusers)
 # asr_python        = "~/.llamanager/venvs/z_image/bin/python"  # Whisper STT (transformers)
 # whispercpp_binary = "~/.llamanager/whispercpp/build/bin/whisper-cli"  # whisper.cpp (Vulkan) STT
 # sherpa_python     = "~/.llamanager/venvs/sherpa/bin/python"  # sherpa-onnx (streaming) STT
@@ -175,6 +176,7 @@ ENGINE_FAMILY: dict[str, str] = {
     "z_image": "image",
     "krea":    "image",
     "ideogram4": "image",
+    "wan":     "video",
     "asr":     "audio",
     "whispercpp": "audio",
     "sherpa":  "audio",
@@ -183,6 +185,9 @@ ENGINE_FAMILY: dict[str, str] = {
 # Text engines that are still managed by the existing HTTP-server path.
 TEXT_ENGINES = frozenset(e for e, f in ENGINE_FAMILY.items() if f == "text")
 IMAGE_ENGINES = frozenset(e for e, f in ENGINE_FAMILY.items() if f == "image")
+# Video engines — one-shot subprocess tasks like the image family (served by
+# ImageTaskRunner), but producing an .mp4 clip instead of a PNG.
+VIDEO_ENGINES = frozenset(e for e, f in ENGINE_FAMILY.items() if f == "video")
 # Audio / speech-to-text engines — one-shot subprocess tasks like the image
 # family, but consuming an audio file and producing a transcription.
 AUDIO_ENGINES = frozenset(e for e, f in ENGINE_FAMILY.items() if f == "audio")
@@ -240,6 +245,37 @@ def _looks_like_z_image(d: Path) -> bool:
     except (OSError, ValueError):
         return False
     return (data.get("_class_name") or "").strip() == "ZImagePipeline"
+
+
+def _looks_like_wan(d: Path) -> bool:
+    """Wan 2.2 video checkpoint shape: a Diffusers ``model_index.json``
+    whose ``_class_name`` is ``WanPipeline`` / ``WanImageToVideoPipeline``,
+    or a ``transformer/config.json`` declaring a Wan architecture. Reading
+    the JSON is the only way to tell Wan apart from other Diffusers
+    pipelines that share the same on-disk shape."""
+    if not d.is_dir():
+        return False
+    import json as _json
+    mi = d / "model_index.json"
+    if mi.is_file():
+        try:
+            data = _json.loads(mi.read_text(encoding="utf-8"))
+            if (data.get("_class_name") or "").strip() in (
+                    "WanPipeline", "WanImageToVideoPipeline"):
+                return True
+        except (OSError, ValueError):
+            pass
+    tcfg = d / "transformer" / "config.json"
+    if tcfg.is_file():
+        try:
+            data = _json.loads(tcfg.read_text(encoding="utf-8"))
+            blob = (data.get("_class_name") or "") + " " + \
+                " ".join(data.get("architectures") or [])
+            if "Wan" in blob:
+                return True
+        except (OSError, ValueError):
+            pass
+    return False
 
 
 def _looks_like_krea(d: Path) -> bool:
@@ -375,6 +411,8 @@ def detect_engine_for_path(model_path: Path) -> str:
             return "krea"
         if _looks_like_ideogram4(model_path):
             return "ideogram4"
+        if _looks_like_wan(model_path):
+            return "wan"
         if _looks_like_hidream(model_path):
             return "hidream"
         if _looks_like_flux2(model_path):
@@ -462,6 +500,12 @@ class Profile:
     # HiDream. Both can be overridden per-request.
     image_editing_scheduler: str = ""
     image_strength: float | None = None
+    # Video-family (Wan) knobs. ``video_num_frames`` is the clip length in
+    # frames (121 ≈ 5s at 24fps); ``video_fps`` is the exported mp4 frame
+    # rate. Ignored by text/image/audio engines. Resolution/steps/guidance/
+    # seed/negative-prompt reuse the ``image_*`` fields above.
+    video_num_frames: int | None = None
+    video_fps: int | None = None
     # Audio-family (ASR / Whisper) knobs. ``audio_language`` is an ISO hint
     # ("ar", "en", … or "auto"); ``audio_task`` is "transcribe" | "translate".
     # Both ignored by text/image engines.
@@ -624,6 +668,10 @@ class Config:
     # Ideogram 4 uses the official ideogram-oss/ideogram4 package and a
     # local runner shipped with llamanager.
     ideogram4_python: str = ""
+    # Wan 2.2 (text/image → video) only needs a Python interpreter with
+    # diffusers + torch + imageio-ffmpeg; the runner ships with llamanager
+    # (engines/_wan_runner.py). Typically points at the shared diffusion venv.
+    wan_python: str = ""
     # ASR (Whisper / speech-to-text) only needs a Python interpreter with
     # ``torch`` + ``transformers``; the runner ships with llamanager
     # (engines/_asr_runner.py). The installer typically points this at the
@@ -964,6 +1012,7 @@ def load_config(path: Path | None = None) -> Config:
         flux2_device_index=_coerce_int(image_cfg.get("flux2_device_index")),
         z_image_python=str(image_cfg.get("z_image_python", "") or ""),
         ideogram4_python=str(image_cfg.get("ideogram4_python", "") or ""),
+        wan_python=str(image_cfg.get("wan_python", "") or ""),
         asr_python=str(image_cfg.get("asr_python", "") or ""),
         whispercpp_binary=str(image_cfg.get("whispercpp_binary", "") or ""),
         sherpa_python=str(image_cfg.get("sherpa_python", "") or ""),
@@ -1434,6 +1483,7 @@ def update_image_config(cfg_path: Path, *,
                         clear_flux2_device_index: bool = False,
                         z_image_python: str | None = None,
                         ideogram4_python: str | None = None,
+                        wan_python: str | None = None,
                         asr_python: str | None = None,
                         whispercpp_binary: str | None = None,
                         sherpa_python: str | None = None,
@@ -1470,6 +1520,8 @@ def update_image_config(cfg_path: Path, *,
         img["z_image_python"] = z_image_python
     if ideogram4_python is not None:
         img["ideogram4_python"] = ideogram4_python
+    if wan_python is not None:
+        img["wan_python"] = wan_python
     if asr_python is not None:
         img["asr_python"] = asr_python
     if whispercpp_binary is not None:

@@ -34,12 +34,14 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .auth import AuthManager, Origin
 from .caller import describe_caller
-from .config import ENGINE_FAMILY, Config, detect_engine_for_id
+from .config import ENGINE_FAMILY, Config, Profile, detect_engine_for_id
 from .audio_runner import (
     AudioError, AudioTaskRunner, execute_transcription, resolve_audio_engine,
 )
 from .engines._base import AudioRequest, ImageRequest
-from .image_runner import ImageError, ImageTaskRunner, resolve_image_engine
+from .image_runner import (
+    ImageError, ImageTaskRunner, resolve_image_engine, resolve_video_engine,
+)
 from .queue_mgr import Cancelled, QueueManager, QueueFull, QueuedRequest
 from .registry import Registry
 from .server_manager import ServerManager, _safe_under
@@ -1397,6 +1399,181 @@ async def images_generations(request: Request) -> Response:
     return await _images_blocking(qm, qr, runner, request, image_req,
                                     model_required, engine, profile_obj,
                                     response_format)
+
+
+@router.post("/videos/generations")
+async def videos_generations(request: Request) -> Response:
+    """Generate a short video from text and/or an image.
+
+    Request body (mirrors /images/generations, video subset):
+        prompt:            str (required)
+        model:             str — a video-family model id; falls back to the
+                           X-Llamanager-Model header or the default image model.
+        size:              "WxH" (default per adapter, e.g. 1280x704)
+        seed:              int (optional)
+        stream:            bool — SSE progress + final result event.
+        profile:           llamanager-specific — selects a video profile (which
+                           carries frames / fps / steps).
+        image:             str — one base64 image (data URL or raw base64). When
+                           present the model runs image-to-video (first frame).
+
+    Frame count and fps come from the selected profile (``video_num_frames`` /
+    ``video_fps``); the clip is written as an ``.mp4`` into the same gallery as
+    images. Runs through the one-shot ImageTaskRunner (single GPU slot).
+    """
+    origin = await _origin_from_request(request)
+    body_bytes = await request.body()
+    try:
+        body = json.loads(body_bytes) if body_bytes else {}
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+
+    prompt = body.get("prompt") or ""
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt is required")
+
+    qm: QueueManager = request.app.state.queue
+    cfg = request.app.state.cfg
+    runner: ImageTaskRunner = request.app.state.image_runner
+
+    model_required = (body.get("model")
+                      or request.headers.get("x-llamanager-model")
+                      or cfg.default_image_model)
+    if not model_required:
+        raise HTTPException(
+            status_code=400,
+            detail=("video requests require 'model' (a video-family model id) "
+                    "or a default model set in the UI top bar"),
+        )
+    _check_model_allowed(origin, model_required)
+    try:
+        engine = resolve_video_engine(cfg, model_required)
+    except ImageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    profile_required = (body.get("profile")
+                        or request.headers.get("x-llamanager-profile"))
+    if (not profile_required
+            and model_required == cfg.default_image_model
+            and cfg.default_image_profile):
+        profile_required = cfg.default_image_profile
+
+    width, height = _parse_size(body.get("size"))
+    response_format = str(body.get("response_format") or "url").lower()
+    if response_format not in ("b64_json", "url"):
+        raise HTTPException(
+            status_code=400,
+            detail="response_format must be 'b64_json' or 'url'",
+        )
+    streaming = bool(body.get("stream", False))
+    seed = body.get("seed")
+    if seed is None:
+        seed_int = None
+    else:
+        try:
+            seed_int = int(seed)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="seed must be an integer")
+
+    def _opt_int(key: str) -> int | None:
+        v = body.get(key)
+        if v is None or v == "":
+            return None
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"{key} must be an integer")
+
+    def _opt_float(key: str) -> float | None:
+        v = body.get(key)
+        if v is None or v == "":
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"{key} must be a number")
+
+    steps_override = _opt_int("steps")
+    guidance_override = _opt_float("guidance")
+    num_frames_override = _opt_int("num_frames")
+    fps_override = _opt_int("fps")
+
+    # Optional single reference image → image-to-video.
+    raw_ref_payloads: list[str] = []
+    single_ref = body.get("image")
+    if single_ref is not None:
+        if not isinstance(single_ref, str):
+            raise HTTPException(
+                status_code=400,
+                detail="'image' must be a base64 string or data URL",
+            )
+        raw_ref_payloads = [single_ref]
+
+    try:
+        qr = await qm.enqueue(
+            origin=origin,
+            model_required=model_required,
+            profile_required=profile_required,
+            # Video shares the one-shot image slot (same ImageTaskRunner);
+            # queueing it as "image" reuses the heavy-one-shot concurrency
+            # rules and mutual exclusion with the text server.
+            task_type="image",
+            caller=await describe_caller(request),
+        )
+    except QueueFull:
+        raise HTTPException(status_code=503, detail="queue full")
+
+    if cfg.conversation_retention_days > 0:
+        qr.prompt_text = prompt
+
+    try:
+        ref_paths = _stage_ref_images(cfg, qr.request_id, raw_ref_payloads)
+    except HTTPException:
+        qm.cancel(qr.request_id)
+        raise
+
+    image_req = ImageRequest(
+        prompt=prompt,
+        width=width,
+        height=height,
+        steps=steps_override,   # adapter honours req.steps over the profile
+        seed=seed_int,
+        n=1,          # one clip per request
+        ref_images=ref_paths,
+    )
+
+    profile_obj = None
+    if profile_required:
+        profile_obj = cfg.get_profile(model_required, profile_required)
+        if profile_obj is None:
+            qm.cancel(qr.request_id)
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown profile {profile_required!r} for model {model_required!r}",
+            )
+
+    # Apply per-request overrides that don't live on ImageRequest (guidance,
+    # frames, fps) by cloning the resolved profile so the adapter picks them up.
+    if any(v is not None for v in
+           (guidance_override, num_frames_override, fps_override)):
+        import dataclasses
+        base_profile = profile_obj or Profile(name="(override)")
+        overrides: dict[str, Any] = {}
+        if guidance_override is not None:
+            overrides["image_guidance"] = guidance_override
+        if num_frames_override is not None:
+            overrides["video_num_frames"] = num_frames_override
+        if fps_override is not None:
+            overrides["video_fps"] = fps_override
+        profile_obj = dataclasses.replace(base_profile, **overrides)
+
+    if streaming:
+        return await _images_stream(qm, qr, runner, request, image_req,
+                                     model_required, engine, profile_obj,
+                                     response_format)
+    return await _images_blocking(qm, qr, runner, request, image_req,
+                                  model_required, engine, profile_obj,
+                                  response_format)
 
 
 async def _images_blocking(

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from . import asr, flux2, hidream, ideogram4, krea, sherpa, whispercpp, z_image
+from . import asr, flux2, hidream, ideogram4, krea, sherpa, wan, whispercpp, z_image
 
 # Public registry. Keys match ``engine_type`` strings used in config.py.
 ADAPTERS = {
@@ -23,6 +23,7 @@ ADAPTERS = {
     "z_image": z_image,
     "krea": krea,
     "ideogram4": ideogram4,
+    "wan": wan,
     "asr": asr,
     "whispercpp": whispercpp,
     "sherpa": sherpa,
@@ -42,6 +43,7 @@ _CAP_DEFAULTS = {
     "ref_help": "",
     "strength": False,             # img2img denoise-strength control
     "keep_original_aspect": False,  # lock output to a single ref's aspect
+    "output_ext": "png",           # produced file extension (video → "mp4")
 }
 
 
@@ -64,6 +66,6 @@ def capabilities(engine: str) -> dict:
 
 __all__ = [
     "ADAPTERS", "get", "capabilities",
-    "hidream", "flux2", "z_image", "krea", "ideogram4", "asr",
+    "hidream", "flux2", "z_image", "krea", "ideogram4", "wan", "asr",
     "whispercpp", "sherpa",
 ]

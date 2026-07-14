@@ -986,6 +986,7 @@ def _topbar_models(request: Request) -> dict[str, Any]:
 
     text: list[dict[str, Any]] = []
     image: list[dict[str, Any]] = []
+    video: list[dict[str, Any]] = []
     for entry in reg.list():
         # Same de-clutter as the models list: projectors aren't launchable
         # and only a split GGUF's first shard is the load target.
@@ -1007,6 +1008,10 @@ def _topbar_models(request: Request) -> dict[str, Any]:
         fam = ENGINE_FAMILY.get(engine, "text")
         if fam == "image":
             image.append(row)
+        elif fam == "video":
+            # Video (Wan) models have their own page (/ui/videos) and picker;
+            # keep them out of both the LLM and the image-model selectors.
+            video.append(row)
         elif fam == "audio":
             # ASR models aren't launchable LLMs — keep them out of the LLM
             # model picker (they have their own page + transcription API).
@@ -1016,6 +1021,7 @@ def _topbar_models(request: Request) -> dict[str, Any]:
 
     text.sort(key=lambda r: r["model_id"])
     image.sort(key=lambda r: r["model_id"])
+    video.sort(key=lambda r: r["model_id"])
     # Multi-slot indicator strip: when the beta is on, the topbar
     # renders one read-only row per slot below the main LLM lane. The
     # views carry just enough to render the strip — id, port, model,
@@ -1033,6 +1039,7 @@ def _topbar_models(request: Request) -> dict[str, Any]:
     return {
         "topbar_text_models": text,
         "topbar_image_models": image,
+        "topbar_video_models": video,
         "topbar_current_llm": sm.runtime.current_model or "",
         "topbar_current_llm_profile": sm.runtime.current_profile or "",
         "topbar_default_llm": cfg.default_model or "",
@@ -3041,6 +3048,84 @@ def _build_image_page_context(cfg, reg) -> dict[str, Any]:
     }
 
 
+def _build_video_page_context(cfg, reg) -> dict[str, Any]:
+    """Shared context for the admin + public video-gen pages.
+
+    Mirrors ``_build_image_page_context`` but scoped to the ``video`` engine
+    family (Wan). Returns the same key names so the video templates reuse the
+    image composer JS unchanged; the values are the video models/profiles/
+    schema/caps.
+    """
+    video_models: list[dict[str, str]] = []
+    engines_in_use: set[str] = set()
+    for m in reg.list():
+        engine = detect_engine_for_id(m.model_id, cfg.models_dir)
+        if ENGINE_FAMILY.get(engine, "text") == "video":
+            video_models.append({"model_id": m.model_id, "engine": engine})
+            engines_in_use.add(engine)
+
+    engines_schema: dict[str, list[dict[str, Any]]] = {}
+    for eng in engines_in_use:
+        try:
+            mod = image_engines.get(eng)
+        except KeyError:
+            continue
+        engines_schema[eng] = [
+            _serialize_profile_field(f) for f in mod.profile_schema()
+        ]
+
+    video_model_ids = {m["model_id"] for m in video_models}
+    profiles_with_fields: list[dict[str, Any]] = []
+    for mid, p in cfg.iter_profiles():
+        if mid not in video_model_ids:
+            continue
+        fields: dict[str, Any] = {}
+        eng = next((m["engine"] for m in video_models if m["model_id"] == mid),
+                   None)
+        if eng and eng in engines_schema:
+            for s in engines_schema[eng]:
+                v = getattr(p, s["key"], None)
+                if v is None or v == "":
+                    continue
+                fields[s["key"]] = str(v)
+        profiles_with_fields.append({
+            "name": p.name, "model": mid, "fields": fields,
+        })
+
+    default_model = cfg.default_image_model or ""
+    if default_model not in video_model_ids:
+        default_model = video_models[0]["model_id"] if video_models else ""
+    default_profile = cfg.default_image_profile or ""
+
+    engines_caps = {eng: image_engines.capabilities(eng)
+                    for eng in engines_in_use}
+
+    return {
+        "image_models": video_models,
+        "image_models_json": json.dumps(video_models),
+        "profiles_json": json.dumps(profiles_with_fields),
+        "engines_schema_json": json.dumps(engines_schema),
+        "engines_caps_json": json.dumps(engines_caps),
+        "default_image_model": default_model,
+        "default_image_profile": default_profile,
+    }
+
+
+@router.get("/videos", response_class=HTMLResponse)
+async def videos_view(request: Request,
+                      _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    cfg = request.app.state.cfg
+    reg: Registry = request.app.state.registry
+    sess = _current_session(request)
+    ctx = _build_video_page_context(cfg, reg)
+    return templates.TemplateResponse(request, "videos.html", _ctx(
+        request,
+        api_key=sess["key"] if sess else "",
+        active="videos",
+        **ctx,
+    ))
+
+
 @router.get("/images", response_class=HTMLResponse)
 async def images_view(request: Request,
                       _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
@@ -3062,9 +3147,24 @@ def _safe_path_components(*parts: str) -> None:
             raise HTTPException(status_code=400, detail="invalid path component")
 
 
+def _gallery_media_type(name: str) -> str | None:
+    """Media type for a gallery file by extension, or None if unsupported.
+
+    The gallery holds both images (.png) and video clips (.mp4, from the Wan
+    video engine); both live under ``images_dir`` and are served by the same
+    routes."""
+    low = name.lower()
+    if low.endswith(".png"):
+        return "image/png"
+    if low.endswith(".mp4"):
+        return "video/mp4"
+    return None
+
+
 def _list_gallery(images_dir: Path, *, origin_filter: str | None = None,
                   limit: int = 200,
-                  before: float | None = None) -> dict[str, Any]:
+                  before: float | None = None,
+                  kind: str | None = None) -> dict[str, Any]:
     """Walk ``images_dir`` newest-first and return a JSON-ready gallery page.
 
     Layout on disk is ``<images_dir>/<day>/<origin>/<name>.png`` (written by
@@ -3104,7 +3204,10 @@ def _list_gallery(images_dir: Path, *, origin_filter: str | None = None,
             except OSError:
                 continue
             for f in files:
-                if not f.is_file() or f.suffix.lower() != ".png":
+                if not f.is_file() or f.suffix.lower() not in (".png", ".mp4"):
+                    continue
+                item_kind = "video" if f.suffix.lower() == ".mp4" else "image"
+                if kind and item_kind != kind:
                     continue
                 try:
                     st = f.stat()
@@ -3117,6 +3220,7 @@ def _list_gallery(images_dir: Path, *, origin_filter: str | None = None,
                     "origin": origin_dir.name,
                     "name": f.name,
                     "size": st.st_size,
+                    "kind": item_kind,
                 })
     items.sort(key=lambda x: x["_mtime"], reverse=True)
     if before is not None:
@@ -3138,6 +3242,7 @@ def _list_gallery(images_dir: Path, *, origin_filter: str | None = None,
             "name": it["name"],
             "mtime": it["_mtime"],
             "size": it["size"],
+            "kind": it.get("kind", "image"),
             "url": f"/ui/images/file/{it['day']}/{it['origin']}/{it['name']}",
             "sidecar": sidecar,
         })
@@ -3148,19 +3253,24 @@ def _list_gallery(images_dir: Path, *, origin_filter: str | None = None,
 async def images_gallery(request: Request,
                          limit: int = 60,
                          before: float | None = None,
+                         kind: str | None = None,
                          _: Origin = Depends(require_admin_ui)) -> Response:
-    """JSON listing of every image on disk, newest first.
+    """JSON listing of every image (and video) on disk, newest first.
 
     Pagination uses an mtime cursor (``before=<float>``) so the client can
-    request the next page once the previous page's last image has been
-    rendered. The admin endpoint sees every origin's gallery; the public
-    variant in ``app.py`` scopes by the bearer's origin name.
+    request the next page once the previous page's last item has been
+    rendered. ``kind`` (``image`` | ``video``) filters the listing so the
+    image and video pages each show only their own media. The admin endpoint
+    sees every origin's gallery; the public variant in ``app.py`` scopes by
+    the bearer's origin name.
     """
     from fastapi.responses import JSONResponse as _JSONResponse
     cfg = request.app.state.cfg
     if limit < 1 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be 1..500")
-    payload = _list_gallery(cfg.images_dir, limit=limit, before=before)
+    if kind is not None and kind not in ("image", "video"):
+        raise HTTPException(status_code=400, detail="kind must be image or video")
+    payload = _list_gallery(cfg.images_dir, limit=limit, before=before, kind=kind)
     return _JSONResponse(payload)
 
 
@@ -3175,8 +3285,10 @@ async def images_file_serve(request: Request, day: str, origin: str, name: str,
     for seg in (day, origin, name):
         if "/" in seg or "\\" in seg or ".." in seg or "\x00" in seg:
             raise HTTPException(status_code=400, detail="invalid path component")
-    if not name.lower().endswith(".png"):
-        raise HTTPException(status_code=400, detail="only .png files are served here")
+    media_type = _gallery_media_type(name)
+    if media_type is None:
+        raise HTTPException(status_code=400,
+                            detail="only .png / .mp4 files are served here")
     p = (cfg.images_dir / day / origin / name).resolve()
     try:
         p.relative_to(cfg.images_dir.resolve())
@@ -3184,7 +3296,7 @@ async def images_file_serve(request: Request, day: str, origin: str, name: str,
         raise HTTPException(status_code=400, detail="path escapes images_dir")
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="not found")
-    return _FileResponse(p, media_type="image/png")
+    return _FileResponse(p, media_type=media_type)
 
 
 # ---------- logs ----------
@@ -3354,6 +3466,7 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
         "flux2_device_index": cfg.flux2_device_index,
         "z_image_python": cfg.z_image_python,
         "ideogram4_python": cfg.ideogram4_python,
+        "wan_python": cfg.wan_python,
     }
     ctx["coex"] = {
         "unload_text_on_arrival": cfg.unload_text_on_arrival,
@@ -3373,7 +3486,7 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
 
     # Per-engine install state — surface the most-relevant row so the
     # card can show "running 42%", "done", or "click to install".
-    engines = ("z_image", "krea", "ideogram4", "hidream", "flux2")
+    engines = ("z_image", "krea", "ideogram4", "wan", "hidream", "flux2")
     install_state: dict[str, Any] = {}
     for eng in engines:
         active = installer.active_for_engine(eng)
@@ -3540,6 +3653,16 @@ async def setup_ideogram4(request: Request,
     cfg = request.app.state.cfg
     cfg.ideogram4_python = ideogram4_python.strip()
     update_image_config(cfg.config_path, ideogram4_python=cfg.ideogram4_python)
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+
+
+@router.post("/setup/image/wan", response_class=HTMLResponse)
+async def setup_wan(request: Request,
+                    wan_python: str = Form(""),
+                    _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    cfg.wan_python = wan_python.strip()
+    update_image_config(cfg.config_path, wan_python=cfg.wan_python)
     return RedirectResponse("/ui/setup-diffusion", status_code=303)
 
 
@@ -4876,7 +4999,8 @@ def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
     on_disk: dict[str, dict[str, Any]] = {}
     for entry in reg.list():
         engine = detect_engine_for_id(entry.model_id, cfg.models_dir)
-        if ENGINE_FAMILY.get(engine, "text") != "image":
+        # The diffusion page covers both image and video (Wan) engines.
+        if ENGINE_FAMILY.get(engine, "text") not in ("image", "video"):
             continue
         on_disk[entry.model_id] = {
             "model_id": entry.model_id,
@@ -4896,6 +5020,7 @@ def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
             "z_image": bool(cfg.z_image_python),
             "krea":    bool(cfg.z_image_python),
             "ideogram4": bool(cfg.ideogram4_python),
+            "wan":     bool(cfg.wan_python),
             "flux2":   bool(cfg.flux2_sd_cli),
         }.get(eng_id, False)
 
@@ -4905,6 +5030,7 @@ def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
             "z_image": "Z-Image (Tongyi-MAI / Z-Anime)",
             "krea":    "Krea 2 Turbo",
             "ideogram4": "Ideogram 4",
+            "wan":     "Wan 2.2 (text/image → video)",
             "flux2":   "FLUX 2 Dev",
         }.get(eng_id, eng_id)
 
