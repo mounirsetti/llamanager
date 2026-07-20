@@ -15,9 +15,12 @@ from llamanager import mem_guard as mg
 from llamanager.gguf_meta import GgufMeta
 
 
-# A no-GQA 31B-ish model (head_count_kv == head_count): KV is huge, like the
-# gemma model that triggered the incident. file_size ~20 GB of weights.
-NO_GQA = GgufMeta(architecture="gemma", block_count=60, embedding_length=5376,
+# A synthetic no-GQA 31B-ish model (head_count_kv == head_count): KV is huge.
+# NOTE: this is NOT gemma-4 — that model was long mis-modelled here as no-GQA
+# because its head_count_kv is a per-layer *array* the parser skipped, leaving
+# a scalar fallback. Real gemma-4 geometry is in SWA_GEMMA4 below.
+NO_GQA = GgufMeta(architecture="synthetic-mha", block_count=60,
+                  embedding_length=5376,
                   head_count=42, head_count_kv=42, context_length=131072,
                   file_size=int(20.4 * 1024**3))
 # A GQA MoE: head_count_kv much smaller than head_count -> tiny KV.
@@ -64,6 +67,64 @@ def test_kv_uses_explicit_head_dim_not_embed_ratio():
     assert abs(explicit / fallback - 256 / 213) < 0.02
     # Sanity: ~26.9 GiB f16 at 110k for this model.
     assert 26.0 < explicit < 28.0
+
+
+# Real gemma-4-31B geometry, read from the shipped GGUF: 60 layers in a
+# repeating 5-local + 1-global pattern; local (sliding-window) layers use
+# 16 KV heads x 256 dim capped at a 1024-token window, global layers 4 KV
+# heads x 512 dim over the full context.
+SWA_GEMMA4 = GgufMeta(
+    architecture="gemma4", block_count=60, embedding_length=5376,
+    head_count=32, head_count_kv=16, key_length=512, value_length=512,
+    key_length_swa=256, value_length_swa=256, sliding_window=1024,
+    sliding_window_pattern=[(i % 6) != 5 for i in range(60)],
+    head_count_kv_per_layer=[4 if (i % 6) == 5 else 16 for i in range(60)],
+    context_length=262144, file_size=int(20.4 * 1024**3))
+
+
+def test_swa_kv_is_sublinear_and_small():
+    """Sliding-window layers cap their KV at the window, so KV must grow far
+    slower than linearly — doubling ctx must NOT double KV."""
+    a = mg.kv_cache_gb("x", 32768, meta=SWA_GEMMA4)
+    b = mg.kv_cache_gb("x", 65536, meta=SWA_GEMMA4)
+    assert a and b
+    assert b < 2 * a          # sublinear: only the 10 global layers scale
+    # ~1.1 GB at 4k and ~5.8 GB at 64k for this model, f16.
+    small = mg.kv_cache_gb("x", 4096, meta=SWA_GEMMA4)
+    assert small and 0.8 < small < 1.5
+    assert 5.0 < b < 6.5
+
+
+def test_swa_model_fits_card_that_naive_sizing_rejects():
+    """Regression for the phantom that made the guardrail reject gemma-4 at
+    ctx 4096: modelling every layer as full-context attention over-counted KV
+    by ~13x and claimed 35 GB on a model that really needs ~21.5 GB."""
+    naive = GgufMeta(architecture="gemma4", block_count=60,
+                     embedding_length=5376, head_count=32, head_count_kv=32,
+                     key_length=512, value_length=512,
+                     context_length=262144, file_size=int(20.4 * 1024**3))
+    real = mg.kv_cache_gb("x", 4096, meta=SWA_GEMMA4)
+    phantom = mg.kv_cache_gb("x", 4096, meta=naive)
+    assert real and phantom
+    assert phantom > real * 10
+    weights = 20.4
+    assert weights + real < 31.0          # comfortably fits a 32 GB card
+    assert weights + phantom > 32.0       # what the old math wrongly claimed
+
+
+def test_safe_max_ctx_inverts_the_real_kv_curve(monkeypatch):
+    """safe_max_ctx must search the actual KV curve, not divide the budget by
+    a per-token rate sampled at ctx=1. For an SWA model every layer counts at
+    ctx=1 but only the sparse global layers keep growing, so the rate-based
+    version understated gemma-4's usable context by ~6x (11k vs ~112k)."""
+    monkeypatch.setattr(mg, "_load_meta", lambda p: SWA_GEMMA4)
+    monkeypatch.setattr(mg, "weights_gb", lambda p, meta=None: 20.4)
+    got = mg.safe_max_ctx("x", 32.0, meta=SWA_GEMMA4)
+    assert got is not None
+    assert got > 60000, f"suggested only {got}; SWA ctx headroom lost again"
+    # And the suggestion must genuinely fit the budget it was derived from.
+    kv = mg.kv_cache_gb("x", got, meta=SWA_GEMMA4)
+    assert kv and 20.4 + kv <= mg.usable_vram_gb(32.0, 1) + 0.01
 
 
 def test_kv_cache_type_scales_footprint():

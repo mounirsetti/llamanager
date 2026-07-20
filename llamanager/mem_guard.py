@@ -6,9 +6,14 @@ A model that *loads* comfortably can still exhaust memory *during use*. Two
 mechanisms drove a real incident (see the 2026-06-04 logs):
 
 * **KV cache.** llama.cpp reserves KV for the full ``--ctx-size``. For a model
-  with little or no GQA (e.g. gemma-4-31B has ``head_count_kv = 32``) the KV
-  cache is enormous — ~77 GB at ctx 64k, ~315 GB at ctx 262k — far past a
-  32 GB GPU *and* 61 GB of system RAM.
+  with little or no GQA the KV cache can be enormous — far past a 32 GB GPU
+  *and* 61 GB of system RAM. It is very model-specific, so it must be read
+  from the GGUF geometry rather than assumed: gemma-4-31B was long mis-sized
+  here as ``head_count_kv = 32`` (a scalar fallback taken because the real
+  value is a *per-layer array*), giving a phantom 15 GB at ctx 4096. Its true
+  KV is ~1.1 GB — it interleaves 50 sliding-window layers capped at a
+  1024-token window with only 10 global layers at 4 KV heads. See
+  ``gguf_meta._kv_cache_gb``.
 * **Host prompt cache.** llama-server keeps past prompts' KV checkpoints in
   host RAM (``--cache-ram``, default 8192 MiB) so long prompts can be reused.
   With huge contexts a single checkpoint set ran to 25 GB, and several
@@ -38,6 +43,102 @@ import psutil
 from .gguf_meta import GgufMeta, _kv_cache_gb, kv_bytes_per_elem, read_gguf_meta
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Live GPU memory (amdgpu sysfs)
+# ---------------------------------------------------------------------------
+#
+# Why this exists: on 2026-07-16 a wedged llama-server was SIGKILLed and the
+# amdgpu/KFD driver never reclaimed its context — 26 GB stayed pinned (device
+# VRAM first, then host RAM via GTT) attributed to a PID that no longer
+# existed. Every later engine launch saw ~7.5 GB free of 32 GB, silently built
+# a mostly-CPU config, and ran at 0.5 tok/s until every request timed out. The
+# box looked "fine" the whole time. These probes let us *notice*.
+#
+# All files below are world-readable, so no root/rocm-smi dependency.
+
+_DRM_CLASS = Path("/sys/class/drm")
+_KFD_PROC = Path("/sys/class/kfd/kfd/proc")
+_AMD_VENDOR = "0x1002"
+
+
+@dataclass(frozen=True)
+class GpuMem:
+    """Live memory readings for one AMD GPU, in GB.
+
+    ``gtt_used`` is *host* RAM pinned by the GPU driver for the card to
+    address. It is not VRAM, it cannot be swapped, and a leak there is
+    invisible to VRAM-only tools like ``rocm-smi --showmeminfo vram`` — which
+    is exactly why the 2026-07-16 leak was mistaken for "the GPU is fine".
+    """
+    card: str
+    vram_used: float
+    vram_total: float
+    gtt_used: float
+    gtt_total: float
+
+    @property
+    def vram_free(self) -> float:
+        return max(0.0, self.vram_total - self.vram_used)
+
+
+def _read_int_file(path: Path) -> int | None:
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def amd_card_dirs() -> list[Path]:
+    """Device dirs for AMD GPUs, e.g. ``/sys/class/drm/card1/device``."""
+    out: list[Path] = []
+    try:
+        candidates = sorted(_DRM_CLASS.glob("card[0-9]*/device"))
+    except OSError:
+        return out
+    for d in candidates:
+        try:
+            if (d / "vendor").read_text().strip() == _AMD_VENDOR:
+                out.append(d)
+        except OSError:
+            continue
+    return out
+
+
+def read_gpu_mem() -> list[GpuMem]:
+    """Live VRAM + GTT usage per AMD card. Empty list if unreadable."""
+    gb = float(1024 ** 3)
+    out: list[GpuMem] = []
+    for d in amd_card_dirs():
+        vu = _read_int_file(d / "mem_info_vram_used")
+        vt = _read_int_file(d / "mem_info_vram_total")
+        gu = _read_int_file(d / "mem_info_gtt_used")
+        gt = _read_int_file(d / "mem_info_gtt_total")
+        if vu is None or vt is None:
+            continue
+        out.append(GpuMem(card=d.parent.name,
+                          vram_used=vu / gb, vram_total=vt / gb,
+                          gtt_used=(gu or 0) / gb, gtt_total=(gt or 0) / gb))
+    return out
+
+
+def kfd_proc_pids() -> set[int]:
+    """PIDs the KFD driver currently holds a compute context for."""
+    try:
+        return {int(p.name) for p in _KFD_PROC.iterdir() if p.name.isdigit()}
+    except OSError:
+        return set()
+
+
+def stale_kfd_pids() -> set[int]:
+    """KFD contexts whose owning process no longer exists.
+
+    A non-empty result means the driver leaked a GPU context: the memory is
+    unreachable from userspace and only a GPU reset or reboot frees it. Both
+    are disruptive, so callers should *report* this, never act on it.
+    """
+    return {pid for pid in kfd_proc_pids() if not Path(f"/proc/{pid}").exists()}
 
 
 # ---------------------------------------------------------------------------
@@ -150,15 +251,35 @@ def safe_max_ctx(model_path: Path, budget_gb: float,
     meta = meta or _load_meta(model_path)
     if meta is None:
         return None
-    per_tok_gb = kv_cache_gb(model_path, 1, meta=meta, kv_cache_type=kv_cache_type)
-    if not per_tok_gb or per_tok_gb <= 0:
+    probe = kv_cache_gb(model_path, 1, meta=meta, kv_cache_type=kv_cache_type)
+    if not probe or probe <= 0:
         return None
     budget = (usable_vram_gb(budget_gb, n_parallel)
               - weights_gb(model_path, meta=meta) - max(0.0, extra_gb))
     if budget <= 0:
         return _MIN_SUGGESTED_CTX
-    raw = int(budget / per_tok_gb)
-    return max(_MIN_SUGGESTED_CTX, (raw // 256) * 256)
+
+    # Invert the KV curve by search rather than dividing the budget by a
+    # per-token rate. KV is monotonic in ctx but NOT proportional to it:
+    # sliding-window layers stop growing once ctx passes the window, and
+    # hybrid SSM layers never grow at all. Extrapolating a rate measured at
+    # ctx=1 (where every layer still counts) understated gemma-4's usable
+    # context by ~6x — suggesting 11k on a card that comfortably holds 64k.
+    def kv_at(ctx: int) -> float:
+        return kv_cache_gb(model_path, ctx, meta=meta,
+                           kv_cache_type=kv_cache_type) or 0.0
+
+    hi = meta.context_length or 1_048_576
+    if kv_at(hi) <= budget:
+        return max(_MIN_SUGGESTED_CTX, (hi // 256) * 256)
+    lo = 0
+    while hi - lo > 256:
+        mid = (lo + hi) // 2
+        if kv_at(mid) <= budget:
+            lo = mid
+        else:
+            hi = mid
+    return max(_MIN_SUGGESTED_CTX, (lo // 256) * 256)
 
 
 @dataclass(frozen=True)

@@ -76,6 +76,22 @@ class GgufMeta:
     ssm_inner_size: int | None = None
     ssm_state_size: int | None = None
     ssm_conv_kernel: int | None = None
+    # Sliding-window attention (Gemma 3/4 and friends). These models interleave
+    # *local* layers, whose KV cache is capped at ``sliding_window`` tokens and
+    # therefore does NOT grow with context, with sparse *global* layers that do.
+    # Gemma 4 additionally gives the two kinds different geometry: the local
+    # layers use more KV heads but a smaller head_dim (16 × 256) than the global
+    # ones (4 × 512). Treating every layer as full-context global attention
+    # over-counts KV by ~13× on gemma-4-31B, which is what made the ctx
+    # guardrail claim 15 GB at ctx 4096 for a model whose real KV is ~1.2 GB.
+    sliding_window: int | None = None
+    # Per-layer True=local(SWA) / False=global. Length == block_count.
+    sliding_window_pattern: list[bool] | None = None
+    # Per-layer KV head counts. Present when the arch varies KV heads by layer.
+    head_count_kv_per_layer: list[int] | None = None
+    # K/V head dimension for the sliding-window layers, when it differs.
+    key_length_swa: int | None = None
+    value_length_swa: int | None = None
     file_size: int = 0
 
 
@@ -102,6 +118,29 @@ def _skip_value(buf: memoryview, off: int, vtype: int) -> int:
             off = _skip_value(buf, off, inner)
         return off
     raise ValueError(f"unsupported gguf value type: {vtype}")
+
+
+def _read_scalar_array(buf: memoryview, off: int) -> tuple[list[Any] | None, int]:
+    """Read an array of scalars, returning ``(values, new_off)``.
+
+    ``off`` must point at the array payload (just past the value-type tag).
+    Returns ``(None, new_off)`` for arrays of non-scalar element types, which
+    we never need. Unlike ``_read_value`` — which deliberately skips arrays,
+    since almost every array in a GGUF is the multi-megabyte tokenizer
+    vocabulary — this materialises the values. Only call it for the handful of
+    small per-layer geometry arrays we actually size from.
+    """
+    (inner,) = struct.unpack_from("<I", buf, off)
+    (count,) = struct.unpack_from("<Q", buf, off + 4)
+    end = _skip_value(buf, off, _T_ARRAY)
+    if inner not in _SCALAR_FMT:
+        return None, end
+    o = off + 12
+    vals: list[Any] = []
+    for _ in range(count):
+        v, o = _read_value(buf, o, inner)
+        vals.append(v)
+    return vals, end
 
 
 def _read_value(buf: memoryview, off: int, vtype: int) -> tuple[Any, int]:
@@ -161,12 +200,22 @@ def read_gguf_meta(path: Path, *, max_header_bytes: int = 4 * 1024 * 1024) -> Gg
                     or key.endswith(".attention.head_count_kv") \
                     or key.endswith(".attention.key_length") \
                     or key.endswith(".attention.value_length") \
+                    or key.endswith(".attention.key_length_swa") \
+                    or key.endswith(".attention.value_length_swa") \
+                    or key.endswith(".attention.sliding_window") \
+                    or key.endswith(".attention.sliding_window_pattern") \
                     or key.endswith(".context_length") \
                     or key.endswith(".full_attention_interval") \
                     or key.endswith(".ssm.inner_size") \
                     or key.endswith(".ssm.state_size") \
                     or key.endswith(".ssm.conv_kernel"):
-                val, off = _read_value(buf, off, vtype)
+                # Several of these are per-layer arrays on SWA architectures
+                # (gemma4 ships head_count_kv and sliding_window_pattern as
+                # 60-element arrays); read those rather than skipping them.
+                if vtype == _T_ARRAY:
+                    val, off = _read_scalar_array(buf, off)
+                else:
+                    val, off = _read_value(buf, off, vtype)
                 pending[key] = val
             else:
                 off = _skip_value(buf, off, vtype)
@@ -177,11 +226,27 @@ def read_gguf_meta(path: Path, *, max_header_bytes: int = 4 * 1024 * 1024) -> Gg
         meta.block_count = pending.get(f"{arch}.block_count") or pending.get("block_count")
         meta.embedding_length = pending.get(f"{arch}.embedding_length")
         meta.head_count = pending.get(f"{arch}.attention.head_count")
-        meta.head_count_kv = (pending.get(f"{arch}.attention.head_count_kv")
-                              or meta.head_count)
+        hckv = pending.get(f"{arch}.attention.head_count_kv")
+        if isinstance(hckv, list):
+            # Per-layer KV heads (gemma4: 16 on local layers, 4 on global).
+            # Keep the list for exact sizing and use the max as the scalar
+            # fallback so any legacy scalar path stays conservative.
+            meta.head_count_kv_per_layer = [int(v) for v in hckv if v is not None]
+            meta.head_count_kv = (max(meta.head_count_kv_per_layer)
+                                  if meta.head_count_kv_per_layer else meta.head_count)
+        else:
+            meta.head_count_kv = hckv or meta.head_count
         meta.key_length = pending.get(f"{arch}.attention.key_length")
         meta.value_length = (pending.get(f"{arch}.attention.value_length")
                              or meta.key_length)
+        meta.key_length_swa = pending.get(f"{arch}.attention.key_length_swa")
+        meta.value_length_swa = (pending.get(f"{arch}.attention.value_length_swa")
+                                 or meta.key_length_swa)
+        sw = pending.get(f"{arch}.attention.sliding_window")
+        meta.sliding_window = sw if isinstance(sw, int) else None
+        swp = pending.get(f"{arch}.attention.sliding_window_pattern")
+        if isinstance(swp, list):
+            meta.sliding_window_pattern = [bool(v) for v in swp]
         meta.context_length = pending.get(f"{arch}.context_length")
         meta.full_attention_interval = pending.get(
             f"{arch}.full_attention_interval")
@@ -267,6 +332,33 @@ def _kv_cache_gb(meta: GgufMeta, ctx_size: int | None,
         per_token_elems = 2 * embed
     else:
         return None
+
+    # Sliding-window attention: local layers hold at most ``sliding_window``
+    # tokens of KV no matter how large ctx is, and may use different geometry
+    # from the global layers. Size each layer kind separately — this is the
+    # difference between a real 1.2 GB and a phantom 15 GB on gemma-4-31B.
+    pattern = meta.sliding_window_pattern
+    window = meta.sliding_window
+    if pattern and window and len(pattern) == n_layers:
+        per_layer_kv = meta.head_count_kv_per_layer
+        swa_k = meta.key_length_swa or k_dim
+        swa_v = meta.value_length_swa or meta.key_length_swa or v_dim
+        bytes_total = 0.0
+        for idx, is_local in enumerate(pattern):
+            if per_layer_kv and idx < len(per_layer_kv):
+                heads = per_layer_kv[idx]
+            else:
+                heads = head_count_kv
+            if is_local:
+                # Capped at the window; llama.cpp still rounds the local cache
+                # up to at least the window size, so use min(ctx, window).
+                tokens = min(ctx_size, window)
+                elems = heads * (swa_k + swa_v)
+            else:
+                tokens = ctx_size
+                elems = heads * (k_dim + v_dim)
+            bytes_total += tokens * elems * bytes_per_elem
+        return bytes_total / (1024 ** 3)
 
     # Hybrid SSM/attention models place a full-attention layer (the only kind
     # that grows a KV cache with context) once every full_attention_interval

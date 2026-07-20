@@ -32,6 +32,21 @@ log = logging.getLogger(__name__)
 START_TIMEOUT_S = 60.0
 STOP_GRACE_S = 10.0
 HEALTH_POLL_INTERVAL_S = 0.5
+# Extra grace for a process the KFD driver still holds a GPU context for.
+# SIGKILL during an in-flight GPU operation can leave the driver unable to
+# reclaim that context: on 2026-07-16 a killed llama-server leaked 26 GB
+# (device VRAM, then host RAM via GTT) attributed to a dead PID, and every
+# later launch silently fell back to CPU. Only a GPU reset or reboot frees it
+# — both catastrophic on a remote box — so it is far cheaper to wait a long
+# time for a clean exit than to kill early. A GPU-busy engine unloading a
+# 20 GB model can legitimately need tens of seconds.
+STOP_GRACE_GPU_S = 60.0
+# How long to wait after exit for the driver to hand memory back before
+# declaring a leak. Release is asynchronous but prompt when it works at all.
+GPU_RELEASE_TIMEOUT_S = 20.0
+GPU_RELEASE_POLL_S = 0.5
+# Treat this much still-held memory after exit as a leak rather than noise.
+GPU_LEAK_THRESHOLD_GB = 1.0
 
 
 def _is_rocm_build(binary: str) -> bool:
@@ -346,6 +361,16 @@ def _basic_to_args(prof: Profile, engine: str, model_path: Path) -> dict[str, An
             )
             if n is not None:
                 out["n-gpu-layers"] = n
+            if prof.ram_spill_policy == "none" and "fit" not in out:
+                # "Every layer on the GPU" must mean exactly that. llama.cpp's
+                # --fit (on by default) silently rewrites *unset* args — most
+                # importantly ctx-size — to squeeze into whatever memory is
+                # free, so a card that is unexpectedly occupied yields a
+                # quietly downsized, partly-CPU run at ~1/100th the speed
+                # instead of an error. That is precisely how a leaked 26 GB
+                # GPU context went unnoticed for 12 hours. With --fit off the
+                # engine refuses to start rather than degrading in silence.
+                out["fit"] = "off"
     return out
 
 
@@ -499,6 +524,69 @@ def _apply_launch_guardrails(spec: "StartSpec", cfg: Config, engine: str) -> Non
         log.debug("launch guardrails skipped: %s", e)
 
 
+def _preflight_gpu_memory(spec: "StartSpec", cfg: Config, engine: str,
+                          *, gpu_only: bool) -> None:
+    """Compare *live* free VRAM against what this launch needs.
+
+    The sizing guardrails above reason about the card's nominal capacity. That
+    is not the same as what is actually free right now: another engine may
+    still be resident, or the driver may be holding a leaked context from a
+    killed process. On 2026-07-16 the latter left 7.5 GB free of 32 GB, and
+    because nothing checked, every launch quietly ran on CPU.
+
+    Warns always; raises ``ServerError`` only when the profile demands a
+    GPU-only run (``ram_spill_policy = "none"``), where a spill is a
+    correctness failure rather than a slow path.
+    """
+    if engine != "llama":
+        return
+    cards = mem_guard.read_gpu_mem()
+    if not cards:
+        return
+    gpu = max(cards, key=lambda g: g.vram_total)
+    need = mem_guard.file_gb(spec.model_path)
+    if spec.mmproj_path:
+        need += mem_guard.file_gb(spec.mmproj_path)
+    ctx = spec.extra_args.get("ctx-size")
+    try:
+        ctx = int(ctx) if ctx is not None else None
+    except (TypeError, ValueError):
+        ctx = None
+    if ctx:
+        kv = mem_guard.kv_cache_gb(spec.model_path, ctx,
+                                   kv_cache_type=str(
+                                       spec.extra_args.get("cache-type-k") or ""))
+        if kv:
+            need += kv
+    free = gpu.vram_free
+    stale = mem_guard.stale_kfd_pids()
+    if stale:
+        log.error(
+            "GPU has leaked contexts from dead PIDs %s — %.1f GB VRAM and "
+            "%.1f GB host RAM (GTT) are pinned and unreclaimable. Clearing "
+            "needs a GPU reset or reboot; not doing that automatically.",
+            sorted(stale), gpu.vram_used, gpu.gtt_used)
+    if need <= free:
+        return
+    detail = (f"{spec.model_id} needs ~{need:.1f} GB on the GPU "
+              f"(weights + KV at ctx {ctx or '?'}) but only {free:.1f} GB of "
+              f"{gpu.vram_total:.0f} GB is free "
+              f"({gpu.vram_used:.1f} GB already in use"
+              + (f", {gpu.gtt_used:.1f} GB pinned as host RAM/GTT"
+                 if gpu.gtt_used > 1.0 else "") + ")")
+    if stale:
+        detail += (f"; leaked GPU contexts from dead PIDs {sorted(stale)} are "
+                   "holding memory — a GPU reset or host reboot is required to "
+                   "reclaim it")
+    if gpu_only:
+        raise ServerError(
+            f"refusing to start: {detail}. This profile requires a full-GPU "
+            f"run (ram_spill_policy='none'), and starting anyway would spill "
+            f"to system RAM and run ~100x slower.")
+    log.warning("preflight: %s — will spill to system RAM and run far slower",
+                detail)
+
+
 class ServerError(Exception):
     pass
 
@@ -539,6 +627,10 @@ class ServerManager:
         self._lock = asyncio.Lock()
         self._log_fp = None  # type: ignore[assignment]
         self._intentional_stop = False
+        # Set once the driver has been seen failing to reclaim a dead engine's
+        # GPU memory. Sticky: only a GPU reset or host reboot clears the
+        # underlying condition, so it must not be reset by a later good stop.
+        self.gpu_leak_detected = False
         # subscribers to unexpected-exit events
         # Each listener queue receives ``(slot_id, returncode)`` tuples so a
         # supervisor watching multiple slots can tell whose child died.
@@ -619,6 +711,14 @@ class ServerManager:
                 )
 
             _apply_launch_guardrails(spec, self.cfg, engine)
+            # Live free-VRAM check. Runs after the guardrails so it sees the
+            # final ctx-size, and before the process exists so a GPU-only
+            # profile fails fast with a readable reason instead of starting a
+            # doomed, silently-CPU-bound engine.
+            _preflight_gpu_memory(
+                spec, self.cfg, engine,
+                gpu_only=(str(spec.extra_args.get("fit", "")).lower() == "off"
+                          or spec.extra_args.get("n-gpu-layers") == -1))
             cmd = spec.cmdline(self.cfg.llama_server_binary, port, engine=engine)
             log_path = self.cfg.logs_dir / self._log_name
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -730,6 +830,9 @@ class ServerManager:
     async def _terminate(self) -> None:
         if not self.proc:
             return
+        pid = self.proc.pid
+        before = mem_guard.read_gpu_mem()
+        killed = False
         if self.proc.returncode is None:
             try:
                 self.proc.send_signal(signal.SIGTERM)
@@ -738,7 +841,23 @@ class ServerManager:
             try:
                 await asyncio.wait_for(self.proc.wait(), timeout=STOP_GRACE_S)
             except asyncio.TimeoutError:
+                # Before escalating, check whether the driver still holds a GPU
+                # context for this PID. If it does, SIGKILL risks leaking that
+                # context permanently (recoverable only by GPU reset/reboot),
+                # so give it a much longer window to finish unwinding first.
+                if pid in mem_guard.kfd_proc_pids():
+                    log.warning(
+                        "llama-server (pid %s) ignored SIGTERM and still holds a "
+                        "GPU context — waiting up to %.0fs for a clean exit "
+                        "rather than SIGKILLing into an in-flight GPU op "
+                        "(that leaks VRAM/GTT until the next reboot)",
+                        pid, STOP_GRACE_GPU_S)
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(self.proc.wait(),
+                                               timeout=STOP_GRACE_GPU_S)
+            if self.proc.returncode is None:
                 log.warning("llama-server did not exit on SIGTERM, escalating to SIGKILL")
+                killed = True
                 try:
                     self.proc.kill()
                 except ProcessLookupError:
@@ -747,11 +866,103 @@ class ServerManager:
                     await asyncio.wait_for(self.proc.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
                     log.error("llama-server still alive after SIGKILL — leaking")
+        await self._verify_gpu_released(pid, before, killed=killed)
         self._close_log()
         self.proc = None
         if self._wait_task and not self._wait_task.done():
             self._wait_task.cancel()
         self._wait_task = None
+
+    async def _verify_gpu_released(self, pid: int,
+                                   before: list[mem_guard.GpuMem],
+                                   *, killed: bool) -> None:
+        """Confirm the driver handed back the engine's GPU memory after exit.
+
+        A leaked KFD context is silent: `rocm-smi` keeps reporting the card as
+        mostly free once device VRAM drains into GTT, while the pinned host RAM
+        never comes back and every subsequent launch quietly falls back to CPU.
+        We detect it two ways — a KFD context still registered to a PID that no
+        longer exists, and memory that never drops after exit.
+
+        This only *records* the condition. Clearing it needs a GPU reset or a
+        reboot, and on a remotely-managed box an unattended reboot can wedge
+        the machine for days, so the decision belongs to the operator.
+        """
+        if not before:
+            return
+        deadline = time.time() + GPU_RELEASE_TIMEOUT_S
+        stale: set[int] = set()
+        after: list[mem_guard.GpuMem] = before
+        while time.time() < deadline:
+            await asyncio.sleep(GPU_RELEASE_POLL_S)
+            stale = mem_guard.stale_kfd_pids()
+            after = mem_guard.read_gpu_mem()
+            if pid in stale:
+                break          # definitive: dead PID still holds a context
+            if not stale and self._gpu_freed(before, after):
+                return         # memory came back; nothing to report
+        by_card = {g.card: g for g in before}
+        details = []
+        for now in after:
+            was = by_card.get(now.card)
+            if not was:
+                continue
+            details.append(
+                f"{now.card}: VRAM {was.vram_used:.1f}→{now.vram_used:.1f} GB, "
+                f"GTT(host RAM) {was.gtt_used:.1f}→{now.gtt_used:.1f} GB")
+        # A stale KFD context (dead PID, live context) is definitive. The
+        # memory-delta check is only a heuristic, and it is wrong whenever
+        # another engine legitimately holds the card — multi-slot keeps other
+        # llama-servers resident — so only trust it when no live GPU process
+        # remains to account for what's still held.
+        leaked = bool(stale)
+        if not leaked and not mem_guard.kfd_proc_pids():
+            leaked = not self._gpu_freed(before, after)
+        if not leaked:
+            return
+        self.gpu_leak_detected = True
+        msg = ("GPU memory was NOT released after llama-server (pid %s) exited%s. "
+               "%s%s This is a driver-level leak: the memory (including host RAM "
+               "pinned as GTT) stays unusable until the GPU is reset or the host "
+               "rebooted. Engines started from now on may silently fall back to "
+               "CPU and run ~100x slower. NOT clearing it automatically — a GPU "
+               "reset or reboot can wedge this machine.")
+        log.error(msg, pid,
+                  " (after SIGKILL)" if killed else "",
+                  f"stale KFD contexts for dead PIDs: {sorted(stale)}. " if stale else "",
+                  "; ".join(details))
+        with contextlib.suppress(Exception):
+            self.db.log_event("gpu_memory_leak", {
+                "pid": pid, "killed": killed, "stale_kfd_pids": sorted(stale),
+                "cards": [{"card": g.card, "vram_used_gb": round(g.vram_used, 2),
+                           "gtt_used_gb": round(g.gtt_used, 2)} for g in after],
+            })
+
+    @staticmethod
+    def _gpu_freed(before: list[mem_guard.GpuMem],
+                   after: list[mem_guard.GpuMem]) -> bool:
+        """True if every card gave back all but a trivial amount of memory.
+
+        Compares VRAM + GTT together: a leak commonly migrates out of device
+        VRAM into pinned host RAM, so watching VRAM alone reads as "released".
+        """
+        by_card = {g.card: g for g in before}
+        for now in after:
+            was = by_card.get(now.card)
+            if not was:
+                continue
+            held_before = was.vram_used + was.gtt_used
+            held_now = now.vram_used + now.gtt_used
+            # Released means the memory came back in absolute terms, not merely
+            # that the number moved. A leak migrating VRAM->GTT barely changes
+            # the total (26.5 -> 25.0 GB), so a "dropped by more than a
+            # threshold" test would wave it through.
+            if held_now <= GPU_LEAK_THRESHOLD_GB:
+                continue
+            if held_now <= held_before * 0.25:
+                continue
+            return False
+        return True
 
     def _close_log(self) -> None:
         try:
