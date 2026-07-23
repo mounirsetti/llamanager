@@ -437,6 +437,64 @@ def detect_engine_for_id(model_id: str, models_dir: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Model-id classification (attachments / shards / launchable LLMs)
+#
+# Registry entries aren't all standalone launchable models: split GGUFs list
+# one entry per shard, and some repos ship attachment files (mmproj vision
+# projectors, external MTP drafters) that are wired into a launch, never
+# launched themselves. These helpers are the single source of truth for that
+# classification — the models page, topbar, chat picker, CLI, and the /v1
+# facade all filter through them.
+# ---------------------------------------------------------------------------
+
+# "-00002-of-00003.gguf" → a piece of a split GGUF. llama.cpp loads the whole
+# set from the first shard, so only that one is a launch target.
+SHARD_RE = _re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", _re.IGNORECASE)
+
+
+def shard_index(model_id: str) -> int | None:
+    """1-based index of a split-GGUF shard, or None if not sharded."""
+    m = SHARD_RE.search(model_id)
+    return int(m.group(1)) if m else None
+
+
+def is_mmproj_id(model_id: str) -> bool:
+    """True for vision-projector files — attachments referenced by a
+    profile's ``mmproj`` field, not launchable models."""
+    return "mmproj" in model_id.rsplit("/", 1)[-1].lower()
+
+
+def is_mtp_draft_id(model_id: str) -> bool:
+    """True for external MTP drafter files (``mtp-*.gguf``) — attachments
+    passed via ``--model-draft`` when a profile enables MTP."""
+    base = model_id.rsplit("/", 1)[-1].lower()
+    return base.startswith("mtp-") and base.endswith(".gguf")
+
+
+def model_role(model_id: str) -> str:
+    """Coarse role of a registry entry: ``"model"`` (launch target),
+    ``"mmproj"`` / ``"mtp_draft"`` (attachments), or ``"shard"`` (non-first
+    piece of a split GGUF)."""
+    if is_mmproj_id(model_id):
+        return "mmproj"
+    if is_mtp_draft_id(model_id):
+        return "mtp_draft"
+    part = shard_index(model_id)
+    if part is not None and part > 1:
+        return "shard"
+    return "model"
+
+
+def is_launchable_llm(model_id: str, models_dir: Path) -> bool:
+    """True for standalone, launchable text-family (LLM) models — excludes
+    attachments, non-first shards, and image/video/audio-family entries."""
+    if model_role(model_id) != "model":
+        return False
+    engine = detect_engine_for_id(model_id, models_dir)
+    return ENGINE_FAMILY.get(engine, "text") == "text"
+
+
+# ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
 

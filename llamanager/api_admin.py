@@ -197,8 +197,23 @@ class PullBody(BaseModel):
 
 @router.get("/models")
 async def models_list(request: Request, _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Every registry entry, annotated with ``engine`` / ``family`` /
+    ``role`` so consumers can tell launchable LLMs apart from diffusion /
+    audio models, attachments (mmproj, MTP drafters), and split-GGUF
+    shards. The CLI's ``models list`` shows role=model + family=text by
+    default and everything with ``--all``."""
+    from .config import ENGINE_FAMILY, detect_engine_for_id, model_role
     reg: Registry = request.app.state.registry
-    return JSONResponse([m.to_dict() for m in reg.list()])
+    cfg = request.app.state.cfg
+    out = []
+    for m in reg.list():
+        d = m.to_dict()
+        engine = detect_engine_for_id(m.model_id, cfg.models_dir)
+        d["engine"] = engine
+        d["family"] = ENGINE_FAMILY.get(engine, "text")
+        d["role"] = model_role(m.model_id)
+        out.append(d)
+    return JSONResponse(out)
 
 
 @router.post("/models/pull")

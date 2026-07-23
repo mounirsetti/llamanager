@@ -799,7 +799,18 @@ def _coerce(v: str) -> Any:
 
 def cmd_models_list(args):
     c = _make_admin_client(args)
-    return _run_admin(lambda: c.models_list())
+    if getattr(args, "all", False):
+        return _run_admin(lambda: c.models_list())
+
+    def _llms_only():
+        # Default view: launchable LLMs only — same de-clutter as the UI's
+        # models page. Diffusion/audio models, attachments (mmproj, MTP
+        # drafters) and non-first shards hide behind --all. Entries without
+        # the annotations (older daemon) pass through untouched.
+        return [m for m in c.models_list()
+                if m.get("role", "model") == "model"
+                and m.get("family", "text") == "text"]
+    return _run_admin(_llms_only)
 
 
 def cmd_models_pull(args):
@@ -1785,7 +1796,11 @@ def main(argv: list[str] | None = None) -> int:
     # models
     msp = sub.add_parser("models", help="manage downloaded models").add_subparsers(
         dest="models_cmd", required=True)
-    sp = msp.add_parser("list", help="list models on disk")
+    sp = msp.add_parser("list", help="list LLM models on disk")
+    sp.add_argument("--all", action="store_true",
+                    help="include everything the registry sees: diffusion/"
+                         "audio models, attachments (mmproj, MTP drafters) "
+                         "and split-GGUF shards")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_models_list)
     sp = msp.add_parser("pull", help="start a HuggingFace GGUF download")
     sp.add_argument("source",

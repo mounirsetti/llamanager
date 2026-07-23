@@ -298,6 +298,25 @@ def resolve_default(cfg: Config) -> tuple[str, str | None]:
     return model, profile
 
 
+def _find_mtp_draft(model_path: Path) -> Path | None:
+    """External MTP drafter shipped alongside a model: an ``mtp-*.gguf`` in
+    the model's directory or its ``MTP/`` subdirectory (the two layouts
+    unsloth repos use). Models with embedded draft heads have no such file —
+    self-speculation needs no ``--model-draft``. Returns the first match
+    alphabetically, or None."""
+    if not model_path.is_file():
+        return None
+    parent = model_path.parent
+    for d in (parent, parent / "MTP", parent / "mtp"):
+        if not d.is_dir():
+            continue
+        for p in sorted(d.iterdir()):
+            name = p.name.lower()
+            if p.is_file() and name.startswith("mtp-") and name.endswith(".gguf"):
+                return p
+    return None
+
+
 def _basic_to_args(prof: Profile, engine: str, model_path: Path) -> dict[str, Any]:
     """Translate the structured 'basic' fields on a profile into engine
     flags. Returns a fresh dict — caller layers raw profile.args on top."""
@@ -314,8 +333,11 @@ def _basic_to_args(prof: Profile, engine: str, model_path: Path) -> dict[str, An
     # otherwise push layers onto the CPU. Left unset, llama.cpp picks auto.
     if getattr(prof, "parallel", None) is not None and engine == "llama":
         out["parallel"] = int(prof.parallel)
-    # Multi-Token Prediction (llama only). The MTP draft heads ship inside the
-    # main model, so this is self-speculation — no separate draft model file.
+    # Multi-Token Prediction (llama only). Some models embed the MTP draft
+    # heads in the main GGUF (self-speculation, e.g. Qwen3.6 — no extra file);
+    # others ship an external drafter (mtp-*.gguf, e.g. unsloth's
+    # gemma-4-26B-A4B pack) that must be passed via --model-draft — llama.cpp
+    # only auto-discovers it for -hf pulls, not -m paths.
     # llama.cpp can't run MTP with more than one slot, so we pin --parallel 1
     # here (overriding any slot count above); the profile validator already
     # blocks an explicit parallel>1 + mmproj alongside MTP.
@@ -323,6 +345,9 @@ def _basic_to_args(prof: Profile, engine: str, model_path: Path) -> dict[str, An
         out["spec-type"] = "draft-mtp"
         out["spec-draft-n-max"] = int(prof.mtp_n_max) if prof.mtp_n_max else 2
         out["parallel"] = 1
+        draft = _find_mtp_draft(model_path)
+        if draft is not None:
+            out["model-draft"] = str(draft)
     # KV-cache quantization (llama only). Shrinks the per-token context memory
     # independently of the model's weight quant. Quantized KV needs flash
     # attention, so turn it on too. "" / "f16" leave the engine default.

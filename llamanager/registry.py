@@ -198,11 +198,13 @@ class Registry:
         if not self.models_dir.exists():
             return out
 
-        # Pass 1: discover image-engine directories. Each candidate dir
-        # is identified by a marker file (tokenizer_config / config.json
-        # / model_index.json for Diffusers pipelines) or by containing a
-        # flux*.gguf alongside a VAE. We collect their paths so the
-        # GGUF and MLX passes can skip files inside them.
+        # Pass 1: discover image/video-engine (diffusion pipeline)
+        # directories. Each candidate dir is identified by a marker file
+        # (tokenizer_config / config.json / model_index.json for Diffusers
+        # pipelines) or by containing a flux*.gguf alongside a VAE. We
+        # collect their paths so the GGUF and MLX passes can skip files
+        # inside them — a Wan pipeline's text_encoder/ or transformer/
+        # subdir would otherwise be mis-listed as a standalone MLX model.
         image_dirs: set[Path] = set()
         for marker in ("tokenizer_config.json", "config.json", "model_index.json"):
             for p in self.models_dir.rglob(marker):
@@ -210,7 +212,7 @@ class Registry:
                 if d == self.models_dir:
                     continue
                 engine = detect_engine_for_path(d)
-                if ENGINE_FAMILY.get(engine, "text") == "image":
+                if ENGINE_FAMILY.get(engine, "text") in ("image", "video"):
                     image_dirs.add(d)
         # Flux2 dirs may not have any marker config — detect via file shape.
         for p in self.models_dir.rglob("*.gguf"):
@@ -218,7 +220,7 @@ class Registry:
             if d == self.models_dir or d in image_dirs:
                 continue
             engine = detect_engine_for_path(d)
-            if ENGINE_FAMILY.get(engine, "text") == "image":
+            if ENGINE_FAMILY.get(engine, "text") in ("image", "video"):
                 image_dirs.add(d)
 
         def _is_inside_image_dir(p: Path) -> bool:
@@ -631,16 +633,18 @@ class Registry:
         if not repo_dir.is_dir():
             return
 
-        # First: is this an image-engine model? If so, register the dir
-        # itself as the model_id and seed adapter-specific profiles.
+        # First: is this an image/video-engine model? If so, register the
+        # dir itself as the model_id and seed adapter-specific profiles.
         engine = detect_engine_for_path(repo_dir)
-        if ENGINE_FAMILY.get(engine, "text") == "image":
+        if ENGINE_FAMILY.get(engine, "text") in ("image", "video"):
             self._seed_image_profiles(repo, repo_dir, engine)
             return
 
-        # Collect GGUF files, separate main models from mmproj files
+        # Collect GGUF files, separate main models from attachments
+        # (mmproj projectors, external MTP drafters).
         main_models: list[str] = []
         mmproj_files: list[str] = []
+        has_mtp_draft = False
         for p in sorted(repo_dir.rglob("*.gguf")):
             if not p.is_file():
                 continue
@@ -648,6 +652,12 @@ class Registry:
             name_lower = p.name.lower()
             if "mmproj" in name_lower:
                 mmproj_files.append(rel)
+            elif name_lower.startswith("mtp-"):
+                # External MTP drafter (unsloth MTP packs) — an attachment
+                # wired in via --model-draft at launch, not a main model.
+                # Without this it can win the alphabetical main-model pick
+                # (MTP/ sorts before lowercase names).
+                has_mtp_draft = True
             else:
                 main_models.append(rel)
 
@@ -686,10 +696,19 @@ class Registry:
         # Pick the first mmproj if one exists in the same repo
         mmproj = mmproj_files[0] if mmproj_files else ""
 
+        # A shipped MTP drafter means the model is MTP-trained — enable
+        # speculative decoding out of the box (the launcher wires the
+        # drafter in via --model-draft). Only when no mmproj was picked:
+        # llama.cpp can't run MTP alongside a vision projector, and we
+        # keep the existing vision-first seeding for repos that ship both
+        # (the profile editor makes flipping to MTP a one-click change).
+        seed_mtp = has_mtp_draft and not mmproj
+
         prof = Profile(
             name=profile_name,
             mmproj=mmproj,
             ctx_size=4096,
+            mtp=seed_mtp,
             args={"temp": 0.7},
         )
 

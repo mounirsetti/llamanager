@@ -7,7 +7,8 @@
    lives. ``current`` keeps a previously-set value selected even if the file
    isn't on disk anymore. Shared by the edit and create profile forms. #}
 {% macro mmproj_select(m, current) %}
-<select class="lm-input lm-input--mono lm-mmproj-select" name="mmproj" {% if m.engine != 'llama' %}disabled{% endif %}>
+<select class="lm-input lm-input--mono lm-mmproj-select" name="mmproj" {% if m.engine != 'llama' %}disabled{% endif %}
+        onchange="if(this.value){var f=this.closest('form'),c=f&&f.querySelector('input[name=mtp]');if(c&&c.checked){c.checked=false;c.dispatchEvent(new Event('change'));}}">
   <option value="" data-mmproj-gb="0" {% if not current %}selected{% endif %}>— none —</option>
   {% if m.mmproj_same %}
   <optgroup label="In this model's folder">
@@ -85,25 +86,39 @@
 {% endif %}
 {% endmacro %}
 
-{# Multi-Token Prediction (llama text models only). Only works on models
-   trained with MTP draft heads (e.g. unsloth *-MTP-GGUF packs); enabling it
-   on a plain model makes llama-server refuse to start. `enabled`/`n_max` are
-   the saved values (or false/none on the create form). MTP is single-slot and
-   can't co-exist with a vision projector — the server pins --parallel 1 and
-   the form rejects an mmproj when this is on. #}
+{# Multi-Token Prediction (llama text models only). Two flavours: models
+   with an external drafter file in their repo (mtp-*.gguf — has_mtp is set,
+   llamanager passes it via --model-draft automatically) and models with
+   embedded draft heads (self-speculation, no file). The checkbox reads
+   positive when we *know* a drafter ships with the model, and warns
+   otherwise. `enabled`/`n_max` are the saved values (or false/none on the
+   create form). MTP is single-slot and can't co-exist with a vision
+   projector — the server pins --parallel 1, and the checkbox/mmproj-select
+   clear each other in the UI (the form validator still backstops it). The
+   drafted-tokens input only shows while the box is ticked. #}
 {% macro mtp_field(m, enabled, n_max) %}
 {% if m.engine == 'llama' and m.engine_family != 'image' %}
-<label class="lm-field-label" style="display:flex; align-items:center; gap:.5rem;">
-  <input type="checkbox" name="mtp" value="on" {% if enabled %}checked{% endif %}>
-  Multi-Token Prediction (MTP)
-  <span class="lm-field-hint">llama-server <code>--spec-type draft-mtp</code>: built-in speculative decoding off the model's own MTP heads — <strong>no separate draft model</strong>. ~1.5–2× faster on MTP-trained models (e.g. <code>*-MTP-GGUF</code>). Forces a single slot and is incompatible with an mmproj. Enabling it on a non-MTP model will fail to launch.</span>
-</label>
-<label class="lm-field-label" style="margin-top:.4rem;">Drafted tokens per step
-  <span class="lm-field-hint">llama-server <code>--spec-draft-n-max</code>. Blank = 2 (the unsloth default).</span>
-</label>
-<input class="lm-input" type="number" name="mtp_n_max" min="1" step="1"
-       value="{{ n_max if n_max is not none else '' }}"
-       placeholder="2">
+<div class="lm-mtp-block">
+  <label class="lm-field-label" style="display:flex; align-items:center; gap:.5rem;">
+    <input type="checkbox" name="mtp" value="on" {% if enabled %}checked{% endif %}
+           onchange="var f=this.closest('form');if(this.checked){var s=f&&f.querySelector('select[name=mmproj]');if(s&&s.value){s.value='';s.dispatchEvent(new Event('change'));}}var b=this.closest('.lm-mtp-block'),x=b&&b.querySelector('.lm-mtp-extra');if(x){x.hidden=!this.checked;}">
+    Faster generation (MTP)
+    {% if m.has_mtp %}<span class="lm-pill" style="color: var(--ok, #3a9);">drafter available</span>{% endif %}
+    {% if m.has_mtp %}
+    <span class="lm-field-hint">This repo ships an MTP drafter (<code>{{ m.mtp_draft_file }}</code>). Tick to enable speculative decoding — llamanager passes the drafter to llama-server automatically (<code>--model-draft</code> + <code>--spec-type draft-mtp</code>), typically ~1.5–2× faster generation. Runs a single request slot and can't combine with a vision projector — ticking this clears the mmproj field.</span>
+    {% else %}
+    <span class="lm-field-hint">llama-server <code>--spec-type draft-mtp</code>: speculative decoding off MTP draft heads embedded in the model itself. <strong>Only works on MTP-trained models</strong> — on a plain model the engine will refuse to start. Runs a single request slot and can't combine with a vision projector — ticking this clears the mmproj field.</span>
+    {% endif %}
+  </label>
+  <div class="lm-mtp-extra" {% if not enabled %}hidden{% endif %}>
+    <label class="lm-field-label" style="margin-top:.4rem;">Drafted tokens per step
+      <span class="lm-field-hint">llama-server <code>--spec-draft-n-max</code>. Blank = 2 (the unsloth default) · 4 works well for the unsloth MTP packs.</span>
+    </label>
+    <input class="lm-input" type="number" name="mtp_n_max" min="1" step="1"
+           value="{{ n_max if n_max is not none else '' }}"
+           placeholder="2">
+  </div>
+</div>
 {% endif %}
 {% endmacro %}
 
@@ -138,6 +153,7 @@
         {% if is_loaded %}<span class="lm-pill lm-pill--running">loaded</span>{% endif %}
         {% if is_default_model %}<span class="lm-pill" style="color: var(--accent); border-color: var(--accent);">default</span>{% endif %}
         {% if m.has_mmproj %}<span class="lm-pill" style="color: var(--fg-2);" title="A vision projector (mmproj) is available in this repo — wire it up in a profile to enable image input.">vision</span>{% endif %}
+        {% if m.has_mtp %}<span class="lm-pill" style="color: var(--fg-2);" title="An MTP drafter ships with this model — tick “Faster generation (MTP)” in a profile and llamanager wires it up automatically (~1.5–2× faster decoding).">MTP</span>{% endif %}
         <span class="lm-model__summary-spacer"></span>
         <span class="lm-model__summary-meta">
           {{ '%.1f GB' % (m.size / (1024**3)) }}

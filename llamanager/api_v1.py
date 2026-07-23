@@ -34,7 +34,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .auth import AuthManager, Origin
 from .caller import describe_caller
-from .config import ENGINE_FAMILY, Config, Profile, detect_engine_for_id
+from .config import (ENGINE_FAMILY, Config, Profile, detect_engine_for_id,
+                     is_launchable_llm)
 from .audio_runner import (
     AudioError, AudioTaskRunner, execute_transcription, resolve_audio_engine,
 )
@@ -1802,7 +1803,14 @@ async def list_models(request: Request) -> Response:
 
     visible: list[str] = []
     if "*" in origin.allowed_models:
-        visible = [m.model_id for m in reg.list()]
+        # Wildcard origins see launchable LLMs only — this is the OpenAI
+        # chat-completions facade, so diffusion/audio models, attachments
+        # (mmproj, MTP drafters) and non-first split-GGUF shards would just
+        # be noise (or launch failures) for the client's model picker.
+        # Explicitly allowlisted ids below are surfaced as-is.
+        cfg = request.app.state.cfg
+        visible = [m.model_id for m in reg.list()
+                   if is_launchable_llm(m.model_id, cfg.models_dir)]
     else:
         registered = {m.model_id for m in reg.list()}
         for a in origin.allowed_models:

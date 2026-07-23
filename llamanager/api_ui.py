@@ -36,11 +36,12 @@ from fastapi.templating import Jinja2Templates
 
 from .auth import AuthManager, Origin
 from .config import (
-    ENGINE_FAMILY, Profile, VALID_FLASH_ATTN, VALID_KV_CACHE_TYPES,
+    ENGINE_FAMILY, Profile, SHARD_RE, VALID_FLASH_ATTN, VALID_KV_CACHE_TYPES,
     VALID_RAM_SPILL_POLICIES,
     VALID_THINKING,
-    delete_profile, detect_engine_for_id, load_config, rename_profile,
-    save_profile, set_default_args, set_model_default_profile,
+    delete_profile, detect_engine_for_id, is_mmproj_id, is_mtp_draft_id,
+    load_config, rename_profile,
+    save_profile, set_default_args, set_model_default_profile, shard_index,
     update_coexistence_policy, update_defaults, update_image_config,
 )
 from . import engines as image_engines
@@ -988,9 +989,10 @@ def _topbar_models(request: Request) -> dict[str, Any]:
     image: list[dict[str, Any]] = []
     video: list[dict[str, Any]] = []
     for entry in reg.list():
-        # Same de-clutter as the models list: projectors aren't launchable
-        # and only a split GGUF's first shard is the load target.
-        if _is_mmproj(entry.model_id):
+        # Same de-clutter as the models list: projectors and MTP drafters
+        # aren't launchable and only a split GGUF's first shard is the load
+        # target.
+        if _is_mmproj(entry.model_id) or _is_mtp_draft(entry.model_id):
             continue
         part = _shard_index(entry.model_id)
         if part is not None and part > 1:
@@ -1443,21 +1445,12 @@ def _ctx_max_for(path: Path, engine: str) -> int:
 
 # A split/sharded GGUF is named ``<name>-00001-of-00005.gguf``. llama.cpp
 # loads the whole set from the first shard, so only that one is a launch
-# target; the rest are pieces of the same model.
-_SHARD_RE = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", re.IGNORECASE)
-
-
-def _is_mmproj(model_id: str) -> bool:
-    """True for vision-projector files. These aren't launchable models —
-    they're attachments referenced by a profile's ``mmproj`` field — so the
-    models list shouldn't show them as their own cards."""
-    return "mmproj" in model_id.rsplit("/", 1)[-1].lower()
-
-
-def _shard_index(model_id: str) -> int | None:
-    """1-based index of a split-GGUF shard, or None if not sharded."""
-    m = _SHARD_RE.search(model_id)
-    return int(m.group(1)) if m else None
+# target; the rest are pieces of the same model. Classification helpers are
+# shared with the CLI / admin API / v1 facade — see config.py.
+_SHARD_RE = SHARD_RE
+_is_mmproj = is_mmproj_id
+_is_mtp_draft = is_mtp_draft_id
+_shard_index = shard_index
 
 
 def _model_dir(model_id: str) -> str:
@@ -1546,18 +1539,28 @@ def _models_ctx(request: Request) -> dict:
     # series (so the first shard's card shows the whole model's size, not just
     # part 1). Projector + non-first-shard files are then skipped as cards.
     mmproj_dirs: set[str] = set()
+    mtp_dirs: dict[str, str] = {}   # repo dir → drafter filename (display)
     shard_series_bytes: dict[str, int] = {}
     for entry in entries:
         if _is_mmproj(entry.model_id):
             mmproj_dirs.add(_model_dir(entry.model_id))
+        if _is_mtp_draft(entry.model_id):
+            # Drafter may live in an MTP/ subdir of the repo — credit the
+            # repo dir too so the main model's card gets the hint.
+            d = _model_dir(entry.model_id)
+            base = entry.model_id.rsplit("/", 1)[-1]
+            mtp_dirs.setdefault(d, base)
+            if d.rsplit("/", 1)[-1].lower() == "mtp" and "/" in d:
+                mtp_dirs.setdefault(d.rsplit("/", 1)[0], base)
         if _shard_index(entry.model_id) is not None:
             key = _SHARD_RE.sub("", entry.model_id)
             shard_series_bytes[key] = shard_series_bytes.get(key, 0) + entry.size
 
     for entry in entries:
         mid = entry.model_id
-        # Vision projectors are attachments, not models — never list them.
-        if _is_mmproj(mid):
+        # Vision projectors / MTP drafters are attachments, not models —
+        # never list them as their own cards.
+        if _is_mmproj(mid) or _is_mtp_draft(mid):
             continue
         # For a split GGUF, only the first shard represents the model.
         part = _shard_index(mid)
@@ -1616,6 +1619,12 @@ def _models_ctx(request: Request) -> dict:
         # Flag models whose repo ships a projector so the card can hint that
         # it's vision-capable (the projector is wired up via a profile).
         d["has_mmproj"] = bool(_model_dir(mid)) and _model_dir(mid) in mmproj_dirs
+        # Same for an external MTP drafter (mtp-*.gguf): the card hints that
+        # enabling MTP in a profile will speed up decode via speculation.
+        # ``mtp_draft_file`` names the drafter so the profile editor can show
+        # exactly what will be wired in via --model-draft.
+        d["has_mtp"] = bool(_model_dir(mid)) and _model_dir(mid) in mtp_dirs
+        d["mtp_draft_file"] = mtp_dirs.get(_model_dir(mid), "")
         # Reasoning-budget advice: measured decode rate + a suggested budget
         # (~20s of thinking at that rate). llama text models only.
         rate = decode_rates.get(mid)
@@ -1651,7 +1660,10 @@ def _models_ctx(request: Request) -> dict:
             prof_entries.sort(key=lambda e: e["name"])
         d["profiles"] = prof_entries
         d["default_profile"] = default_profile
-        if d["engine_family"] == "image":
+        if d["engine_family"] in ("image", "video"):
+            # Video (Wan) pipelines live on the Diffusion models / Videos
+            # pages — group them with the image family here so they never
+            # land in the LLM list.
             image_models.append(d)
         elif d["engine_family"] == "audio":
             # ASR models have their own page (/ui/asr-models) — keep them out
@@ -2952,9 +2964,15 @@ async def chat_view(request: Request, _: Origin = Depends(require_admin_ui)) -> 
     sess = _current_session(request)
     # Filter to LLM-family (text engines only). Image-family models
     # don't belong in the chat picker even though they show up in the
-    # registry — confirms via ENGINE_FAMILY.
+    # registry — confirms via ENGINE_FAMILY. Attachments (mmproj
+    # projectors, MTP drafters) and non-first shards aren't launchable.
     llm_models: list[str] = []
     for m in reg.list():
+        if _is_mmproj(m.model_id) or _is_mtp_draft(m.model_id):
+            continue
+        part = _shard_index(m.model_id)
+        if part is not None and part > 1:
+            continue
         engine = detect_engine_for_id(m.model_id, cfg.models_dir)
         if ENGINE_FAMILY.get(engine, "text") == "text":
             llm_models.append(m.model_id)
