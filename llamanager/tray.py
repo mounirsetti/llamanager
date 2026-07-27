@@ -30,7 +30,7 @@ from typing import Any
 
 from . import service_ctl
 from .admin_client import AdminClient, AdminClientError, resolve_base_url
-from .config import Config, load_config
+from .config import Config, ConfigError, expand, load_config
 
 log = logging.getLogger("llamanager.tray")
 
@@ -464,9 +464,14 @@ class TrayApp:
         return 0
 
 
-def _setup_tray_logging(cfg: Config) -> Path | None:
+def _setup_tray_logging(cfg: Config | None = None) -> Path | None:
     """Log to logs_dir/tray.log so a failed *autostart* launch (no console)
-    leaves a trace instead of vanishing. Also keeps the console handler."""
+    leaves a trace instead of vanishing. Also keeps the console handler.
+
+    ``cfg`` is optional so this can run *before* the config is loaded — a
+    config failure is exactly the case that used to vanish silently. Without
+    a config we use the default data dir, which lives in $HOME and so is
+    available even when a configured models volume is not."""
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     root = logging.getLogger()
     root.setLevel(logging.INFO)
@@ -474,9 +479,10 @@ def _setup_tray_logging(cfg: Config) -> Path | None:
         sh = logging.StreamHandler()
         sh.setFormatter(fmt)
         root.addHandler(sh)
+    logs_dir = cfg.logs_dir if cfg is not None else expand("~/.llamanager") / "logs"
     try:
-        cfg.logs_dir.mkdir(parents=True, exist_ok=True)
-        log_path = cfg.logs_dir / "tray.log"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        log_path = logs_dir / "tray.log"
         fh = RotatingFileHandler(log_path, maxBytes=1 * 1024 * 1024,
                                  backupCount=2, encoding="utf-8")
         fh.setFormatter(fmt)
@@ -486,10 +492,27 @@ def _setup_tray_logging(cfg: Config) -> Path | None:
         return None
 
 
-def main(cfg: Config | None = None) -> int:
-    cfg = cfg or load_config()
+def main(cfg: Config | None = None,
+         config_path: Path | None = None) -> int:
+    # Logging first, config second. An autostart launch has no console and no
+    # systemd unit of its own, so anything that fails before the log file is
+    # open leaves no trace at all — which is precisely what a bad models_dir
+    # used to do.
     log_path = _setup_tray_logging(cfg)
     log.info("tray starting (pid=%s, log=%s)", os.getpid(), log_path)
+    if cfg is None:
+        try:
+            cfg = load_config(config_path)
+        except ConfigError as e:
+            log.error("tray aborting — %s", e)
+            return 1
+        except Exception:
+            log.exception("tray aborting: configuration could not be loaded")
+            return 1
+        # Now that the real config is known, attach its log file too if it
+        # differs from the default we guessed above.
+        if cfg.logs_dir / "tray.log" != log_path:
+            log_path = _setup_tray_logging(cfg)
     try:
         return TrayApp(cfg).run()
     except SystemExit:

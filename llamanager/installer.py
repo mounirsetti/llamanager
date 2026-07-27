@@ -197,6 +197,11 @@ SYSTEMD_UNIT_TEMPLATE = """\
 Description=llamanager — manager and proxy for llama-server
 After=network-online.target
 Wants=network-online.target
+# Give up after 5 failed starts in 5 minutes. Without a limit, a permanent
+# fault (e.g. a models volume that never mounts) restarts forever, burying the
+# real error under thousands of identical journal entries.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple

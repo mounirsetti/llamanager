@@ -9,7 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .config import AUDIO_ENGINES, expand, load_config, write_default_config
+from .config import (AUDIO_ENGINES, ConfigError, expand, load_config,
+                     write_default_config)
 
 # Selectable ASR engines for `llamanager asr {install,setup,cancel-install}`.
 # Derived from the engine registry so new audio engines appear automatically;
@@ -58,8 +59,10 @@ def cmd_tray(args: argparse.Namespace) -> int:
             return 0
         return 1
     from .tray import main as tray_main
-    cfg = load_config(Path(args.config) if args.config else None)
-    return tray_main(cfg)
+    # Let the tray load the config itself: it sets up file logging first, so a
+    # config failure under autostart (no console) is recorded in tray.log
+    # instead of dying silently.
+    return tray_main(config_path=Path(args.config) if args.config else None)
 
 
 def cmd_init_config(args: argparse.Namespace) -> int:
@@ -2476,7 +2479,12 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
-    return args.func(args)
+    try:
+        return args.func(args)
+    except ConfigError as e:
+        # Actionable on its own — a traceback through pathlib only obscures it.
+        print(f"llamanager: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":  # pragma: no cover

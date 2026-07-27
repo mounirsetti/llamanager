@@ -37,6 +37,11 @@ from typing import Any, Iterator
 log = logging.getLogger(__name__)
 
 
+class ConfigError(RuntimeError):
+    """The configuration is unusable — a bad value, or a required directory
+    that cannot be created. Carries a message meant to be shown as-is."""
+
+
 DEFAULT_CONFIG_TOML = """\
 [server]
 # Bind to loopback by default. Bearer tokens are sent in cleartext over HTTP,
@@ -1024,10 +1029,55 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
     )
 
 
+# Mount roots where a configured directory commonly lives on a removable or
+# separately-mounted volume. If the volume isn't mounted, the path below the
+# root simply won't exist — and mkdir(parents=True) would try to create it.
+_MOUNT_ROOTS = ("/run/media", "/media", "/mnt", "/Volumes")
+
+
+def _nearest_existing(path: Path) -> Path:
+    """Deepest ancestor of ``path`` (including itself) that exists."""
+    for candidate in (path, *path.parents):
+        if candidate.exists():
+            return candidate
+    return Path(path.anchor or ".")
+
+
+def _ensure_dir(path: Path, setting: str) -> None:
+    """Create a required directory, or raise :class:`ConfigError` naming the
+    setting that points at it.
+
+    Without this, an unmounted volume produces a bare ``PermissionError`` from
+    deep inside ``pathlib``: ``mkdir(parents=True)`` walks up past the missing
+    mount point into the (root-owned) mount root and fails there, so the error
+    names a directory the operator never configured."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return
+    except OSError as e:
+        existing = _nearest_existing(path)
+        msg = f"{setting} = {path} is not usable: {e.strerror or e}"
+        under_mount_root = any(
+            str(path).startswith(root + "/") for root in _MOUNT_ROOTS
+        )
+        if under_mount_root and existing != path:
+            msg += (
+                f"\n  The volume it lives on looks unmounted — the deepest "
+                f"existing directory is {existing}."
+                f"\n  Mount it (an /etc/fstab entry makes it survive a reboot), "
+                f"or point {setting} somewhere else."
+            )
+        elif existing != path:
+            msg += f"\n  The deepest existing directory is {existing}."
+        raise ConfigError(msg) from e
+
+
 def load_config(path: Path | None = None) -> Config:
     """Load config from ``path`` (or default location). Missing keys use
     safe defaults; missing file uses bundled defaults entirely. Migrates
-    legacy flat ``[profiles.X]`` layouts on the fly."""
+    legacy flat ``[profiles.X]`` layouts on the fly.
+
+    Raises :class:`ConfigError` if a required directory can't be created."""
     cfg_path = expand(str(path)) if path else expand("~/.llamanager/config.toml")
     raw = _load_toml(cfg_path)
 
@@ -1174,9 +1224,9 @@ def load_config(path: Path | None = None) -> Config:
             log.exception("legacy config migration save failed for %s", cfg_path)
 
     # Ensure required dirs exist.
-    cfg.data_dir.mkdir(parents=True, exist_ok=True)
-    cfg.models_dir.mkdir(parents=True, exist_ok=True)
-    cfg.logs_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_dir(cfg.data_dir, "data_dir")
+    _ensure_dir(cfg.models_dir, "models_dir")
+    _ensure_dir(cfg.logs_dir, "logs_dir")
 
     return cfg
 
