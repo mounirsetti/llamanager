@@ -421,7 +421,20 @@
   }
 </style>
 
-<form id="lm-img-composer" class="lm-img-form" autocomplete="off">
+{# hx-boost="false" is load-bearing, not decoration.
+
+   base.html wraps the content block in hx-boost="true" + hx-ext="morph".
+   Boost intercepts *form submits* as well as links, so pressing Generate
+   fired a boosted GET /ui/images alongside the real POST — htmx binds its
+   submit handler after this page's inline listener, so our
+   preventDefault() never stopped it. The boosted response morphed <body>,
+   replacing #gen-grid, #gen-hint and friends underneath the still-running
+   generation: the live placeholders and progress were written to detached
+   nodes while a fresh, stateless copy of the page rendered on top. The
+   result was a generation that ran perfectly and showed nothing at all.
+   Same family of bug as the hx-disinherit fix noted in base.html:1505. #}
+<form id="lm-img-composer" class="lm-img-form" autocomplete="off"
+      hx-boost="false">
   <div class="gen-shell">
 
     {# ---- Feed ---- #}
@@ -524,6 +537,8 @@
     defaultProfile: {{ default_image_profile | tojson }},
     apiKey: "{{ api_key }}",
     galleryUrl: "/ui/images/gallery",
+    statusUrl: "/ui/images/status",
+    cancelUrlTpl: "/admin/queue/{id}/cancel",
     fileUrlPrefix: "/ui/images/file/",
     generationsUrl: "/v1/images/generations"
   };
@@ -535,7 +550,11 @@
   const $ = (id) => document.getElementById(id);
   const HISTORY_KEY = "lm_img_prompt_history";
 
-  const state = { nextBefore: null, inFlight: false, abort: null, seenUrls: new Set(), refs: [] };
+  const state = { nextBefore: null, inFlight: false, abort: null, seenUrls: new Set(),
+                  refs: [], requestId: null, detached: false, poll: null };
+  // Survives a reload so a reattached card can still show its prompt —
+  // the server tracks the job, not the text that produced it.
+  const INFLIGHT_KEY = "lm_img_inflight";
 
   const modelSel   = $("lm-img-model");
   const profileSel = $("lm-img-profile");
@@ -1017,7 +1036,7 @@
       div.className = "gen-card gen-card--live";
       div.innerHTML = `
         <div class="gen-live__top">
-          <span class="gen-live__dot"></span><span>Generating</span>
+          <span class="gen-live__dot"></span><span class="gen-live__label">Generating</span>
           <span class="gen-live__idx"></span>
         </div>
         <div class="gen-live__body">
@@ -1102,6 +1121,89 @@
     updateEmpty();
   }
 
+  // ---------- Reattach to a job already running on the server ----------
+  // A generation is a queued job, not a property of this page's SSE
+  // connection. Reloading used to drop the in-progress card and leave the
+  // feed looking idle while the GPU was busy; now we ask the server what
+  // it's doing and rebuild the card from that.
+  function rememberInFlight(prompt, n) {
+    try {
+      localStorage.setItem(INFLIGHT_KEY, JSON.stringify({prompt, n, at: Date.now()}));
+    } catch {}
+  }
+  function forgetInFlight() {
+    try { localStorage.removeItem(INFLIGHT_KEY); } catch {}
+  }
+  function recallInFlight() {
+    try {
+      const v = JSON.parse(localStorage.getItem(INFLIGHT_KEY) || "null");
+      // Stale entries (a job that ended while the tab was closed) would
+      // otherwise caption an unrelated run.
+      if (v && Date.now() - v.at < 3 * 3600 * 1000) return v;
+    } catch {}
+    return null;
+  }
+
+  async function fetchStatus() {
+    const r = await fetch(cfg.statusUrl, {
+      headers: cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : {},
+      credentials: "same-origin",
+    });
+    if (!r.ok) throw new Error(`status ${r.status}`);
+    return r.json();
+  }
+
+  function applyStatus(st) {
+    stage.phase = st.step != null ? "running" : "loading";
+    stage.step = st.step; stage.total = st.total_steps;
+    if (st.started_at) live.startedAt = st.started_at * 1000;
+    renderStage();
+  }
+
+  /** Poll while detached (no SSE of our own) until the job ends, then
+   *  pull the finished image into the placeholder. */
+  function startPolling() {
+    if (state.poll) return;
+    state.poll = setInterval(async () => {
+      let st;
+      try { st = await fetchStatus(); }
+      catch { return; }               // transient — keep the card up
+      if (st.status === "generating" || st.busy) { applyStatus(st); return; }
+      // Finished (or failed) while we were away.
+      clearInterval(state.poll); state.poll = null;
+      state.detached = false;
+      stage.phase = "saving"; renderStage();
+      await refreshFront({resolve: true});
+      if (live.cards.length) {
+        await new Promise(r => setTimeout(r, 600));
+        await refreshFront({resolve: true});
+      }
+      clearLive();
+      setBusy(false);
+      forgetInFlight();
+    }, 1500);
+  }
+
+  async function reattachIfBusy() {
+    let st;
+    try { st = await fetchStatus(); } catch { return; }
+    if (st.status !== "generating" && !st.busy) { forgetInFlight(); return; }
+    const remembered = recallInFlight();
+    const n = (remembered && remembered.n) || 1;
+    const prompt = (remembered && remembered.prompt)
+      || `${st.model_id || st.engine || "Image"} — started elsewhere`;
+    state.requestId = st.request_id || null;
+    state.detached = true;
+    setBusy(true);
+    makeLiveCards(prompt, n);
+    live.cards.forEach(c => {
+      const label = c.querySelector(".gen-live__label");
+      if (label) label.textContent = "Reattached";
+    });
+    applyStatus(st);
+    startPolling();
+  }
+
   function setBusy(busy) {
     state.inFlight = busy;
     submitBtn.disabled = busy;
@@ -1116,7 +1218,36 @@
       document.title = baseTitle;
     }
   }
-  cancelBtn.addEventListener("click", () => { if (state.abort) state.abort.abort(); });
+  // Cancel must reach the server. Aborting the fetch only drops our end
+  // of the stream — and since a dropped client no longer stops the job
+  // (so a refresh doesn't kill your generation), that would leave the
+  // engine running with the UI claiming it had stopped.
+  cancelBtn.addEventListener("click", async () => {
+    const id = state.requestId;
+    if (id) {
+      cancelBtn.disabled = true;
+      try {
+        const r = await fetch(cfg.cancelUrlTpl.replace("{id}", encodeURIComponent(id)), {
+          method: "POST",
+          headers: cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : {},
+          credentials: "same-origin",
+        });
+        if (!r.ok && r.status !== 404) showError(`Could not cancel: HTTP ${r.status}`);
+      } catch (e) {
+        showError(`Could not cancel: ${e.message}`);
+      } finally {
+        cancelBtn.disabled = false;
+      }
+    }
+    // Drop our stream too, so the UI unwinds without waiting for the
+    // engine's dying breath. The polling path (detached) unwinds itself.
+    if (state.abort) state.abort.abort();
+    else if (state.detached) {
+      if (state.poll) { clearInterval(state.poll); state.poll = null; }
+      state.detached = false;
+      clearLive(); setBusy(false); forgetInFlight();
+    }
+  });
 
   const stage = { phase: "", pos: -1, step: null, total: null };
   let sawResult = false;
@@ -1215,8 +1346,11 @@
     stage.phase = ""; stage.pos = -1; stage.step = null; stage.total = null;
     sawResult = false;
 
+    state.requestId = null; state.detached = false;
+
     const body = buildRequestBody();
     makeLiveCards(promptText, body.n);
+    rememberInFlight(promptText, body.n);
     updateLive("Sending…", null);
     $("gen-feed").scrollTop = 0;
 
@@ -1228,6 +1362,9 @@
         body: JSON.stringify(body), signal: ctrl.signal, credentials: "same-origin",
       });
       if (!r.ok) { const t = await r.text(); throw new Error(`HTTP ${r.status}: ${t.slice(0, 240)}`); }
+      // Needed to cancel server-side, and to know which job a reloaded
+      // page is looking at.
+      state.requestId = r.headers.get("x-llamanager-request-id") || null;
       const reader = r.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
@@ -1259,6 +1396,8 @@
       clearLive();
       setBusy(false);
       state.abort = null;
+      state.requestId = null;
+      forgetInFlight();
     }
   }
 
@@ -1282,7 +1421,7 @@
     renderOverrides();
     applyCaps();
   }
-  loadInitial();
+  loadInitial().then(reattachIfBusy);
   autosize();
 })();
 </script>

@@ -253,3 +253,96 @@ def test_dispatcher_full_cycle_marks_inflight_and_releases(tmp_path):
         asyncio.run(go())
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Regression: a busy image engine blocks dispatch even when the queue's
+# own in-flight counter says otherwise.
+#
+# The failure this pins down: a client that dropped its SSE connection
+# mid-generation used to refund the image slot from the *response's*
+# finally block, while the diffusion engine kept running and holding its
+# VRAM. With image_in back at 0 the dispatcher happily started
+# llama-server on top of a live 26 GB image engine, filling the card.
+#
+# The queue therefore takes two independent readings — its counter and
+# the runner's run lock — and blocks if either says "busy".
+# ---------------------------------------------------------------------------
+
+class _FakeImageRunner:
+    """Minimal stand-in exposing the ``is_busy`` contract."""
+
+    def __init__(self) -> None:
+        self.busy = False
+
+    @property
+    def is_busy(self) -> bool:
+        return self.busy
+
+
+def test_busy_image_engine_blocks_text_even_when_counter_is_zero(tmp_path):
+    cfg = _make_cfg(tmp_path, allow_concurrent=False)
+    db = DB(cfg.db_path)
+    try:
+        sm = ServerManager(cfg, db)
+        qm = QueueManager(cfg, db, sm)
+        runner = _FakeImageRunner()
+        qm.image_runner = runner
+
+        async def go():
+            _plant_text_model(cfg)
+            _plant_image_model(cfg)
+            text_req = await qm.enqueue(origin=_make_origin(),
+                                        model_required="tiny.gguf")
+            image_req = await qm.enqueue(origin=_make_origin(),
+                                         model_required="img-engine")
+
+            # Counter says the GPU is free; the engine says otherwise.
+            # This is exactly the post-disconnect state.
+            qm._in_flight_count["image"] = 0
+            runner.busy = True
+            assert qm._can_dispatch(text_req) is False, \
+                "text must not start while a diffusion engine holds the GPU"
+            assert qm._can_dispatch(image_req) is False, \
+                "a second image must not stack onto a running engine"
+
+            # Engine releases the GPU -> both become dispatchable again.
+            runner.busy = False
+            assert qm._can_dispatch(text_req) is True
+            assert qm._can_dispatch(image_req) is True
+
+        asyncio.run(go())
+    finally:
+        db.close()
+
+
+def test_image_runner_missing_or_broken_never_blocks_dispatch(tmp_path):
+    """The extra check is a safety net, not a new way to wedge the queue."""
+    cfg = _make_cfg(tmp_path, allow_concurrent=False)
+    db = DB(cfg.db_path)
+    try:
+        sm = ServerManager(cfg, db)
+        qm = QueueManager(cfg, db, sm)
+
+        async def go():
+            _plant_text_model(cfg)
+            text_req = await qm.enqueue(origin=_make_origin(),
+                                        model_required="tiny.gguf")
+
+            # Never wired up.
+            assert qm._image_engine_busy() is False
+            assert qm._can_dispatch(text_req) is True
+
+            class _Broken:
+                @property
+                def is_busy(self):
+                    raise RuntimeError("runtime state unreadable")
+
+            qm.image_runner = _Broken()
+            assert qm._image_engine_busy() is False, \
+                "a raising is_busy must degrade to 'not busy', not propagate"
+            assert qm._can_dispatch(text_req) is True
+
+        asyncio.run(go())
+    finally:
+        db.close()

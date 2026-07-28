@@ -3292,6 +3292,38 @@ async def images_gallery(request: Request,
     return _JSONResponse(payload)
 
 
+@router.get("/images/status")
+async def images_status(request: Request,
+                        _: Origin = Depends(require_admin_ui)) -> Response:
+    """Is a generation in flight, and how far along is it?
+
+    Lets the images page reattach to a running job after a reload. The
+    generation is a queued job, not a property of whichever SSE
+    connection started it, so refreshing the page must not lose sight of
+    it — without this the in-progress card simply vanished and the image
+    appeared out of nowhere minutes later.
+
+    ``queued`` counts image-family requests still waiting, so a reloaded
+    page can also show work that hasn't reached the GPU yet.
+    """
+    from fastapi.responses import JSONResponse as _JSONResponse
+    runner = getattr(request.app.state, "image_runner", None)
+    if runner is None:
+        return _JSONResponse({"status": "idle", "queued": 0})
+    payload = dict(runner.status())
+    payload["busy"] = bool(runner.is_busy)
+    qm = getattr(request.app.state, "queue", None)
+    queued = 0
+    if qm is not None:
+        try:
+            queued = sum(1 for r in qm.snapshot().get("pending", [])
+                         if r.get("task_type") == "image")
+        except Exception:  # noqa: BLE001 — status must never 500
+            queued = 0
+    payload["queued"] = queued
+    return _JSONResponse(payload)
+
+
 @router.get("/images/file/{day}/{origin}/{name}")
 async def images_file_serve(request: Request, day: str, origin: str, name: str,
                             _: Origin = Depends(require_admin_ui)) -> Response:

@@ -110,8 +110,12 @@ class QueueManager:
         #   * a new request enters the heap (enqueue, resume)
         #   * an in-flight request completes (mark_in_flight_done)
         #   * a request is cancelled (cancel)
+        #   * the image runner releases the GPU (ImageTaskRunner.on_idle)
         # The dispatcher waits on it while no eligible work exists.
         self._cv = asyncio.Condition()
+        # Set by app wiring. Consulted as a second, independent check on
+        # whether a diffusion engine holds the GPU — see _image_engine_busy.
+        self.image_runner: Any = None
         self._seq = itertools.count()
         self._dispatcher_task: asyncio.Task[None] | None = None
         self._paused = False
@@ -497,6 +501,12 @@ class QueueManager:
         image_in = self._in_flight_count.get("image", 0)
         audio_in = self._in_flight_count.get("audio", 0)
         asr_coexist = bool(getattr(self.cfg, "asr_coexist", True))
+        # Two independent readings of "is the GPU busy with an image?":
+        # our own request counter, and the runner's run lock. They should
+        # agree; when they don't, the engine is the one telling the truth.
+        # Belt-and-braces on purpose — a stale counter used to be enough
+        # to put llama-server and a diffusion engine on the card at once.
+        image_busy = image_in > 0 or self._image_engine_busy()
 
         # Audio (ASR) is a warm, concurrent, VRAM-budgeted tenant — NOT a
         # single-slot one-shot. Concurrency is its own handle now (the VRAM
@@ -512,13 +522,13 @@ class QueueManager:
                 return False
             # coexist=off → ASR unloads the other engine and owns the GPU for
             # its run; block while text/image are still in flight.
-            if not asr_coexist and (text_in > 0 or image_in > 0):
+            if not asr_coexist and (text_in > 0 or image_busy):
                 return False
             return True
 
         # Image is still a heavy one-shot with a hard 1-slot ceiling.
         if req.task_type == "image":
-            if image_in >= 1:
+            if image_busy:
                 return False
             if not self.cfg.allow_concurrent and text_in > 0:
                 return False
@@ -529,12 +539,36 @@ class QueueManager:
         # text
         if text_in >= max(1, self.cfg.max_concurrent):
             return False
-        if not self.cfg.allow_concurrent and image_in > 0:
+        if not self.cfg.allow_concurrent and image_busy:
             return False
         # coexist=off makes ASR and text mutually exclusive.
         if not asr_coexist and audio_in > 0:
             return False
         return True
+
+    def _image_engine_busy(self) -> bool:
+        """True when a diffusion engine actually holds the GPU.
+
+        Independent of ``_in_flight_count``: that counter follows the
+        *request*, and a request can end while its engine has not. The
+        runner clears this by releasing its run lock, then calls
+        ``notify_capacity_changed`` so we re-evaluate.
+        """
+        # getattr, not attribute access: tests build partially-initialised
+        # QueueManagers via __new__, and a missing wire-up must read as
+        # "no engine known", never as an error that blocks dispatch.
+        runner = getattr(self, "image_runner", None)
+        if runner is None:
+            return False
+        try:
+            return bool(runner.is_busy)
+        except Exception:  # noqa: BLE001 — never let this block dispatch
+            log.debug("image_runner.is_busy raised", exc_info=True)
+            return False
+
+    def notify_capacity_changed(self) -> None:
+        """Re-evaluate dispatch eligibility (engine freed the GPU, etc.)."""
+        self._wake_dispatcher_soon()
 
     def _pop_next(self) -> QueuedRequest | None:
         """Pick the next dispatchable request, applying starvation

@@ -138,6 +138,13 @@ def create_app(config_path: Path | None = None,
     registry = Registry(cfg, db)
     image_runner = ImageTaskRunner(cfg, db, sm=sm)
     audio_runner = AudioTaskRunner(cfg, db, sm=sm)
+    # Cross-wire the image runner and the queue so cross-family
+    # exclusion is decided by whether an engine actually holds the GPU,
+    # not only by the queue's request counter. The counter alone was
+    # enough to start llama-server on top of a live diffusion engine
+    # once a client disconnected mid-generation.
+    queue.image_runner = image_runner
+    image_runner.on_idle = queue.notify_capacity_changed
 
     # Warn if llama-server binary is not found
     if not detect_binary(cfg.llama_server_binary):

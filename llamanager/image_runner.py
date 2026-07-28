@@ -122,11 +122,27 @@ class ImageTaskRunner:
         self._cooldown_until: float = 0.0
         # Optional callback hooks for streaming progress to UI/SSE.
         self._progress_listeners: list[Callable[[ProgressEvent], Any]] = []
+        # Fired (synchronously) once a run has released the GPU. Wired to
+        # the queue dispatcher so it re-evaluates eligibility — see
+        # ``is_busy``.
+        self.on_idle: Callable[[], None] | None = None
 
     # ---- lifecycle ----
     @property
     def is_busy(self) -> bool:
-        return self.cfg.runtime_path.exists() and rt.load(self.cfg.runtime_path).image.status == "generating"
+        """True while a generation actually owns the GPU.
+
+        The run lock is the authority here, not ``runtime.json``: it is
+        held for exactly as long as an engine is resident (including the
+        yield_to_image window around it), it needs no disk read, and it
+        cannot lag behind reality. The queue consults this as a second,
+        independent invariant alongside its own in-flight counter — the
+        counter tracks *requests*, and a request can end while its engine
+        has not (client disconnects, handler unwinds). Trusting the
+        counter alone is what let llama-server start on top of a live
+        diffusion engine.
+        """
+        return self._lock.locked()
 
     @property
     def in_cooldown(self) -> bool:
@@ -310,6 +326,15 @@ class ImageTaskRunner:
                 sidecar=sidecar,
             )
         finally:
+            # The run lock is released by now on every exit path, so the
+            # GPU is genuinely free. Poke the queue: a text request may be
+            # parked purely because ``is_busy`` was True, and nothing else
+            # would wake the dispatcher for a lock release.
+            if self.on_idle is not None:
+                try:
+                    self.on_idle()
+                except Exception:  # noqa: BLE001 — never break a run on this
+                    log.debug("on_idle hook raised", exc_info=True)
             # Drop the staged reference-image directory regardless of how
             # we exited — success, engine crash, queue cancel, timeout.
             # ``shutil.rmtree`` with ignore_errors is safe even if the
@@ -446,6 +471,12 @@ class ImageTaskRunner:
                             await _handle_line(rest)
                         return
                     log_fp.write(chunk)
+                    # Flush per chunk: the handle stays open for the whole
+                    # run, so without this the engine log reaches disk only
+                    # when the process exits — the dashboard's log tail
+                    # showed an empty file for the entire generation, which
+                    # is exactly when an operator wants to read it.
+                    log_fp.flush()
                     try:
                         buf += chunk.decode("utf-8", errors="replace")
                     except Exception:

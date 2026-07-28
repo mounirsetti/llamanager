@@ -1577,6 +1577,20 @@ async def videos_generations(request: Request) -> Response:
                                   response_format)
 
 
+def _consume_detached_result(task: asyncio.Task) -> None:
+    """Retrieve the outcome of a generation whose client already left.
+
+    The request row and the slot are already handled by the run task's
+    own finally; this exists purely so an abandoned task's exception is
+    marked retrieved instead of surfacing as an asyncio warning.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.info("image job finished after its client disconnected: %s", exc)
+
+
 async def _images_blocking(
     qm: QueueManager,
     qr: QueuedRequest,
@@ -1589,10 +1603,29 @@ async def _images_blocking(
     response_format: str,
 ) -> Response:
     error: str | None = None
-    try:
-        await qm.wait_for_slot(qr)
+    run_task: asyncio.Task | None = None
+
+    # Same ownership rule as the streaming path: the slot is refunded by
+    # whoever runs the engine, so a client that hangs up mid-generation
+    # can't hand the scheduler a GPU that is still occupied.
+    finalized = False
+
+    def _finalize(err: str | None) -> None:
+        nonlocal finalized
+        if finalized:
+            return
+        finalized = True
+        qm.mark_in_flight_done(
+            qr, error=err,
+            cancelled=(err == "cancelled"),
+            prompt_tokens=None, completion_tokens=None,
+            prompt_text=image_req.prompt,
+        )
+
+    async def _run_owned():
+        err: str | None = None
         try:
-            result = await runner.run(
+            return await runner.run(
                 model_id=model_required,
                 engine=engine,
                 profile=profile_obj,
@@ -1601,6 +1634,28 @@ async def _images_blocking(
                 origin_name=qr.origin.name,
                 cancel_event=qr.cancel,
             )
+        except asyncio.CancelledError:
+            err = "cancelled"
+            raise
+        except Exception as e:  # noqa: BLE001 — recorded, then re-raised
+            err = str(e)
+            raise
+        finally:
+            _finalize(err)
+
+    try:
+        await qm.wait_for_slot(qr)
+        run_task = asyncio.create_task(_run_owned())
+        try:
+            # Shielded: cancelling this handler (client disconnect) must
+            # not cancel the engine run out from under its own cleanup.
+            result = await asyncio.shield(run_task)
+        except asyncio.CancelledError:
+            # Client went away mid-generation. Same rule as the streaming
+            # path: the job outlives the connection, keeps its slot, and
+            # writes its image. _run_owned finalises when it finishes.
+            run_task.add_done_callback(_consume_detached_result)
+            raise
         except ImageError as e:
             error = str(e)
             raise HTTPException(status_code=502, detail=error)
@@ -1626,12 +1681,10 @@ async def _images_blocking(
         log.exception("image generation failed for %s", qr.request_id)
         raise HTTPException(status_code=502, detail=str(e))
     finally:
-        qm.mark_in_flight_done(
-            qr, error=error,
-            cancelled=(error == "cancelled"),
-            prompt_tokens=None, completion_tokens=None,
-            prompt_text=image_req.prompt,
-        )
+        if run_task is None:
+            # Never reached the engine (still queued / dispatcher failed):
+            # nothing else will refund the slot.
+            _finalize(error)
 
 
 async def _images_stream(
@@ -1656,8 +1709,53 @@ async def _images_stream(
         except asyncio.QueueFull:
             pass
 
+    # ---- queue bookkeeping is owned by the WORK, not by the response ----
+    # Releasing the slot from the response's finally block was the orphan
+    # bug: a client that reloaded the page or hit Cancel refunded the
+    # image slot while the diffusion engine was still resident on the GPU,
+    # so the dispatcher believed the card was free and started llama-server
+    # on top of it. Whoever runs the engine releases the slot, and only
+    # once the engine is actually gone.
+    finalized = False
+
+    def _finalize(error: str | None) -> None:
+        nonlocal finalized
+        if finalized:
+            return
+        finalized = True
+        qm.mark_in_flight_done(
+            qr, error=error,
+            cancelled=(error == "cancelled"),
+            prompt_tokens=None, completion_tokens=None,
+            prompt_text=image_req.prompt,
+        )
+
+    async def _run_owned():
+        """Own the engine run and the slot refund together."""
+        err: str | None = None
+        try:
+            return await runner.run(
+                model_id=model_required,
+                engine=engine,
+                profile=profile_obj,
+                req=image_req,
+                request_id=qr.request_id,
+                origin_name=qr.origin.name,
+                progress_cb=_on_progress,
+                cancel_event=qr.cancel,
+            )
+        except asyncio.CancelledError:
+            err = "cancelled"
+            raise
+        except Exception as e:  # noqa: BLE001 — recorded, then re-raised
+            err = str(e)
+            raise
+        finally:
+            _finalize(err)
+
     async def gen() -> AsyncIterator[bytes]:
         error: str | None = None
+        run_task: asyncio.Task | None = None
         try:
             # Phase 1: wait for slot. ImageTaskRunner is invoked AFTER the
             # slot is acquired; until then emit keepalives.
@@ -1690,19 +1788,9 @@ async def _images_stream(
                 return
 
             # Phase 2: run the engine. We launch the actual task as a
-            # background task so we can interleave progress events.
-            run_task = asyncio.create_task(
-                runner.run(
-                    model_id=model_required,
-                    engine=engine,
-                    profile=profile_obj,
-                    req=image_req,
-                    request_id=qr.request_id,
-                    origin_name=qr.origin.name,
-                    progress_cb=_on_progress,
-                    cancel_event=qr.cancel,
-                )
-            )
+            # background task so we can interleave progress events. The
+            # task outlives this response on purpose — see _run_owned.
+            run_task = asyncio.create_task(_run_owned())
             # The slot is ours and the engine subprocess is starting, but
             # nothing will emit a step until the weights are resident —
             # minutes for a cold diffusion model. Tell the client we moved
@@ -1752,12 +1840,27 @@ async def _images_stream(
             log.exception("image stream failed for %s", qr.request_id)
             yield f"data: {json.dumps({'error': {'message': error}})}\n\n".encode("utf-8")
         finally:
-            qm.mark_in_flight_done(
-                qr, error=error,
-                cancelled=(error == "cancelled"),
-                prompt_tokens=None, completion_tokens=None,
-                prompt_text=image_req.prompt,
-            )
+            if run_task is None:
+                # We never reached the engine (still queued, or the
+                # dispatcher failed). Nothing else will refund the slot.
+                _finalize(error)
+            elif not run_task.done():
+                # Nobody will call .result() on it now, so retrieve the
+                # outcome in a callback — otherwise asyncio logs a
+                # "Task exception was never retrieved" traceback every
+                # time a detached generation ends in an error.
+                run_task.add_done_callback(_consume_detached_result)
+            # Otherwise: deliberately nothing. This block also runs on
+            # GeneratorExit when the client goes away — a page refresh,
+            # a closed tab, a flaky network. The generation is a queued
+            # *job*, not a property of the HTTP connection, so it keeps
+            # running, keeps its slot (held by _run_owned until the
+            # engine really stops), and lands in the gallery. The page
+            # reattaches to it on load via /ui/images/status.
+            #
+            # Stopping early is an explicit act: POST
+            # /admin/queue/{id}/cancel sets qr.cancel, which
+            # ImageTaskRunner._watch_cancel turns into a SIGTERM.
 
     headers = {
         "x-llamanager-request-id": qr.request_id,
