@@ -1703,6 +1703,12 @@ async def _images_stream(
                     cancel_event=qr.cancel,
                 )
             )
+            # The slot is ours and the engine subprocess is starting, but
+            # nothing will emit a step until the weights are resident —
+            # minutes for a cold diffusion model. Tell the client we moved
+            # out of the queue so it can say "loading model" instead of
+            # sitting on the last queue message with no visible change.
+            yield b": status=loading\n\n"
             # Poll the progress queue often (so per-step events reach the
             # client live) but only emit a keepalive after a real lull —
             # otherwise the bound to KEEPALIVE_INTERVAL_S would batch
