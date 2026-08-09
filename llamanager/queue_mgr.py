@@ -136,6 +136,13 @@ class QueueManager:
         # accumulated prompt cache / KV checkpoints without interrupting any
         # live generation. See mem_guard.MemoryWatchdog.
         self._reclaim_pending: bool = False
+        # A reclaim restart costs the next request a full engine reload (~12s
+        # for a 26B model), so it is rate-limited independently of how often
+        # the watchdog asks: no more than one per
+        # ``cfg.mem_reclaim_min_interval_s``. Without this floor a watchdog
+        # stuck at CRITICAL restarts the engine before *every* request.
+        self._last_reclaim_ts: float = 0.0
+        self._reclaim_skipped: int = 0
 
     def request_reclaim(self) -> None:
         """Ask the dispatcher to reset the engine before the next task runs."""
@@ -851,15 +858,35 @@ class QueueManager:
         # means no live generation is interrupted.
         if self._reclaim_pending:
             self._reclaim_pending = False
-            if not need_swap and self.sm.is_running:
-                self.db.log_event("dispatch_mem_reclaim",
-                                  {"req": req.request_id, "model": loaded})
-                log.info("memory reclaim: restarting engine to reset cache "
-                         "before request %s", req.request_id)
-                try:
-                    await self.sm.restart()
-                except Exception as e:  # noqa: BLE001 — reclaim is best-effort
-                    log.warning("memory reclaim restart failed: %s", e)
+            now = time.time()
+            if need_swap:
+                # The swap below cold-restarts the engine anyway — count it as
+                # the reclaim so we don't restart again moments later.
+                self._last_reclaim_ts = now
+            elif self.sm.is_running:
+                min_gap = float(
+                    getattr(self.cfg, "mem_reclaim_min_interval_s", 300.0) or 0.0)
+                since = now - self._last_reclaim_ts
+                if min_gap > 0 and self._last_reclaim_ts > 0 and since < min_gap:
+                    # Too soon since the last one. Dropping the request (rather
+                    # than deferring it) is deliberate: the watchdog re-arms the
+                    # flag on its own cadence, so nothing is lost.
+                    self._reclaim_skipped += 1
+                    log.debug("memory reclaim: skipping engine restart before "
+                              "%s (last one %.0fs ago, min gap %.0fs)",
+                              req.request_id, since, min_gap)
+                else:
+                    self.db.log_event("dispatch_mem_reclaim",
+                                      {"req": req.request_id, "model": loaded,
+                                       "skipped_since_last": self._reclaim_skipped})
+                    log.info("memory reclaim: restarting engine to reset cache "
+                             "before request %s", req.request_id)
+                    self._reclaim_skipped = 0
+                    self._last_reclaim_ts = now
+                    try:
+                        await self.sm.restart()
+                    except Exception as e:  # noqa: BLE001 — reclaim is best-effort
+                        log.warning("memory reclaim restart failed: %s", e)
 
         if need_swap and self.cfg.lock_model_loading:
             target_name = target_spec.model_id if target_spec else "a model"

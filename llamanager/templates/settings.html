@@ -170,6 +170,10 @@
     {% if mem_swap_total_gb %}
     <span><strong style="color: var(--fg-1);">swap</strong>
       {{ mem_swap_used_gb }} / {{ mem_swap_total_gb }} GB used</span>
+    {# Traffic, not occupancy, is what pressure keys on: a full swap file with
+       no traffic is history, not a problem. #}
+    <span title="Swap traffic (in + out). Occupancy alone is a lagging marker — this is what the guard treats as thrashing."><strong style="color: var(--fg-1);">swap I/O</strong>
+      {% if mem_swap_io_mb_s is none %}<span style="color: var(--fg-3);">—</span>{% else %}{{ mem_swap_io_mb_s }} MB/s{% endif %}</span>
     {% endif %}
     {% if mem_pressure %}
     <span class="lm-pill {{ 'lm-pill--crashed' if mem_pressure == 'critical' else ('lm-pill--swapping' if mem_pressure == 'warn' else '') }}"

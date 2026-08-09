@@ -219,17 +219,23 @@ def test_cache_ram_scales_down_with_pressure():
 
 # ---------- pressure classification ----------
 
-def _state(avail_frac, swap_frac, ram=61.0, swap=8.0):
+def _state(avail_frac, swap_frac, ram=61.0, swap=8.0, io=None):
     return mg.MemState(ram_total_gb=ram, ram_available_gb=ram * avail_frac,
-                       swap_total_gb=swap, swap_used_gb=swap * swap_frac)
+                       swap_total_gb=swap, swap_used_gb=swap * swap_frac,
+                       swap_io_mb_s=io)
 
 
 @pytest.mark.parametrize("avail,swap,expected", [
     (0.50, 0.00, mg.Pressure.OK),
     (0.12, 0.10, mg.Pressure.WARN),     # RAM tight
     (0.05, 0.10, mg.Pressure.CRITICAL), # RAM critical
-    (0.40, 0.30, mg.Pressure.WARN),     # swap warn
-    (0.40, 0.70, mg.Pressure.CRITICAL), # swap critical
+    # Swap occupancy is gated on RAM: with plenty free it is history, not
+    # pressure (see test_full_swap_with_free_ram_is_not_pressure).
+    (0.40, 0.30, mg.Pressure.OK),
+    (0.40, 0.70, mg.Pressure.OK),
+    # Under the gate (< 25% free) occupancy escalates as before.
+    (0.20, 0.30, mg.Pressure.WARN),
+    (0.20, 0.70, mg.Pressure.CRITICAL),
     (0.008, 1.0, mg.Pressure.CRITICAL), # the incident: 0.5/61 GB free, full swap
 ])
 def test_classify_pressure(avail, swap, expected):
@@ -237,10 +243,72 @@ def test_classify_pressure(avail, swap, expected):
     assert mg.classify_pressure(_state(avail, swap), th) is expected
 
 
+def test_full_swap_with_free_ram_is_not_pressure():
+    """The 2026-08-09 regression: swap 7.9/8.0 GB used, 35/60 GB RAM free and
+    zero swap traffic. Occupancy alone latched the guard at CRITICAL, which
+    restarted the engine before 92% of requests."""
+    th = mg.MemThresholds()
+    s = mg.MemState(ram_total_gb=60.0, ram_available_gb=35.0,
+                    swap_total_gb=8.0, swap_used_gb=7.9, swap_io_mb_s=0.0)
+    assert mg.classify_pressure(s, th) is mg.Pressure.OK
+
+
+def test_swap_traffic_escalates_regardless_of_headroom():
+    """Traffic is live thrash — it counts even with RAM to spare."""
+    th = mg.MemThresholds()
+    assert mg.classify_pressure(_state(0.50, 0.2, io=5.0), th) is mg.Pressure.WARN
+    assert mg.classify_pressure(_state(0.50, 0.2, io=50.0), th) is mg.Pressure.CRITICAL
+    # Unknown traffic (None) must not be read as zero *or* as pressure.
+    assert mg.classify_pressure(_state(0.50, 0.2, io=None), th) is mg.Pressure.OK
+
+
 def test_no_swap_box_ignores_swap_signal():
     th = mg.MemThresholds()
     s = mg.MemState(ram_total_gb=32, ram_available_gb=20, swap_total_gb=0, swap_used_gb=0)
     assert mg.classify_pressure(s, th) is mg.Pressure.OK
+
+
+def test_thresholds_from_cfg_override_defaults():
+    class Cfg:
+        mem_crit_swap_io_mb_s = 3.5
+        mem_swap_gate_avail_frac = 0.9
+
+    th = mg.MemThresholds.from_cfg(Cfg())
+    assert th.crit_swap_io_mb_s == 3.5
+    assert th.swap_gate_avail_frac == 0.9
+    assert th.warn_avail_frac == mg.MemThresholds.warn_avail_frac  # untouched
+    # With the gate raised, the same full-swap/free-RAM box is CRITICAL again.
+    s = mg.MemState(ram_total_gb=60.0, ram_available_gb=35.0,
+                    swap_total_gb=8.0, swap_used_gb=7.9)
+    assert mg.classify_pressure(s, th) is mg.Pressure.CRITICAL
+
+
+# ---------- swap I/O sampling ----------
+
+def test_swap_io_sampler_rate(monkeypatch):
+    counters = [(1000, 2000)]
+    clock = [100.0]
+    monkeypatch.setattr(mg, "read_swap_io_pages", lambda: counters[-1])
+    monkeypatch.setattr(mg.time, "monotonic", lambda: clock[0])
+    s = mg.SwapIoSampler()
+    assert s.sample() is None                 # first reading: no baseline yet
+    # 512 pages in + 512 out = 1024 pages x 4 KiB = 4 MiB over 2s = 2 MB/s.
+    counters.append((1512, 2512))
+    clock[0] = 102.0
+    rate = s.sample()
+    assert rate == pytest.approx(1024 * mg._PAGE_BYTES / 2 / (1024 ** 2), rel=0.01)
+    # A quiet interval reads as zero, not as the previous rate.
+    clock[0] = 104.0
+    assert s.sample() == 0.0
+    # A gap longer than MAX_DT re-baselines rather than averaging over it.
+    clock[0] = 104.0 + mg.SwapIoSampler.MAX_DT + 1
+    counters.append((99999, 99999))
+    assert s.sample() is None
+
+
+def test_swap_io_sampler_unreadable_is_none(monkeypatch):
+    monkeypatch.setattr(mg, "read_swap_io_pages", lambda: None)
+    assert mg.SwapIoSampler().sample() is None
 
 
 # ---------- watchdog ----------
@@ -285,30 +353,96 @@ def test_watchdog_disabled_does_not_start(monkeypatch):
     assert wd._task is None
 
 
-def test_watchdog_repeats_while_critical(monkeypatch):
-    """Sustained CRITICAL re-fires the callback on the repeat cadence so the
-    caller can keep/escalate reclaim — not just once on the rising edge."""
-    monkeypatch.setattr(mg, "read_mem_state", lambda: _state(0.03, 0.8))  # CRITICAL
+def _run_watchdog(cfg, states, seconds=0.3):
+    """Drive the watchdog over a state sequence; return (watchdog, levels)."""
+    seq = list(states)
+    i = {"n": 0}
+
+    def fake_read():
+        s = seq[min(i["n"], len(seq) - 1)]
+        i["n"] += 1
+        return s
+
     calls = []
 
     async def cb(level, state):
         calls.append(level)
 
+    holder = {}
+
+    async def run():
+        wd = mg.MemoryWatchdog(cfg, on_pressure=cb,
+                               interval_s=cfg.mem_guard_interval_s)
+        holder["wd"] = wd
+        wd.start()
+        await asyncio.sleep(seconds)
+        await wd.stop()
+
+    import unittest.mock as _m
+    with _m.patch.object(mg, "read_mem_state", fake_read):
+        asyncio.run(run())
+    return holder["wd"], calls
+
+
+def test_watchdog_repeats_while_critical():
+    """Sustained CRITICAL re-fires the callback on the repeat cadence so the
+    caller can keep/escalate reclaim — not just once on the rising edge."""
     class Cfg:
         mem_guard_enabled = True
         mem_guard_interval_s = 0.02
         mem_crit_repeat_s = 0.05
+        mem_crit_repeat_max_s = 0.05   # cap == base, i.e. back-off disabled
 
-    async def run():
-        wd = mg.MemoryWatchdog(Cfg(), on_pressure=cb, interval_s=0.02)
-        wd.start()
-        await asyncio.sleep(0.3)
-        await wd.stop()
-
-    asyncio.run(run())
+    _wd, calls = _run_watchdog(Cfg(), [_state(0.03, 0.8)])
     # One edge-triggered CRITICAL plus several repeats over ~0.3s at 0.05s.
     assert calls and all(c == mg.Pressure.CRITICAL for c in calls)
     assert len(calls) >= 3, calls
+
+
+def test_watchdog_backs_off_when_reclaim_achieves_nothing():
+    """Reclaim isn't free — it restarts the engine between tasks. When memory
+    doesn't improve, the callback cadence must widen instead of hammering."""
+    class Cfg:
+        mem_guard_enabled = True
+        mem_guard_interval_s = 0.02
+        mem_crit_repeat_s = 0.05
+        mem_crit_repeat_max_s = 10.0
+
+    wd, calls = _run_watchdog(Cfg(), [_state(0.03, 0.8)])
+    assert calls and all(c == mg.Pressure.CRITICAL for c in calls)
+    # Doubling from 0.05s means at most a handful of emits in 0.3s.
+    assert len(calls) <= 4, calls
+    assert wd._crit_repeat_cur > Cfg.mem_crit_repeat_s
+
+
+def test_backoff_decision():
+    """The back-off decision itself, without timing: no relief widens the
+    cadence (capped), any real relief snaps it back to the base."""
+    class Cfg:
+        mem_guard_enabled = True
+        mem_crit_repeat_s = 10.0
+        mem_crit_repeat_max_s = 40.0
+        mem_relief_gb = 1.0
+
+    wd = mg.MemoryWatchdog(Cfg(), on_pressure=lambda *a: None)
+    wd._last_emit_avail = 2.0
+
+    wd._apply_backoff(mg.MemState(61.0, 2.5, 8.0, 8.0))   # +0.5 GB — no relief
+    assert wd._crit_repeat_cur == 20.0
+    wd._apply_backoff(mg.MemState(61.0, 2.5, 8.0, 8.0))
+    assert wd._crit_repeat_cur == 40.0
+    wd._apply_backoff(mg.MemState(61.0, 2.5, 8.0, 8.0))
+    assert wd._crit_repeat_cur == 40.0                    # capped
+
+    wd._last_emit_avail = 2.0
+    wd._apply_backoff(mg.MemState(61.0, 6.0, 8.0, 8.0))   # +4 GB — it worked
+    assert wd._crit_repeat_cur == 10.0
+
+    # No baseline yet (first repeat after a rising edge) → no back-off.
+    wd._last_emit_avail = None
+    wd._crit_repeat_cur = 10.0
+    wd._apply_backoff(mg.MemState(61.0, 2.0, 8.0, 8.0))
+    assert wd._crit_repeat_cur == 10.0
 
 
 def test_coexist_feasibility_gate(tmp_path, monkeypatch):

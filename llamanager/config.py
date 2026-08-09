@@ -142,6 +142,37 @@ allow_concurrent = false
 # is the operator's responsibility.
 allow_diffusion_with_slots = false
 
+[mem_guard]
+# Host-memory watchdog. It samples RAM + swap and, under pressure, resets the
+# engine between tasks to clear accumulated prompt cache / KV checkpoints.
+# enabled    = true
+# interval_s = 5.0
+# clamp_ctx  = false            # clamp a 'danger' ctx-size instead of warning
+# hard_stop_enabled = false     # last resort: stop the engine while CRITICAL
+#
+# Pressure thresholds. Free-RAM fractions of total RAM:
+# warn_avail_frac = 0.15
+# crit_avail_frac = 0.07
+# Swap *occupancy*. This is a lagging marker — Linux never faults swapped
+# pages back in on its own, so a swap file stays full long after the box has
+# recovered. It therefore only escalates while free RAM is under
+# `swap_gate_avail_frac`; raise that to make occupancy count sooner.
+# warn_swap_frac = 0.25
+# crit_swap_frac = 0.60
+# swap_gate_avail_frac = 0.25
+# Swap *traffic* (MB/s in+out) — real thrash, trusted regardless of headroom:
+# warn_swap_io_mb_s = 2.0
+# crit_swap_io_mb_s = 20.0
+#
+# Reclaim cadence. While pressure stays CRITICAL the watchdog re-fires every
+# `crit_repeat_s`, doubling up to `crit_repeat_max_s` whenever a reclaim frees
+# less than `relief_gb`. `reclaim_min_interval_s` is a hard floor between two
+# engine-resetting reclaims — each costs the next request a full model reload.
+# crit_repeat_s = 15.0
+# crit_repeat_max_s = 300.0
+# relief_gb = 1.0
+# reclaim_min_interval_s = 300.0
+
 [auto_update]
 # Per-engine "auto-update when idle". When an engine is enabled below,
 # llamanager checks upstream for a newer build on a fixed cadence and, once
@@ -637,6 +668,28 @@ class Config:
     # generation unless ``mem_hard_stop_enabled`` is set.
     mem_guard_enabled: bool = True
     mem_guard_interval_s: float = 5.0
+    # Pressure thresholds (see mem_guard.MemThresholds, which reads these off
+    # the config object by name). Free-RAM fractions of total RAM:
+    mem_warn_avail_frac: float = 0.15
+    mem_crit_avail_frac: float = 0.07
+    # Swap-occupancy fractions. These are a *lagging* signal — a swap file
+    # stays full long after the box has recovered — so they only escalate
+    # while free RAM is itself under ``mem_swap_gate_avail_frac``.
+    mem_warn_swap_frac: float = 0.25
+    mem_crit_swap_frac: float = 0.60
+    mem_swap_gate_avail_frac: float = 0.25
+    # Swap *traffic* in MB/s: actual thrash, trusted on its own.
+    mem_warn_swap_io_mb_s: float = 2.0
+    mem_crit_swap_io_mb_s: float = 20.0
+    # Sustained-CRITICAL callback cadence. Repeats back off exponentially up
+    # to ``mem_crit_repeat_max_s`` while each reclaim frees less than
+    # ``mem_relief_gb``, so ineffective reclaim can't run in a tight loop.
+    mem_crit_repeat_s: float = 15.0
+    mem_crit_repeat_max_s: float = 300.0
+    mem_relief_gb: float = 1.0
+    # Hard floor between two engine-resetting reclaims, whatever the watchdog
+    # asks for. Each one costs the next request a full model reload.
+    mem_reclaim_min_interval_s: float = 300.0
     # When true, the launch guardrail clamps a 'danger' ctx-size down to the
     # largest size that fits VRAM instead of only warning. Off by default —
     # warning-only avoids silently overriding a value set on purpose.
@@ -1173,6 +1226,27 @@ def load_config(path: Path | None = None) -> Config:
     cfg.mem_hard_stop_enabled = bool(
         mem.get("hard_stop_enabled", cfg.mem_hard_stop_enabled))
     cfg.mem_ctx_checkpoints = max(0, int(mem.get("ctx_checkpoints", 0) or 0))
+    # Thresholds + reclaim cadence. Each falls back to the dataclass default,
+    # and a non-numeric value in config.toml is ignored rather than fatal —
+    # a typo here must not stop the daemon from booting.
+    for _key, _attr in (
+        ("warn_avail_frac", "mem_warn_avail_frac"),
+        ("crit_avail_frac", "mem_crit_avail_frac"),
+        ("warn_swap_frac", "mem_warn_swap_frac"),
+        ("crit_swap_frac", "mem_crit_swap_frac"),
+        ("swap_gate_avail_frac", "mem_swap_gate_avail_frac"),
+        ("warn_swap_io_mb_s", "mem_warn_swap_io_mb_s"),
+        ("crit_swap_io_mb_s", "mem_crit_swap_io_mb_s"),
+        ("crit_repeat_s", "mem_crit_repeat_s"),
+        ("crit_repeat_max_s", "mem_crit_repeat_max_s"),
+        ("relief_gb", "mem_relief_gb"),
+        ("reclaim_min_interval_s", "mem_reclaim_min_interval_s"),
+    ):
+        if _key in mem:
+            try:
+                setattr(cfg, _attr, max(0.0, float(mem[_key])))
+            except (TypeError, ValueError):
+                pass
 
     # ---- conversation retention ----
     conv = raw.get("conversation", {}) if isinstance(raw.get("conversation"), dict) else {}

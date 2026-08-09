@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import time
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
@@ -412,6 +414,14 @@ class MemThresholds:
     crit_avail_frac: float = 0.07     # CRITICAL when < 7%
     warn_swap_frac: float = 0.25      # WARN when swap used > 25% of swap
     crit_swap_frac: float = 0.60      # CRITICAL when > 60%
+    # Swap *occupancy* only counts as pressure while RAM is also tight — see
+    # ``classify_pressure``. Above this much free RAM, a full swap file is
+    # treated as history, not pressure.
+    swap_gate_avail_frac: float = 0.25
+    # Swap *traffic* (MB/s in+out). This is live thrash and is trusted on its
+    # own, whatever the occupancy or headroom says.
+    warn_swap_io_mb_s: float = 2.0
+    crit_swap_io_mb_s: float = 20.0
 
     @classmethod
     def from_cfg(cls, cfg: object) -> "MemThresholds":
@@ -421,7 +431,97 @@ class MemThresholds:
             crit_avail_frac=g("mem_crit_avail_frac", cls.crit_avail_frac),
             warn_swap_frac=g("mem_warn_swap_frac", cls.warn_swap_frac),
             crit_swap_frac=g("mem_crit_swap_frac", cls.crit_swap_frac),
+            swap_gate_avail_frac=g("mem_swap_gate_avail_frac",
+                                   cls.swap_gate_avail_frac),
+            warn_swap_io_mb_s=g("mem_warn_swap_io_mb_s", cls.warn_swap_io_mb_s),
+            crit_swap_io_mb_s=g("mem_crit_swap_io_mb_s", cls.crit_swap_io_mb_s),
         )
+
+
+# ---------------------------------------------------------------------------
+# Swap traffic (thrash detection)
+# ---------------------------------------------------------------------------
+#
+# Why a *rate* and not just "how full is swap": Linux never proactively faults
+# swapped-out anonymous pages back in. Once a transient spike has pushed pages
+# out, the swap file stays full long after the box has recovered — on
+# 2026-08-09 this box sat at 7.9/8.0 GB swap used with 35 GB of RAM free and
+# zero swap traffic. Occupancy alone therefore latched the watchdog at
+# CRITICAL indefinitely, which restarted the engine before 92% of requests
+# (4581 of 5004 over a week, +12s each). Traffic is the signal that actually
+# means "the box is thrashing right now".
+
+_VMSTAT = Path("/proc/vmstat")
+_PAGE_BYTES = float(getattr(os, "sysconf", lambda _: 4096)("SC_PAGE_SIZE")
+                    if hasattr(os, "sysconf") else 4096)
+
+
+def read_swap_io_pages() -> tuple[int, int] | None:
+    """Cumulative (pages swapped in, pages swapped out) since boot.
+
+    Returns None on non-Linux hosts or if /proc/vmstat is unreadable — the
+    caller then treats swap traffic as *unknown* rather than as zero.
+    """
+    try:
+        text = _VMSTAT.read_text()
+    except OSError:
+        return None
+    pin = pout = None
+    for line in text.splitlines():
+        if line.startswith("pswpin "):
+            pin = line.split()[1]
+        elif line.startswith("pswpout "):
+            pout = line.split()[1]
+    if pin is None or pout is None:
+        return None
+    try:
+        return int(pin), int(pout)
+    except ValueError:
+        return None
+
+
+class SwapIoSampler:
+    """Turns the kernel's cumulative swap counters into a MB/s rate.
+
+    Stateful by necessity: a rate needs two samples. Shared module-wide (see
+    ``_SWAP_IO``) so one-shot callers of ``read_mem_state`` ride along on the
+    watchdog's regular sampling instead of each keeping their own baseline.
+    """
+
+    #: Samples closer together than this reuse the last computed rate — the
+    #: counters move in whole pages and a sub-tick delta is mostly noise.
+    MIN_DT = 0.5
+    #: Beyond this gap the delta would average over a window long enough to
+    #: hide a recent burst, so we re-baseline and report "unknown" once.
+    MAX_DT = 60.0
+
+    def __init__(self) -> None:
+        self._prev: tuple[float, int, int] | None = None   # (ts, pin, pout)
+        self._rate: float | None = None
+
+    def sample(self) -> float | None:
+        """MB/s of swap traffic (in + out), or None while unknown."""
+        counters = read_swap_io_pages()
+        if counters is None:
+            return None
+        now = time.monotonic()
+        pin, pout = counters
+        prev, self._prev = self._prev, (now, pin, pout)
+        if prev is None:
+            return None
+        dt = now - prev[0]
+        if dt < self.MIN_DT:
+            self._prev = prev          # keep the older baseline for next time
+            return self._rate
+        if dt > self.MAX_DT:
+            self._rate = None
+            return None
+        pages = max(0, pin - prev[1]) + max(0, pout - prev[2])
+        self._rate = (pages * _PAGE_BYTES) / dt / (1024 ** 2)
+        return self._rate
+
+
+_SWAP_IO = SwapIoSampler()
 
 
 @dataclass(frozen=True)
@@ -430,6 +530,10 @@ class MemState:
     ram_available_gb: float
     swap_total_gb: float
     swap_used_gb: float
+    #: Swap traffic in MB/s, or None when it could not be sampled (first
+    #: reading, non-Linux host, stale baseline). None means *unknown* — the
+    #: classifier simply doesn't consult the traffic signal.
+    swap_io_mb_s: float | None = None
 
     @property
     def ram_available_frac(self) -> float:
@@ -442,8 +546,10 @@ class MemState:
                 if self.swap_total_gb else 0.0)
 
     def summary(self) -> str:
+        io = ("" if self.swap_io_mb_s is None
+              else f", swap I/O {self.swap_io_mb_s:.1f} MB/s")
         return (f"RAM {self.ram_available_gb:.1f}/{self.ram_total_gb:.1f} GB free, "
-                f"swap {self.swap_used_gb:.1f}/{self.swap_total_gb:.1f} GB used")
+                f"swap {self.swap_used_gb:.1f}/{self.swap_total_gb:.1f} GB used{io}")
 
 
 def read_mem_state() -> MemState:
@@ -455,21 +561,38 @@ def read_mem_state() -> MemState:
         ram_available_gb=gb(vm.available),
         swap_total_gb=gb(sw.total),
         swap_used_gb=gb(sw.used),
+        swap_io_mb_s=_SWAP_IO.sample(),
     )
 
 
 def classify_pressure(state: MemState, th: MemThresholds) -> Pressure:
-    """Map a memory snapshot to a pressure level (the worse of RAM/swap)."""
+    """Map a memory snapshot to a pressure level (the worst of three signals).
+
+    The three signals are deliberately not symmetric:
+
+    * **Free RAM** — the primary signal, always consulted.
+    * **Swap occupancy** — a *lagging* marker: it records that the box was
+      once short of RAM, not that it is now. It only escalates while free RAM
+      is itself below ``swap_gate_avail_frac``; otherwise a swap file left
+      full by an old spike would pin the guard at CRITICAL forever.
+    * **Swap traffic** — live thrash, trusted unconditionally when known.
+    """
     level = Pressure.OK
     if state.ram_available_frac < th.crit_avail_frac:
         level = Pressure.CRITICAL
     elif state.ram_available_frac < th.warn_avail_frac:
         level = max(level, Pressure.WARN)
-    # Swap is only meaningful pressure if swap actually exists.
-    if state.swap_total_gb > 0:
+    # Swap occupancy — only meaningful if swap exists AND RAM is tight too.
+    if state.swap_total_gb > 0 and state.ram_available_frac < th.swap_gate_avail_frac:
         if state.swap_used_frac > th.crit_swap_frac:
             level = Pressure.CRITICAL
         elif state.swap_used_frac > th.warn_swap_frac:
+            level = max(level, Pressure.WARN)
+    # Swap traffic — the box is paging right now, regardless of headroom.
+    if state.swap_io_mb_s is not None:
+        if state.swap_io_mb_s > th.crit_swap_io_mb_s:
+            level = Pressure.CRITICAL
+        elif state.swap_io_mb_s > th.warn_swap_io_mb_s:
             level = max(level, Pressure.WARN)
     return Pressure(level)
 
@@ -501,6 +624,15 @@ class MemoryWatchdog:
         # isn't enough). 0 disables the repeat (pure edge-triggered).
         self._crit_repeat_s = float(getattr(cfg, "mem_crit_repeat_s", 15.0))
         self._crit_elapsed = 0.0
+        # Repeats back off exponentially while they achieve nothing. Reclaim
+        # is not free (it restarts the engine between tasks), so hammering it
+        # every 15s against pressure it cannot relieve — e.g. RAM held by
+        # something outside our control — costs far more than it saves.
+        self._crit_repeat_max_s = float(
+            getattr(cfg, "mem_crit_repeat_max_s", 300.0))
+        self._relief_gb = float(getattr(cfg, "mem_relief_gb", 1.0))
+        self._crit_repeat_cur = self._crit_repeat_s
+        self._last_emit_avail: float | None = None
 
     @property
     def last_level(self) -> Pressure:
@@ -530,6 +662,9 @@ class MemoryWatchdog:
                 if level != self._last:
                     prev, self._last = self._last, level
                     self._crit_elapsed = 0.0
+                    # A fresh edge earns a fresh (un-backed-off) cadence.
+                    self._crit_repeat_cur = self._crit_repeat_s
+                    self._last_emit_avail = None
                     # Report on any rise, and on the return to OK.
                     if level > prev or level == Pressure.OK:
                         await self._emit(level, state)
@@ -537,8 +672,9 @@ class MemoryWatchdog:
                     # Sustained CRITICAL — re-fire on the repeat cadence so the
                     # caller keeps (and escalates) reclaim while the box thrashes.
                     self._crit_elapsed += self.interval_s
-                    if self._crit_elapsed >= self._crit_repeat_s:
+                    if self._crit_elapsed >= self._crit_repeat_cur:
                         self._crit_elapsed = 0.0
+                        self._apply_backoff(state)
                         await self._emit(level, state)
             except asyncio.CancelledError:
                 raise
@@ -546,8 +682,27 @@ class MemoryWatchdog:
                 log.debug("memory watchdog tick failed: %s", e)
             await asyncio.sleep(self.interval_s)
 
+    def _apply_backoff(self, state: MemState) -> None:
+        """Widen the repeat cadence when the last reclaim bought us nothing.
+
+        "Nothing" = available RAM did not improve by ``mem_relief_gb`` since
+        the previous emit. Any real relief resets the cadence to the base
+        interval so a genuinely thrashing box is still handled promptly.
+        ``_emit`` owns the baseline itself, so this only reads it.
+        """
+        prev = self._last_emit_avail
+        if prev is not None and state.ram_available_gb <= prev + self._relief_gb:
+            self._crit_repeat_cur = min(self._crit_repeat_max_s,
+                                        self._crit_repeat_cur * 2)
+            log.info("memory: reclaim freed <%.1f GB — backing off pressure "
+                     "callbacks to every %.0fs",
+                     self._relief_gb, self._crit_repeat_cur)
+        else:
+            self._crit_repeat_cur = self._crit_repeat_s
+
     async def _emit(self, level: Pressure, state: MemState) -> None:
         if level == Pressure.CRITICAL:
+            self._last_emit_avail = state.ram_available_gb
             log.warning("memory CRITICAL: %s", state.summary())
         elif level == Pressure.WARN:
             log.warning("memory tight: %s", state.summary())
