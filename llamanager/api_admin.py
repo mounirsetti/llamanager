@@ -14,8 +14,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
+from .api_v1 import require_local_origin_is_local
 from .auth import AuthManager, Origin
 from .events import list_events
+from .intake import is_accepting, set_accepting
 from .queue_mgr import QueueManager
 from .registry import Registry
 from .server_manager import ServerError, ServerManager, resolve_spec
@@ -32,6 +34,13 @@ async def admin_origin(request: Request) -> Origin:
     origin = await am.verify(key)
     if not origin or not origin.is_admin:
         raise HTTPException(status_code=403, detail="admin scope required")
+    # The same-machine control key (see auth.ensure_local_control) is a
+    # capability granted by file permissions, not something to accept from the
+    # network — it exists so local tools need no configuration. Refuse it off
+    # loopback so binding to 0.0.0.0 can't turn a readable file into remote
+    # admin. Ordinary admin origins are unaffected.
+    require_local_origin_is_local(
+        origin, request.client.host if request.client else None)
     return origin
 
 
@@ -48,6 +57,7 @@ async def status(request: Request, _: Origin = Depends(admin_origin)) -> JSONRes
         "in_flight": snap["in_flight"],
         "in_flight_count": len(snap["in_flight"]),
         "paused": snap["paused"],
+        "accepting_requests": is_accepting(request.app),
     })
     return JSONResponse(base)
 
@@ -167,6 +177,37 @@ async def queue_resume(request: Request, _: Origin = Depends(admin_origin)) -> J
     qm: QueueManager = request.app.state.queue
     await qm.resume()
     return JSONResponse({"ok": True})
+
+
+# ---------- intake switch ----------
+#
+# Distinct from queue pause/resume above: pausing the queue keeps *accepting*
+# requests and holds them until they time out, while closing intake refuses
+# them with 503 and survives a daemon restart. See intake.py.
+
+@router.get("/intake")
+async def intake_status(request: Request,
+                        _: Origin = Depends(admin_origin)) -> JSONResponse:
+    qm: QueueManager = request.app.state.queue
+    return JSONResponse({
+        "accepting": is_accepting(request.app),
+        "queue_depth": qm.snapshot()["depth"],
+    })
+
+
+@router.post("/intake/pause")
+async def intake_pause(request: Request,
+                       _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Stop taking requests. In-flight work finishes; the queued backlog is
+    dropped; new requests get 503 until intake is resumed."""
+    return JSONResponse(set_accepting(request.app, False))
+
+
+@router.post("/intake/resume")
+async def intake_resume(request: Request,
+                        _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Start taking requests again."""
+    return JSONResponse(set_accepting(request.app, True))
 
 
 @router.post("/queue/cancel-all")
@@ -967,13 +1008,18 @@ async def diffusion_profiles_list(request: Request,
                 k: getattr(p, k) for k in (
                     "image_model_type", "image_size", "image_steps",
                     "image_guidance", "image_seed", "image_editing_scheduler",
+                    "image_negative_prompt", "image_lora_weights",
+                    "image_lora_scale", "image_strength",
+                    # Video-family knobs, or a Wan profile lists with no clip
+                    # length and reads as if it were an image profile.
+                    "video_num_frames", "video_fps",
                 ) if getattr(p, k) not in ("", None)
             }
             profiles.append({"name": p.name, "fields": fields})
     engine = detect_engine_for_id(model, cfg.models_dir)
     builtins: dict[str, Any] = {}
     try:
-        builtins = _engines.get(engine).default_profiles()
+        builtins = _engines.default_profiles(engine, cfg.models_dir / model)
     except Exception:
         builtins = {}
     return JSONResponse({
@@ -1164,7 +1210,7 @@ async def diffusion_materialize_defaults(request: Request,
     except KeyError:
         raise HTTPException(status_code=400, detail="unknown engine")
     try:
-        builtins = adapter.default_profiles()
+        builtins = _engines.default_profiles(body.engine, cfg.models_dir / body.model_id)
     except Exception as e:
         raise HTTPException(status_code=400,
                             detail=f"engine has no default profiles: {e}")
@@ -2249,7 +2295,7 @@ async def asr_profiles_list(request: Request, model: str = "",
             profiles.append({"name": p.name, "fields": fields})
     engine = detect_engine_for_id(model, cfg.models_dir)
     try:
-        builtins = _engines.get(engine).default_profiles()
+        builtins = _engines.default_profiles(engine, cfg.models_dir / model)
     except Exception:
         builtins = {}
     return JSONResponse({

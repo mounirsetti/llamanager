@@ -104,9 +104,81 @@
       ">Images &rarr;</span>
       <span style="font-family: 'Fraunces', serif; font-size: 1.0625rem; color: var(--fg-0);">Direct image generation</span>
       <span style="font-size: 0.8125rem; color: var(--fg-2);">
-        Generate images with the configured diffusion engine (HiDream / Flux2). Browse the gallery and re-roll prompts.
+        Generate images with the configured diffusion engine (Z-Image / Krea 2). Browse the gallery and re-roll prompts.
       </span>
     </a>
+
+    <a href="/ui/videos" style="
+      background: var(--bg-0);
+      padding: 20px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      text-decoration: none;
+      color: inherit;
+      transition: background 120ms ease;
+    " onmouseover="this.style.background='var(--bg-1)'" onmouseout="this.style.background='var(--bg-0)'">
+      <span style="
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 0.625rem;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--accent);
+      ">Video &rarr;</span>
+      <span style="font-family: 'Fraunces', serif; font-size: 1.0625rem; color: var(--fg-0);">Direct video generation</span>
+      <span style="font-size: 0.8125rem; color: var(--fg-2);">
+        Turn a prompt or a still into a short clip with the configured video engine (Wan 2.2). Animate any image from the gallery.
+      </span>
+    </a>
+  </div>
+</section>
+
+{# ---- Shareable playgrounds (public, key-gated — no admin session) ---- #}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Share</span>
+    <span class="lm-section-meta">public pages — origin key, no admin login</span>
+  </header>
+
+  <p style="margin: 0 0 14px; font-size: 0.8125rem; color: var(--fg-2); max-width: 68ch;">
+    Hand these to anyone holding an origin key. They are the same three surfaces without the
+    admin session — each asks for a key once and keeps it in the browser. Per-origin
+    <code>allowed_models</code> still applies, so a key only ever sees the models it is scoped to.
+  </p>
+
+  <div style="
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 2px;
+    background: var(--bg-3);
+    border: 1px solid var(--bg-3);
+  ">
+    {% for path, label, blurb in [
+        ('/chat',   'Chat',   'Streaming chat against any allowed LLM.'),
+        ('/images', 'Images', 'Image generation and a per-origin gallery.'),
+        ('/videos', 'Video',  'Text or image to a short clip, same gallery.')
+    ] %}
+    <a href="{{ path }}" style="
+      background: var(--bg-0);
+      padding: 16px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      text-decoration: none;
+      color: inherit;
+      transition: background 120ms ease;
+    " onmouseover="this.style.background='var(--bg-1)'" onmouseout="this.style.background='var(--bg-0)'">
+      <span style="
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 0.625rem;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--fg-2);
+      ">{{ base_url }}{{ path }}</span>
+      <span style="font-family: 'Fraunces', serif; font-size: 0.9375rem; color: var(--fg-0);">{{ label }}</span>
+      <span style="font-size: 0.75rem; color: var(--fg-2);">{{ blurb }}</span>
+    </a>
+    {% endfor %}
   </div>
 </section>
 

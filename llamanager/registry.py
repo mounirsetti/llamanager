@@ -425,7 +425,11 @@ class Registry:
             log.warning("estimate_repo_size(%s) failed: %s", repo, exc)
             return 0
         total = 0
-        prefix = (subfolder.strip("/") + "/") if subfolder else ""
+        # Mirror start_pull: ``subfolder`` may name several components, and a
+        # multi-component pull also brings the repo-root index files.
+        prefixes = [x.strip().strip("/") + "/"
+                    for x in (subfolder or "").split(",") if x.strip().strip("/")]
+        multi = len(prefixes) > 1
         want = {f.strip() for f in files if f.strip()} if files else None
         for sib in getattr(info, "siblings", []):
             name = getattr(sib, "rfilename", "") or ""
@@ -434,8 +438,11 @@ class Registry:
                 # repo-relative path or just the file name).
                 if name not in want and name.rsplit("/", 1)[-1] not in want:
                     continue
-            elif prefix and not name.startswith(prefix):
-                continue
+            elif prefixes:
+                root_index = multi and "/" not in name and name.endswith(
+                    (".json", ".txt"))
+                if not root_index and not any(name.startswith(p) for p in prefixes):
+                    continue
             size = getattr(sib, "size", None)
             if isinstance(size, int) and size > 0:
                 total += size
@@ -825,10 +832,25 @@ class Registry:
 
         allow_patterns: list[str] | None = None
         if subfolder:
-            sf = subfolder.strip("/")
-            if not sf or ".." in sf.split("/"):
+            # Accept a comma-separated list of subfolders, not just one.
+            # Some repos ship several formats side by side — MiniMax-H3 carries
+            # its original release *and* the diffusers conversion, so a whole
+            # repo pull is 464 GB where the components diffusers needs are
+            # 134 GB. Naming the components turns "will not fit" into "fits".
+            parts = [x.strip().strip("/") for x in subfolder.split(",")]
+            parts = [x for x in parts if x]
+            if not parts:
                 raise ValueError(f"unsafe subfolder: {subfolder!r}")
-            allow_patterns = [f"{sf}/*", f"{sf}/**/*"]
+            allow_patterns = []
+            for sf in parts:
+                if ".." in sf.split("/"):
+                    raise ValueError(f"unsafe subfolder: {subfolder!r}")
+                allow_patterns += [f"{sf}/*", f"{sf}/**/*"]
+            if len(parts) > 1:
+                # A multi-component pull still needs the repo-root index files
+                # (model_index.json / modular_model_index.json), or the
+                # pipeline has nothing to assemble the components from.
+                allow_patterns += ["*.json", "*.txt"]
 
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(

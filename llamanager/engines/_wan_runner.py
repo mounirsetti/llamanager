@@ -84,6 +84,85 @@ def _load_pipeline(model_path: Path, dtype_name: str, *, image_to_video: bool):
     return pipe
 
 
+# Wan's VAE compresses 16x spatially and 4x temporally, and the transformer
+# patches (1,2,2) on top — so a clip is (frames/4+1) * (W/32) * (H/32) tokens.
+# 3D attention runs over all of them at once and, on ROCm, through the math
+# backend, so the attention matrix grows with tokens^2. 832x480x49f = 5070
+# tokens fits; 1280x704x121f = 27280 tokens would need ~36 GiB for attention
+# alone. Budget conservatively and refuse rather than silently CPU-offload.
+# Measured resident on a 32 GB gfx1201: 12.5 GiB. The 19 GB of transformer
+# shards on disk are fp32 and halve to ~10 GiB in bf16; the fp32 VAE adds
+# ~2 GiB. That leaves ~19 GiB of headroom for the attention matrix.
+_WAN_WEIGHTS_GIB = 12.5
+_WAN_HEADS = 24
+
+
+def _wan_tokens(width: int, height: int, num_frames: int) -> int:
+    latent_frames = (num_frames - 1) // 4 + 1
+    return latent_frames * (width // 32) * (height // 32)
+
+
+def _setup_gpu_resident(pipe, args, device):
+    """Encode the prompt, free the text encoder, then load transformer + VAE.
+
+    Returns ``(prompt_embeds, negative_prompt_embeds)``. Raises RuntimeError
+    when the clip cannot fit in VRAM rather than falling back to CPU offload.
+    """
+    import gc
+    import torch
+
+    total_gib = torch.cuda.get_device_properties(0).total_memory / 2 ** 30
+    tokens = _wan_tokens(args.width, args.height, args.num_frames)
+    # bf16 scores + an fp32 softmax copy, per attention call.
+    attn_gib = (tokens ** 2) * _WAN_HEADS * 6 / 2 ** 30
+    est = _WAN_WEIGHTS_GIB + attn_gib
+    # 0.92, not ~1.0: the estimate tracks PyTorch's own allocations but
+    # not driver/fragmentation overhead, and it under-predicted the
+    # measured Wan peak by ~7% (15.9 est vs 16.97 actual). Krea at
+    # 1280x720 lands at 30.9 GiB estimated and OOMs for real, so the
+    # margin has to reject it.
+    if est > total_gib * 0.92:
+        raise RuntimeError(
+            f"{args.width}x{args.height} x {args.num_frames} frames needs "
+            f"~{est:.1f} GiB ({tokens} attention tokens) but this GPU has "
+            f"{total_gib:.1f} GiB. Wan's 3D attention grows with tokens^2 and "
+            f"uses the math backend on ROCm. Lower the resolution or frame "
+            f"count (832x480 at 49 frames fits) and retry."
+        )
+
+    print(f"[wan] gpu-resident: {tokens} attn tokens, est peak "
+          f"{est:.1f}/{total_gib:.1f} GiB", file=sys.stderr)
+    pipe.text_encoder.to(device)
+    with torch.no_grad():
+        pe, ne = pipe.encode_prompt(
+            prompt=[args.prompt],
+            negative_prompt=([args.negative_prompt] if args.negative_prompt
+                             else None),
+            do_classifier_free_guidance=float(args.guidance) > 1.0,
+            device=device,
+        )
+    pe = pe.detach()
+    if ne is not None:
+        ne = ne.detach()
+    # ``to("meta")`` drops the storage outright rather than leaving 11 GB in
+    # host RAM until the GC happens to run.
+    pipe.text_encoder.to("meta")
+    pipe.text_encoder = None
+    gc.collect()
+    torch.cuda.empty_cache()
+    # VAE stays on the GPU: _resolve_vae_device() would send it to CPU on
+    # ROCm, and a CPU decode of an entire clip is ruinous (a single 1280x720
+    # still costs ~28 s there). Tiling below keeps the conv workloads small,
+    # which is the same mitigation the CPU fallback was reaching for.
+    pipe.transformer.to(device)
+    pipe.vae.to(device)
+    free_b, total_b = torch.cuda.mem_get_info()
+    print(f"[wan] transformer+vae resident on GPU; VRAM "
+          f"{(total_b - free_b) / 2 ** 30:.1f}/{total_b / 2 ** 30:.1f} GiB",
+          file=sys.stderr)
+    return pe, ne
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Wan 2.2 video inference runner")
     p.add_argument("--model_path", required=True, type=Path)
@@ -153,18 +232,15 @@ def main() -> int:
         except Exception:  # noqa: BLE001 — best-effort; diffusers versions vary
             pass
 
-    # The 5B model is memory-heavy for a single consumer card. Prefer
-    # model CPU offload (streams components onto the GPU as needed) unless
-    # the operator disabled it. Falls back to a plain .to(device).
+    # The 11 GB UMT5 encoder and the 19 GB transformer are never live at the
+    # same time, so encode the prompt with only the encoder resident, free it,
+    # then bring up the transformer + VAE. Peak VRAM is max(encoder,
+    # transformer+vae) ~= 22 GB instead of the ~33 GB sum, and every stage
+    # runs on the GPU with no weight streaming over PCIe.
     vae_device = _resolve_vae_device(args.vae_device, device)
-    if args.cpu_offload and device == "cuda":
-        try:
-            pipe.enable_model_cpu_offload()
-            print("[wan] model CPU offload enabled", file=sys.stderr)
-        except Exception as e:  # noqa: BLE001
-            print(f"[wan] cpu offload unavailable ({e}); moving to {device}",
-                  file=sys.stderr)
-            pipe.to(device)
+    gpu_embeds = None
+    if device == "cuda" and args.cpu_offload:
+        gpu_embeds = _setup_gpu_resident(pipe, args, device)
     else:
         pipe.to(device)
         if vae_device != device:
@@ -196,6 +272,14 @@ def main() -> int:
         guidance_scale=args.guidance,
         generator=generator,
     )
+    if gpu_embeds is not None:
+        # The text encoder was freed to make room for the transformer.
+        pe, ne = gpu_embeds
+        call_kwargs.pop("prompt", None)
+        call_kwargs.pop("negative_prompt", None)
+        call_kwargs["prompt_embeds"] = pe
+        if ne is not None:
+            call_kwargs["negative_prompt_embeds"] = ne
     if init_image is not None:
         call_kwargs["image"] = init_image
 

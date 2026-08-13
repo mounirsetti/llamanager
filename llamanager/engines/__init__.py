@@ -14,7 +14,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from . import asr, flux2, hidream, ideogram4, krea, sherpa, wan, whispercpp, z_image
+from . import (asr, flux2, hidream, ideogram4, krea, minimax_h3, sherpa, wan,
+               whispercpp, z_image)
 
 # Public registry. Keys match ``engine_type`` strings used in config.py.
 ADAPTERS = {
@@ -24,6 +25,7 @@ ADAPTERS = {
     "krea": krea,
     "ideogram4": ideogram4,
     "wan": wan,
+    "minimax_h3": minimax_h3,
     "asr": asr,
     "whispercpp": whispercpp,
     "sherpa": sherpa,
@@ -64,8 +66,36 @@ def capabilities(engine: str) -> dict:
     return caps
 
 
+def default_profiles(engine: str, model_dir=None) -> dict:
+    """Built-in starting profiles for ``engine``, checkpoint-aware.
+
+    Some adapters key their defaults off the on-disk layout — Krea returns a
+    different set for the original Diffusers checkpoint than for the GGUF
+    one, and seeding an original checkpoint with GGUF profiles produces
+    profiles that fail at load time with "GGUF quants are not loadable".
+    Pass ``model_dir`` and it reaches the adapters that accept it; adapters
+    that don't take it are called unchanged.
+
+    Returns ``{}`` rather than raising when an adapter has no defaults, so
+    callers can treat every engine uniformly.
+    """
+    import inspect
+    mod = ADAPTERS.get(engine)
+    fn = getattr(mod, "default_profiles", None) if mod else None
+    if fn is None:
+        return {}
+    try:
+        takes_dir = "model_dir" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        takes_dir = False
+    try:
+        return fn(model_dir=model_dir) if (takes_dir and model_dir is not None) else fn()
+    except Exception:  # noqa: BLE001 — a bad adapter shouldn't break the page
+        return {}
+
+
 __all__ = [
-    "ADAPTERS", "get", "capabilities",
-    "hidream", "flux2", "z_image", "krea", "ideogram4", "wan", "asr",
+    "ADAPTERS", "get", "capabilities", "default_profiles",
+    "hidream", "flux2", "z_image", "krea", "ideogram4", "wan", "minimax_h3", "asr",
     "whispercpp", "sherpa",
 ]

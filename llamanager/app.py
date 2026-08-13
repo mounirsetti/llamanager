@@ -120,6 +120,35 @@ def _emit_bootstrap_key(cfg: Config, boot_key: str) -> None:
         )
 
 
+def _ensure_local_control_key(cfg: Config, auth: AuthManager) -> None:
+    """Drop the same-machine control key in data_dir (0600) so local tools —
+    the tray, the CLI — need no configuration to drive this daemon.
+
+    Unlike the bootstrap key this is not printed anywhere and is not meant to
+    be copied around: it is a capability file, and being able to read it (same
+    user, same machine) *is* the authorization. Best-effort — a daemon that
+    can't write it still runs, callers just fall back to an explicit key.
+    """
+    from .auth import LOCAL_KEY_FILENAME
+    path = cfg.data_dir / LOCAL_KEY_FILENAME
+    try:
+        key = auth.ensure_local_control(path)
+        if key is None:
+            return  # already provisioned
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Create with 0600 from the start — no window where the key sits on
+        # disk world-readable.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(key + "\n")
+        os.chmod(path, 0o600)
+        log.info("local control key written to %s (mode 0600) — the tray and "
+                 "CLI use it automatically on this machine", path)
+    except OSError as e:
+        log.warning("could not write the local control key (%s); local tools "
+                    "will need LLAMANAGER_ADMIN_KEY", e)
+
+
 def create_app(config_path: Path | None = None,
                *, print_bootstrap: bool = True) -> FastAPI:
     cfg = load_config(config_path)
@@ -157,6 +186,7 @@ def create_app(config_path: Path | None = None,
     boot_key = auth.ensure_bootstrap()
     if boot_key and print_bootstrap:
         _emit_bootstrap_key(cfg, boot_key)
+    _ensure_local_control_key(cfg, auth)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[override]

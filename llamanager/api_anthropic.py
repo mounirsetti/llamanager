@@ -39,6 +39,7 @@ from .api_v1 import (
     _cancelable_post,
     _extract_prompt_text,
     _require_origin_enabled,
+    require_local_origin_is_local,
     _extract_response_text,
     _model_allowed,
     _model_known,
@@ -49,6 +50,7 @@ from .api_v1 import (
 from .auth import AuthManager, Origin
 from .caller import describe_caller
 from .config import Config
+from .intake import require_open
 from .queue_mgr import Cancelled, QueueFull, QueueManager
 from .registry import Registry
 from .server_manager import ServerManager
@@ -82,6 +84,8 @@ async def _origin_from_request(req: Request) -> Origin:
     if not origin:
         raise HTTPException(status_code=401, detail="invalid api key")
     _require_origin_enabled(origin)
+    require_local_origin_is_local(
+        origin, req.client.host if req.client else None)
     return origin
 
 
@@ -885,6 +889,7 @@ class _AnthropicStreamTranslator:
 @router.post("/messages")
 async def messages(request: Request) -> Response:
     origin = await _origin_from_request(request)
+    require_open(request.app)
     body_bytes = await request.body()
     try:
         body = json.loads(body_bytes) if body_bytes else {}
@@ -1102,6 +1107,9 @@ async def count_tokens(request: Request) -> Response:
     blocks are excluded from the count — a deliberate undercount that
     matches what local inference will actually tokenize."""
     origin = await _origin_from_request(request)
+    # Gated too: counting proxies to the running engine's /tokenize, so it is
+    # work the machine does, not free metadata like the model listing.
+    require_open(request.app)
     body_bytes = await request.body()
     try:
         body = json.loads(body_bytes) if body_bytes else {}

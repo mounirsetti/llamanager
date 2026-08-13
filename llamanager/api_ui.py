@@ -604,6 +604,58 @@ def _linux_per_process_vram() -> dict[int, int]:
     return out
 
 
+def _nearest_existing(path: Path) -> Path:
+    """Walk up until a directory that exists — the filesystem we'd land on.
+
+    A destination that hasn't been created yet still has a free-space answer:
+    it is whatever mount its first existing ancestor sits on.
+    """
+    p = Path(path).expanduser()
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    return p
+
+
+def disk_preflight(dest: Path, required_bytes: int) -> dict[str, Any]:
+    """Is there room for ``required_bytes`` at ``dest``?
+
+    Returns the numbers the confirm dialog shows, plus a verdict:
+    ``ok`` / ``tight`` / ``insufficient``. "tight" means it fits but would
+    leave under 10 GB, which on a models volume is where downloads start
+    failing halfway through.
+    """
+    import shutil
+    dest = Path(dest).expanduser()
+    probe = _nearest_existing(dest)
+    try:
+        usage = shutil.disk_usage(probe)
+        free, total = usage.free, usage.total
+        err = ""
+    except OSError as e:
+        free = total = 0
+        err = str(e)
+    after = free - required_bytes
+    if err or total == 0:
+        verdict = "unknown"
+    elif after < 0:
+        verdict = "insufficient"
+    elif after < 10 * 1024 ** 3:
+        verdict = "tight"
+    else:
+        verdict = "ok"
+    return {
+        "dest": str(dest),
+        "mount": str(probe),
+        "exists": dest.expanduser().exists(),
+        "required_bytes": int(required_bytes),
+        "free_bytes": int(free),
+        "total_bytes": int(total),
+        "after_bytes": int(after),
+        "verdict": verdict,
+        "error": err,
+    }
+
+
 def _get_system_info(models_dir: str | Path) -> dict[str, Any]:
     """Gather hardware info relevant to llama-server inference."""
     import psutil
@@ -1049,6 +1101,10 @@ def _topbar_models(request: Request) -> dict[str, Any]:
         "topbar_default_image_profile": cfg.default_image_profile or "",
         "topbar_slots_enabled": bool(getattr(cfg, "multi_slot_enabled", False)),
         "topbar_slots": topbar_slots,
+        # Master intake switch (see intake.py). Off means every inference
+        # request — including the ones this UI's own chat/image pages make —
+        # is refused with 503.
+        "topbar_accepting": bool(getattr(cfg, "accepting_requests", True)),
     }
 
 
@@ -1852,10 +1908,13 @@ async def models_pull_ui(request: Request, source: str = Form(...),
     return _models_redirect(request)
 
 
-@router.post("/models/set-dir", response_class=HTMLResponse)
-async def models_set_dir(request: Request,
-                         models_dir: str = Form(...),
-                         _: None = Depends(require_csrf)) -> Response:
+def apply_models_dir(request: Request, models_dir: str) -> Path:
+    """Point llamanager at a new models directory and persist it.
+
+    Shared by the models page and the download confirm dialog, so a
+    destination chosen right before a multi-GB pull goes through exactly the
+    same path as one set from the settings page.
+    """
     import re as _re
     cfg = request.app.state.cfg
     new_dir = Path(models_dir.strip()).expanduser().resolve()
@@ -1863,7 +1922,6 @@ async def models_set_dir(request: Request,
     cfg.models_dir_override = new_dir
     cfg.registry = request.app.state.registry
     request.app.state.registry.models_dir = new_dir
-    # Persist to config.toml
     config_path = cfg.config_path
     text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
     new_line = f'models_dir = {json.dumps(str(new_dir))}'
@@ -1880,6 +1938,14 @@ async def models_set_dir(request: Request,
         else:
             text = text.rstrip("\n") + f"\n\n[server]\n{new_line}\n"
     config_path.write_text(text, encoding="utf-8")
+    return new_dir
+
+
+@router.post("/models/set-dir", response_class=HTMLResponse)
+async def models_set_dir(request: Request,
+                         models_dir: str = Form(...),
+                         _: None = Depends(require_csrf)) -> Response:
+    apply_models_dir(request, models_dir)
     return _models_redirect(request)
 
 
@@ -3520,6 +3586,7 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
         "z_image_python": cfg.z_image_python,
         "ideogram4_python": cfg.ideogram4_python,
         "wan_python": cfg.wan_python,
+        "minimax_h3_python": getattr(cfg, "minimax_h3_python", ""),
     }
     ctx["coex"] = {
         "unload_text_on_arrival": cfg.unload_text_on_arrival,
@@ -3539,7 +3606,8 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
 
     # Per-engine install state — surface the most-relevant row so the
     # card can show "running 42%", "done", or "click to install".
-    engines = ("z_image", "krea", "ideogram4", "wan", "hidream", "flux2")
+    engines = ("z_image", "krea", "ideogram4", "wan", "minimax_h3",
+               "hidream", "flux2")
     install_state: dict[str, Any] = {}
     for eng in engines:
         active = installer.active_for_engine(eng)
@@ -3549,6 +3617,15 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
             recent = installer.list_for_engine(eng, limit=1)
             install_state[eng] = recent[0] if recent else None
     ctx["engine_installs"] = install_state
+    # Whether ANY engine install is in flight. Computed here rather than in
+    # the template so adding an engine can't silently drop it from the
+    # live-progress poll (the template used to name four engines by hand).
+    ctx["any_install_busy"] = any(
+        (row or {}).get("status") in ("pending", "running")
+        if isinstance(row, dict)
+        else bool(row) and getattr(row, "status", None) in ("pending", "running")
+        for row in install_state.values()
+    )
     # Render the GPU-resolved plan (which on AMD swaps in the ROCm wheels
     # and notes) when one exists; otherwise fall back to the generic
     # baseline so the card still has packages/notes to show.
@@ -3719,6 +3796,17 @@ async def setup_wan(request: Request,
     return RedirectResponse("/ui/setup-diffusion", status_code=303)
 
 
+@router.post("/setup/image/minimax_h3", response_class=HTMLResponse)
+async def setup_minimax_h3(request: Request,
+                           minimax_h3_python: str = Form(""),
+                           _: None = Depends(require_csrf)) -> Response:
+    cfg = request.app.state.cfg
+    cfg.minimax_h3_python = minimax_h3_python.strip()
+    update_image_config(cfg.config_path,
+                        minimax_h3_python=cfg.minimax_h3_python)
+    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+
+
 @router.post("/setup/coexistence", response_class=HTMLResponse)
 async def setup_coexistence(request: Request,
                             unload_text_on_arrival: str = Form(""),
@@ -3747,6 +3835,7 @@ async def install_engine_deps(request: Request, engine: str,
                               diffusers_version: str = Form(""),
                               reset_diffusers: str = Form(""),
                               torch_backend: str = Form("auto"),
+                              venvs_dir: str = Form(""),
                               _: None = Depends(require_csrf)) -> Response:
     """Kick off an opinionated venv + pip install for one engine.
 
@@ -3754,10 +3843,20 @@ async def install_engine_deps(request: Request, engine: str,
     persists as an override; ``reset_diffusers`` clears the override and
     reinstalls the shipped pin. ``torch_backend`` (auto/rocm/cuda/cpu)
     chooses which torch build to install."""
-    from .config import set_diffusers_override
-    from .engine_installer import TORCH_BACKENDS
+    from .config import set_diffusers_override, update_image_config
+    from .engine_installer import TORCH_BACKENDS, venv_root
     cfg = request.app.state.cfg
     installer = request.app.state.engine_installer
+    # The confirm dialog can repoint where venvs are built — a diffusion stack
+    # is 8-12 GB and the data dir often sits on a small system partition.
+    chosen_root = (venvs_dir or "").strip()
+    if chosen_root and Path(chosen_root).expanduser() != venv_root(cfg):
+        try:
+            Path(chosen_root).expanduser().mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return _error_html(f"cannot use {chosen_root}: {e}", status_code=400)
+        cfg.venvs_dir = Path(chosen_root).expanduser()
+        update_image_config(cfg.config_path, venvs_dir=str(cfg.venvs_dir))
     options: dict[str, Any] = {}
     # Checkbox values arrive as "on" when checked, "" when not.
     if patch_flash_attn:
@@ -3800,9 +3899,23 @@ async def download_engine_model(request: Request, engine: str,
                                 repo: str = Form(...),
                                 subfolder: str = Form(""),
                                 filename: str = Form(""),
+                                models_dir: str = Form(""),
                                 _: None = Depends(require_csrf)) -> Response:
     """Start an HF whole-repo, subfolder, or single-file diffusion download."""
     reg: Registry = request.app.state.registry
+    cfg = request.app.state.cfg
+    # The confirm dialog can repoint the shared models directory before a
+    # multi-GB pull starts, so a big download lands on the big disk.
+    chosen_dir = (models_dir or "").strip()
+    if chosen_dir and Path(chosen_dir).expanduser() != cfg.models_dir:
+        try:
+            Path(chosen_dir).expanduser().mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return _error_html(f"cannot use {chosen_dir}: {e}", status_code=400)
+        try:
+            apply_models_dir(request, chosen_dir)
+        except Exception as e:  # noqa: BLE001
+            return _error_html(f"could not set models dir: {e}", status_code=400)
     repo_clean = repo.strip()
     if not repo_clean:
         return _error_html("repo is required", status_code=400)
@@ -3831,6 +3944,104 @@ async def download_engine_model(request: Request, engine: str,
     except Exception as e:
         return _error_html(f"pull failed: {e}", status_code=400)
     return RedirectResponse("/ui/setup-diffusion", status_code=303)
+
+
+@router.get("/setup-diffusion/preflight", response_class=HTMLResponse)
+async def setup_diffusion_preflight(request: Request,
+                                    engine: str,
+                                    kind: str = "deps",
+                                    repo: str = "",
+                                    subfolder: str = "",
+                                    filename: str = "",
+                                    dest: str = "",
+                                    _: Origin = Depends(require_admin_ui)
+                                    ) -> HTMLResponse:
+    """Destination + free-space check, rendered into the confirm dialog.
+
+    ``kind=deps`` sizes the pip/venv install; ``kind=model`` sizes an HF
+    download, asking the hub for the real repo size and falling back to the
+    catalog's estimate when that call fails (offline, gated, rate-limited).
+    """
+    from .engine_installer import ENGINE_PLANS, resolve_plan, venv_root
+    from . import diffusion_catalog
+
+    cfg = request.app.state.cfg
+    if kind not in ("deps", "model"):
+        return _error_html("kind must be deps or model", status_code=400)
+
+    if kind == "deps":
+        base = ENGINE_PLANS.get(engine)
+        if base is None:
+            return _error_html(f"no install plan for {engine!r}", status_code=400)
+        try:
+            from .gpu_detect import detect_gpu
+            plan = resolve_plan(engine, detect_gpu(), cfg=cfg)
+            space_mb = plan.space_mb if plan else base.space_mb
+            label = plan.label if plan else base.label
+        except Exception:  # noqa: BLE001 — preview only; fall back to baseline
+            space_mb, label = base.space_mb, base.label
+        target = Path(dest) if dest.strip() else venv_root(cfg) / engine
+        required = int(space_mb) * 1024 ** 2
+        ctx = {
+            "action": f"/ui/setup-diffusion/engine/{engine}/install-deps",
+            "title": f"Install {label} dependencies",
+            "subtitle": ("A Python venv plus the engine's torch stack. "
+                         "Nothing is downloaded until you confirm."),
+            "dest_field": "venvs_dir",
+            "size_source": "engine install plan",
+            "confirm_label": "Install here",
+            "extra_note": (
+                "This sets where <em>all</em> engine venvs live, not just this "
+                "one. Existing venvs are not moved."),
+            "passthrough": {},
+        }
+        # The dialog edits the venvs *root*, so show that rather than the
+        # per-engine subdirectory it will create underneath.
+        target = target.parent if not dest.strip() else Path(dest)
+    else:
+        repo_clean = repo.strip().removeprefix("hf://").removeprefix("hf:")
+        if not repo_clean:
+            return _error_html("repo is required", status_code=400)
+        reg: Registry = request.app.state.registry
+        sub = subfolder.strip().strip("/") or None
+        fn = filename.strip()
+        required, source_label = 0, ""
+        try:
+            if fn:
+                required = await reg.estimate_repo_size(repo_clean, files=[fn])
+            else:
+                required = await reg.estimate_repo_size(repo_clean, sub)
+            source_label = "measured from the Hugging Face repo"
+        except Exception:  # noqa: BLE001 — gated/offline: fall back to catalog
+            required = 0
+        if not required:
+            entry = diffusion_catalog.by_canonical_id(repo_clean)
+            if entry is None:
+                entry = next((e for e in diffusion_catalog.for_engine(engine)
+                              if e.hf_repo == repo_clean), None)
+            if entry and entry.approx_size_gb:
+                required = int(entry.approx_size_gb * 1024 ** 3)
+                source_label = "catalog estimate (hub size unavailable)"
+            else:
+                source_label = "unknown — hub size unavailable"
+        target = Path(dest) if dest.strip() else cfg.models_dir
+        ctx = {
+            "action": f"/ui/setup-diffusion/engine/{engine}/download-model",
+            "title": f"Download {repo_clean}",
+            "subtitle": "Weights are pulled from Hugging Face into this folder.",
+            "dest_field": "models_dir",
+            "size_source": source_label,
+            "confirm_label": "Download here",
+            "extra_note": (
+                "This is the shared models directory; changing it repoints "
+                "every model llamanager knows about."),
+            "passthrough": {"repo": repo_clean, "subfolder": subfolder.strip(),
+                            "filename": fn},
+        }
+
+    ctx["preflight"] = disk_preflight(Path(target), required)
+    return templates.TemplateResponse(request, "_preflight.html",
+                                      _ctx(request, **ctx))
 
 
 @router.get("/setup-diffusion/_partial", response_class=HTMLResponse)
@@ -4934,6 +5145,21 @@ async def topbar_llm_set_default(request: Request,
     return _topbar_redirect(request)
 
 
+@router.post("/topbar/intake", response_class=HTMLResponse)
+async def topbar_intake(request: Request,
+                        accepting: str = Form(...),
+                        _: None = Depends(require_csrf)) -> Response:
+    """Flip the master intake switch from the top bar.
+
+    ``accepting=off`` closes the door: new API requests get 503, the queued
+    backlog is dropped, in-flight work finishes. The state is persisted to
+    config.toml, so it holds across a daemon restart until switched back on.
+    """
+    from .intake import set_accepting
+    set_accepting(request.app, accepting.strip().lower() in ("on", "true", "1"))
+    return _topbar_redirect(request)
+
+
 @router.post("/topbar/image/set-default", response_class=HTMLResponse)
 async def topbar_image_set_default(request: Request,
                                    model_id: str = Form(""),
@@ -5074,6 +5300,7 @@ def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
             "krea":    bool(cfg.z_image_python),
             "ideogram4": bool(cfg.ideogram4_python),
             "wan":     bool(cfg.wan_python),
+            "minimax_h3": bool(getattr(cfg, "minimax_h3_python", "")),
             "flux2":   bool(cfg.flux2_sd_cli),
         }.get(eng_id, False)
 
@@ -5084,14 +5311,12 @@ def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
             "krea":    "Krea 2 Turbo",
             "ideogram4": "Ideogram 4",
             "wan":     "Wan 2.2 (text/image → video)",
+            "minimax_h3": "MiniMax-H3 (video + audio)",
             "flux2":   "FLUX 2 Dev",
         }.get(eng_id, eng_id)
 
         schema = [_serialize_profile_field(f) for f in eng_mod.profile_schema()]
-        try:
-            default_profiles_dict = eng_mod.default_profiles()
-        except Exception:
-            default_profiles_dict = {}
+        default_profiles_dict = image_engines.default_profiles(eng_id)
         default_profiles_view = [
             {"name": n, "fields": d}
             for n, d in default_profiles_dict.items()
@@ -5368,10 +5593,9 @@ async def diffusion_profiles_materialize_defaults(
     if eng_mod is None or not mid:
         return _error_html("model_id and a known engine are required",
                            status_code=400)
-    try:
-        builtins = eng_mod.default_profiles()
-    except Exception as e:
-        return _error_html(f"engine {engine!r} has no default profiles: {e}",
+    builtins = image_engines.default_profiles(engine, cfg.models_dir / mid)
+    if not builtins:
+        return _error_html(f"engine {engine!r} has no default profiles",
                            status_code=400)
     existing = cfg.get_model(mid)
     existing_names = set(existing.profiles.keys()) if existing else set()
@@ -5494,10 +5718,7 @@ def _asr_models_ctx(request: Request) -> dict[str, Any]:
             continue
         fields = _asr_engine_setup_fields(cfg, eng_id, eng_mod)
         schema = [_serialize_profile_field(f) for f in eng_mod.profile_schema()]
-        try:
-            default_profiles_dict = eng_mod.default_profiles()
-        except Exception:
-            default_profiles_dict = {}
+        default_profiles_dict = image_engines.default_profiles(eng_id)
         default_profiles_view = [
             {"name": n, "fields": d} for n, d in default_profiles_dict.items()
         ]

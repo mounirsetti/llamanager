@@ -71,6 +71,7 @@
       --ok:   oklch(0.70 0.13 155);
       --warn: oklch(0.78 0.14 80);
       --bad:  oklch(0.62 0.18 28);
+      --bad-soft: oklch(0.62 0.18 28 / 0.14);
 
       --shadow-1: 0 1px 0 0 oklch(0 0 0 / 0.18);
     }
@@ -95,6 +96,7 @@
       --ok:   oklch(0.50 0.14 155);
       --warn: oklch(0.55 0.14 70);
       --bad:  oklch(0.52 0.20 28);
+      --bad-soft: oklch(0.52 0.20 28 / 0.10);
 
       --shadow-1: 0 1px 0 0 oklch(0 0 0 / 0.06);
     }
@@ -143,6 +145,12 @@
       display: flex;
       flex-direction: column;
       gap: 28px;
+      /* Backstop: the nav scrolls on its own (below), but on a viewport too
+         short for even brand + collapsed nav + footer the whole rail must
+         scroll — a sticky 100vh box with overflow:visible hides the surplus
+         with no way to reach it. */
+      overflow-y: auto;
+      overscroll-behavior: contain;
     }
     .lm-brand {
       font-family: 'Fraunces', 'Iowan Old Style', Charter, Georgia, serif;
@@ -196,7 +204,32 @@
     .lm-meta-action:hover { opacity: 0.75; }
 
     /* ---------- nav ---------- */
-    .lm-nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+    /* The link list is the only part of the rail allowed to overflow, so the
+       brand and the rail footer (theme, refresh, sign out) stay pinned and
+       reachable at any window height. min-height keeps a usable scroll area
+       before the rail's own scrollbar takes over. */
+    .lm-nav {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      flex: 1;
+      min-height: 120px;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      /* Breathing room so focus rings (2px, offset 2px) aren't clipped
+         against the scroll container's edges; cancelled by the margin. */
+      padding: 2px;
+      margin: -2px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--bg-3) transparent;
+    }
+    .lm-nav::-webkit-scrollbar { width: 6px; }
+    .lm-nav::-webkit-scrollbar-track { background: transparent; }
+    .lm-nav::-webkit-scrollbar-thumb {
+      background: var(--bg-3);
+      border-radius: 999px;
+    }
+    .lm-nav::-webkit-scrollbar-thumb:hover { background: var(--fg-3); }
     .lm-nav-eyebrow {
       font-size: 0.6875rem;
       letter-spacing: 0.12em;
@@ -305,10 +338,14 @@
     }
     /* The sticky bar background stretches edge-to-edge, but its content
        is constrained to the same 1180px column as .lm-canvas-inner and
-       left-aligned, so the topbar visually tracks the page content. */
+       left-aligned, so the topbar visually tracks the page content.
+
+       Flex, not grid: the child count varies (the slots strip and the
+       intake switch come and go), and a fixed column template pushed the
+       extra child onto a second row. The two model lanes share the free
+       space; dividers, slots and the switch size to content. */
     .lm-topbar__inner {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+      display: flex;
       align-items: stretch;
       max-width: 1180px;
     }
@@ -332,15 +369,17 @@
       align-items: center;
       gap: 0;
       min-width: 0;
+      flex: 1 1 0;
       padding: 8px 0 8px 40px;
       margin: 0;
     }
     .lm-topbar__lane--right {
       justify-content: flex-end;
-      padding: 8px 40px 8px 0;
+      padding: 8px 0;
     }
     .lm-topbar__divider {
       align-self: stretch;
+      flex: 0 0 auto;
       width: 1px;
       background: var(--bg-3);
       margin: 8px 20px;
@@ -350,6 +389,7 @@
        3 rows tall then scrolls. The clickable card jumps to /ui/slots. */
     .lm-topbar__slots {
       display: flex; flex-direction: column;
+      flex: 0 0 auto;
       gap: 2px;
       margin: 4px 0;
       padding: 4px 10px;
@@ -630,6 +670,84 @@
       pointer-events: none;
     }
 
+    /* ---------- intake switch ----------
+       A hardware-style toggle at the end of the bar: knob left + muted
+       label = taking requests; knob right + red = the door is shut. It is
+       the loudest control up here on purpose — a forgotten pause looks
+       like an outage from the client side. */
+    .lm-topbar__intake {
+      display: flex;
+      align-items: center;
+      flex: 0 0 auto;
+      padding: 8px 40px 8px 0;
+      margin: 0;
+    }
+    .lm-topbar__switch {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      height: 28px;
+      padding: 0 10px 0 8px;
+      border: 1px solid var(--bg-3);
+      background: transparent;
+      border-radius: 2px;
+      cursor: pointer;
+      transition: color 180ms ease, border-color 180ms ease,
+                  background 180ms ease;
+    }
+    .lm-topbar__switch:hover { border-color: var(--fg-2); }
+    .lm-topbar__switch-track {
+      position: relative;
+      width: 26px; height: 14px;
+      flex-shrink: 0;
+      border-radius: 999px;
+      background: var(--bg-3);
+      transition: background 180ms ease;
+    }
+    .lm-topbar__switch-knob {
+      position: absolute;
+      top: 2px; left: 2px;
+      width: 10px; height: 10px;
+      border-radius: 999px;
+      background: var(--fg-2);
+      transition: transform 180ms ease, background 180ms ease;
+    }
+    .lm-topbar__switch-label {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.6875rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+      white-space: nowrap;
+      transition: color 180ms ease;
+    }
+    /* Engaged = intake closed. */
+    .lm-topbar__switch[aria-checked="true"] {
+      border-color: var(--bad);
+      background: var(--bad-soft, var(--bg-2));
+    }
+    .lm-topbar__switch[aria-checked="true"] .lm-topbar__switch-track {
+      background: var(--bad);
+    }
+    .lm-topbar__switch[aria-checked="true"] .lm-topbar__switch-knob {
+      transform: translateX(12px);
+      background: var(--bg-0);
+    }
+    .lm-topbar__switch[aria-checked="true"] .lm-topbar__switch-label {
+      color: var(--bad);
+      font-weight: 600;
+    }
+    .lm-topbar__switch:active .lm-topbar__switch-knob { transform: scale(0.9); }
+    .lm-topbar__switch[aria-checked="true"]:active .lm-topbar__switch-knob {
+      transform: translateX(12px) scale(0.9);
+    }
+    /* While closed the whole bar reads as alarmed, not just the switch. */
+    .lm-topbar.is-intake-paused { border-bottom-color: var(--bad); }
+    .lm-topbar.is-intake-paused::after {
+      background: linear-gradient(90deg,
+        transparent 0%, var(--bad) 6%, var(--bad) 94%, transparent 100%);
+    }
+
     /* Empty lane: when no models of this family are on disk. */
     .lm-topbar__empty {
       display: inline-flex;
@@ -656,14 +774,14 @@
        than letting flex wrap into a jagged second line. */
     @media (max-width: 1100px) {
       .lm-topbar__lane { padding-left: 20px; }
-      .lm-topbar__lane--right { padding-right: 20px; }
+      .lm-topbar__intake { padding-right: 20px; }
       .lm-topbar__sigil { padding-right: 10px; }
       .lm-topbar__field--profile { flex-basis: 110px; }
     }
     @media (max-width: 820px) {
       .lm-topbar__inner {
-        grid-template-columns: 1fr;
-        grid-auto-rows: auto;
+        flex-direction: column;
+        align-items: stretch;
       }
       .lm-topbar__divider {
         width: auto;
@@ -672,7 +790,8 @@
         background: var(--bg-3);
       }
       .lm-topbar__lane,
-      .lm-topbar__lane--right {
+      .lm-topbar__lane--right,
+      .lm-topbar__intake {
         justify-content: flex-start;
         padding: 8px 16px;
       }
@@ -1394,10 +1513,22 @@
         padding: 14px 20px;
         border-right: 0;
         border-bottom: 1px solid var(--bg-3);
+        overflow: visible;
       }
       .lm-meta { display: none; }
       .lm-nav-eyebrow { display: none; }
-      .lm-nav { flex-direction: row; flex: 1 1 100%; gap: 4px; flex-wrap: wrap; }
+      /* Horizontal wrapping bar: it grows with the page, so drop the
+         desktop rail's internal scrolling and its edge padding. */
+      .lm-nav {
+        flex-direction: row;
+        flex: 1 1 100%;
+        gap: 4px;
+        flex-wrap: wrap;
+        min-height: 0;
+        overflow: visible;
+        padding: 0;
+        margin: 0;
+      }
       .lm-nav-link { padding: 5px 10px; }
       .lm-nav-link[aria-current="page"]::before {
         left: 6px;
@@ -1589,7 +1720,8 @@
          selected dropdown option *is* the canonical state — no redundant
          "currently loaded" text alongside. #}
       {% if topbar_text_models is defined %}
-      <div class="lm-topbar" id="lm-topbar"
+      <div class="lm-topbar {% if not topbar_accepting %}is-intake-paused{% endif %}"
+           id="lm-topbar"
            data-current-llm="{{ topbar_current_llm }}"
            data-current-llm-profile="{{ topbar_current_llm_profile }}"
            data-default-llm="{{ topbar_default_llm }}"
@@ -1757,6 +1889,31 @@
             <a href="/ui/diffusion-models">pull one</a>
           </span>
           {% endif %}
+        </form>
+
+        <div class="lm-topbar__divider" aria-hidden="true"></div>
+
+        {# ---- Intake switch ------------------------------------------
+           Master "are we taking requests" toggle. Off refuses every
+           inference request with 503 (this UI's own chat/image pages
+           included) and persists across restarts. A plain form POST — the
+           label + colour carry the state, no JS involved. #}
+        <form class="lm-topbar__intake" method="post" action="/ui/topbar/intake"
+              data-topbar-form="intake">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="accepting"
+                 value="{% if topbar_accepting %}off{% else %}on{% endif %}">
+          <button type="submit" class="lm-topbar__switch" role="switch"
+                  aria-checked="{% if topbar_accepting %}false{% else %}true{% endif %}"
+                  aria-label="Stop taking requests"
+                  title="{% if topbar_accepting %}Stop taking requests — new API requests get 503, the queued backlog is dropped, in-flight work finishes{% else %}Start taking requests again{% endif %}">
+            <span class="lm-topbar__switch-track" aria-hidden="true">
+              <span class="lm-topbar__switch-knob"></span>
+            </span>
+            <span class="lm-topbar__switch-label">
+              {% if topbar_accepting %}accepting{% else %}not accepting{% endif %}
+            </span>
+          </button>
         </form>
        </div>
       </div>

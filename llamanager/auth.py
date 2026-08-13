@@ -86,6 +86,32 @@ class Origin:
         }
 
 
+#: Reserved origin name for the same-machine control credential (see
+#: AuthManager.ensure_local_control). Admin-scoped, but only honoured on
+#: loopback connections.
+LOCAL_ORIGIN_NAME = "local"
+
+#: Filename of that credential inside ``data_dir``. Mode 0600 — readable
+#: only by the user the daemon runs as, which is the whole point.
+LOCAL_KEY_FILENAME = ".local-control-key"
+
+
+def is_loopback_host(host: str | None) -> bool:
+    """Whether a peer address is this machine.
+
+    Empty/unparseable hosts come from in-process transports (ASGI test
+    clients, unix sockets) and are local by construction.
+    """
+    import ipaddress
+    host = (host or "").strip()
+    if host in ("", "testclient", "localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def generate_key() -> str:
     return _KEY_PREFIX + secrets.token_urlsafe(32)
 
@@ -204,6 +230,35 @@ class AuthManager:
             is_admin=True,
         )
         self.db.log_event("bootstrap_created", {"name": "bootstrap"})
+        return key
+
+    def ensure_local_control(self, key_path: Path) -> str | None:
+        """Guarantee a same-machine control credential and return it if it was
+        (re)written, else None.
+
+        Local tools that run as the operator — the tray, the CLI — shouldn't
+        have to be handed a key to drive a daemon on the same box. The daemon
+        mints a dedicated admin origin (``local``) and drops its key in a 0600
+        file only that user can read, so "same machine, same user" *is* the
+        credential. Nothing is trusted by network position: see
+        ``api_admin.admin_origin``, which additionally refuses this origin on
+        non-loopback connections.
+
+        The key is created once and left alone afterwards, so a long-lived
+        tray's cached client keeps working across daemon restarts. Delete the
+        file to force a fresh key on the next start.
+        """
+        origin = self.get_origin_by_name(LOCAL_ORIGIN_NAME)
+        if origin is not None and key_path.exists():
+            return None
+        if origin is None:
+            _, key = self.create_origin(name=LOCAL_ORIGIN_NAME, priority=100,
+                                        allowed_models=["*"], is_admin=True)
+        else:
+            # Origin exists but the file is gone — nobody can read the old key
+            # any more, so replace it.
+            key = self.rotate_key(origin.id)
+        self.db.log_event("local_control_key_written", {"path": str(key_path)})
         return key
 
     # ---- CRUD ----

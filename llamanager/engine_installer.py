@@ -109,9 +109,10 @@ AMD_ROCM_INDEX = f"https://repo.radeon.com/rocm/manylinux/{AMD_ROCM_REL}/"
 CPU_TORCH_INDEX = "https://download.pytorch.org/whl/cpu"
 
 # Engines whose AMD path we know how to wire to repo.radeon.com wheels.
-AMD_WHEEL_ENGINES = {"hidream", "z_image", "krea", "ideogram4", "wan", "asr"}
+AMD_WHEEL_ENGINES = {"hidream", "z_image", "krea", "ideogram4", "wan", "asr",
+                     "minimax_h3"}
 # Valid values for the UI/CLI torch-backend selector.
-TORCH_BACKENDS = ("auto", "rocm", "cuda", "cpu")
+TORCH_BACKENDS = ("auto", "rocm", "cuda", "mps", "cpu")
 
 # Hard-pinned fallback wheels per Python ABI. Used when the index
 # scrape fails (network down, AMD changed page layout, etc.). Bump
@@ -281,6 +282,42 @@ ENGINE_PLANS: dict[str, EnginePackages] = {
             "Z-Image / HiDream diffusion venv's torch when present. If the "
             "shipped diffusers pin is behind upstream Wan 2.2 support, bump it "
             "with the version picker. AMD gets the official ROCm torch wheels."
+        ),
+    ),
+    "minimax_h3": EnginePackages(
+        engine="minimax_h3",
+        label="MiniMax-H3 — video + audio",
+        # MiniMax-H3 is Modular-Diffusers-only and lands after the pinned
+        # release, so this is the one engine that tracks diffusers git main.
+        # Verified 2026-08-11: diffusers 0.39.0 exports ModularPipeline and
+        # ComponentsManager but has no minimax_h3 module, so the pin cannot
+        # serve it.
+        #
+        # Two quantisation backends, because they cover different hardware:
+        # bitsandbytes provides 4-bit NF4 (measured 3.88x smaller and faster
+        # than bf16 on gfx1201, and the only 4-bit path with ROCm kernels),
+        # torchao provides int8/fp8 and a CUDA-only int4. av (PyAV) decodes
+        # video and audio references; imageio-ffmpeg muxes the generated
+        # soundtrack onto the clip.
+        packages=[
+            "torch", "transformers", "accelerate", "huggingface_hub",
+            "safetensors", "Pillow", "ftfy", "imageio", "imageio-ffmpeg",
+            "av", "torchao", "bitsandbytes",
+            "git+https://github.com/huggingface/diffusers.git",
+        ],
+        reuse_from=(),   # needs diffusers main; never share a pinned venv
+        space_mb=12000,
+        notes=(
+            "Joint video + audio generation. Installs diffusers from git main "
+            "(MiniMax-H3 is Modular-Diffusers-only and is not in the pinned "
+            "release) plus torchao for int8 weight-only quantisation. "
+            "HARDWARE: the transformer is 61.7 GB and the Qwen3-VL "
+            "conditioner another 62.1 GB in bfloat16. Quantised to 4-bit NF4 "
+            "and loaded one component at a time, the peak drops to ~21.5 GB, "
+            "which fits a 32 GB card with nothing in system RAM. int8 needs "
+            "~40 GB, and unquantised needs ~80 GB. The runner probes the "
+            "backend, sizes the request and refuses with the reason rather "
+            "than thrashing."
         ),
     ),
     "asr": EnginePackages(
@@ -465,8 +502,13 @@ def _effective_backend(backend: str | None, gpu: GpuProfile) -> str:
         b = "auto"
     if b != "auto":
         return b
+    # Apple Silicon maps to "mps", not "cpu": the default macOS arm64 wheel
+    # on PyPI already carries the Metal backend, so the right action there is
+    # to install plain torch and let it find the GPU. Sending Apple down the
+    # CPU path pinned it to --index-url .../whl/cpu and gave up the GPU for
+    # no reason.
     return {"amd": "rocm", "nvidia": "cuda",
-            "apple": "cpu", "cpu": "cpu"}.get(gpu.kind, "cpu")
+            "apple": "mps", "cpu": "cpu"}.get(gpu.kind, "cpu")
 
 
 def _is_torch_pkg(spec: str) -> bool:
@@ -521,6 +563,14 @@ def resolve_plan(engine: str, gpu: GpuProfile, emit=None,
         )
         if engine == "hidream":
             notes += " Recommend enabling the pipeline.py flash-attn patch below."
+        if engine == "minimax_h3":
+            notes += (
+                " NOTE: use the nf4 profile on AMD. bitsandbytes has ROCm "
+                "kernels and measured 3.88x smaller AND faster than bf16 on "
+                "gfx1201, which brings the model to ~21.5 GB peak. torchao's "
+                "int4 has no ROCm kernels and its int8 falls back to a slow "
+                "dequant path here."
+            )
         if not wheels:
             notes += (" NOTE: no ROCm wheels resolved for this Python ABI — "
                       "pip will fall back to a generic torch, which won't use "
@@ -539,6 +589,29 @@ def resolve_plan(engine: str, gpu: GpuProfile, emit=None,
     if eff == "rocm":
         emit(f"[plan] engine {engine!r} has no AMD wheel recipe; "
              f"falling back to generic torch")
+
+    # ---- Apple Silicon (Metal / MPS) -----------------------------------
+    if eff == "mps":
+        notes = base.notes + (
+            f" Torch build: Apple Silicon / Metal{chosen_caption} — the "
+            "default macOS arm64 wheel from PyPI carries the MPS backend, so "
+            "no index override is used."
+        )
+        if engine == "minimax_h3":
+            notes += (
+                " NOTE: neither bitsandbytes nor torchao ships Metal kernels, "
+                "so MiniMax-H3 runs unquantised here and needs ~68 GB of "
+                "unified memory even with one component loaded at a time."
+            )
+        return ResolvedPlan(
+            engine=engine,
+            label=base.label,
+            notes=notes,
+            space_mb=base.space_mb,
+            target="mps",
+            packages=list(base.packages),
+            extra_index_url=base.extra_index_url,
+        )
 
     # ---- CPU-only build ------------------------------------------------
     if eff == "cpu":
@@ -565,11 +638,17 @@ def resolve_plan(engine: str, gpu: GpuProfile, emit=None,
         )
 
     # ---- NVIDIA CUDA / generic fallback --------------------------------
+    cuda_note = f" Torch build: CUDA{chosen_caption}." if eff == "cuda" else ""
+    if eff == "cuda" and engine == "minimax_h3":
+        cuda_note += (
+            " Every quantisation backend is available here: bitsandbytes nf4 "
+            "(~21.5 GB peak) and torchao int4 (~21 GB) both fit a 32 GB card, "
+            "and torchao's cpp extensions load on CUDA."
+        )
     return ResolvedPlan(
         engine=engine,
         label=base.label,
-        notes=base.notes + (
-            f" Torch build: CUDA{chosen_caption}." if eff == "cuda" else ""),
+        notes=base.notes + cuda_note,
         space_mb=base.space_mb,
         target=eff,
         packages=list(base.packages),
@@ -582,7 +661,15 @@ def resolve_plan(engine: str, gpu: GpuProfile, emit=None,
 # ---------- venv path helpers (unchanged) ------------------------------
 
 def venv_root(cfg: Config) -> Path:
-    """Where per-engine venvs live."""
+    """Where per-engine venvs live.
+
+    Defaults to ``<data_dir>/venvs`` but honours an explicit ``venvs_dir``:
+    a diffusion stack is 8-12 GB and the data dir is often on a small system
+    partition, so operators need to be able to put it on the big disk.
+    """
+    override = getattr(cfg, "venvs_dir", None)
+    if override:
+        return Path(override).expanduser()
     return cfg.data_dir / "venvs"
 
 
@@ -1453,6 +1540,9 @@ class EngineInstaller:
         elif engine == "wan":
             kwargs["wan_python"] = python_path
             self.cfg.wan_python = python_path
+        elif engine == "minimax_h3":
+            kwargs["minimax_h3_python"] = python_path
+            self.cfg.minimax_h3_python = python_path
         elif engine == "hidream":
             kwargs["hidream_python"] = python_path
             self.cfg.hidream_python = python_path

@@ -43,6 +43,7 @@ _DEFAULT_SIZE = "1280x704"
 # tier). The operator can still type custom dims via the profile.
 SIZE_BUCKETS = [
     "1280x704", "704x1280",     # 720p landscape / portrait
+    "1152x640", "640x1152",     # best quality/VRAM trade on a 32 GB card
     "960x544", "544x960",       # lighter draft tier
     "832x480", "480x832",
 ]
@@ -221,13 +222,16 @@ def profile_schema() -> list[ProfileField]:
     return [
         ProfileField(
             key="image_size", label="Resolution", kind="select",
-            default=_DEFAULT_SIZE, options=SIZE_BUCKETS,
-            help="720p (1280x704) is the native quality bucket; smaller = faster.",
+            default="1152x640", options=SIZE_BUCKETS,
+            help="1152x640 is the best quality that fits a 32 GB card; "
+                 "1280x704 is native but needs an 80 GB card at useful lengths.",
         ),
         ProfileField(
             key="video_num_frames", label="Frames", kind="int",
-            default=_DEFAULT_NUM_FRAMES,
-            help="121 frames ≈ 5s at 24fps. Fewer frames = much faster / less VRAM.",
+            default=49,
+            help="49 ≈ 3s, 81 ≈ 5s at 16fps. VRAM grows with (frames x pixels)² — "
+                 "1152x640 at 49 frames peaks at 17.3 GiB, while 1280x704 at 121 "
+                 "needs ~112 GiB and is rejected on consumer cards.",
         ),
         ProfileField(
             key="video_fps", label="Playback FPS", kind="int",
@@ -276,19 +280,45 @@ def capabilities() -> dict[str, Any]:
 
 
 def default_profiles() -> dict[str, dict[str, Any]]:
+    """Starting profiles, ordered best-first.
+
+    ``wan-best`` is the measured sweet spot on a 32 GB card: 1152x640 keeps
+    the source still's fine detail where 832x480 softens it, and 49 frames
+    holds the attention matrix inside VRAM. Measured 248.7 s at 17.29 GiB
+    peak, fully GPU-resident.
+
+    ``wan-720p`` is the upstream model-card recipe. It needs far more than
+    32 GB — 1280x704 at 121 frames is 27280 attention tokens, ~112 GiB — so
+    on a consumer card the runner rejects it with the reason. It stays here
+    because it is the right profile on an 80 GB card.
+    """
     return {
+        "wan-best": {
+            "image_size": "1152x640",
+            "image_steps": 30,
+            "image_guidance": _DEFAULT_GUIDANCE,
+            "video_num_frames": 49,
+            "video_fps": 16,
+        },
+        "wan-5s": {
+            "image_size": "832x480",
+            "image_steps": 30,
+            "image_guidance": _DEFAULT_GUIDANCE,
+            "video_num_frames": 81,
+            "video_fps": 16,
+        },
+        "wan-draft": {
+            "image_size": "832x480",
+            "image_steps": 30,
+            "image_guidance": _DEFAULT_GUIDANCE,
+            "video_num_frames": 49,
+            "video_fps": 16,
+        },
         "wan-720p": {
             "image_size": _DEFAULT_SIZE,
             "image_steps": _DEFAULT_STEPS,
             "image_guidance": _DEFAULT_GUIDANCE,
             "video_num_frames": _DEFAULT_NUM_FRAMES,
-            "video_fps": _DEFAULT_FPS,
-        },
-        "wan-draft": {
-            "image_size": "960x544",
-            "image_steps": 30,
-            "image_guidance": _DEFAULT_GUIDANCE,
-            "video_num_frames": 49,
             "video_fps": _DEFAULT_FPS,
         },
     }

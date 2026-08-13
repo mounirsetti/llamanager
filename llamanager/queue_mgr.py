@@ -301,6 +301,19 @@ class QueueManager:
                     n += 1
         return n
 
+    def cancel_pending(self) -> int:
+        """Cancel every request still waiting in the queue, leaving in-flight
+        work alone. Used by the intake switch (``intake.set_accepting``): once
+        the door is closed there is no point holding requests whose callers
+        will time out waiting, so the backlog is dropped and the GPU goes idle
+        as soon as the running task finishes.
+        """
+        n = 0
+        for req in list(self._by_id.values()):
+            if req.status == "queued" and self.cancel(req.request_id):
+                n += 1
+        return n
+
     # ---- pause / resume ----
     def pause(self) -> None:
         self._paused = True

@@ -32,7 +32,7 @@ from fastapi import (APIRouter, HTTPException, Request, Response, WebSocket,
                      WebSocketDisconnect)
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .auth import AuthManager, Origin
+from .auth import LOCAL_ORIGIN_NAME, AuthManager, Origin, is_loopback_host
 from .caller import describe_caller
 from .config import (ENGINE_FAMILY, Config, Profile, detect_engine_for_id,
                      is_launchable_llm)
@@ -43,6 +43,7 @@ from .engines._base import AudioRequest, ImageRequest
 from .image_runner import (
     ImageError, ImageTaskRunner, resolve_image_engine, resolve_video_engine,
 )
+from .intake import MESSAGE as INTAKE_MESSAGE, is_accepting, require_open
 from .queue_mgr import Cancelled, QueueManager, QueueFull, QueuedRequest
 from .registry import Registry
 from .server_manager import ServerManager, _safe_under
@@ -64,7 +65,30 @@ async def _origin_from_request(req: Request) -> Origin:
     if not origin:
         raise HTTPException(status_code=401, detail="invalid api key")
     _require_origin_enabled(origin)
+    require_local_origin_is_local(
+        origin, req.client.host if req.client else None)
     return origin
+
+
+def require_local_origin_is_local(origin: Origin, peer_host: str | None) -> None:
+    """Refuse the same-machine control credential from anywhere but this box.
+
+    ``auth.ensure_local_control`` mints an admin origin whose key sits in a
+    0600 file so local tools (tray, CLI) need no configuration. Reading that
+    file is the authorization, which means the credential is only meaningful
+    on the machine that holds it — a copy that escapes (a synced home
+    directory, a backup) must not become a working remote key. Enforced on
+    every authenticated surface, not just /admin, so this origin can never do
+    anything off-box.
+    """
+    if origin.name != LOCAL_ORIGIN_NAME:
+        return
+    if is_loopback_host(peer_host):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="the local control key is only accepted from this machine",
+    )
 
 
 def _require_origin_enabled(origin: Origin) -> None:
@@ -621,6 +645,7 @@ async def _handle_inference(
     request: Request, path: str
 ) -> Response:
     origin = await _origin_from_request(request)
+    require_open(request.app)
     body_bytes = await request.body()
     try:
         body = json.loads(body_bytes) if body_bytes else {}
@@ -945,6 +970,7 @@ async def audio_transcriptions(request: Request) -> Response:
         profile:          llamanager extension — selects an audio profile.
     """
     origin = await _origin_from_request(request)
+    require_open(request.app)
     try:
         form = await request.form()
     except Exception:
@@ -1107,6 +1133,15 @@ async def audio_stream(websocket: WebSocket) -> None:
             origin = await am.verify(sess.get("key"))
     if origin is None or not origin.enabled:
         return await fail("unauthorized", code=1008)
+    if (origin.name == LOCAL_ORIGIN_NAME
+            and not is_loopback_host(
+                websocket.client.host if websocket.client else None)):
+        return await fail("the local control key is only accepted from "
+                          "this machine", code=1008)
+    # Intake switch — the HTTP endpoints answer 503; a websocket can only say
+    # so in the error frame before closing (1013 = "try again later").
+    if not is_accepting(websocket.app):
+        return await fail(INTAKE_MESSAGE, code=1013)
 
     qp = websocket.query_params
     model = qp.get("model") or websocket.headers.get("x-llamanager-model")
@@ -1211,6 +1246,7 @@ async def images_generations(request: Request) -> Response:
         strength:              float — Flux2 img2img denoise strength (0..1).
     """
     origin = await _origin_from_request(request)
+    require_open(request.app)
     body_bytes = await request.body()
     try:
         body = json.loads(body_bytes) if body_bytes else {}
@@ -1423,6 +1459,7 @@ async def videos_generations(request: Request) -> Response:
     images. Runs through the one-shot ImageTaskRunner (single GPU slot).
     """
     origin = await _origin_from_request(request)
+    require_open(request.app)
     body_bytes = await request.body()
     try:
         body = json.loads(body_bytes) if body_bytes else {}

@@ -54,10 +54,30 @@ def resolve_admin_key(cfg: Config | None, explicit: str | None = None) -> str:
         cli_section = (cfg.raw or {}).get("cli") or {}
         if cli_section.get("admin_key"):
             return str(cli_section["admin_key"])
+    # Same machine, same user: the daemon leaves a 0600 control key in its
+    # data dir, so local tools (tray, CLI) need no configuration at all. Being
+    # able to read that file is the authorization — and the daemon only
+    # honours this origin over loopback. Last resort, so an explicit key or
+    # env var still wins.
+    local = _local_control_key(cfg)
+    if local:
+        return local
     raise AdminClientError(
         "no admin key found. Set LLAMANAGER_ADMIN_KEY, pass --admin-key, "
         "or add `admin_key = \"...\"` under a `[cli]` section in config.toml."
     )
+
+
+def _local_control_key(cfg: Config | None) -> str | None:
+    """Read the daemon's same-machine control key, if this user can."""
+    from .auth import LOCAL_KEY_FILENAME
+    from .config import expand
+    data_dir = cfg.data_dir if cfg is not None else expand("~/.llamanager")
+    try:
+        key = (data_dir / LOCAL_KEY_FILENAME).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return key or None
 
 
 @dataclass
@@ -242,6 +262,17 @@ class AdminClient:
 
     def queue_resume(self) -> dict[str, Any]:
         return self._post("/admin/queue/resume")
+
+    # ---- intake switch ----
+
+    def intake_status(self) -> dict[str, Any]:
+        return self._get("/admin/intake")
+
+    def intake_pause(self) -> dict[str, Any]:
+        return self._post("/admin/intake/pause")
+
+    def intake_resume(self) -> dict[str, Any]:
+        return self._post("/admin/intake/resume")
 
     # ---- models ----
 

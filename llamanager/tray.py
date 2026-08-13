@@ -209,6 +209,9 @@ class TrayApp:
             d.reachable, d.detail,
             st.get("state"), st.get("current_model"), st.get("current_profile"),
             st.get("queue_depth"), st.get("in_flight_count"),
+            # Included so the menu rebuilds when the switch is flipped
+            # elsewhere (top bar, CLI) — not only when the tray flips it.
+            st.get("accepting_requests"),
             models, _autorun_label(), snap["last_error"][:60],
         )
 
@@ -236,19 +239,24 @@ class TrayApp:
 
     # ---- menu actions ----
 
-    def _safe_admin(self, fn, label: str) -> None:
+    def _safe_admin(self, fn, label: str) -> bool:
+        """Run an admin call, reporting failures. Returns whether it worked so
+        callers can keep their own success notification honest."""
         if self._client is None:
             self._notify("No admin key configured")
-            return
+            return False
+        ok = True
         try:
             fn(self._client)
         except AdminClientError as e:
+            ok = False
             self._notify(f"{label} failed: {e}")
         # Refresh promptly so the menu reflects the new state.
         self._poll_once()
         if self._icon is not None:
             self._icon.menu = self._build_menu()
             self._icon.update_menu()
+        return ok
 
     def _notify(self, msg: str) -> None:
         log.info(msg)
@@ -315,6 +323,25 @@ class TrayApp:
     def _act_llm_restart(self, *_: Any) -> None:
         self._safe_admin(lambda c: c.server_restart(), "Restart LLM")
 
+    # intake switch — the daemon-wide "stop taking requests" toggle. Same
+    # state the top bar and `llamanager intake` drive; the tray reads it from
+    # the status poll it already makes.
+    def _act_intake_toggle(self, *_: Any) -> None:
+        if self._accepting(self.state.snapshot()["status"]):
+            if self._safe_admin(lambda c: c.intake_pause(), "Pause intake"):
+                self._notify("Not taking requests — new ones get 503 until "
+                             "you switch this back on")
+        else:
+            if self._safe_admin(lambda c: c.intake_resume(), "Resume intake"):
+                self._notify("Taking requests again")
+
+    @staticmethod
+    def _accepting(status: dict[str, Any]) -> bool:
+        """Whether the daemon is taking requests. Absent on a daemon older
+        than the intake switch — treat that as 'yes', which is what such a
+        daemon does."""
+        return bool(status.get("accepting_requests", True))
+
     def _act_open_ui(self, *_: Any) -> None:
         webbrowser.open(self._web_url)
 
@@ -362,9 +389,14 @@ class TrayApp:
         cur_model = st.get("current_model")
         cur_profile = st.get("current_profile")
 
-        # Header line (disabled).
+        accepting = self._accepting(st)
+
+        # Header line (disabled). A closed door is called out here as well as
+        # on the toggle below — from the client side a forgotten pause looks
+        # exactly like an outage, so it should be visible without opening a
+        # submenu.
         if up:
-            header = "● Running"
+            header = "● Running" if accepting else "● Running — NOT taking requests"
         else:
             header = "○ Stopped"
         qd = st.get("queue_depth")
@@ -431,6 +463,19 @@ class TrayApp:
             Item(queue_line, None, enabled=False),
             Menu.SEPARATOR,
             Item("Open Web UI", self._act_open_ui, default=True),
+            Menu.SEPARATOR,
+            # Checked = taking requests. Unchecking closes the door: new
+            # requests get 503 and the queued backlog is dropped, while
+            # in-flight work finishes. Persists until switched back on.
+            #
+            # Without an admin key every control here is inert (the tray is
+            # then reachability-only), so say so on the item instead of
+            # offering a switch that silently does nothing when clicked.
+            Item("Accepting requests" if self._client is not None
+                 else "Accepting requests  (needs an admin key)",
+                 self._act_intake_toggle,
+                 checked=lambda i: accepting,
+                 enabled=up and self._client is not None),
             Menu.SEPARATOR,
             Item("Service", service_menu),
             Item("LLM", llm_menu),

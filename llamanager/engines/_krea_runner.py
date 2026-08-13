@@ -226,6 +226,82 @@ def _apply_lora(pipe, lora: str, scale: float | None) -> None:
               file=sys.stderr)
 
 
+# Measured on a 32 GB gfx1201 (R9700), Krea 2 Turbo bf16 at 1024x576:
+# resident weights 24.7 GiB, total peak 27.92 GiB -> 3.2 GiB of activations
+# for 3304 attention tokens. Attention dominates and scales with tokens^2.
+_KREA_WEIGHTS_GIB = 24.7
+_REF_TOKENS = 3304.0
+_REF_ACT_GIB = 3.2
+_TEXT_TOKENS = 1000        # typical encoded prompt length
+
+
+def _estimate_peak_gib(width: int, height: int) -> tuple[float, int]:
+    """Return (estimated_peak_gib, tokens) for a Krea run at this size.
+
+    diffusers routes Krea's *masked* attention to the math backend on ROCm
+    (flash rejects attn_mask, efficient has no kernel for it), so the full
+    attention matrix is materialised and activation cost grows ~tokens^2.
+    """
+    tokens = (width // 16) * (height // 16) + _TEXT_TOKENS
+    act = _REF_ACT_GIB * (tokens / _REF_TOKENS) ** 2
+    return _KREA_WEIGHTS_GIB + act, tokens
+
+
+def _setup_gpu_resident(pipe, args, device):
+    """Encode the prompt, free the text encoder, then load the transformer.
+
+    Returns ``(prompt_embeds, prompt_embeds_mask, neg_embeds, neg_mask)``.
+    Raises RuntimeError when the requested resolution cannot fit in VRAM: we
+    deliberately do NOT fall back to CPU offload, which streams weights over
+    PCIe and measured ~86x slower (964 s vs 11 s for 4 steps).
+    """
+    import gc
+    import torch
+
+    total_gib = torch.cuda.get_device_properties(0).total_memory / 2 ** 30
+    est, tokens = _estimate_peak_gib(args.width, args.height)
+    # 0.92, not ~1.0: the estimate tracks PyTorch's own allocations but
+    # not driver/fragmentation overhead, and it under-predicted the
+    # measured Wan peak by ~7% (15.9 est vs 16.97 actual). Krea at
+    # 1280x720 lands at 30.9 GiB estimated and OOMs for real, so the
+    # margin has to reject it.
+    if est > total_gib * 0.92:
+        raise RuntimeError(
+            f"{args.width}x{args.height} needs ~{est:.1f} GiB but this GPU has "
+            f"{total_gib:.1f} GiB. Krea 2 Turbo's masked attention falls back "
+            f"to the math backend on ROCm, so cost grows with tokens^2 "
+            f"({tokens} tokens here). Reduce the resolution (1024x576 fits at "
+            f"~27.9 GiB) and retry."
+        )
+
+    print(f"[krea] gpu-resident: {tokens} attn tokens, est peak "
+          f"{est:.1f}/{total_gib:.1f} GiB", file=sys.stderr)
+    pipe.text_encoder.to(device)
+    with torch.no_grad():
+        pe, pm = pipe.encode_prompt(prompt=[args.prompt], device=device,
+                                    num_images_per_prompt=1)
+        ne = nm = None
+        if args.negative_prompt:
+            ne, nm = pipe.encode_prompt(prompt=[args.negative_prompt],
+                                        device=device, num_images_per_prompt=1)
+    pe, pm = pe.detach(), pm.detach()
+    if ne is not None:
+        ne, nm = ne.detach(), nm.detach()
+    # ``to("meta")`` drops the storage outright; a plain del would leave the
+    # 8.3 GB sitting in host RAM until the GC happened to run.
+    pipe.text_encoder.to("meta")
+    pipe.text_encoder = None
+    gc.collect()
+    torch.cuda.empty_cache()
+    pipe.transformer.to(device)
+    pipe.vae.to(device)
+    free_b, total_b = torch.cuda.mem_get_info()
+    print(f"[krea] transformer+vae resident; VRAM "
+          f"{(total_b - free_b) / 2 ** 30:.1f}/{total_b / 2 ** 30:.1f} GiB",
+          file=sys.stderr)
+    return pe, pm, ne, nm
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Krea 2 Turbo runner")
     p.add_argument("--model_path", required=True, type=Path)
@@ -288,24 +364,16 @@ def main() -> int:
         print(f"[krea] loading LoRA {args.lora} scale={args.lora_scale}",
               file=sys.stderr)
         _apply_lora(pipe, args.lora, args.lora_scale)
-    # bf16 transformer (26 GB) + text encoder (9 GB) exceed a 32 GB card
-    # together; sequential offload keeps one component on-GPU at a time.
+    # The bf16 transformer (25 GB) and the text encoder (8.3 GB) do not fit
+    # on a 32 GB card together — but they are never needed at the same time.
+    # Encode the prompt with only the encoder resident, free it, then bring
+    # the transformer up: peak VRAM becomes max(encoder, transformer+vae)
+    # rather than the sum. Everything then runs on the GPU, with no weight
+    # streaming over PCIe (measured 86x faster than sequential offload:
+    # 11 s vs 964 s for 4 steps).
+    gpu_embeds = None
     if device == "cuda":
-        # At >= 1024² the math-SDPA fallback needs ~4 GB for the attention
-        # matrix, which doesn't fit next to the resident 26 GB transformer.
-        # Stream the weights instead (slower, but it completes).
-        big = (args.width * args.height) > 768 * 768
-        try:
-            if big:
-                print("[krea] >768² on 32 GB VRAM: using sequential cpu "
-                      "offload (slower, avoids attention OOM)", file=sys.stderr)
-                pipe.enable_sequential_cpu_offload()
-            else:
-                pipe.enable_model_cpu_offload()
-        except Exception as exc:  # noqa: BLE001 — fall back to plain .to()
-            print(f"[krea] cpu offload unavailable ({exc}); using .to(cuda)",
-                  file=sys.stderr)
-            pipe.to(device)
+        gpu_embeds = _setup_gpu_resident(pipe, args, device)
     else:
         pipe.to(device)
     for fn in ("enable_tiling", "enable_slicing"):
@@ -336,6 +404,17 @@ def main() -> int:
         "guidance_scale": args.guidance,
         "generator": generator,
     }
+    if gpu_embeds is not None:
+        # The text encoder was freed to make room for the transformer, so the
+        # pipeline has to be fed the embeddings computed before it went away.
+        pe, pm, ne, nm = gpu_embeds
+        kwargs.pop("prompt", None)
+        kwargs.pop("negative_prompt", None)
+        kwargs["prompt_embeds"] = pe
+        kwargs["prompt_embeds_mask"] = pm
+        if ne is not None:
+            kwargs["negative_prompt_embeds"] = ne
+            kwargs["negative_prompt_embeds_mask"] = nm
     if init_image is not None:
         # The img2img subclass has a slimmer signature (no true_cfg passthrough)
         # and derives everything else from the init image.
@@ -343,9 +422,12 @@ def main() -> int:
         kwargs["strength"] = args.strength
     elif args.true_cfg is not None:
         kwargs["true_cfg_scale"] = args.true_cfg
-    # Prefer memory-efficient SDPA: the math fallback materializes the full
-    # attention matrix (~4 GB at 1024²), which doesn't fit next to the
-    # 26 GB bf16 transformer on a 32 GB card.
+    # Ask torch for a memory-efficient SDPA backend. NOTE: diffusers >= 0.35
+    # routes attention through its own dispatcher, which ignores this context
+    # entirely — and on ROCm neither alternative works for Krea's *masked*
+    # attention (flash/aiter raises on attn_mask, efficient has no kernel), so
+    # in practice this falls through to math. _estimate_peak_gib() budgets for
+    # that; keep the context for non-ROCm builds where it still helps.
     try:
         from torch.nn.attention import SDPBackend, sdpa_kernel
         sdp_ctx = sdpa_kernel(

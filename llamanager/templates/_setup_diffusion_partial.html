@@ -61,7 +61,7 @@
       <form method="post" action="/ui/setup-diffusion/engine/{{ engine }}/install-deps"
             style="display: inline-block;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        {% set auto_be = {'amd':'ROCm','nvidia':'CUDA','apple':'CPU','cpu':'CPU'}.get(gpu.kind, 'CPU') %}
+        {% set auto_be = {'amd':'ROCm','nvidia':'CUDA','apple':'Metal / MPS','cpu':'CPU'}.get(gpu.kind, 'CPU') %}
         <label style="display: flex; align-items: center; gap: 8px;
                       margin: 6px 0 10px; font-size: 0.8125rem; max-width: 60ch;">
           <span>PyTorch build</span>
@@ -70,6 +70,7 @@
             <option value="auto" selected>Auto-detect ({{ auto_be }})</option>
             <option value="rocm">AMD ROCm</option>
             <option value="cuda">NVIDIA CUDA</option>
+            <option value="mps">Apple Silicon (Metal)</option>
             <option value="cpu">CPU only</option>
           </select>
           <span style="color: var(--fg-3); font-size: 0.75rem;">
@@ -90,8 +91,10 @@
           </span>
         </label>
         {% endif %}
-        <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm"
-                data-confirm="Create a Python venv and install dependencies? This will take several minutes and ~{% if plan.space_mb >= 1024 %}{{ '%.1f GB' % (plan.space_mb / 1024) }}{% else %}{{ plan.space_mb }} MB{% endif %} of disk.">
+        {# Opens the destination + free-space dialog; the real POST is
+           submitted from inside it once the location is confirmed. #}
+        <button type="button" class="lm-btn lm-btn--primary lm-btn--sm"
+                data-preflight="engine={{ engine }}&kind=deps">
           {% if install and install.status == 'done' %}Reinstall dependencies{% else %}Install dependencies{% endif %}
         </button>
       </form>
@@ -220,10 +223,15 @@
   </div>
   <div class="lm-field" style="margin: 0;">
     <label class="lm-field-label">Subfolder (optional)</label>
+    {# Prefilled, not just a placeholder: for repos that ship several formats
+       the component list is the difference between a 140 GB and a 464 GB
+       pull, and a placeholder submits as empty. #}
     <input class="lm-input lm-input--mono" type="text" name="subfolder"
-           placeholder="{{ placeholder_sub }}">
+           placeholder="{{ placeholder_sub }}"
+           value="{% if ',' in placeholder_sub %}{{ placeholder_sub }}{% endif %}">
   </div>
-  <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Download</button>
+  <button type="button" class="lm-btn lm-btn--primary lm-btn--sm"
+          data-preflight="engine={{ engine }}&kind=model">Download</button>
 </form>
 {% if hint %}
 <p class="lm-engine-section__note" style="margin-top: -6px;">{{ hint|safe }}</p>
@@ -647,6 +655,102 @@
     ) }}
     {{ download_progress() }}
     {{ engine_models_list('wan') }}
+  </div>
+</div>
+
+
+{# ===================================================================
+   MINIMAX-H3 (video + audio)
+   =================================================================== #}
+{% set mm_state = 'ready' if image_cfg.minimax_h3_python else 'idle' %}
+<div class="lm-engine-card" data-engine="minimax_h3">
+  <div class="lm-engine-card__head">
+    <h2 class="lm-engine-card__name">MiniMax-H3 <em>video + audio</em></h2>
+    <span class="lm-engine-card__tag">modular diffusers · video</span>
+  </div>
+  <div class="lm-engine-card__status" data-state="{{ mm_state }}">
+    {% if image_cfg.minimax_h3_python %}
+      Ready — Python at <code style="margin-left: 4px;">{{ image_cfg.minimax_h3_python }}</code>
+    {% else %}
+      Not configured. Install dependencies below — this engine needs its own venv (diffusers git main).
+    {% endif %}
+  </div>
+
+  <p class="lm-engine-section__note" style="margin-bottom: 14px;">
+    Generates a clip <em>and its soundtrack</em> from one denoising loop — no
+    vocoder, no separate audio pass. 24&nbsp;fps, 5–15&nbsp;second clips, from a
+    prompt alone or from a first and/or last keyframe. Guidance is distilled
+    into the weights, so there is no negative prompt and no guidance scale.
+  </p>
+
+  <div class="lm-engine-section" style="border-top: 0; margin-top: 0; padding-top: 0;">
+    <div class="lm-engine-section__head">
+      <span>Hardware</span>
+      <span class="lm-engine-section__meta">read this before installing</span>
+    </div>
+    <p class="lm-engine-section__note">
+      The transformer is <strong>61.7&nbsp;GB</strong> and the Qwen3-VL
+      conditioner another <strong>62.1&nbsp;GB</strong> in bfloat16 — about
+      124&nbsp;GB of weights. There are two workable setups:
+    </p>
+    <ul class="lm-engine-section__note" style="padding-left: 18px; margin-top: 0;">
+      <li><strong>~80&nbsp;GB accelerator</strong> — runs resident, everything on the GPU.</li>
+      <li><strong>24–32&nbsp;GB CUDA card</strong> — int8 weight-only plus block
+          offload. Works, but parks roughly 75&nbsp;GB of weights in
+          <em>host RAM</em> and streams them per step.</li>
+    </ul>
+    <p class="lm-engine-section__note">
+      int8 comes from torchao, which is CUDA-only: on ROCm, Metal and CPU the
+      weights stay bf16 and the full 124&nbsp;GB has to fit. The runner sizes
+      every request against the real hardware and refuses with the numbers
+      rather than thrashing.
+      {% if gpu.kind == 'amd' %}
+        <strong>This machine is AMD/ROCm</strong>, so int8 is unavailable here.
+      {% elif gpu.kind == 'apple' %}
+        <strong>This machine is Apple Silicon</strong>, so int8 is unavailable
+        and the weights must fit in unified memory.
+      {% endif %}
+    </p>
+  </div>
+
+  <form class="lm-form" method="post" action="/ui/setup/image/minimax_h3">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-field">
+      <label class="lm-field-label" for="minimax-h3-python">Python executable</label>
+      <div style="display: flex; gap: 8px; align-items: flex-end;">
+        <input id="minimax-h3-python" class="lm-input lm-input--mono" type="text"
+               name="minimax_h3_python" value="{{ image_cfg.minimax_h3_python }}"
+               placeholder="{{ engine_venv_python.minimax_h3 }}"
+               style="flex: 1; min-width: 0;">
+        <button type="button"
+                class="lm-btn lm-btn--ghost lm-btn--xs"
+                hx-get="/ui/fs/browse?kind=file&target=minimax-h3-python"
+                data-fs-prefill="minimax-h3-python"
+                hx-target="[data-fs-host='minimax-h3-python']"
+                hx-swap="innerHTML">Browse…</button>
+      </div>
+      <div class="lm-fs-host" data-fs-host="minimax-h3-python"></div>
+      <p class="lm-engine-section__note">
+        Needs a <strong>dedicated</strong> venv: MiniMax-H3 is Modular-Diffusers-only
+        and lands after the pinned release, so it tracks diffusers git main and
+        cannot share the Z-Image venv.
+      </p>
+    </div>
+    <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Save path</button>
+  </form>
+
+  {{ install_section('minimax_h3') }}
+
+  <div class="lm-engine-section">
+    <div class="lm-engine-section__head"><span>Models</span></div>
+    {{ model_download_form(
+        'minimax_h3',
+        'MiniMaxAI/MiniMax-H3',
+        'transformer,text_encoder,vae,audio_vae,scheduler,audio_scheduler,tokenizer,processor',
+        'The repo ships the diffusers conversion <em>and</em> the original release side by side, so a whole-repo pull is <strong>464 GB</strong>. Keep the prefilled subfolder list to fetch only what diffusers loads (<strong>140 GB</strong>): <code>transformer/</code> for text-to-video and keyframes, plus the shared conditioner, VAEs and schedulers. Swap <code>transformer</code> for <code>transformer_ref</code> if you want the omni-reference workflow instead.'
+    ) }}
+    {{ download_progress() }}
+    {{ engine_models_list('minimax_h3') }}
   </div>
 </div>
 

@@ -60,15 +60,24 @@ QUANT_SIZE_GB = {
     "krea2_turbo-Q8_0.gguf": 13.71,
 }
 
-_DEFAULT_SIZE = "1024x1024"
+_DEFAULT_SIZE = "1024x576"
 _DEFAULT_STEPS_FAST = 4
-_DEFAULT_STEPS_QUALITY = 8
+_DEFAULT_STEPS_QUALITY = 12
 _DEFAULT_GUIDANCE = 1.0
 _DEFAULT_QUANT = "krea2_turbo-Q6_K.gguf"
 _ORIGINAL_SENTINEL = "original"
 
+# Ordered by what a 32 GB card can actually hold. Krea's masked attention
+# falls back to the math SDPA backend on ROCm (flash rejects attn_mask,
+# efficient has no kernel for it), so activation cost grows with tokens^2 on
+# top of a 24.7 GiB resident transformer. Measured: 1024x576 peaks at 27.92
+# GiB and fits; 1280x720 needs ~31 GiB and OOMs. The larger buckets remain
+# for cards with more headroom — the runner estimates and refuses with the
+# reason rather than silently falling back to CPU offload.
 SIZE_BUCKETS = [
+    "1024x576", "576x1024",
     "768x768",
+    "960x640", "640x960",
     "1024x1024",
     "1152x896", "896x1152",
     "1280x720", "720x1280",
@@ -276,12 +285,12 @@ def profile_schema() -> list[ProfileField]:
         ProfileField(
             key="image_size", label="Resolution", kind="select",
             default=_DEFAULT_SIZE, options=SIZE_BUCKETS,
-            help="1024² is the balanced default; larger buckets need more VRAM.",
+            help="1024x576 is the largest bucket measured to fit a 32 GB card (27.9 GiB peak). Larger buckets need a bigger card; the runner says so.",
         ),
         ProfileField(
             key="image_steps", label="Steps", kind="int",
-            default=_DEFAULT_STEPS_FAST,
-            help="Krea 2 Turbo is a fast model: 4 for draft, 8 for quality.",
+            default=_DEFAULT_STEPS_QUALITY,
+            help="Krea 2 Turbo is fast: 4 for draft (11 s), 12 for quality (23.5 s). Past 12 the device geometry starts to flatten.",
         ),
         ProfileField(
             key="image_guidance", label="Guidance scale", kind="float",
@@ -335,12 +344,26 @@ def capabilities() -> dict[str, Any]:
 
 
 def default_profiles(model_dir: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Starting profiles, ordered best-first.
+
+    ``krea-best`` is the measured optimum for the original checkpoint: 12
+    steps at 1024x576, 23.5 s, 27.92 GiB peak, fully GPU-resident. At 8 steps
+    the stylus geometry in the test scene was still settling; past 12 the
+    subject flattens and picks up edge artefacts while fabric keeps improving.
+    Guidance stays at 0 — Turbo is distilled and needs no CFG.
+    """
     if model_dir is not None and _is_original_layout(model_dir):
         return {
-            "krea-original": {
+            "krea-best": {
                 "image_model_type": _ORIGINAL_SENTINEL,
                 "image_size": _DEFAULT_SIZE,
                 "image_steps": _DEFAULT_STEPS_QUALITY,
+                "image_guidance": 0.0,
+            },
+            "krea-draft": {
+                "image_model_type": _ORIGINAL_SENTINEL,
+                "image_size": _DEFAULT_SIZE,
+                "image_steps": _DEFAULT_STEPS_FAST,
                 "image_guidance": 0.0,
             },
             "krea-realism-lora": {

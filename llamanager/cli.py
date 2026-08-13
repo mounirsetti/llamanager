@@ -904,6 +904,23 @@ def cmd_queue_resume(args):
     return _run_admin(lambda: c.queue_resume())
 
 
+# ---- intake switch ----
+
+def cmd_intake_status(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.intake_status())
+
+
+def cmd_intake_pause(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.intake_pause())
+
+
+def cmd_intake_resume(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.intake_resume())
+
+
 # ---- origins ----
 
 def cmd_origins_list(args):
@@ -1865,6 +1882,23 @@ def main(argv: list[str] | None = None) -> int:
     _add_admin_flags(sp); sp.set_defaults(func=cmd_queue_pause)
     sp = qsp.add_parser("resume", help="resume after pause")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_queue_resume)
+
+    # intake — the master "stop taking requests" switch. Unlike `queue pause`
+    # (which holds requests until they time out), this refuses them with 503
+    # and stays off across daemon restarts.
+    isp = sub.add_parser(
+        "intake",
+        help="master switch: whether llamanager takes requests at all",
+    ).add_subparsers(dest="intake_cmd", required=True)
+    sp = isp.add_parser("status", help="show whether requests are being taken")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_intake_status)
+    sp = isp.add_parser(
+        "pause",
+        help="stop taking requests (503 to new ones, drops the queued backlog;"
+             " in-flight work finishes)")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_intake_pause)
+    sp = isp.add_parser("resume", help="start taking requests again")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_intake_resume)
 
     # origins
     osp = sub.add_parser("origins", help="manage API-key origins").add_subparsers(

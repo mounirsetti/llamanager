@@ -167,10 +167,10 @@
    reconciled in place — open <details>, form values, and focus all
    survive each tick. Without morph, every poll wiped the inline
    engine-paths and download forms. #}
-{% set _any_install_busy = (engine_installs.z_image and engine_installs.z_image.status in ('pending','running'))
-                       or (engine_installs.krea and engine_installs.krea.status in ('pending','running'))
-                       or (engine_installs.ideogram4 and engine_installs.ideogram4.status in ('pending','running'))
-                       or (engine_installs.hidream and engine_installs.hidream.status in ('pending','running')) %}
+{# Poll while ANY engine install is in flight. Iterating engine_installs
+   rather than naming engines keeps a newly added engine (wan, minimax_h3, …)
+   from silently losing its live progress bar. #}
+{% set _any_install_busy = any_install_busy %}
 {% set _any_download_busy = (downloads | selectattr('status', 'equalto', 'running') | list)
                          or (downloads | selectattr('status', 'equalto', 'pending') | list) %}
 
@@ -189,5 +189,137 @@
   {% include "_setup_diffusion_partial.html" %}
 
 </div>
+
+{# Destination + free-space confirmation. Deliberately OUTSIDE
+   #setup-diffusion-body: that div is morph-polled every 2s while an install
+   or download runs, and morphing an <dialog> mid-interaction would close it
+   and discard whatever path was being typed. #}
+<dialog id="lm-preflight-dialog" class="lm-preflight-dialog"
+        aria-label="Confirm destination">
+  <div id="lm-preflight-body">
+    <p class="lm-preflight__note">Checking destination…</p>
+  </div>
+</dialog>
+
+<style>
+  .lm-preflight-dialog {
+    border: 1px solid var(--bg-3);
+    background: var(--bg-0);
+    color: var(--fg-0);
+    padding: 0;
+    max-width: 620px;
+    width: calc(100vw - 32px);
+  }
+  .lm-preflight-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+  .lm-preflight { padding: 22px 24px; display: block; }
+  .lm-preflight__title {
+    font-family: 'Fraunces', serif; font-size: 1.25rem; margin: 0 0 4px;
+    letter-spacing: -0.01em;
+  }
+  .lm-preflight__sub {
+    font-size: 0.8125rem; color: var(--fg-2); margin: 0 0 16px; max-width: 62ch;
+  }
+  .lm-preflight__table {
+    width: 100%; border-collapse: collapse; margin: 14px 0 4px;
+    font-size: 0.8125rem;
+  }
+  .lm-preflight__table th {
+    text-align: left; font-weight: 500; color: var(--fg-2);
+    padding: 6px 10px 6px 0; white-space: nowrap; width: 1%;
+  }
+  .lm-preflight__table td { padding: 6px 10px 6px 0; }
+  .lm-preflight__table td.n {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .lm-preflight__table td.n[data-verdict="insufficient"] { color: var(--bad); }
+  .lm-preflight__table td.n[data-verdict="tight"]        { color: var(--warn); }
+  .lm-preflight__table td.n[data-verdict="ok"]           { color: var(--ok); }
+  .lm-preflight__src { color: var(--fg-3); font-size: 0.75rem; }
+  .lm-preflight__note {
+    font-size: 0.75rem; color: var(--fg-2); margin: 8px 0 0; max-width: 66ch;
+    line-height: 1.5;
+  }
+  .lm-preflight__alert {
+    margin: 12px 0 0; padding: 10px 12px; font-size: 0.8125rem;
+    border-left: 2px solid var(--warn); background: var(--bg-1);
+  }
+  .lm-preflight__alert[data-level="bad"] { border-left-color: var(--bad); }
+  .lm-preflight__actions {
+    display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px;
+  }
+</style>
+
+<script>
+  // Any control carrying data-preflight opens the dialog instead of
+  // submitting: the real POST happens from the form the dialog loads, so a
+  // multi-GB install never starts before its destination is confirmed.
+  (function () {
+    const dlg = document.getElementById('lm-preflight-dialog');
+    const body = document.getElementById('lm-preflight-body');
+    if (!dlg || !body) return;
+
+    document.addEventListener('click', function (ev) {
+      const opener = ev.target.closest('[data-preflight]');
+      if (opener) {
+        ev.preventDefault();
+        const qs = opener.getAttribute('data-preflight');
+        // Pull the repo/subfolder out of the sibling form so the size check
+        // reflects what was actually typed, not just the placeholder.
+        const form = opener.closest('form');
+        const extra = new URLSearchParams();
+        // Options chosen in the card (repo/subfolder, torch build, flash-attn)
+        // live in the outer form. Carry the sizing-relevant ones into the
+        // preflight query, and stash the rest so the dialog's own form can
+        // replay them on submit — otherwise confirming would silently drop
+        // the operator's PyTorch-build choice.
+        const carry = {};
+        if (form) {
+          for (const name of ['repo', 'subfolder', 'filename']) {
+            const field = form.elements[name];
+            if (field && field.value.trim()) extra.set(name, field.value.trim());
+            else if (field && field.placeholder && name === 'repo') {
+              extra.set(name, field.placeholder.trim());
+            }
+          }
+          for (const name of ['torch_backend', 'diffusers_version']) {
+            const field = form.elements[name];
+            if (field && field.value) carry[name] = field.value;
+          }
+          const flash = form.elements['patch_flash_attn'];
+          if (flash && flash.checked) carry['patch_flash_attn'] = 'on';
+        }
+        opener._lmCarry = carry;
+        const url = '/ui/setup-diffusion/preflight?' + qs +
+                    (extra.toString() ? '&' + extra.toString() : '');
+        body.innerHTML = '<p class="lm-preflight__note">Checking destination…</p>';
+        if (!dlg.open) dlg.showModal();
+        fetch(url, { credentials: 'same-origin' })
+          .then(function (r) { return r.text(); })
+          .then(function (html) {
+            body.innerHTML = html;
+            const target = body.querySelector('form');
+            if (target) {
+              for (const [k, v] of Object.entries(opener._lmCarry || {})) {
+                const h = document.createElement('input');
+                h.type = 'hidden'; h.name = k; h.value = v;
+                target.appendChild(h);
+              }
+            }
+            if (window.htmx) window.htmx.process(body);
+          })
+          .catch(function (e) {
+            body.innerHTML = '<p class="lm-preflight__alert" data-level="bad">' +
+              'Could not check the destination: ' + e + '</p>';
+          });
+        return;
+      }
+      if (ev.target.closest('[data-preflight-cancel]')) {
+        ev.preventDefault();
+        dlg.close();
+      }
+    });
+  })();
+</script>
 
 {% endblock %}

@@ -32,7 +32,7 @@ class CatalogEntry:
     "downloading".
     """
     canonical_id: str
-    engine: str            # 'hidream' | 'z_image' | 'krea' | 'ideogram4' | 'flux2' | 'wan'
+    engine: str            # 'hidream' | 'z_image' | 'krea' | 'ideogram4' | 'flux2' | 'wan' | 'minimax_h3'
     label: str             # human-readable name
     hf_repo: str           # 'org/name'
     subfolder: str = ""    # optional HF subfolder
@@ -149,6 +149,32 @@ CATALOG: list[CatalogEntry] = [
             "image to animate it as the opening frame."
         ),
         homepage="https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+    ),
+    CatalogEntry(
+        canonical_id="MiniMaxAI/MiniMax-H3",
+        engine="minimax_h3",
+        label="MiniMax-H3 (video + audio)",
+        hf_repo="MiniMaxAI/MiniMax-H3",
+        # The repo carries BOTH the original FL2VA/Ref2VA release (268 GB)
+        # and the diffusers conversion, so a whole-repo pull is 464 GB. Naming
+        # the components diffusers actually loads brings it to 140 GB.
+        subfolder=("transformer,text_encoder,vae,audio_vae,"
+                   "scheduler,audio_scheduler,tokenizer,processor"),
+        approx_size_gb=140.0,
+        description=(
+            "Generates video and its soundtrack together — one transformer "
+            "denoises the video and audio latents in the same loop, so there "
+            "is no vocoder and no separate audio pass. 24fps, 5-15s clips, "
+            "text-to-video or first/last keyframe. Guidance is distilled into "
+            "the weights, so there is no negative prompt or guidance scale. "
+            "VERY LARGE: 61.7 GB transformer + 62.1 GB Qwen3-VL conditioner "
+            "in bf16 — 140 GB on disk for the diffusers components (the full "
+            "repo is 464 GB because it also ships the original release "
+            "format; the prefilled subfolder list skips that). Quantised to "
+            "4-bit NF4 and loaded one component at a time it peaks around "
+            "21.5 GB of VRAM, which fits a 32 GB card."
+        ),
+        homepage="https://huggingface.co/MiniMaxAI/MiniMax-H3",
     ),
     CatalogEntry(
         canonical_id="FLUX.2-dev",

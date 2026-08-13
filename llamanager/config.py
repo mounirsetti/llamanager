@@ -105,6 +105,10 @@ queue_timeout_s = 300
 # model — requests needing a model that isn't already loaded are rejected.
 # Toggle live from Settings → Engine behavior.
 lock_model_loading = false
+# Master intake switch. When false, every inference request is refused with
+# 503 instead of being queued. Toggle live from the top bar or with
+# `llamanager intake pause` / `llamanager intake resume`.
+accepting_requests = true
 
 [image]
 # Image-engine paths. Both stacks have hardware-pinned dependency chains
@@ -213,6 +217,7 @@ ENGINE_FAMILY: dict[str, str] = {
     "krea":    "image",
     "ideogram4": "image",
     "wan":     "video",
+    "minimax_h3": "video",
     "asr":     "audio",
     "whispercpp": "audio",
     "sherpa":  "audio",
@@ -281,6 +286,28 @@ def _looks_like_z_image(d: Path) -> bool:
     except (OSError, ValueError):
         return False
     return (data.get("_class_name") or "").strip() == "ZImagePipeline"
+
+
+def _looks_like_minimax_h3(d: Path) -> bool:
+    """MiniMax-H3 checkpoint shape: a Modular Diffusers repo.
+
+    MiniMax-H3 ships as Modular Diffusers blocks, so the marker is a
+    ``modular_model_index.json`` rather than the ``model_index.json`` every
+    other diffusion engine here writes. That file alone is not conclusive —
+    other Modular repos exist — so we also require a MiniMaxH3 component
+    class inside it.
+    """
+    if not d.is_dir():
+        return False
+    import json as _json
+    idx = d / "modular_model_index.json"
+    if not idx.is_file():
+        return False
+    try:
+        return "MiniMaxH3" in _json.dumps(_json.loads(
+            idx.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return False
 
 
 def _looks_like_wan(d: Path) -> bool:
@@ -447,6 +474,8 @@ def detect_engine_for_path(model_path: Path) -> str:
             return "krea"
         if _looks_like_ideogram4(model_path):
             return "ideogram4"
+        if _looks_like_minimax_h3(model_path):
+            return "minimax_h3"
         if _looks_like_wan(model_path):
             return "wan"
         if _looks_like_hidream(model_path):
@@ -744,6 +773,11 @@ class Config:
     # freeze the engine on a chosen model (e.g. while debugging or to protect
     # a warm cache) without pausing the queue entirely.
     lock_model_loading: bool = False
+    # Operator intake switch: when false, llamanager refuses every inference
+    # request at the door with 503 instead of queueing it. Flipped from the
+    # top bar or `llamanager intake pause/resume`; persisted here so a daemon
+    # restart comes back up still closed. See intake.py.
+    accepting_requests: bool = True
 
     # New: profiles nest under their parent model.
     models: dict[str, ModelConfig] = field(default_factory=dict)
@@ -788,6 +822,11 @@ class Config:
     # diffusers + torch + imageio-ffmpeg; the runner ships with llamanager
     # (engines/_wan_runner.py). Typically points at the shared diffusion venv.
     wan_python: str = ""
+    minimax_h3_python: str = ""
+    # Where per-engine venvs are built. Blank = <data_dir>/venvs.
+    # Overridable because the engine stacks are multi-GB and the
+    # data dir often lives on a small system partition.
+    venvs_dir: Path | None = None
     # ASR (Whisper / speech-to-text) only needs a Python interpreter with
     # ``torch`` + ``transformers``; the runner ships with llamanager
     # (engines/_asr_runner.py). The installer typically points this at the
@@ -1068,6 +1107,8 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
         image_lora_scale=_coerce_float(body.get("image_lora_scale")),
         image_editing_scheduler=str(body.get("image_editing_scheduler", "") or ""),
         image_strength=_coerce_float(body.get("image_strength")),
+        video_num_frames=_coerce_int(body.get("video_num_frames")),
+        video_fps=_coerce_int(body.get("video_fps")),
         audio_language=str(body.get("audio_language", "") or ""),
         audio_task=str(body.get("audio_task", "") or ""),
         audio_word_timestamps=str(body.get("audio_word_timestamps", "") or ""),
@@ -1165,6 +1206,7 @@ def load_config(path: Path | None = None) -> Config:
         max_wait_s=int(q.get("max_wait_s", 300)),
         queue_timeout_s=int(q.get("queue_timeout_s", 300)),
         lock_model_loading=bool(q.get("lock_model_loading", False)),
+        accepting_requests=bool(q.get("accepting_requests", True)),
         hidream_python=str(image_cfg.get("hidream_python", "") or ""),
         hidream_repo=str(image_cfg.get("hidream_repo", "") or ""),
         hidream_target_rocm_release=str(
@@ -1174,6 +1216,9 @@ def load_config(path: Path | None = None) -> Config:
         z_image_python=str(image_cfg.get("z_image_python", "") or ""),
         ideogram4_python=str(image_cfg.get("ideogram4_python", "") or ""),
         wan_python=str(image_cfg.get("wan_python", "") or ""),
+        minimax_h3_python=str(image_cfg.get("minimax_h3_python", "") or ""),
+        venvs_dir=(expand(str(image_cfg["venvs_dir"]))
+                   if image_cfg.get("venvs_dir") else None),
         asr_python=str(image_cfg.get("asr_python", "") or ""),
         whispercpp_binary=str(image_cfg.get("whispercpp_binary", "") or ""),
         sherpa_python=str(image_cfg.get("sherpa_python", "") or ""),
@@ -1501,6 +1546,14 @@ def _profile_to_tomlkit(prof: Profile):
         tbl.add("image_editing_scheduler", prof.image_editing_scheduler)
     if prof.image_strength is not None:
         tbl.add("image_strength", prof.image_strength)
+    # Video-family (Wan) knobs. Without these a saved video profile silently
+    # loses its clip length and frame rate and falls back to the adapter's
+    # defaults — which on a consumer card is a 121-frame request the VRAM
+    # guard then rejects.
+    if prof.video_num_frames is not None:
+        tbl.add("video_num_frames", prof.video_num_frames)
+    if prof.video_fps is not None:
+        tbl.add("video_fps", prof.video_fps)
     if prof.audio_language:
         tbl.add("audio_language", prof.audio_language)
     if prof.audio_task:
@@ -1666,6 +1719,8 @@ def update_image_config(cfg_path: Path, *,
                         z_image_python: str | None = None,
                         ideogram4_python: str | None = None,
                         wan_python: str | None = None,
+                        minimax_h3_python: str | None = None,
+                        venvs_dir: str | None = None,
                         asr_python: str | None = None,
                         whispercpp_binary: str | None = None,
                         sherpa_python: str | None = None,
@@ -1704,6 +1759,10 @@ def update_image_config(cfg_path: Path, *,
         img["ideogram4_python"] = ideogram4_python
     if wan_python is not None:
         img["wan_python"] = wan_python
+    if minimax_h3_python is not None:
+        img["minimax_h3_python"] = minimax_h3_python
+    if venvs_dir is not None:
+        img["venvs_dir"] = venvs_dir
     if asr_python is not None:
         img["asr_python"] = asr_python
     if whispercpp_binary is not None:
@@ -1877,7 +1936,8 @@ def update_coexistence_policy(cfg_path: Path, *,
 
 
 def update_queue_settings(cfg_path: Path, *,
-                          lock_model_loading: bool | None = None) -> None:
+                          lock_model_loading: bool | None = None,
+                          accepting_requests: bool | None = None) -> None:
     """Update toggles in the [queue] section of config.toml."""
     import tomlkit
     doc = _load_tomlkit(cfg_path)
@@ -1886,6 +1946,8 @@ def update_queue_settings(cfg_path: Path, *,
     sect = doc["queue"]
     if lock_model_loading is not None:
         sect["lock_model_loading"] = bool(lock_model_loading)
+    if accepting_requests is not None:
+        sect["accepting_requests"] = bool(accepting_requests)
     _save_tomlkit(cfg_path, doc)
 
 
