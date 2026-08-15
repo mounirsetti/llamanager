@@ -5344,6 +5344,8 @@ def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
             # shared ComfyUI engine, not per model.
             "minimax_h3_comfy": bool(getattr(cfg, "comfyui_python", "")
                                      and getattr(cfg, "comfyui_repo", "")),
+            "krea_comfy": bool(getattr(cfg, "comfyui_python", "")
+                               and getattr(cfg, "comfyui_repo", "")),
             "flux2":   bool(cfg.flux2_sd_cli),
         }.get(eng_id, False)
 
@@ -5356,6 +5358,7 @@ def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
             "wan":     "Wan 2.2 (text/image → video)",
             "minimax_h3": "MiniMax-H3 (video + audio)",
             "minimax_h3_comfy": "MiniMax-H3 (ComfyUI, video + audio)",
+            "krea_comfy": "Krea 2 Turbo (ComfyUI)",
             "flux2":   "FLUX 2 Dev",
         }.get(eng_id, eng_id)
 

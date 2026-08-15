@@ -849,6 +849,19 @@
     {{ engine_models_list('minimax_h3_comfy') }}
   </div>
   {% endif %}
+
+  {% set kc = catalog_components.get('Krea-2-Turbo-Comfy') %}
+  {% if kc %}
+  <div class="lm-engine-section">
+    <div class="lm-engine-section__head">
+      <span>Krea 2 Turbo</span>
+      <span class="lm-engine-section__meta">text → image, 8 steps</span>
+    </div>
+    <p class="lm-engine-section__note">{{ kc.description }}</p>
+    {{ component_downloads('krea_comfy', kc) }}
+    {{ engine_models_list('krea_comfy') }}
+  </div>
+  {% endif %}
 </div>
 
 

@@ -227,6 +227,46 @@ CATALOG: list[CatalogEntry] = [
         ),
     ),
     CatalogEntry(
+        canonical_id="Krea-2-Turbo-Comfy",
+        engine="krea_comfy",
+        label="Krea 2 Turbo (ComfyUI)",
+        hf_repo="vantagewithai/Krea-2-Turbo-GGUF",
+        # The Q6_K recipe; the other transformer quants below are alternatives
+        # to it, not additions.
+        approx_size_gb=15.0,
+        description=(
+            "The same Krea 2 Turbo as the diffusers entry, loaded from a GGUF "
+            "quant instead of the 24.5 GB bf16 checkpoint. diffusers has no "
+            "single-file or GGUF path for this architecture, so the quants "
+            "are only reachable through ComfyUI. Q6_K is 9.9 GB, which leaves "
+            "a 32 GB card enough headroom to keep the whole pipeline resident. "
+            "Guidance-distilled: 8 steps, cfg 1.0, no negative prompt. "
+            "Requires the ComfyUI engine to be installed."
+        ),
+        homepage="https://huggingface.co/krea/Krea-2-Turbo",
+        components=(
+            ("vantagewithai/Krea-2-Turbo-GGUF", "krea2_turbo-Q6_K.gguf",
+             "diffusion_models", 9.86,
+             "Transformer, 6-bit. The default: closest to bf16 that still "
+             "leaves headroom beside the conditioner."),
+            ("vantagewithai/Krea-2-Turbo-GGUF", "krea2_turbo-Q8_0.gguf",
+             "diffusion_models", 12.76,
+             "Transformer, 8-bit. Optional: highest fidelity, least headroom."),
+            ("vantagewithai/Krea-2-Turbo-GGUF", "krea2_turbo-Q4_K_M.gguf",
+             "diffusion_models", 6.97,
+             "Transformer, 4-bit. Optional: fastest and smallest."),
+            ("Comfy-Org/Krea-2",
+             "text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
+             "text_encoders", 4.88,
+             "Qwen3-VL 4B conditioner (fp8). Krea 2 uses its own, not the "
+             "Qwen-Image encoder."),
+            ("Comfy-Org/Krea-2", "vae/qwen_image_vae.safetensors", "vae", 0.24,
+             "VAE."),
+            ("Comfy-Org/Krea-2", "loras/krea2_darkbrush.safetensors",
+             "loras", 0.44, "Optional style LoRA (dark brush)."),
+        ),
+    ),
+    CatalogEntry(
         canonical_id="FLUX.2-dev",
         engine="flux2",
         label="FLUX 2 Dev",

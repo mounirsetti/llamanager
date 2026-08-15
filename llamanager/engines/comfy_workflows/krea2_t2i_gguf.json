@@ -1,0 +1,80 @@
+{
+  "_comment": [
+    "Krea 2 Turbo text-to-image, from a GGUF transformer.",
+    "Derived from ComfyUI's own template image_krea2_turbo_t2i.json (its",
+    "subgraph 'Text to Image (Krea-2 Turbo)'), reduced to the sampling path:",
+    "the template's prompt-expansion chain (TextGenerate + switches) is UI",
+    "convenience, not part of the model, and llamanager sends the prompt the",
+    "caller actually wrote.",
+    "UNETLoader is swapped for the ComfyUI-GGUF one; the text encoder stays a",
+    "CLIPLoader because Krea 2's conditioner ships as an fp8_scaled",
+    "safetensors, not a GGUF. Its loader type is 'krea2', not 'qwen_image' -",
+    "Krea 2 uses a Qwen3-VL 4B conditioner of its own.",
+    "Krea 2 Turbo is guidance-distilled: cfg is 1.0 and the negative branch is",
+    "a zeroed copy of the positive conditioning, which is what the reference",
+    "workflow does. There is no negative prompt to supply."
+  ],
+
+  "1": {
+    "class_type": "UnetLoaderGGUF",
+    "inputs": {"unet_name": "__UNET__"}
+  },
+  "2": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": ["1", 0],
+      "lora_name": "__LORA__",
+      "strength_model": "__LORA_STRENGTH__"
+    }
+  },
+  "3": {
+    "class_type": "CLIPLoader",
+    "inputs": {"clip_name": "__CLIP__", "type": "krea2"}
+  },
+  "4": {
+    "class_type": "VAELoader",
+    "inputs": {"vae_name": "__VAE__"}
+  },
+
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {"clip": ["3", 0], "text": "__PROMPT__"}
+  },
+  "6": {
+    "class_type": "ConditioningZeroOut",
+    "inputs": {"conditioning": ["5", 0]}
+  },
+  "7": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": "__WIDTH__",
+      "height": "__HEIGHT__",
+      "batch_size": 1
+    }
+  },
+
+  "8": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["2", 0],
+      "seed": "__SEED__",
+      "steps": "__STEPS__",
+      "cfg": "__CFG__",
+      "sampler_name": "__SAMPLER__",
+      "scheduler": "__SCHEDULER__",
+      "positive": ["5", 0],
+      "negative": ["6", 0],
+      "latent_image": ["7", 0],
+      "denoise": 1.0
+    }
+  },
+
+  "9": {
+    "class_type": "VAEDecode",
+    "inputs": {"samples": ["8", 0], "vae": ["4", 0]}
+  },
+  "10": {
+    "class_type": "SaveImage",
+    "inputs": {"images": ["9", 0], "filename_prefix": "llamanager/krea2"}
+  }
+}

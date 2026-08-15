@@ -480,3 +480,116 @@ def _fake_comfy_install(cfg, tmp_path):
     py = tmp_path / "python"
     py.write_text("")
     cfg.comfyui_python, cfg.comfyui_repo = str(py), str(repo)
+
+
+# -------------------------------------------------------- the image adapter
+
+
+def test_krea_workflow_zeroes_the_negative_branch():
+    """Krea 2 Turbo is guidance-distilled: the negative conditioning is a
+    zeroed copy of the positive, and cfg stays 1.0. A regression that wired a
+    real negative prompt here would quietly degrade every image."""
+    from llamanager.engines import comfy_backend as cb
+    graph = cb.render_workflow(
+        cb.workflow_path("krea2_t2i_gguf").read_text(), _KREA_VALUES)
+
+    pos = next(k for k, n in graph.items()
+               if n["class_type"] == "CLIPTextEncode")
+    zero = next(k for k, n in graph.items()
+                if n["class_type"] == "ConditioningZeroOut")
+    sampler = next(n for n in graph.values() if n["class_type"] == "KSampler")
+    assert graph[zero]["inputs"]["conditioning"] == [pos, 0]
+    assert sampler["inputs"]["positive"] == [pos, 0]
+    assert sampler["inputs"]["negative"] == [zero, 0]
+    assert sampler["inputs"]["cfg"] == 1.0
+
+
+def test_krea_detect_needs_a_text_encoder(tmp_path):
+    from llamanager.engines import krea_comfy as k
+    root = tmp_path / "Krea-2-Turbo-Comfy"
+    (root / "diffusion_models").mkdir(parents=True)
+    (root / "vae").mkdir()
+    (root / "vae" / k.VAE_FILE).write_bytes(b"x")
+    (root / "diffusion_models" / "krea2_turbo-Q6_K.gguf").write_bytes(b"x")
+    assert not k.detect(root)
+
+    (root / "text_encoders").mkdir()
+    (root / "text_encoders" / k.CLIP_FILE).write_bytes(b"x")
+    assert k.detect(root)
+
+
+def test_krea_comfy_and_minimax_comfy_do_not_claim_each_other(tmp_path):
+    """Both are ComfyUI trees; detection must key on the model, not the shape."""
+    from llamanager.engines import krea_comfy as k, minimax_h3_comfy as m
+    krea = tmp_path / "K"
+    for sub in ("diffusion_models", "text_encoders", "vae"):
+        (krea / sub).mkdir(parents=True)
+    (krea / "diffusion_models" / "krea2_turbo-Q6_K.gguf").write_bytes(b"x")
+    (krea / "text_encoders" / k.CLIP_FILE).write_bytes(b"x")
+    (krea / "vae" / k.VAE_FILE).write_bytes(b"x")
+
+    assert k.detect(krea) and not m.detect(krea)
+
+
+def test_krea_build_command_selects_the_quant(tmp_path, cfg):
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    root = tmp_path / "Krea-2-Turbo-Comfy"
+    for sub in ("diffusion_models", "text_encoders", "vae", "loras"):
+        (root / sub).mkdir(parents=True)
+    for quant, (fname, _gb) in k.QUANT_FILES.items():
+        (root / "diffusion_models" / fname).write_bytes(b"x")
+    (root / "text_encoders" / k.CLIP_FILE).write_bytes(b"x")
+    (root / "vae" / k.VAE_FILE).write_bytes(b"x")
+
+    prof = Profile(name="kreac-draft", **k.default_profiles()["kreac-draft"])
+    argv, _ = k.build_command(cfg, root, prof, _image_request("a lobby", []),
+                              tmp_path / "o.png")
+    tok = _argv_tokens(argv)
+    assert tok["UNET"] == k.QUANT_FILES["Q4_K_M"][0]
+    assert tok["STEPS"] == "4"
+    assert tok["CFG"] == "1.0"
+    # No LoRA configured -> the node is dropped, not zeroed.
+    assert "--bypass" in argv
+
+
+def test_krea_rejects_reference_images(tmp_path, cfg):
+    """img2img stays on the diffusers engine; say so instead of ignoring it."""
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    img = tmp_path / "ref.png"
+    img.write_bytes(b"x")
+    with pytest.raises(RuntimeError, match="text-to-image"):
+        k.build_command(cfg, tmp_path, Profile(name="p"),
+                        _image_request("x", [img]), tmp_path / "o.png")
+
+
+_KREA_VALUES = {
+    "UNET": "krea2_turbo-Q6_K.gguf", "LORA": "", "LORA_STRENGTH": 0.0,
+    "CLIP": "qwen3vl_4b_fp8_scaled.safetensors",
+    "VAE": "qwen_image_vae.safetensors", "PROMPT": "a hotel lobby",
+    "WIDTH": 1024, "HEIGHT": 1024, "STEPS": 8, "CFG": 1.0,
+    "SAMPLER": "euler", "SCHEDULER": "simple", "SEED": 1,
+}
+
+
+def test_every_comfy_workflow_template_is_valid_json_and_fully_tokenised():
+    """Guards the whole family: a template whose tokens nobody supplies, or
+    which stopped parsing, must fail here rather than at request time."""
+    import json
+    from llamanager.engines import comfy_backend as cb
+    known = {"minimax_h3_i2v_gguf": _WORKFLOW_VALUES, "krea2_t2i_gguf": _KREA_VALUES}
+    templates = sorted(cb.workflow_path("x").parent.glob("*.json"))
+    assert templates, "no workflow templates found"
+    for path in templates:
+        raw = json.loads(path.read_text())          # parses as JSON at rest
+        assert "_comment" in raw, f"{path.name} should document itself"
+        values = known.get(path.stem)
+        assert values is not None, f"{path.name} has no test coverage"
+        graph = cb.render_workflow(path.read_text(), values)
+        for node_id, node in graph.items():
+            assert "class_type" in node, f"{path.name}:{node_id}"

@@ -219,6 +219,7 @@ ENGINE_FAMILY: dict[str, str] = {
     "wan":     "video",
     "minimax_h3": "video",
     "minimax_h3_comfy": "video",
+    "krea_comfy": "image",
     "asr":     "audio",
     "whispercpp": "audio",
     "sherpa":  "audio",
@@ -308,6 +309,14 @@ def _looks_like_comfy_model(d: Path) -> bool:
     has_vae = vae.is_dir() and any(
         f.suffix == ".safetensors" for f in vae.iterdir() if f.is_file())
     return has_unet and has_vae
+
+
+def _looks_like_krea_comfy(d: Path) -> bool:
+    """A ComfyUI-format model directory holding Krea 2 Turbo."""
+    if not _looks_like_comfy_model(d):
+        return False
+    return any("krea" in f.name.lower()
+               for f in (d / "diffusion_models").iterdir() if f.is_file())
 
 
 def _looks_like_minimax_h3_comfy(d: Path) -> bool:
@@ -514,6 +523,8 @@ def detect_engine_for_path(model_path: Path) -> str:
             return "ideogram4"
         if _looks_like_minimax_h3_comfy(model_path):
             return "minimax_h3_comfy"
+        if _looks_like_krea_comfy(model_path):
+            return "krea_comfy"
         if _looks_like_minimax_h3(model_path):
             return "minimax_h3"
         if _looks_like_wan(model_path):
