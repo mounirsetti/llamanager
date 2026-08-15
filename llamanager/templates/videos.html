@@ -45,6 +45,9 @@
   }
   .gen-card {
     position: relative;
+    /* Every z-index inside a tile stays inside it, so a caption or a live
+       tile's status text can never paint over a neighbouring card. */
+    isolation: isolate;
     /* Sized to the media, not cropped to a square. --card-ar is set from the
        real dimensions once the image or video reports them; the 1 is only the
        fallback for the moment before that happens. Portrait, square and
@@ -290,7 +293,13 @@
        100vh math, which the mobile URL bar breaks. */
     .gen-shell { height: auto; min-height: 0; display: block; padding-bottom: 138px; }
     .gen-feed { overflow: visible; padding: 4px 0; }
-    .gen-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+    /* column-gap only: the masonry rows are 4px, so a row-gap here would be
+       inserted between every one of a tile's ~40 spanned rows and blow the
+       feed apart into mostly empty space. */
+    .gen-grid {
+      grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+      column-gap: 8px; row-gap: 0;
+    }
 
     .gen-dock {
       position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; margin: 0;
@@ -817,7 +826,11 @@
     items.forEach(it => {
       if (state.seenUrls.has(it.url)) return;
       state.seenUrls.add(it.url);
-      grid.insertBefore(cardFor(it), anchor);
+      const c = cardFor(it);
+      grid.insertBefore(c, anchor);
+      // Span now, on the placeholder shape — waiting for the media to load
+      // would leave the tile one 4px row tall in the meantime.
+      spanCard(c);
     });
     updateEmpty();
   }
@@ -964,9 +977,25 @@
     return body;
   }
 
+  /* Shape of the clip being generated, so the placeholder claims exactly
+     the slot its result will land in. Read from the size override (or the
+     value it inherits from the profile), clamped like fitCardToMedia. */
+  function requestedAspect() {
+    const el = overrides.querySelector('[name="image_size"]');
+    let raw = el ? (el.value || el.placeholder || "") : "";
+    // A <select> left on its blank row carries the inherited size only in
+    // that option's label ("— inherit (1024x1024) —").
+    if (!raw && el && el.tagName === "SELECT" && el.selectedOptions[0])
+      raw = el.selectedOptions[0].textContent || "";
+    const m = String(raw).match(/(\d+)\s*[x\u00d7]\s*(\d+)/);
+    if (!m || !+m[1] || !+m[2]) return 1;
+    return Math.min(Math.max(+m[1] / +m[2], 0.5), 2.0);
+  }
+
   function makeLiveCard(prompt) {
     const div = document.createElement("div");
     div.className = "gen-card gen-card--live";
+    div.style.setProperty("--card-ar", String(requestedAspect()));
     div.innerHTML = `
       <div class="gen-live__spinner"></div>
       <div class="gen-live__phase">Queued…</div>
@@ -974,6 +1003,9 @@
       <div class="gen-live__prompt"></div>`;
     div.querySelector(".gen-live__prompt").textContent = prompt;
     grid.insertBefore(div, grid.firstChild);
+    // Masonry rows are 4px; a tile with no span occupies one row and the
+    // rest of the feed tiles straight over it.
+    spanCard(div);
     emptyEl.hidden = true;
     return div;
   }
@@ -997,7 +1029,12 @@
     let txt = "Sending…", pct = null;
     if (stage.phase === "queued") {
       txt = stage.pos > 0 ? `Queued · ${stage.pos} ahead` : (stage.pos === 0 ? "Next in line…" : "Queued…");
-    } else if (stage.phase === "swapping_model") { txt = "Loading model…"; }
+    } else if (stage.phase === "swapping_model") { txt = "Freeing the GPU…"; }
+    else if (stage.phase === "loading") {
+      // Slot acquired, weights loading — nothing reports a step for a while,
+      // so name the phase instead of printing the raw status token.
+      txt = "Loading model…";
+    }
     else if (stage.phase === "running") {
       if (stage.step != null && stage.total != null) {
         txt = `Step ${stage.step} / ${stage.total}`;
@@ -1070,6 +1107,10 @@
     $("gen-feed").scrollTop = 0;
 
     const body = buildRequestBody();
+    // Body is built (it reads the textarea), so the box can empty now: the
+    // prompt lives on the live tile and in the history popover, and leaving
+    // it in place kept the composer expanded over the feed.
+    promptEl.value = ""; autosize();
     const ctrl = new AbortController(); state.abort = ctrl;
     try {
       const r = await fetch(cfg.generationsUrl, {
@@ -1092,7 +1133,12 @@
       }
     } catch (e) {
       if (e.name === "AbortError") { /* cancelled */ }
-      else showError(`Generation failed: ${e.message}`);
+      else {
+        showError(`Generation failed: ${e.message}`);
+        // Nothing was produced — hand the prompt back rather than making
+        // the user dig it out of the history popover.
+        if (!promptEl.value.trim()) { promptEl.value = promptText; autosize(); }
+      }
     } finally {
       setBusy(false); state.abort = null; removeLive();
     }

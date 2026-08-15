@@ -148,7 +148,10 @@
     }
     .gen-card {
       /* Sized to the media — see the note in images.html. */
-      position: relative; aspect-ratio: var(--card-ar, 1); margin-bottom: 12px;
+      position: relative;
+      /* Every z-index inside a tile stays inside it, so a caption or a live
+         tile's status text can never paint over a neighbouring card. */
+      isolation: isolate; aspect-ratio: var(--card-ar, 1); margin-bottom: 12px;
       background: var(--bg-1);
       border: 1px solid var(--bg-3); border-radius: 10px; overflow: hidden;
       cursor: pointer;
@@ -320,7 +323,13 @@
     @media (max-width: 760px) {
       .gen-shell { padding: 8px; }
       .gen-topbar { padding-bottom: 8px; }
-      .gen-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+      /* column-gap only: the masonry rows are 4px, so a row-gap here would be
+       inserted between every one of a tile's ~40 spanned rows and blow the
+       feed apart into mostly empty space. */
+    .gen-grid {
+      grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+      column-gap: 8px; row-gap: 0;
+    }
       .gen-bar { flex-wrap: wrap; }
       .gen-modelbtn {
         order: -1; flex: 1 1 100%; max-width: none; flex-direction: row;
@@ -791,7 +800,8 @@
     }
     function prependItems(items) {
       const anchor = liveCard ? liveCard.nextSibling : grid.firstChild;
-      items.forEach(it => { if (state.seenUrls.has(it.url)) return; state.seenUrls.add(it.url); grid.insertBefore(cardFor(it), anchor); });
+      items.forEach(it => { if (state.seenUrls.has(it.url)) return; state.seenUrls.add(it.url);
+        const c = cardFor(it); grid.insertBefore(c, anchor); spanCard(c); });
       updateEmpty();
     }
     function updateEmpty() {
@@ -892,12 +902,28 @@
       }
       return body;
     }
+    /* Shape of the result being generated, so the placeholder claims exactly
+       the slot its result will land in. Read from the size override (or the
+       value it inherits from the profile), clamped like fitCardToMedia. */
+    function requestedAspect() {
+      const el = overrides.querySelector('[name="image_size"]');
+      let raw = el ? (el.value || el.placeholder || "") : "";
+      // A <select> left on its blank row carries the inherited size only in
+      // that option's label ("— inherit (1024x1024) —").
+      if (!raw && el && el.tagName === "SELECT" && el.selectedOptions[0])
+        raw = el.selectedOptions[0].textContent || "";
+      const m = String(raw).match(/(\d+)\s*[x\u00d7]\s*(\d+)/);
+      if (!m || !+m[1] || !+m[2]) return 1;
+      return Math.min(Math.max(+m[1] / +m[2], 0.5), 2.0);
+    }
     function makeLiveCard(prompt) {
       const div = document.createElement("div"); div.className = "gen-card gen-card--live";
+      div.style.setProperty("--card-ar", String(requestedAspect()));
       div.innerHTML = `<div class="gen-live__spinner"></div><div class="gen-live__phase">Queued…</div>
         <div class="gen-live__bar"><div class="gen-live__fill"></div></div><div class="gen-live__prompt"></div>`;
       div.querySelector(".gen-live__prompt").textContent = prompt;
-      grid.insertBefore(div, grid.firstChild); emptyEl.hidden = true; return div;
+      grid.insertBefore(div, grid.firstChild); spanCard(div);
+      emptyEl.hidden = true; return div;
     }
     function updateLive(txt, pct) { if (!liveCard) return; liveCard.querySelector(".gen-live__phase").textContent = txt; if (pct != null) liveCard.querySelector(".gen-live__fill").style.width = `${pct}%`; }
     function removeLive() { if (liveCard) { liveCard.remove(); liveCard = null; } updateEmpty(); }
@@ -908,7 +934,9 @@
     function renderStage() {
       let txt = "Sending…", pct = null;
       if (stage.phase === "queued") txt = stage.pos > 0 ? `Queued · ${stage.pos} ahead` : (stage.pos === 0 ? "Next in line…" : "Queued…");
-      else if (stage.phase === "swapping_model") txt = "Loading model…";
+      else if (stage.phase === "swapping_model") txt = "Freeing the GPU…";
+      // Weights loading: name the phase instead of printing the raw token.
+      else if (stage.phase === "loading") txt = "Loading model…";
       else if (stage.phase === "running") { if (stage.step != null && stage.total != null) { txt = `Step ${stage.step} / ${stage.total}`; if (stage.total > 0) pct = Math.round(100 * stage.step / stage.total); } else txt = "Generating…"; }
       else if (stage.phase === "saving") { txt = "Saving…"; pct = 100; }
       else if (stage.phase) txt = stage.phase;
@@ -953,7 +981,11 @@
       const promptText = promptEl.value.trim(); pushHistory(promptText);
       setBusy(true); stage.phase = ""; stage.pos = -1; stage.step = null; stage.total = null;
       liveCard = makeLiveCard(promptText); updateLive("Sending…", 0); $("gen-feed").scrollTop = 0;
-      const body = buildRequestBody(); const ctrl = new AbortController(); state.abort = ctrl;
+      const body = buildRequestBody();
+      // Body is built (it reads the textarea), so the box can empty now: the
+      // prompt lives on the live tile and in the history popover.
+      promptEl.value = ""; autosize();
+      const ctrl = new AbortController(); state.abort = ctrl;
       try {
         const r = await fetch(cfg.generationsUrl, { method: "POST",
           headers: { "Content-Type": "application/json", ...AUTH() }, body: JSON.stringify(body), signal: ctrl.signal });
@@ -964,7 +996,13 @@
           buf += decoder.decode(value, {stream: true}); let idx;
           while ((idx = buf.indexOf("\n\n")) !== -1) { handleSseBlock(buf.slice(0, idx)); buf = buf.slice(idx + 2); }
         }
-      } catch (e) { if (e.name !== "AbortError") showError(`Generation failed: ${e.message}`); }
+      } catch (e) {
+        if (e.name !== "AbortError") {
+          showError(`Generation failed: ${e.message}`);
+          // Nothing was produced — hand the prompt back.
+          if (!promptEl.value.trim()) { promptEl.value = promptText; autosize(); }
+        }
+      }
       finally { setBusy(false); state.abort = null; removeLive(); }
     }
     form.addEventListener("submit", (ev) => { ev.preventDefault(); generate(); });

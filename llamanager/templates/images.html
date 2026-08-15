@@ -48,6 +48,10 @@
   }
   .gen-card {
     position: relative;
+    /* Every z-index inside a tile stays inside it. Without this, a live
+       tile's status text (z-index 1) painted over the neighbouring image
+       tiles instead of staying in its own card. */
+    isolation: isolate;
     /* Sized to the media, not cropped to a square. --card-ar is set from the
        real dimensions once the image or video reports them; the 1 is only the
        fallback for the moment before that happens. Portrait, square and
@@ -401,7 +405,13 @@
        100vh math, which the mobile URL bar breaks. */
     .gen-shell { height: auto; min-height: 0; display: block; padding-bottom: 138px; }
     .gen-feed { overflow: visible; padding: 4px 0; }
-    .gen-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+    /* column-gap only: the masonry rows are 4px, so a row-gap here would be
+       inserted between every one of a tile's ~40 spanned rows and blow the
+       feed apart into mostly empty space. */
+    .gen-grid {
+      grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+      column-gap: 8px; row-gap: 0;
+    }
     /* No scroll container to stick inside — pinning here would float the
        strip over the page nav instead. */
     .gen-feedhead { position: static; flex-wrap: wrap; gap: 6px 10px; }
@@ -975,7 +985,9 @@
     items.forEach(it => {
       if (state.seenUrls.has(it.url)) return;
       state.seenUrls.add(it.url);
-      grid.insertBefore(cardFor(it, {fresh}), anchor);
+      const c = cardFor(it, {fresh});
+      grid.insertBefore(c, anchor);
+      spanCard(c);
     });
     updateEmpty();
   }
@@ -1133,8 +1145,24 @@
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
   }
 
+  /* Shape of the image being generated, so the placeholder claims exactly
+     the slot its result will land in. Read from the size override (or the
+     value it inherits from the profile), clamped like fitCardToMedia. */
+  function requestedAspect() {
+    const el = overrides.querySelector('[name="image_size"]');
+    let raw = el ? (el.value || el.placeholder || "") : "";
+    // A <select> left on its blank row carries the inherited size only in
+    // that option's label ("— inherit (1024x1024) —").
+    if (!raw && el && el.tagName === "SELECT" && el.selectedOptions[0])
+      raw = el.selectedOptions[0].textContent || "";
+    const m = String(raw).match(/(\d+)\s*[x\u00d7]\s*(\d+)/);
+    if (!m || !+m[1] || !+m[2]) return 1;
+    return Math.min(Math.max(+m[1] / +m[2], 0.5), 2.0);
+  }
+
   function makeLiveCards(prompt, n) {
     const cards = [];
+    const ar = requestedAspect();
     for (let i = 0; i < n; i++) {
       const div = document.createElement("div");
       div.className = "gen-card gen-card--live";
@@ -1151,6 +1179,7 @@
         </div>
         <div class="gen-live__bar is-indeterminate"><div class="gen-live__fill"></div></div>
         <div class="gen-live__prompt"></div>`;
+      div.style.setProperty("--card-ar", String(ar));
       if (n > 1) div.querySelector(".gen-live__idx").textContent = `${i + 1} / ${n}`;
       div.querySelector(".gen-live__prompt").textContent = prompt;
       cards.push(div);
@@ -1159,6 +1188,9 @@
     // finished images will.
     const anchor = grid.firstChild;
     cards.forEach(c => grid.insertBefore(c, anchor));
+    // Masonry rows are 4px; a tile with no span occupies one row and the
+    // rest of the feed tiles straight over it.
+    cards.forEach(spanCard);
     live.cards = cards;
     live.startedAt = Date.now();
     emptyEl.hidden = true;
@@ -1214,6 +1246,9 @@
         const next = live.cards[0] || grid.firstChild;
         grid.insertBefore(card, next);
       }
+      // Span now, on the placeholder's shape — waiting for the image to
+      // load would leave the tile one 4px row tall in the meantime.
+      spanCard(card);
     });
     updateEmpty();
   }
@@ -1454,6 +1489,10 @@
     state.requestId = null; state.detached = false;
 
     const body = buildRequestBody();
+    // Body is built (it reads the textarea), so the box can empty now: the
+    // prompt lives on the live tile and in the history popover, and leaving
+    // it in place kept the composer expanded over the feed.
+    promptEl.value = ""; autosize();
     makeLiveCards(promptText, body.n);
     rememberInFlight(promptText, body.n);
     updateLive("Sending…", null);
@@ -1484,7 +1523,12 @@
       }
     } catch (e) {
       if (e.name === "AbortError") { /* cancelled */ }
-      else showError(`Generation failed: ${e.message}`);
+      else {
+        showError(`Generation failed: ${e.message}`);
+        // Nothing was produced — hand the prompt back rather than making
+        // the user dig it out of the history popover.
+        if (!promptEl.value.trim()) { promptEl.value = promptText; autosize(); }
+      }
     } finally {
       // Resolve the placeholders into their images before tearing them
       // down, so the tiles never blink out and back in — the spinner
