@@ -5497,6 +5497,7 @@ async def diffusion_profile_create(request: Request,
     try:
         prof = _build_image_profile_from_form(name, eng_mod, form)
         save_profile(cfg.config_path, model_id, name, prof)
+        _reload_config(request)
     except ValueError as e:
         return _error_html(str(e), status_code=400)
     if make_default:
@@ -5544,6 +5545,7 @@ async def diffusion_profile_update(request: Request, profile_name: str,
             return _error_html(str(e), status_code=400)
     try:
         save_profile(cfg.config_path, model_id, target, prof)
+        _reload_config(request)
     except ValueError as e:
         return _error_html(str(e), status_code=400)
     _reload_config(request)
@@ -5597,6 +5599,7 @@ async def diffusion_profile_clone(request: Request, profile_name: str,
         clone_kwargs[f.name] = getattr(src, f.name)
     try:
         save_profile(cfg.config_path, mid, new, Profile(**clone_kwargs))
+        _reload_config(request)
     except ValueError as e:
         return _error_html(str(e), status_code=400)
     _reload_config(request)

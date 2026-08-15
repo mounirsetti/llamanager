@@ -606,10 +606,12 @@ def create_app(config_path: Path | None = None,
         from .config import ENGINE_FAMILY, detect_engine_for_id
 
         _templates = Jinja2Templates(directory=str(_Path(__file__).parent / "templates"))
+        # Live config, not the one captured at boot — see /images below.
+        live_cfg = request.app.state.cfg
         # LLM-family only; image-family models live on /images.
         llm_models: list[str] = []
         for m in registry.list():
-            engine = detect_engine_for_id(m.model_id, cfg.models_dir)
+            engine = detect_engine_for_id(m.model_id, live_cfg.models_dir)
             if ENGINE_FAMILY.get(engine, "text") == "text":
                 llm_models.append(m.model_id)
         llm_set = set(llm_models)
@@ -620,7 +622,7 @@ def create_app(config_path: Path | None = None,
         # (allowed_models) is applied client-side after login.
         profile_triples = [
             [p.name, mid, bool(p.mmproj)]
-            for mid, p in cfg.iter_profiles()
+            for mid, p in live_cfg.iter_profiles()
             if mid in llm_set
         ]
         return _templates.TemplateResponse(request, "chat_public.html", {
@@ -643,7 +645,10 @@ def create_app(config_path: Path | None = None,
         from .api_ui import _build_image_page_context
 
         _templates = Jinja2Templates(directory=str(_Path(__file__).parent / "templates"))
-        ctx = _build_image_page_context(cfg, registry)
+        # request.app.state.cfg, not the captured cfg: config is reloaded
+        # in place when profiles or engines change, and closing over the
+        # startup object would freeze this page at boot state.
+        ctx = _build_image_page_context(request.app.state.cfg, registry)
         return _templates.TemplateResponse(request, "images_public.html", {
             "request": request,
             **ctx,
@@ -660,7 +665,7 @@ def create_app(config_path: Path | None = None,
         from .api_ui import _build_video_page_context
 
         _templates = Jinja2Templates(directory=str(_Path(__file__).parent / "templates"))
-        ctx = _build_video_page_context(cfg, registry)
+        ctx = _build_video_page_context(request.app.state.cfg, registry)
         return _templates.TemplateResponse(request, "videos_public.html", {
             "request": request,
             **ctx,

@@ -763,3 +763,38 @@ def test_a_real_standalone_gguf_still_lists_as_a_text_model(tmp_path):
 
     ids = {e.model_id for e in reg.list()}
     assert "unsloth/Some-Model-GGUF/model-Q4_K_M.gguf" in ids
+
+
+# --------------------------------------------- public pages see live config
+
+
+def test_public_pages_read_the_live_config_not_the_boot_snapshot(app, cfg):
+    """Regression: /chat, /images and /videos closed over the cfg captured
+    when the app was built, so a profile added later was invisible on the
+    public surfaces forever while the admin pages showed it immediately.
+
+    Asserted at the source level because reproducing it end-to-end needs a
+    real config reload mid-process; the failure mode is entirely "which
+    object does this route read".
+    """
+    import inspect
+    from llamanager import app as app_mod
+
+    src = inspect.getsource(app_mod.create_app)
+    for route in ("images_public", "videos_public", "chat_public"):
+        start = src.index(f"async def {route}(")
+        end = src.find("\n    @app.", start)
+        body = src[start:end if end != -1 else None]
+        assert "request.app.state.cfg" in body, (
+            f"{route} must read request.app.state.cfg so config reloads "
+            f"reach the public pages")
+
+
+def test_materializing_profiles_refreshes_the_in_memory_config():
+    """The composer reads cfg.iter_profiles(), so writing config.toml without
+    reloading leaves a freshly materialized profile unusable until restart."""
+    import inspect
+    from llamanager import api_ui
+
+    src = inspect.getsource(api_ui.diffusion_profiles_materialize_defaults)
+    assert "_reload_config(request)" in src
