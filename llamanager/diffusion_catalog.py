@@ -255,11 +255,19 @@ CATALOG: list[CatalogEntry] = [
             ("vantagewithai/Krea-2-Turbo-GGUF", "krea2_turbo-Q4_K_M.gguf",
              "diffusion_models", 6.97,
              "Transformer, 4-bit. Optional: fastest and smallest."),
+            ("unsloth/Qwen3-VL-4B-Instruct-GGUF",
+             "Qwen3-VL-4B-Instruct-Q8_0.gguf", "text_encoders", 3.99,
+             "Qwen3-VL 4B conditioner as GGUF (Q8_0). Loads in ~1 s where the "
+             "safetensors form takes ~12 min on ROCm; needs the mmproj below."),
+            ("unsloth/Qwen3-VL-4B-Instruct-GGUF", "mmproj-F16.gguf",
+             "text_encoders", 0.78,
+             "Vision tower companion for the GGUF conditioner. Required with "
+             "it: without these keys ComfyUI cannot recognise the model."),
             ("Comfy-Org/Krea-2",
              "text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
              "text_encoders", 4.88,
-             "Qwen3-VL 4B conditioner (fp8). Krea 2 uses its own, not the "
-             "Qwen-Image encoder."),
+             "Alternative conditioner (fp8 safetensors). Works, but ~12 min "
+             "per request on ROCm; the GGUF pair above is the fast path."),
             ("Comfy-Org/Krea-2", "vae/qwen_image_vae.safetensors", "vae", 0.24,
              "VAE."),
             ("Comfy-Org/Krea-2", "loras/krea2_darkbrush.safetensors",

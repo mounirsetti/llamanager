@@ -603,7 +603,8 @@ def test_every_comfy_workflow_template_is_valid_json_and_fully_tokenised():
     which stopped parsing, must fail here rather than at request time."""
     import json
     from llamanager.engines import comfy_backend as cb
-    known = {"minimax_h3_i2v_gguf": _WORKFLOW_VALUES, "krea2_t2i_gguf": _KREA_VALUES}
+    known = {"minimax_h3_i2v_gguf": _WORKFLOW_VALUES, "krea2_t2i_gguf": _KREA_VALUES,
+             "krea2_t2i_gguf_te": _KREA_VALUES}
     templates = sorted(cb.workflow_path("x").parent.glob("*.json"))
     assert templates, "no workflow templates found"
     for path in templates:
@@ -819,3 +820,52 @@ def test_materializing_profiles_refreshes_the_in_memory_config():
 
     src = inspect.getsource(api_ui.diffusion_profiles_materialize_defaults)
     assert "_reload_config(request)" in src
+
+
+# ------------------------------------------------- the GGUF text encoder
+
+
+def test_krea_prefers_the_gguf_encoder_when_the_pair_is_present(tmp_path):
+    """The whole 34x speedup hangs on this routing, so it is pinned.
+
+    A GGUF encoder is only usable WITH its mmproj: without the vision-tower
+    keys ComfyUI cannot recognise a Qwen3-VL and routes it to a plain-LLM
+    encoder that produces the wrong conditioning shape (2560 instead of
+    12x2560). So the GGUF path is chosen only when both files exist.
+    """
+    from llamanager.engines import krea_comfy as k
+    te = tmp_path / "text_encoders"
+    te.mkdir()
+    (te / k.CLIP_SAFETENSORS).write_bytes(b"x")
+    assert k.resolve_text_encoder(tmp_path) == (k.CLIP_SAFETENSORS, "krea2_t2i_gguf")
+
+    (te / k.CLIP_GGUF).write_bytes(b"x")          # GGUF alone: not enough
+    assert k.resolve_text_encoder(tmp_path)[0] == k.CLIP_SAFETENSORS
+
+    (te / k.CLIP_GGUF_MMPROJ).write_bytes(b"x")   # the pair: fast path
+    assert k.resolve_text_encoder(tmp_path) == (k.CLIP_GGUF, "krea2_t2i_gguf_te")
+
+
+def test_gguf_te_workflow_uses_the_gguf_clip_loader_with_krea2_type():
+    """The type must stay 'krea2': the 12-layer tap and template are applied
+    at encode time by comfy.text_encoders.krea2, not by the loader."""
+    from llamanager.engines import comfy_backend as cb
+    g = cb.render_workflow(cb.workflow_path("krea2_t2i_gguf_te").read_text(),
+                           _KREA_VALUES)
+    assert g["3"]["class_type"] == "CLIPLoaderGGUF"
+    assert g["3"]["inputs"]["type"] == "krea2"
+
+
+def test_comfy_plan_carries_the_qwen3vl_mmproj_patch():
+    """A fresh install must get the fast encoder path automatically."""
+    from llamanager.engine_installer import ENGINE_PLANS
+    from pathlib import Path
+    plan = ENGINE_PLANS["comfy"]
+    assert plan.patches, "comfy plan should apply the ComfyUI-GGUF patch"
+    for dest, name in plan.patches:
+        patch = (Path(__file__).parent.parent / "llamanager" / "engines"
+                 / "comfy_patches" / name)
+        assert patch.is_file(), f"missing patch file {name}"
+        text = patch.read_text()
+        assert "QWEN3VL_VISION_SD_MAP" in text
+        assert "deepstack_merger_list" in text

@@ -35,8 +35,35 @@ _DEFAULT_SAMPLER = "euler"
 _DEFAULT_SCHEDULER = "simple"
 _DEFAULT_SIZE = "1024x1024"
 
-CLIP_FILE = "qwen3vl_4b_fp8_scaled.safetensors"
 VAE_FILE = "qwen_image_vae.safetensors"
+
+# Text encoder. Two forms are supported and they differ by 700 seconds.
+#
+# The Comfy-Org safetensors (fp8_scaled or bf16) build the encoder through
+# ComfyUI's ordinary CLIPLoader, which on gfx1201 spends ~719 s of
+# single-threaded CPU per request constructing it — 97% of the whole
+# generation. A llama.cpp-style GGUF of the same Qwen3-VL-4B, with its mmproj
+# companion beside it, loads through CLIPLoaderGGUF in about one second and
+# produces a near-identical image (compared at equal seed). So the GGUF is
+# the default and the safetensors are the fallback for a directory that only
+# has those.
+CLIP_GGUF = "Qwen3-VL-4B-Instruct-Q8_0.gguf"
+CLIP_GGUF_MMPROJ = "mmproj-F16.gguf"
+CLIP_SAFETENSORS = "qwen3vl_4b_fp8_scaled.safetensors"
+CLIP_FILE = CLIP_SAFETENSORS   # kept for callers/tests that reference the name
+
+
+def resolve_text_encoder(model_dir: Path) -> tuple[str, str]:
+    """(filename, workflow name) for the best encoder present in ``model_dir``.
+
+    Prefers the GGUF pair; a GGUF without its mmproj is NOT usable — ComfyUI
+    cannot recognise the architecture without the vision tower keys — so it
+    is only chosen when both files exist.
+    """
+    te = model_dir / "text_encoders"
+    if (te / CLIP_GGUF).is_file() and (te / CLIP_GGUF_MMPROJ).is_file():
+        return CLIP_GGUF, "krea2_t2i_gguf_te"
+    return CLIP_SAFETENSORS, "krea2_t2i_gguf"
 
 # Transformer quants. Q6_K is the default: it is the largest quant that still
 # leaves comfortable headroom next to the conditioner on a 32 GB card.
@@ -143,8 +170,9 @@ def build_command(
     cfg_scale = (profile.image_guidance
                  if profile.image_guidance is not None else _DEFAULT_CFG)
 
+    clip_file, workflow_name = resolve_text_encoder(model_path)
     missing = cb.missing_files(model_path, {
-        "diffusion_models": unet, "text_encoders": CLIP_FILE, "vae": VAE_FILE})
+        "diffusion_models": unet, "text_encoders": clip_file, "vae": VAE_FILE})
     if missing:
         raise RuntimeError(
             "Krea 2 Turbo model directory is incomplete — missing "
@@ -155,10 +183,10 @@ def build_command(
         str(python), "-u", str(runner),
         "--comfy-repo", str(repo),
         "--model-path", str(model_path),
-        "--workflow", str(cb.workflow_path("krea2_t2i_gguf")),
+        "--workflow", str(cb.workflow_path(workflow_name)),
         "--output", str(out_path),
         "--set", f"UNET={unet}",
-        "--set", f"CLIP={CLIP_FILE}",
+        "--set", f"CLIP={clip_file}",
         "--set", f"VAE={VAE_FILE}",
         # --set-str, not --set: a prompt of "2024" is valid JSON and would
         # otherwise reach the graph as a number.

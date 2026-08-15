@@ -1,0 +1,87 @@
+diff --git a/loader.py b/loader.py
+index 7cefb11..6cfb66b 100644
+--- a/loader.py
++++ b/loader.py
+@@ -219,6 +219,33 @@ CLIP_VISION_SD_MAP = {
+     "ln2.": "norm2.",
+ }
+ 
++QWEN3VL_VISION_SD_MAP = {
++    "mm.0.": "model.visual.merger.linear_fc1.",
++    "mm.2.": "model.visual.merger.linear_fc2.",
++    "v.post_ln.": "model.visual.merger.norm.",
++    "v.patch_embd": "model.visual.patch_embed.proj",
++    "v.position_embd": "model.visual.pos_embed",
++    "v.blk.": "model.visual.blocks.",
++    "ffn_up": "mlp.linear_fc1",
++    "ffn_down": "mlp.linear_fc2",
++    "attn_out.": "attn.proj.",
++    "ln1.": "norm1.",
++    "ln2.": "norm2.",
++}
++
++def qwen3vl_deepstack_rename(sd, indexes=(5, 11, 17)):
++    # llama.cpp names DeepStack mergers by the vision layer they tap;
++    # HF/Comfy index them 0..N-1 in that same order.
++    out = {}
++    for k, v in sd.items():
++        m = re.match(r"^v\.deepstack\.(\d+)\.(fc1|fc2|norm)\.(.*)$", k)
++        if m and int(m.group(1)) in indexes:
++            i = indexes.index(int(m.group(1)))
++            part = {"fc1": "linear_fc1", "fc2": "linear_fc2", "norm": "norm"}[m.group(2)]
++            k = f"model.visual.deepstack_merger_list.{i}.{part}.{m.group(3)}"
++        out[k] = v
++    return out
++
+ def sd_map_replace(raw_sd, key_map):
+     sd = {}
+     for k,v in raw_sd.items():
+@@ -268,7 +295,7 @@ def strip_quant_suffix(name):
+         name = name[:match.start()]
+     return name
+ 
+-def gguf_mmproj_loader(path):
++def gguf_mmproj_loader(path, sd_map=None, rename=None):
+     # Reverse version of Qwen2VLVisionModel.modify_tensors
+     logging.info("Attenpting to find mmproj file for text encoder...")
+ 
+@@ -289,6 +316,14 @@ def gguf_mmproj_loader(path):
+         if tenc in name.lower():
+             target.append(fname)
+ 
++    if len(target) == 0:
++        # No stem match. If the folder holds exactly one mmproj file, take it:
++        # a downloaded "mmproj-F16.gguf" keeps its upstream name and would
++        # otherwise never pair with the encoder beside it.
++        lone = [f for f in os.listdir(root)
++                if f.lower().endswith(".gguf") and "mmproj" in f.lower()]
++        if len(lone) == 1:
++            target = lone
+     if len(target) == 0:
+         logging.error(f"Error: Can't find mmproj file for '{tenc_fname}' (matching:'{tenc}')! Qwen-Image-Edit will be broken!")
+         return {}
+@@ -306,7 +341,9 @@ def gguf_mmproj_loader(path):
+         vsd["v.patch_embd.weight"] = torch.stack([w1, w2], dim=2)
+ 
+     # run main replacement
+-    vsd = sd_map_replace(vsd, CLIP_VISION_SD_MAP)
++    if rename is not None:
++        vsd = rename(vsd)
++    vsd = sd_map_replace(vsd, sd_map or CLIP_VISION_SD_MAP)
+ 
+     # handle split Q/K/V
+     if "visual.blocks.0.attn_q.weight" in vsd:
+@@ -501,6 +538,13 @@ def gguf_clip_loader(path):
+         if arch == "qwen2vl":
+             vsd = gguf_mmproj_loader(path)
+             sd.update(vsd)
++        if arch == "qwen3vl":
++            # The vision tower is what lets ComfyUI recognise a Qwen3-VL
++            # text encoder (detect_te_model keys on its DeepStack mergers);
++            # without it a Qwen3-VL GGUF is treated as a plain LLM.
++            vsd = gguf_mmproj_loader(path, sd_map=QWEN3VL_VISION_SD_MAP,
++                                     rename=qwen3vl_deepstack_rename)
++            sd.update(vsd)
+     else:
+         pass
+     return sd

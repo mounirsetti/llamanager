@@ -176,6 +176,12 @@ class EnginePackages:
     # (a warning), a failing smoke gate fails the install — it exists to catch
     # an unusable engine before the operator downloads tens of GB of weights.
     smoke: tuple[str, ...] = ()
+    # Patches applied to a cloned repo after checkout, as (repo-dest, patch
+    # file under llamanager/engines/comfy_patches). Applied with
+    # ``git apply --check`` first so a no-longer-applicable patch fails the
+    # install loudly rather than leaving the tree half-changed; an
+    # already-applied patch (re-install) is detected and skipped.
+    patches: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -397,6 +403,15 @@ ENGINE_PLANS: dict[str, EnginePackages] = {
         # request time, which is far too late to find out. Verified on Python
         # 3.14 with ROCm torch 2.10.
         smoke=("-c", _COMFY_SMOKE),
+        patches=(
+            # Lets a llama.cpp-style Qwen3-VL GGUF (LLM file + mmproj
+            # companion) load as a diffusion text encoder. Measured on gfx1201
+            # this takes the Krea 2 Turbo encoder from 719 s to 1 s per
+            # request — 740 s -> 22 s end to end — with a near-identical
+            # image. See the patch header for the mapping it adds.
+            ("comfyui/custom_nodes/ComfyUI-GGUF",
+             "comfyui-gguf-qwen3vl-mmproj.patch"),
+        ),
         space_mb=9500,
         notes=(
             "Shared ComfyUI backend. llamanager drives it headlessly: a "
@@ -1117,6 +1132,35 @@ class EngineInstaller:
                                 f"git clone of {url} failed (exit {rc})")
                     if cancel.is_set():
                         raise asyncio.CancelledError()
+
+            if base is not None and base.patches:
+                for dest_rel, patch_name in base.patches:
+                    dest = src_root / dest_rel
+                    patch = (Path(__file__).parent / "engines" / "comfy_patches"
+                             / patch_name)
+                    if not patch.is_file():
+                        raise RuntimeError(f"patch not found: {patch}")
+                    # Reverse-check first: an already-applied patch (re-install)
+                    # is a no-op, not an error.
+                    rc = await self._run_subprocess(
+                        ["git", "apply", "--reverse", "--check", str(patch)],
+                        cancel, emit, cwd=dest)
+                    if rc == 0:
+                        emit(f"[patch] {patch_name} already applied; skipping")
+                        continue
+                    rc = await self._run_subprocess(
+                        ["git", "apply", "--check", str(patch)],
+                        cancel, emit, cwd=dest)
+                    if rc != 0:
+                        raise RuntimeError(
+                            f"patch {patch_name} no longer applies to "
+                            f"{dest_rel} — upstream changed; the patch needs "
+                            "updating before this engine can be installed.")
+                    rc = await self._run_subprocess(
+                        ["git", "apply", str(patch)], cancel, emit, cwd=dest)
+                    if rc != 0:
+                        raise RuntimeError(f"applying {patch_name} failed")
+                    emit(f"[patch] applied {patch_name} to {dest_rel}")
 
             set_progress(5, f"Creating venv at {venv_root(self.cfg) / engine}")
             venv_dir = venv_root(self.cfg) / engine
