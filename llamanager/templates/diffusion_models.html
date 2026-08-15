@@ -269,7 +269,7 @@
                   <span class="lm-dm-field__help">Lowercase letters, digits, hyphens, dots, underscores.</span>
                 </div>
 
-                {{ schema_fields(eng.schema, prof) }}
+                {{ schema_fields(eng.schema, prof, dir_options=row.dir_options) }}
 
                 <div class="lm-dm-actions">
                   <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Save changes</button>
@@ -346,7 +346,7 @@
                        pattern="[a-z0-9._-]+" required
                        placeholder="e.g. hd-portrait">
               </div>
-              {{ schema_fields(eng.schema) }}
+              {{ schema_fields(eng.schema, dir_options=row.dir_options) }}
               <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8125rem; margin: 6px 0;">
                 <input type="checkbox" name="make_default" value="on">
                 <span>Make this the default profile for {{ row.model_id }}</span>

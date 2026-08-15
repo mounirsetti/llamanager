@@ -3148,12 +3148,21 @@ def _build_image_page_context(cfg, reg) -> dict[str, Any]:
     engines_caps = {eng: image_engines.capabilities(eng)
                     for eng in engines_in_use}
 
+    # Files backing dir-backed fields (LoRAs), per model — the composer turns
+    # them into a picker instead of a free-text filename.
+    dir_options = {
+        m["model_id"]: _dir_options(cfg, m["model_id"],
+                                    engines_schema.get(m["engine"], []))
+        for m in image_models
+    }
+
     return {
         "image_models": image_models,
         "image_models_json": json.dumps(image_models),
         "profiles_json": json.dumps(profiles_with_fields),
         "engines_schema_json": json.dumps(engines_schema),
         "engines_caps_json": json.dumps(engines_caps),
+        "dir_options_json": json.dumps(dir_options),
         "default_image_model": default_model,
         "default_image_profile": default_profile,
     }
@@ -3211,12 +3220,21 @@ def _build_video_page_context(cfg, reg) -> dict[str, Any]:
     engines_caps = {eng: image_engines.capabilities(eng)
                     for eng in engines_in_use}
 
+    # Same LoRA picker data as the image page (MiniMax-H3's turbo distill
+    # LoRA lives in the model's loras/ folder).
+    dir_options = {
+        m["model_id"]: _dir_options(cfg, m["model_id"],
+                                    engines_schema.get(m["engine"], []))
+        for m in video_models
+    }
+
     return {
         "image_models": video_models,
         "image_models_json": json.dumps(video_models),
         "profiles_json": json.dumps(profiles_with_fields),
         "engines_schema_json": json.dumps(engines_schema),
         "engines_caps_json": json.dumps(engines_caps),
+        "dir_options_json": json.dumps(dir_options),
         "default_image_model": default_model,
         "default_image_profile": default_profile,
     }
@@ -5288,7 +5306,39 @@ def _serialize_profile_field(field) -> dict[str, Any]:
         "default": field.default,
         "options": list(field.options or []),
         "help": field.help,
+        "options_dir": getattr(field, "options_dir", "") or "",
     }
+
+
+# Extensions worth offering as a value for an ``options_dir`` field. LoRAs
+# ship as safetensors, occasionally as GGUF; everything else in the folder
+# (READMEs, .json sidecars) would just be noise in the picker.
+_DIR_OPTION_SUFFIXES = (".safetensors", ".gguf", ".pt", ".ckpt")
+
+
+def _dir_options(cfg, model_id: str, schema: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Files on disk that are valid values for this model's dir-backed fields.
+
+    Keyed by field key, e.g. ``{"image_lora_weights": ["krea2_darkbrush.safetensors"]}``.
+    A field with no folder (or an empty one) maps to an empty list, which the
+    UI renders as an explicit "nothing installed" state rather than a blank
+    text box the operator has to guess a filename into.
+    """
+    out: dict[str, list[str]] = {}
+    for f in schema:
+        sub = f.get("options_dir") or ""
+        if not sub:
+            continue
+        d = cfg.models_dir / model_id / sub
+        names: list[str] = []
+        try:
+            names = sorted(p.name for p in d.iterdir()
+                           if p.is_file()
+                           and p.suffix.lower() in _DIR_OPTION_SUFFIXES)
+        except OSError:
+            names = []
+        out[f["key"]] = names
+    return out
 
 
 def _profile_field_value(prof: Profile | None, key: str) -> str:
@@ -5450,6 +5500,9 @@ def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
                 "profiles": profs,
                 "default_profile": (model_cfg.default_profile if model_cfg
                                     else ""),
+                # {field key: files on disk} for dir-backed fields (LoRAs).
+                # Per row, not per engine: the folder belongs to the model.
+                "dir_options": _dir_options(cfg, mid, schema) if mid else {},
             }
 
         # Start with catalog rows for this engine.

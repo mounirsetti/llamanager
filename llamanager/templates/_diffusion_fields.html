@@ -14,9 +14,34 @@
    empty (the server treats empty as "inherit").
 #}
 
-{% macro field_input(field, value, name_prefix="field_") %}
+{% macro field_input(field, value, name_prefix="field_", dir_options=None) %}
   {% set fname = name_prefix ~ field.key %}
-  {% if field.kind == 'select' %}
+  {% if field.options_dir %}
+    {# Dir-backed field (LoRAs): the valid values are the files sitting in
+       the model's own ``options_dir`` folder, so offer those rather than a
+       blank box to guess a filename into. ``dir_options`` is None when the
+       caller has no per-model view (the engine-level "add profile" form
+       still gets one, since it is rendered inside a model row). A value
+       already saved in config is kept as an option even if the file is gone,
+       so opening the editor never silently drops it. #}
+    {% set files = (dir_options or {}).get(field.key) or [] %}
+    {% if files or value %}
+    <select class="lm-input lm-input--mono" name="{{ fname }}">
+      <option value="">— none —</option>
+      {% for opt in files %}
+      <option value="{{ opt }}" {% if value == opt %}selected{% endif %}>{{ opt }}</option>
+      {% endfor %}
+      {% if value and value not in files %}
+      <option value="{{ value }}" selected>{{ value }} (missing on disk)</option>
+      {% endif %}
+    </select>
+    {% else %}
+    <select class="lm-input lm-input--mono" name="{{ fname }}" disabled>
+      <option value="">no {{ field.options_dir }} installed</option>
+    </select>
+    <input type="hidden" name="{{ fname }}" value="">
+    {% endif %}
+  {% elif field.kind == 'select' %}
     <select class="lm-input lm-input--mono" name="{{ fname }}">
       <option value="">— inherit —</option>
       {% for opt in field.options %}
@@ -44,12 +69,18 @@
    ``name_prefix`` lets callers namespace fields (e.g. the image
    composer uses "override_" so the server can tell composer overrides
    apart from a profile-edit save). #}
-{% macro schema_fields(schema, profile=None, name_prefix="field_") %}
+{% macro schema_fields(schema, profile=None, name_prefix="field_", dir_options=None) %}
   {% for f in schema %}
   <div class="lm-dm-field">
     <label class="lm-dm-field__label" for="">{{ f.label }}</label>
-    {{ field_input(f, (profile.fields[f.key] if profile and f.key in profile.fields else ''), name_prefix=name_prefix) }}
-    {% if f.help %}<span class="lm-dm-field__help">{{ f.help }}</span>{% endif %}
+    {{ field_input(f, (profile.fields[f.key] if profile and f.key in profile.fields else ''), name_prefix=name_prefix, dir_options=dir_options) }}
+    {% if f.options_dir and not (dir_options or {}).get(f.key) %}
+    <span class="lm-dm-field__help">
+      No files in <code>{{ f.options_dir }}/</code> for this model. Download one
+      from <a href="/ui/setup-diffusion">Diffusion engines</a>, or drop a
+      <code>.safetensors</code> into the model's <code>{{ f.options_dir }}/</code> folder.
+    </span>
+    {% elif f.help %}<span class="lm-dm-field__help">{{ f.help }}</span>{% endif %}
   </div>
   {% endfor %}
 {% endmacro %}

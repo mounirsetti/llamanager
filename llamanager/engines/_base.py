@@ -84,3 +84,9 @@ class ProfileField:
     default: Any = None
     options: list[str] | None = None    # for kind="select"
     help: str = ""                      # short caption shown under the field
+    # Subfolder of the model's own directory whose files are the valid
+    # values (e.g. "loras"). The field stays a free-text key server-side;
+    # the UI just turns it into a picker of what is actually on disk, and
+    # says so when the folder is empty or missing. Without this a LoRA is a
+    # blank text box the operator has to guess a filename into.
+    options_dir: str = ""

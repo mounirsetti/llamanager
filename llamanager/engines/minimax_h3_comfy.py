@@ -327,7 +327,7 @@ def profile_schema() -> list[ProfileField]:
         ),
         ProfileField(
             key="image_lora_weights", label="Turbo LoRA", kind="text",
-            default=TURBO_LORA_FILE,
+            default=TURBO_LORA_FILE, options_dir="loras",
             help="Filename in the model's loras/ folder. Clear it to sample "
                  "without a distill (raise steps to ~50).",
         ),

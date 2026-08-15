@@ -270,7 +270,7 @@ def profile_schema() -> list[ProfileField]:
         ),
         ProfileField(
             key="image_lora_weights", label="LoRA", kind="text",
-            default="",
+            default="", options_dir="loras",
             help="Optional filename in the model's loras/ folder "
                  "(e.g. krea2_darkbrush.safetensors).",
         ),

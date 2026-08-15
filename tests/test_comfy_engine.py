@@ -919,3 +919,48 @@ def test_comfy_plan_carries_the_qwen3vl_mmproj_patch():
         text = patch.read_text()
         assert "QWEN3VL_VISION_SD_MAP" in text
         assert "deepstack_merger_list" in text
+
+
+# ------------------------------------------------------- the LoRA picker
+
+
+def test_lora_field_offers_the_files_in_the_models_loras_folder(tmp_path):
+    """The LoRA field was a blank text box: no way to see what was installed.
+
+    ``options_dir`` makes it a picker over the model's own folder, so the
+    editor offers exactly the files the adapter is willing to load (it
+    bypasses the LoraLoader node for anything not in ``loras/``).
+    """
+    from llamanager.api_ui import _dir_options, _serialize_profile_field
+    from llamanager.config import Config
+    from llamanager.engines import krea_comfy
+
+    schema = [_serialize_profile_field(f) for f in krea_comfy.profile_schema()]
+    lora = next(f for f in schema if f["key"] == "image_lora_weights")
+    assert lora["options_dir"] == "loras"
+
+    cfg = Config()
+    cfg.models_dir_override = tmp_path
+    d = _comfy_pack(tmp_path, "Krea-2-Turbo-Comfy", "krea2_turbo-Q6_K.gguf")
+
+    # No loras/ folder yet — an explicit empty list, which the UI renders as
+    # "no loras installed" instead of an input inviting a guess.
+    assert _dir_options(cfg, "Krea-2-Turbo-Comfy", schema) == {
+        "image_lora_weights": []}
+
+    (d / "loras").mkdir()
+    (d / "loras" / "krea2_darkbrush.safetensors").write_bytes(b"w")
+    (d / "loras" / "notes.txt").write_text("not a lora")
+
+    assert _dir_options(cfg, "Krea-2-Turbo-Comfy", schema) == {
+        "image_lora_weights": ["krea2_darkbrush.safetensors"]}
+
+
+def test_a_lora_folder_does_not_become_a_model(tmp_path):
+    """Adding loras/ to a pack must not resurrect the duplicate-entry bug."""
+    d = _comfy_pack(tmp_path, "Krea-2-Turbo-Comfy", "krea2_turbo-Q6_K.gguf")
+    (d / "loras").mkdir()
+    (d / "loras" / "krea2_darkbrush.safetensors").write_bytes(b"w")
+
+    assert [m.model_id for m in _registry(tmp_path).list()] == [
+        "Krea-2-Turbo-Comfy"]

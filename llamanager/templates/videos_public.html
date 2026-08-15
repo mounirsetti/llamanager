@@ -469,6 +469,8 @@
       imageModels: {{ image_models_json | safe }},
       profiles: {{ profiles_json | safe }},
       enginesSchema: {{ engines_schema_json | safe }},
+      // {model_id: {field key: [files]}} for dir-backed fields (LoRAs).
+      dirOptions: {{ dir_options_json | safe }},
       enginesCaps: {{ engines_caps_json | safe }},
       defaultModel: {{ default_image_model | tojson }},
       defaultProfile: {{ default_image_profile | tojson }},
@@ -618,7 +620,15 @@
         const label = document.createElement("label"); label.className = "lm-img-field__label"; label.textContent = f.label; wrap.appendChild(label);
         const placeholder = pf[f.key] != null ? String(pf[f.key]) : (f.default != null ? String(f.default) : "");
         let input;
-        if (f.kind === "select") {
+        const dirFiles = f.options_dir ? ((cfg.dirOptions || {})[modelSel.value] || {})[f.key] : null;
+        if (f.options_dir) {
+          // Dir-backed field (LoRA): only what is in the model's folder.
+          input = document.createElement("select"); input.className = "lm-input lm-input--mono";
+          const blank = document.createElement("option"); blank.value = "";
+          blank.textContent = placeholder ? `— inherit (${placeholder}) —` : "— none —"; input.appendChild(blank);
+          (dirFiles || []).forEach(o => { const op = document.createElement("option"); op.value = o; op.textContent = o; input.appendChild(op); });
+          if (!dirFiles || !dirFiles.length) { input.disabled = true; blank.textContent = `no ${f.options_dir} installed`; }
+        } else if (f.kind === "select") {
           input = document.createElement("select"); input.className = "lm-input lm-input--mono";
           const blank = document.createElement("option"); blank.value = "";
           blank.textContent = placeholder ? `— inherit (${placeholder}) —` : "— inherit —"; input.appendChild(blank);
