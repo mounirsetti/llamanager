@@ -593,3 +593,92 @@ def test_every_comfy_workflow_template_is_valid_json_and_fully_tokenised():
         graph = cb.render_workflow(path.read_text(), values)
         for node_id, node in graph.items():
             assert "class_type" in node, f"{path.name}:{node_id}"
+
+
+# ------------------------------------------------------------- the runner
+
+
+def _runner_module():
+    """Load _comfy_runner.py the way it loads itself: by path.
+
+    It is written to run inside the ComfyUI venv (which has no llamanager),
+    so it must not be importable only as a package member.
+    """
+    import importlib.util
+    from llamanager.engines import comfy_backend as cb
+    path = Path(cb.__file__).with_name("_comfy_runner.py")
+    spec = importlib.util.spec_from_file_location("_comfy_runner_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_runner_loads_the_backend_without_the_llamanager_package():
+    """The runner runs under a different interpreter than the daemon, so it
+    loads comfy_backend by file path. If that ever became a package import it
+    would fail only at request time, inside the ComfyUI venv."""
+    runner = _runner_module()
+    cb = runner._load_backend()
+    assert hasattr(cb, "render_workflow") and hasattr(cb, "bypass_node")
+
+
+def test_runner_parses_typed_set_pairs():
+    runner = _runner_module()
+    got = runner.parse_set([
+        "WIDTH=1344", "FPS=24.0", "SEED=0",
+        "PROMPT=a hotel: grand, warm",     # not JSON -> stays a string
+        "LORA=",                            # empty -> empty string
+    ])
+    assert got["WIDTH"] == 1344 and isinstance(got["WIDTH"], int)
+    assert got["FPS"] == 24.0
+    assert got["SEED"] == 0
+    assert got["PROMPT"] == "a hotel: grand, warm"
+    assert got["LORA"] == ""
+
+
+def test_runner_rejects_a_malformed_set_pair():
+    runner = _runner_module()
+    with pytest.raises(SystemExit):
+        runner.parse_set(["WIDTH"])
+
+
+def test_runner_collects_the_newest_real_output(tmp_path):
+    """ComfyUI groups outputs by node and kind; temp files must be skipped."""
+    import os
+    import time as _t
+    runner = _runner_module()
+    out_dir = tmp_path / "out"
+    (out_dir / "sub").mkdir(parents=True)
+    old = out_dir / "old.png"
+    old.write_bytes(b"old")
+    new = out_dir / "sub" / "clip.mp4"
+    new.write_bytes(b"new")
+    os.utime(old, (1, 1))
+    os.utime(new, (_t.time(), _t.time()))
+
+    hist = {"outputs": {
+        "9":  {"images": [{"filename": "old.png", "subfolder": "",
+                           "type": "output"}]},
+        "16": {"video": [{"filename": "clip.mp4", "subfolder": "sub",
+                          "type": "output"},
+                         {"filename": "preview.png", "subfolder": "",
+                          "type": "temp"}]},
+    }}
+    dest = tmp_path / "final.mp4"
+    assert runner.collect_output(hist, out_dir, dest) == dest
+    assert dest.read_bytes() == b"new"
+
+
+def test_runner_reports_when_a_workflow_produced_nothing(tmp_path):
+    runner = _runner_module()
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    with pytest.raises(RuntimeError, match="no output files"):
+        runner.collect_output({"outputs": {}}, out_dir, tmp_path / "x.mp4")
+
+
+def test_runner_picks_a_free_loopback_port():
+    """A fixed port would submit our workflow to an operator's own ComfyUI."""
+    runner = _runner_module()
+    a, b = runner._free_port(), runner._free_port()
+    assert 1024 < a < 65536 and 1024 < b < 65536
