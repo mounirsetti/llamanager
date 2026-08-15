@@ -234,6 +234,10 @@ async def queue_cancel_all(request: Request, origin: str | None = None,
 class PullBody(BaseModel):
     source: str
     files: list[str] | None = None
+    # Which page owns the resulting download row: 'text' (default, an LLM
+    # pull), 'image' or 'video'. Anything else is coerced to 'text' by the
+    # registry.
+    family: str = "text"
 
 
 @router.get("/models")
@@ -262,7 +266,8 @@ async def models_pull(request: Request, body: PullBody,
                       _: Origin = Depends(admin_origin)) -> JSONResponse:
     reg: Registry = request.app.state.registry
     try:
-        did = reg.start_pull(source=body.source, files=body.files)
+        did = reg.start_pull(source=body.source, files=body.files,
+                             family=body.family)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     return JSONResponse({"download_id": did}, status_code=202)

@@ -1557,7 +1557,15 @@ def _recommended_reasoning_budget(tok_s: float | None) -> int | None:
     return max(500, int(round((tok_s * 20) / 250.0) * 250))
 
 
-def _models_ctx(request: Request) -> dict:
+def _models_ctx(request: Request,
+                download_families: tuple[str, ...] | None = None) -> dict:
+    """Shared context for the models page and everything built on it.
+
+    ``download_families`` scopes the ``downloads`` list to the families the
+    calling page owns ('text' for the LLM page, image/video for the
+    diffusion pages). ``None`` means "every download", which is what the
+    setup-diffusion context needs for its per-repo progress index.
+    """
     import sys as _sys
     import psutil as _psutil
     reg: Registry = request.app.state.registry
@@ -1768,7 +1776,9 @@ def _models_ctx(request: Request) -> dict:
         models=all_models,
         text_models=text_models,
         image_models=image_models,
-        downloads=reg.list_downloads(),
+        downloads=[d for d in reg.list_downloads()
+                   if download_families is None
+                   or d.get("family", "text") in download_families],
         current_model=request.app.state.sm.runtime.current_model,
         current_profile=request.app.state.sm.runtime.current_profile,
         models_dir=str(cfg.models_dir),
@@ -1788,14 +1798,27 @@ def _models_ctx(request: Request) -> dict:
 
 @router.get("/models", response_class=HTMLResponse)
 async def models_view(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    return templates.TemplateResponse(request, "models.html", _models_ctx(request))
+    # The LLM page owns text downloads only — diffusion/video pulls are
+    # listed on the diffusion pages instead.
+    return templates.TemplateResponse(
+        request, "models.html", _models_ctx(request, ("text",)),
+    )
 
 
 @router.get("/models/_list", response_class=HTMLResponse)
 async def models_list_partial(request: Request,
                               _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """The models page's card wrapper, re-fetched when a download finishes.
+
+    ``show_image=False`` mirrors how models.html includes this partial. Without
+    it the partial defaults to showing every group, so the post-download morph
+    swapped the *diffusion* cards (MiniMax-H3-Comfy, Krea, Wan…) into the LLM
+    page — the same category confusion the download families fix.
+    """
+    ctx = _models_ctx(request, ("text",))
+    ctx["show_image"] = False
     return templates.TemplateResponse(
-        request, "_models_list_partial.html", _models_ctx(request),
+        request, "_models_list_partial.html", ctx,
     )
 
 
@@ -1808,7 +1831,7 @@ async def models_downloads_strip(request: Request,
     from ``_models_list_partial`` is what lets open profile editors
     survive the poll — the model cards (and their inline forms) live
     in a sibling div that this endpoint never touches."""
-    ctx = _models_ctx(request)
+    ctx = _models_ctx(request, ("text",))
     resp = templates.TemplateResponse(
         request, "_models_downloads_strip.html", ctx,
     )
@@ -1955,7 +1978,7 @@ async def download_cancel_ui(request: Request, download_id: str,
                               _: None = Depends(require_csrf)) -> Response:
     reg: Registry = request.app.state.registry
     reg.cancel_pull(download_id)
-    return _models_redirect(request)
+    return _download_action_redirect(request)
 
 
 @router.post("/downloads/{download_id}/delete", response_class=HTMLResponse)
@@ -1963,7 +1986,7 @@ async def download_delete_ui(request: Request, download_id: str,
                               _: None = Depends(require_csrf)) -> Response:
     reg: Registry = request.app.state.registry
     reg.delete_download(download_id)
-    return _models_redirect(request)
+    return _download_action_redirect(request)
 
 
 def _open_path(path: str) -> None:
@@ -3578,7 +3601,9 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
     from .engine_installer import ENGINE_PLANS, resolve_plan, venv_python
     from .gpu_detect import detect_gpu, render_group_ok
 
-    ctx = _models_ctx(request)
+    # Mirror image of the LLM page: this one owns diffusion/video downloads,
+    # so a GGUF pull started from /ui/models never shows up here.
+    ctx = _models_ctx(request, ("image", "video"))
     ctx["image_cfg"] = {
         "hidream_python": cfg.hidream_python,
         "hidream_repo": cfg.hidream_repo,
@@ -3955,6 +3980,12 @@ async def download_engine_model(request: Request, engine: str,
         source = "hf://" + repo_clean.removeprefix("hf://").removeprefix("hf:")
     sub = subfolder.strip().strip("/") or None
     fn = filename.strip()
+    # Tag the row with the engine's family so this pull is listed on the
+    # diffusion pages and not in the LLM download list. Unknown engines fall
+    # back to "image" — either way it stays out of the text list.
+    fam = ENGINE_FAMILY.get(engine, "image")
+    if fam not in ("image", "video"):
+        fam = "image"
     try:
         # Estimate size up-front so the progress bar can show a total.
         bare_repo = source.removeprefix("hf://").removeprefix("hf:")
@@ -3963,12 +3994,12 @@ async def download_engine_model(request: Request, engine: str,
             size = await reg.estimate_repo_size(bare_repo, files=[fn])
             reg.start_pull(source=source, files=[fn],
                            subfolder=None, whole_repo=False,
-                           bytes_total=size, target_dir=dest)
+                           bytes_total=size, target_dir=dest, family=fam)
         else:
             size = await reg.estimate_repo_size(bare_repo, sub)
             reg.start_pull(source=source, files=None,
                            subfolder=sub, whole_repo=True,
-                           bytes_total=size, target_dir=dest)
+                           bytes_total=size, target_dir=dest, family=fam)
     except Exception as e:
         return _error_html(f"pull failed: {e}", status_code=400)
     return RedirectResponse("/ui/setup-diffusion", status_code=303)
@@ -4558,6 +4589,31 @@ def _models_redirect(request: Request) -> Response:
         resp.headers["HX-Redirect"] = "/ui/models"
         return resp
     return RedirectResponse("/ui/models", status_code=303)
+
+
+# Pages that render download rows and can therefore be the origin of a
+# cancel/delete. Anything else falls back to the models page.
+_DOWNLOAD_PAGES = ("/ui/models", "/ui/setup-diffusion", "/ui/diffusion-models")
+
+
+def _download_action_redirect(request: Request) -> Response:
+    """Post-mutation response for a download cancel/delete.
+
+    Same mechanics as ``_models_redirect`` but returns the operator to the
+    page they acted on: diffusion pulls are cancelled from the diffusion
+    pages, and bouncing them to the LLM models page (where the row isn't even
+    listed anymore) would look like the action did nothing.
+    """
+    from urllib.parse import urlparse
+    target = "/ui/models"
+    referer = urlparse(request.headers.get("referer", "")).path
+    if referer in _DOWNLOAD_PAGES:
+        target = referer
+    if _wants_htmx(request):
+        resp = Response(status_code=204)
+        resp.headers["HX-Redirect"] = target
+        return resp
+    return RedirectResponse(target, status_code=303)
 
 
 def _profile_saved_response(request: Request, model_id: str,

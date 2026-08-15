@@ -369,7 +369,8 @@ class Registry:
                    subfolder: str | None = None,
                    whole_repo: bool = False,
                    bytes_total: int = 0,
-                   target_dir: str | None = None) -> str:
+                   target_dir: str | None = None,
+                   family: str = "text") -> str:
         """Kick off a background download.
 
         Modes:
@@ -393,8 +394,13 @@ class Registry:
         models, where the transformer, text encoder, VAEs and LoRA each
         come from a different uploader. Path traversal is rejected by
         ``_ensure_under``, same as every other target.
+
+        ``family`` ('text' | 'image' | 'video') records what the pull is
+        for, so each page lists only its own downloads — a failed diffusion
+        component pull has no business showing up under the LLM list.
         """
         download_id = secrets.token_urlsafe(8)
+        fam = family if family in ("text", "image", "video") else "text"
         # Stash mode metadata inside files_json so the run loop can
         # decide which fetch path to take without a separate column.
         meta = {
@@ -405,9 +411,9 @@ class Registry:
         }
         self.db.execute(
             "INSERT INTO downloads(id, source, files_json, status, "
-            "bytes_total, started_at) VALUES (?, ?, ?, 'pending', ?, ?)",
+            "bytes_total, started_at, family) VALUES (?, ?, ?, 'pending', ?, ?, ?)",
             (download_id, source, json.dumps(meta),
-             int(bytes_total or 0), time.time()),
+             int(bytes_total or 0), time.time(), fam),
         )
         cancel = asyncio.Event()
         self._cancel_flags[download_id] = cancel
@@ -422,7 +428,7 @@ class Registry:
             "id": download_id, "source": source,
             "files": files or [], "subfolder": subfolder or "",
             "whole_repo": bool(whole_repo) or bool(subfolder),
-            "target_dir": target_dir or "",
+            "target_dir": target_dir or "", "family": fam,
         })
         return download_id
 
@@ -575,6 +581,8 @@ class Registry:
             "started_at": row["started_at"],
             "finished_at": row["finished_at"],
             "error": row["error"],
+            # 'text' | 'image' | 'video' — which page owns this row.
+            "family": (row["family"] if "family" in row.keys() else None) or "text",
         }
 
     def list_downloads(self) -> list[dict[str, Any]]:

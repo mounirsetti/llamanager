@@ -168,8 +168,9 @@ def _call_download(tmp_path, **form):
     app = SimpleNamespace(state=SimpleNamespace(registry=spy, cfg=cfg))
     kwargs = {"repo": "", "subfolder": "", "filename": "",
               "models_dir": "", "target_dir": "", **form}
+    engine = kwargs.pop("engine", "minimax_h3_comfy")
     resp = asyncio.run(api_ui.download_engine_model(
-        _Req(app), engine="minimax_h3_comfy", _=None, **kwargs))
+        _Req(app), engine=engine, _=None, **kwargs))
     return spy, resp
 
 
@@ -191,6 +192,26 @@ def test_download_route_forwards_target_dir_for_a_whole_repo(tmp_path):
                             target_dir="Model-Comfy/vae")
     assert spy.calls[0]["target_dir"] == "Model-Comfy/vae"
     assert spy.calls[0]["whole_repo"] is True
+
+
+def test_download_route_tags_the_pull_with_the_engine_family(tmp_path):
+    """Diffusion pulls must be enqueued as image/video, not text.
+
+    The family is what keeps a failed component pull off the LLM models page,
+    where it used to show up looking like a broken language model.
+    """
+    spy, _ = _call_download(tmp_path, repo="Comfy-Org/MiniMax-H3",
+                            target_dir="MiniMax-H3-Comfy/vae")
+    assert spy.calls[0]["family"] == "video"
+
+    spy, _ = _call_download(tmp_path, engine="krea_comfy",
+                            repo="Comfy-Org/Krea-2")
+    assert spy.calls[0]["family"] == "image"
+
+    # An engine the family map doesn't know still stays out of the text list.
+    spy, _ = _call_download(tmp_path, engine="brand_new_engine",
+                            repo="org/model")
+    assert spy.calls[0]["family"] == "image"
 
 
 def test_download_route_omits_target_dir_when_blank(tmp_path):

@@ -1,5 +1,9 @@
 {% set active_downloads = downloads | selectattr('status', 'equalto', 'running') | list %}
 {% set active_downloads = active_downloads + (downloads | selectattr('status', 'equalto', 'pending') | list) %}
+{# ``downloads`` is already scoped to the page's family by the view
+   (text here, image/video on the diffusion pages), so these are LLM
+   pulls only — a failed diffusion component pull is listed on
+   /ui/setup-diffusion instead of masquerading as a language model. #}
 {% set finished_downloads = downloads | selectattr('status', 'in', ['failed', 'cancelled']) | list %}
 
 {# Projector picker — a real dropdown (not free text), with the model's own

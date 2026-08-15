@@ -134,6 +134,55 @@ SCHEMA_VERSIONS: list[str] = [
 ]
 
 
+def _downloads_family_migration() -> str:
+    """v8 script: tag each download row with the family it belongs to.
+
+    Without this column a download row is just "some HF pull" — the models
+    page had no way to tell a GGUF LLM pull from a diffusion/video component
+    pull, so every failed row (MiniMax-H3 parts included) piled up under
+    "Language models".
+
+    Legacy rows predate the column and default to ``text``; the generated
+    UPDATEs re-tag the ones whose source matches a diffusion-catalog repo
+    (primary repo or any per-component repo) with that entry's real family,
+    so old failures land on the diffusion side where they belong. An
+    unmatched legacy row stays ``text``, which is what the overwhelming
+    majority of pre-catalog pulls actually were.
+    """
+    from .config import ENGINE_FAMILY
+    from .diffusion_catalog import CATALOG
+
+    by_repo: dict[str, str] = {}
+    for entry in CATALOG:
+        fam = ENGINE_FAMILY.get(entry.engine, "image")
+        repos = [entry.hf_repo, *(c[0] for c in entry.components)]
+        for repo in repos:
+            repo = (repo or "").strip().lower()
+            if not repo:
+                continue
+            by_repo.setdefault(repo, fam)
+            # The catalog names the Diffusers re-host (…-Diffusers) while a
+            # hand-typed pull often used the base repo. Match both.
+            by_repo.setdefault(repo.removesuffix("-diffusers"), fam)
+
+    stmts = ["ALTER TABLE downloads ADD COLUMN family TEXT NOT NULL DEFAULT 'text';"]
+    for repo, fam in sorted(by_repo.items()):
+        # Repo ids are org/name — no quotes, but escape defensively. ``_`` is a
+        # LIKE wildcard here; over-matching a single character is harmless for
+        # a backfill this coarse.
+        safe = repo.replace("'", "''")
+        stmts.append(
+            f"UPDATE downloads SET family='{fam}' WHERE lower(source) LIKE '%{safe}%';"
+        )
+    return "\n".join(stmts)
+
+
+# v8: per-download ``family`` ('text' | 'image' | 'video'), set at enqueue
+# time from the engine the pull is for. Lets each page show only its own
+# downloads instead of one global list.
+SCHEMA_VERSIONS.append(_downloads_family_migration())
+
+
 def _connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)

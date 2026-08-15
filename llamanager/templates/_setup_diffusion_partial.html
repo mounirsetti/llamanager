@@ -1009,6 +1009,45 @@
 </div>
 
 
+{# ---------- Failed / cancelled model downloads --------------------
+   ``downloads`` on this page is scoped to the image/video families (see
+   _setup_diffusion_ctx), so these are diffusion pulls only. They used to
+   land in the LLM list on /ui/models, where a MiniMax-H3 component pull
+   read as a language model. #}
+{% set failed_downloads = downloads | selectattr('status', 'in', ['failed', 'cancelled']) | list %}
+{% if failed_downloads %}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Failed downloads</span>
+    <span class="lm-section-meta">{{ failed_downloads|length }} model pull{{ 's' if failed_downloads|length != 1 }} that didn't finish</span>
+  </header>
+  <table class="lm-table">
+    <tbody>
+    {% for d in failed_downloads %}
+    <tr>
+      <td data-label="Model">
+        <code style="color: var(--fg-2);">{{ d.source }}</code>
+        <span class="lm-pill lm-pill--crashed" style="margin-left: 8px;">{{ d.status }}</span>
+      </td>
+      <td data-label="">
+        {% if d.error %}<span style="font-size: 0.8125rem; color: var(--bad);">{{ d.error[:80] }}{% if d.error|length > 80 %}&hellip;{% endif %}</span>{% endif %}
+      </td>
+      <td class="actions" data-label="">
+        <form method="post" action="/ui/downloads/{{ d.id }}/delete"
+              data-confirm="Remove this entry and clean up any partial files?"
+              style="display: inline;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Remove</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+
 {# ---------- Coexistence policy ----------------------------------- #}
 <section class="lm-section">
   <header class="lm-section-head">
