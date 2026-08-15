@@ -30,6 +30,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -94,12 +95,27 @@ class ComfyServer:
         log(f"starting server on port {self.port}; log -> {self.log_file}")
         # ComfyUI's own logging is verbose and continuous. It goes to a file,
         # never to our stderr, so it cannot flood the caller's log capture.
-        self._log_fh = open(self.log_file, "wb")
+        #
+        # Each line is stamped with seconds since launch. ComfyUI prints no
+        # timestamps of its own, which makes "where did the twelve minutes
+        # go" unanswerable from its log — the stamps turn a wall of INFO
+        # lines into a phase profile.
+        self._log_fh = open(self.log_file, "w", encoding="utf-8")
         self.proc = subprocess.Popen(
             argv, cwd=str(self.repo),
-            stdout=self._log_fh, stderr=subprocess.STDOUT,
-            start_new_session=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            start_new_session=True, text=True, errors="replace", bufsize=1,
         )
+        t0 = time.time()
+
+        def _stamp() -> None:
+            assert self.proc is not None and self.proc.stdout is not None
+            for line in self.proc.stdout:
+                self._log_fh.write(f"[{time.time() - t0:7.1f}s] {line}")
+                self._log_fh.flush()
+
+        self._log_thread = threading.Thread(target=_stamp, daemon=True)
+        self._log_thread.start()
 
     def wait_ready(self, timeout: float = STARTUP_TIMEOUT_S) -> None:
         deadline = time.time() + timeout
@@ -126,10 +142,10 @@ class ComfyServer:
 
     def tail_log(self, limit: int = 4000) -> str:
         try:
-            data = self.log_file.read_bytes()
+            return self.log_file.read_text(encoding="utf-8",
+                                           errors="replace")[-limit:]
         except OSError:
             return "(no log)"
-        return data[-limit:].decode("utf-8", errors="replace")
 
     def stop(self) -> None:
         """Terminate the whole process group, then verify it is gone.
@@ -437,8 +453,10 @@ def main() -> int:
             port=_free_port(), output_dir=out_dir, input_dir=in_dir,
             temp_dir=tmp_dir, extra_paths=paths_yaml,
             log_file=work / "comfyui.log", extra_args=args.comfy_arg)
+        t_start = time.time()
         server.start()
         server.wait_ready()
+        t_ready = time.time()
 
         if args.init_image is not None:
             if not args.init_image.is_file():
@@ -451,10 +469,25 @@ def main() -> int:
             node_id, _, input_name = spec.partition(":")
             cb.bypass_node(graph, node_id, input_name or "model")
 
-        t0 = time.time()
+        t_submit = time.time()
         hist = run_prompt(server, graph, uuid.uuid4().hex, args.timeout)
-        log(f"sampling finished in {time.time() - t0:.1f}s")
+        t_done = time.time()
         collect_output(hist, out_dir, args.output)
+
+        # A phase breakdown, because "it took 766 seconds" does not say
+        # whether the fix is a faster sampler or a warm server. ComfyUI
+        # reports its own execution time, which covers loading the weights
+        # plus sampling plus decoding; the difference between that and our
+        # wall clock is queue and transport.
+        comfy_exec = ""
+        for line in server.tail_log(20000).splitlines():
+            if "Prompt executed in" in line:
+                comfy_exec = line.split("Prompt executed in", 1)[1].strip()
+        log(f"TIMING startup={t_ready - t_start:.1f}s "
+            f"execute={t_done - t_submit:.1f}s "
+            f"collect={time.time() - t_done:.1f}s "
+            f"total={time.time() - t_start:.1f}s"
+            + (f" comfy_reported={comfy_exec}" if comfy_exec else ""))
         return 0
     except Exception as e:
         log(f"ERROR: {type(e).__name__}: {e}")
