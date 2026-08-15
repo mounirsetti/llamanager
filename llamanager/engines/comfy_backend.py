@@ -23,7 +23,12 @@ fails loudly on a mismatch instead of silently sampling something else.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -142,3 +147,92 @@ def missing_files(model_dir: Path, required: dict[str, str]) -> list[str]:
     return [f"{sub}/{name}"
             for sub, name in required.items()
             if name and not (model_dir / sub / name).is_file()]
+
+
+# ---------------------------------------------------------------- warm server
+#
+# Measured on this box: a Krea 2 Turbo request spends 719 of 740 seconds
+# building the Qwen3-VL text encoder. The GGUF transformer loads in 1.1s and
+# sampling takes 12s. The encoder cost is the same whether the checkpoint is
+# fp8_scaled or bf16 (719s vs 684s), so no choice of weights avoids it — the
+# only way not to pay it is to not do it again.
+#
+# ComfyUI caches loaded models between prompts, so a server that outlives one
+# request serves the next one with the encoder already built. These helpers
+# let a runner find an existing server for the same model directory, and let
+# a reaper shut it down once it has been idle, because a warm server holds
+# VRAM that nothing else on this machine can use.
+
+
+def server_state_path(model_dir: Path) -> Path:
+    """Where the warm server for ``model_dir`` records itself.
+
+    Keyed by the model directory, not globally: two models must never share a
+    server, or the second request would silently sample with the first
+    model's weights still resident and its own loaders pointed elsewhere.
+    """
+    key = hashlib.sha256(str(model_dir.resolve()).encode()).hexdigest()[:16]
+    root = Path(os.environ.get("TMPDIR", "/tmp"))
+    return root / f"llamanager-comfy-warm-{key}.json"
+
+
+def heartbeat_path(state: Path) -> Path:
+    """Touched by every request; the reaper measures idleness from its mtime."""
+    return state.with_suffix(".beat")
+
+
+def read_live_server(model_dir: Path) -> dict[str, Any] | None:
+    """Return the recorded server if it is genuinely alive and serving.
+
+    Every field is re-verified rather than trusted: a stale state file from a
+    killed server would otherwise send a request into a closed port, and a
+    recycled PID would be even worse.
+    """
+    state = server_state_path(model_dir)
+    try:
+        info = json.loads(state.read_text())
+    except (OSError, ValueError):
+        return None
+    pid, port = info.get("pid"), info.get("port")
+    if not pid or not port:
+        return None
+    try:
+        os.kill(int(pid), 0)          # alive? (no signal sent)
+    except (OSError, ValueError):
+        return None
+    if str(info.get("model_dir")) != str(model_dir.resolve()):
+        return None
+    # Its directories must still exist, or results would land nowhere.
+    for key in ("output_dir", "input_dir"):
+        if not info.get(key) or not Path(info[key]).is_dir():
+            return None
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/system_stats", timeout=5) as r:
+            json.loads(r.read())
+    except Exception:  # noqa: BLE001 — unreachable means not usable
+        return None
+    return info
+
+
+def write_server_state(model_dir: Path, pid: int, port: int,
+                       output_dir: Path, input_dir: Path) -> Path:
+    """Record a warm server. The directories matter as much as the port: a
+    reusing run must collect results from, and upload images to, the ones the
+    server was actually started with."""
+    state = server_state_path(model_dir)
+    state.write_text(json.dumps({
+        "pid": pid, "port": port,
+        "model_dir": str(model_dir.resolve()),
+        "output_dir": str(output_dir), "input_dir": str(input_dir),
+        "started": time.time(),
+    }))
+    heartbeat_path(state).write_text(str(time.time()))
+    return state
+
+
+def touch_heartbeat(model_dir: Path) -> None:
+    try:
+        heartbeat_path(server_state_path(model_dir)).write_text(str(time.time()))
+    except OSError:
+        pass

@@ -426,11 +426,32 @@
     .gen-pop { max-height: 64dvh; }
 
     .lm-img-composer, .lm-img-overrides { grid-template-columns: 1fr; }
-    .gen-lightbox { padding: 0; }
-    .gen-lightbox__panel { flex-direction: column; max-height: 100dvh; border-radius: 0; }
-    .gen-lightbox__imgwrap img { max-height: 60dvh; }
-    .gen-lightbox__side { width: auto; border-left: none; border-top: 1px solid var(--bg-3); max-height: 38dvh; }
-    .gen-lightbox__close { top: 10px; right: 12px; }
+    /* On a phone the panel is the whole screen and scrolls as ONE column.
+       Previously the image wrapper kept flex:1, so it claimed all the space
+       the metadata was not using and left a large dead area under a small
+       picture; and because only the metadata pane scrolled, the gesture did
+       nothing over the image. Now the media sizes to its content and the
+       panel itself is the scroll container. */
+    .gen-lightbox { padding: 0; align-items: stretch; }
+    .gen-lightbox__panel {
+      flex-direction: column; height: 100dvh; max-height: 100dvh;
+      border-radius: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+    }
+    .gen-lightbox__imgwrap { flex: 0 0 auto; padding: 8px; }
+    .gen-lightbox__imgwrap img,
+    .gen-lightbox__imgwrap video {
+      max-height: 72dvh; width: auto; max-width: 100%;
+    }
+    .gen-lightbox__side {
+      width: auto; flex: 0 0 auto; max-height: none; overflow: visible;
+      border-left: none; border-top: 1px solid var(--bg-3);
+      padding-bottom: 28px;   /* clear of the home indicator */
+    }
+    .gen-lb-actions { margin-top: 12px; }
+    .gen-lightbox__close {
+      top: 10px; right: 12px; width: 44px; height: 44px;  /* touch target */
+      position: fixed; z-index: 2;
+    }
   }
 </style>
 
@@ -903,7 +924,7 @@
     items.forEach(it => {
       if (state.seenUrls.has(it.url)) return;
       state.seenUrls.add(it.url);
-      grid.appendChild(cardFor(it));
+      const _c = cardFor(it); grid.appendChild(_c); spanCard(_c);
     });
     updateEmpty();
   }
@@ -921,6 +942,8 @@
     updateEmpty();
   }
   function updateEmpty() {
+    // Any mutation can add tiles; re-span so none is left at one 4px row.
+    requestAnimationFrame(relayoutMasonry);
     const hasCards = grid.querySelector(".gen-card");
     emptyEl.hidden = !!hasCards || live.cards.length > 0;
   }

@@ -878,6 +878,18 @@ class Config:
     # interpreter and the path to the checkout whose main.py we run.
     comfyui_python: str = ""
     comfyui_repo: str = ""
+    # Seconds to leave a ComfyUI server running after a request so the next
+    # one reuses its loaded models. Measured on this box, a Krea 2 Turbo
+    # request spends 719 of 740 seconds building the text encoder, and that
+    # cost is identical for fp8 and bf16 weights — reuse is the only thing
+    # that removes it.
+    #
+    # DEFAULT 0 (off): the reuse path is written but does not work yet — the
+    # adopted server stops answering immediately after it is recorded, and
+    # the cause is not yet found. Until it is, the strict one-shot path is
+    # the only one that is known good, and correctness beats an unproven
+    # speedup. Set a positive value only to work on it.
+    comfy_keep_warm_s: int = 0
     # Where per-engine venvs are built. Blank = <data_dir>/venvs.
     # Overridable because the engine stacks are multi-GB and the
     # data dir often lives on a small system partition.
@@ -1274,6 +1286,7 @@ def load_config(path: Path | None = None) -> Config:
         minimax_h3_python=str(image_cfg.get("minimax_h3_python", "") or ""),
         comfyui_python=str(image_cfg.get("comfyui_python", "") or ""),
         comfyui_repo=str(image_cfg.get("comfyui_repo", "") or ""),
+        comfy_keep_warm_s=int(image_cfg.get("comfy_keep_warm_s", 0) or 0),
         venvs_dir=(expand(str(image_cfg["venvs_dir"]))
                    if image_cfg.get("venvs_dir") else None),
         asr_python=str(image_cfg.get("asr_python", "") or ""),
@@ -1779,6 +1792,7 @@ def update_image_config(cfg_path: Path, *,
                         minimax_h3_python: str | None = None,
                         comfyui_python: str | None = None,
                         comfyui_repo: str | None = None,
+                        comfy_keep_warm_s: int | None = None,
                         venvs_dir: str | None = None,
                         asr_python: str | None = None,
                         whispercpp_binary: str | None = None,
@@ -1824,6 +1838,8 @@ def update_image_config(cfg_path: Path, *,
         img["comfyui_python"] = comfyui_python
     if comfyui_repo is not None:
         img["comfyui_repo"] = comfyui_repo
+    if comfy_keep_warm_s is not None:
+        img["comfy_keep_warm_s"] = int(comfy_keep_warm_s)
     if venvs_dir is not None:
         img["venvs_dir"] = venvs_dir
     if asr_python is not None:

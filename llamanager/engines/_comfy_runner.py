@@ -73,12 +73,15 @@ class ComfyServer:
         self.extra_paths, self.log_file = extra_paths, log_file
         self.extra_args = extra_args or []
         self.proc: subprocess.Popen | None = None
+        # A server kept warm for the next request is "adopted": this run talks
+        # to it but must not reap it on exit. The idle reaper owns its life.
+        self.adopted = False
 
     @property
     def base(self) -> str:
         return f"http://127.0.0.1:{self.port}"
 
-    def start(self) -> None:
+    def start(self, timestamped: bool = True) -> None:
         argv = [
             str(self.python), "main.py",
             "--listen", "127.0.0.1", "--port", str(self.port),
@@ -101,6 +104,18 @@ class ComfyServer:
         # go" unanswerable from its log — the stamps turn a wall of INFO
         # lines into a phase profile.
         self._log_fh = open(self.log_file, "w", encoding="utf-8")
+        if not timestamped:
+            # A server that outlives this process must NOT write into a pipe
+            # we own: when this runner exits the read end closes and ComfyUI
+            # dies on EPIPE the moment it next logs. Hand it the file directly
+            # and give up the timestamps, which are a debugging aid rather
+            # than something a warm server needs.
+            self.proc = subprocess.Popen(
+                argv, cwd=str(self.repo),
+                stdout=self._log_fh, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            return
         self.proc = subprocess.Popen(
             argv, cwd=str(self.repo),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -155,6 +170,10 @@ class ComfyServer:
         has previously leaked GPU memory on this hardware, so the group gets a
         real chance to exit on SIGTERM first.
         """
+        if self.adopted:
+            log("leaving the warm server running for the next request")
+            self._close_log()
+            return
         if self.proc is None or self.proc.poll() is not None:
             self._close_log()
             return
@@ -372,6 +391,23 @@ def parse_set(pairs: list[str], *, as_text: bool = False) -> dict[str, object]:
     return out
 
 
+def _spawn_reaper(state: Path, beat: Path, pid: int,
+                  idle_seconds: float) -> None:
+    """Start the detached process that will eventually stop the warm server.
+
+    It cannot be this run: this run is about to exit. See _comfy_reaper.py.
+    """
+    reaper = Path(__file__).with_name("_comfy_reaper.py")
+    subprocess.Popen(
+        [sys.executable, str(reaper), "--pid", str(pid),
+         "--beat", str(beat), "--state", str(state),
+         "--idle", str(idle_seconds)],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    log(f"warm server will be reaped after {idle_seconds:.0f}s idle")
+
+
 def _load_backend():
     """Import ``comfy_backend`` by file path, not as ``llamanager.engines.*``.
 
@@ -413,6 +449,10 @@ def main() -> int:
                    help="extra flag passed through to ComfyUI's main.py")
     p.add_argument("--keep-server-log", action="store_true",
                    help="keep the ComfyUI log file instead of the temp dir")
+    p.add_argument("--keep-warm", type=float, default=0.0, metavar="SECONDS",
+                   help="leave the server running for this many idle seconds "
+                        "so the next request reuses its loaded models. 0 "
+                        "(the default) keeps strict one-shot behaviour.")
     args = p.parse_args()
 
     cb = _load_backend()
@@ -430,11 +470,14 @@ def main() -> int:
     server: ComfyServer | None = None
 
     def _terminate(signum, _frame):
-        # Reap the child before dying, or it keeps the GPU.
+        # Reap the child before dying, or it keeps the GPU. A warm server is
+        # exempt: the reaper owns it, and killing it here would throw away the
+        # loaded models the next request is meant to reuse.
         log(f"received signal {signum}; shutting down")
         if server is not None:
             server.stop()
-        shutil.rmtree(work, ignore_errors=True)
+        if server is None or not getattr(server, "adopted", False):
+            shutil.rmtree(work, ignore_errors=True)
         os._exit(143)
 
     signal.signal(signal.SIGTERM, _terminate)
@@ -448,14 +491,39 @@ def main() -> int:
         paths_yaml = work / "extra_model_paths.yaml"
         paths_yaml.write_text(cb.extra_model_paths_yaml(args.model_path))
 
-        server = ComfyServer(
-            python=Path(sys.executable), repo=args.comfy_repo,
-            port=_free_port(), output_dir=out_dir, input_dir=in_dir,
-            temp_dir=tmp_dir, extra_paths=paths_yaml,
-            log_file=work / "comfyui.log", extra_args=args.comfy_arg)
         t_start = time.time()
-        server.start()
-        server.wait_ready()
+        warm = cb.read_live_server(args.model_path) if args.keep_warm else None
+        if warm:
+            # Reuse: the expensive part (constructing the text encoder) has
+            # already happened inside that process, and ComfyUI keeps it
+            # cached between prompts. Its directories are its own, so adopt
+            # them rather than the ones prepared above.
+            out_dir = Path(warm["output_dir"])
+            in_dir = Path(warm["input_dir"])
+            server = ComfyServer(
+                python=Path(sys.executable), repo=args.comfy_repo,
+                port=int(warm["port"]), output_dir=out_dir, input_dir=in_dir,
+                temp_dir=tmp_dir, extra_paths=paths_yaml,
+                log_file=work / "comfyui.log", extra_args=args.comfy_arg)
+            server.adopted = True
+            log(f"reusing warm server pid={warm['pid']} port={warm['port']}")
+        else:
+            server = ComfyServer(
+                python=Path(sys.executable), repo=args.comfy_repo,
+                port=_free_port(), output_dir=out_dir, input_dir=in_dir,
+                temp_dir=tmp_dir, extra_paths=paths_yaml,
+                log_file=work / "comfyui.log", extra_args=args.comfy_arg)
+            server.start(timestamped=not args.keep_warm)
+            server.wait_ready()
+            if args.keep_warm:
+                server.adopted = True   # leave it running for the next request
+                cb.write_server_state(args.model_path, server.proc.pid,
+                                      server.port, out_dir, in_dir)
+                st = cb.server_state_path(args.model_path)
+                _spawn_reaper(st, cb.heartbeat_path(st), server.proc.pid,
+                              args.keep_warm)
+        if args.keep_warm:
+            cb.touch_heartbeat(args.model_path)
         t_ready = time.time()
 
         if args.init_image is not None:
@@ -504,7 +572,12 @@ def main() -> int:
                 log(f"kept server log at {kept}")
             except OSError:
                 pass
-        shutil.rmtree(work, ignore_errors=True)
+        # A warm server's output and input directories live inside this run's
+        # work dir, so it can only be removed when nothing is left running in
+        # it. The reaper deletes the state file; the directory is small and
+        # lands under TMPDIR, so leaving it is the safe trade.
+        if not getattr(server, "adopted", False):
+            shutil.rmtree(work, ignore_errors=True)
 
 
 if __name__ == "__main__":

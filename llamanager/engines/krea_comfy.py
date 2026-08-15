@@ -186,6 +186,10 @@ def build_command(
         argv += ["--set", "LORA=", "--set", "LORA_STRENGTH=0.0",
                  "--bypass", "2:model"]
 
+    keep_warm = int(getattr(cfg, "comfy_keep_warm_s", 0) or 0)
+    if keep_warm > 0:
+        argv += ["--keep-warm", str(keep_warm)]
+
     for k, v in (profile.args or {}).items():
         flag = "--" + str(k).replace("_", "-")
         if isinstance(v, bool):

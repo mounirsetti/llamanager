@@ -331,11 +331,26 @@
       .gen-iconbtn { width: 44px; height: 44px; }
       .gen-pop { max-height: 64dvh; }
       .lm-img-composer, .lm-img-overrides { grid-template-columns: 1fr; }
-      .gen-lightbox { padding: 0; }
-      .gen-lightbox__panel { flex-direction: column; max-height: 100dvh; border-radius: 0; }
-      .gen-lightbox__imgwrap img { max-height: 58dvh; }
-      .gen-lightbox__side { width: auto; border-left: none; border-top: 1px solid var(--bg-3); max-height: 40dvh; }
-      .gen-lightbox__close { top: 10px; right: 12px; }
+      /* One scrolling column — see the note in images.html. The image
+         wrapper must not keep flex:1 or it claims the space the metadata
+         is not using, and only the metadata pane would scroll. */
+      .gen-lightbox { padding: 0; align-items: stretch; }
+      .gen-lightbox__panel {
+        flex-direction: column; height: 100dvh; max-height: 100dvh;
+        border-radius: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+      }
+      .gen-lightbox__imgwrap { flex: 0 0 auto; padding: 8px; }
+      .gen-lightbox__imgwrap img,
+      .gen-lightbox__imgwrap video { max-height: 72dvh; width: auto; max-width: 100%; }
+      .gen-lightbox__side {
+        width: auto; flex: 0 0 auto; max-height: none; overflow: visible;
+        border-left: none; border-top: 1px solid var(--bg-3);
+        padding-bottom: 28px;
+      }
+      .gen-lightbox__close {
+        top: 10px; right: 12px; width: 44px; height: 44px;
+        position: fixed; z-index: 2;
+      }
     }
   </style>
 </head>
@@ -752,7 +767,7 @@
       return div;
     }
     function appendItems(items) {
-      items.forEach(it => { if (state.seenUrls.has(it.url)) return; state.seenUrls.add(it.url); grid.appendChild(cardFor(it)); });
+      items.forEach(it => { if (state.seenUrls.has(it.url)) return; state.seenUrls.add(it.url); const _c = cardFor(it); grid.appendChild(_c); spanCard(_c); });
       updateEmpty();
     }
     function prependItems(items) {
@@ -760,7 +775,10 @@
       items.forEach(it => { if (state.seenUrls.has(it.url)) return; state.seenUrls.add(it.url); grid.insertBefore(cardFor(it), anchor); });
       updateEmpty();
     }
-    function updateEmpty() { emptyEl.hidden = !!grid.querySelector(".gen-card") || !!liveCard; }
+    function updateEmpty() {
+      requestAnimationFrame(relayoutMasonry);
+      emptyEl.hidden = !!grid.querySelector(".gen-card") || !!liveCard;
+    }
 
     async function fetchGallery({reset=false} = {}) {
       const params = new URLSearchParams({limit: "60"});
