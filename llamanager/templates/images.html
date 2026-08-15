@@ -35,12 +35,25 @@
   .gen-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(215px, 1fr));
-    gap: 12px;
+    column-gap: 12px;
+    row-gap: 0;
     align-content: start;
+    /* Masonry: implicit rows are deliberately tiny and each tile spans as
+       many as its own height needs (see relayoutMasonry). Without this a
+       single tall portrait tile forces its entire row tall and leaves a
+       large hole beside the landscape tiles. Row order stays left-to-right,
+       which CSS columns would not preserve. */
+    grid-auto-rows: 4px;
+    align-items: start;
   }
   .gen-card {
     position: relative;
-    aspect-ratio: 1;
+    /* Sized to the media, not cropped to a square. --card-ar is set from the
+       real dimensions once the image or video reports them; the 1 is only the
+       fallback for the moment before that happens. Portrait, square and
+       landscape therefore sit side by side without losing their edges. */
+    aspect-ratio: var(--card-ar, 1);
+    margin-bottom: 12px;
     background: var(--bg-1);
     border: 1px solid var(--bg-3);
     border-radius: 10px;
@@ -536,6 +549,7 @@
     defaultModel: {{ default_image_model | tojson }},
     defaultProfile: {{ default_image_profile | tojson }},
     apiKey: "{{ api_key }}",
+    mediaKind: "image",
     galleryUrl: "/ui/images/gallery",
     statusUrl: "/ui/images/status",
     cancelUrlTpl: "/admin/queue/{id}/cancel",
@@ -829,6 +843,30 @@
   });
 
   // ---------- Feed ----------
+  // Give a gallery tile the shape of the media inside it. Called once the
+  // browser reports real dimensions, because the sidecar's width/height are
+  // not reliable (a request made with `size` leaves them at 0). Ratios are
+  // clamped so one extreme panorama or tall strip cannot dominate the grid.
+  // Masonry: give each tile a row span matching its own height, so a tall
+  // portrait no longer forces its whole row tall. Rows are 4px and the gap
+  // is the tile's own margin, so the span is simply height+margin over 4.
+  function spanCard(card) {
+    const h = card.getBoundingClientRect().height;
+    if (!h) return;
+    card.style.gridRowEnd = `span ${Math.ceil((h + 12) / 4)}`;
+  }
+  function relayoutMasonry() {
+    document.querySelectorAll('.gen-card').forEach(spanCard);
+  }
+  addEventListener('resize', relayoutMasonry);
+
+  function fitCardToMedia(card, w, h) {
+    if (!w || !h) return;
+    const ar = Math.min(Math.max(w / h, 0.5), 2.0);
+    card.style.setProperty("--card-ar", String(ar));
+    requestAnimationFrame(() => spanCard(card));
+  }
+
   function cardFor(item, {fresh = false} = {}) {
     const div = document.createElement("div");
     div.className = fresh ? "gen-card gen-card--fresh" : "gen-card";
@@ -839,12 +877,16 @@
       const vid = document.createElement("video");
       vid.src = item.url; vid.muted = true; vid.loop = true;
       vid.playsInline = true; vid.preload = "metadata";
+      vid.addEventListener("loadedmetadata",
+        () => fitCardToMedia(div, vid.videoWidth, vid.videoHeight));
       vid.addEventListener("mouseenter", () => { vid.play().catch(() => {}); });
       vid.addEventListener("mouseleave", () => { vid.pause(); });
       div.appendChild(vid);
     } else {
       const img = document.createElement("img");
       img.loading = "lazy"; img.src = item.url;
+      img.addEventListener("load",
+        () => fitCardToMedia(div, img.naturalWidth, img.naturalHeight));
       div.appendChild(img);
     }
     const sc = item.sidecar || {};
@@ -885,6 +927,7 @@
 
   async function fetchGallery({reset=false} = {}) {
     const params = new URLSearchParams({limit: "60"});
+    if (cfg.mediaKind) params.set("kind", cfg.mediaKind);
     if (!reset && state.nextBefore != null) params.set("before", String(state.nextBefore));
     const r = await fetch(`${cfg.galleryUrl}?${params.toString()}`, {
       headers: cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : {},
@@ -1320,7 +1363,8 @@
    *  (or, when nothing is in flight, onto the head of the feed). */
   async function refreshFront({resolve = false} = {}) {
     try {
-      const r = await fetch(`${cfg.galleryUrl}?limit=12`, {
+      const _kq = cfg.mediaKind ? `&kind=${cfg.mediaKind}` : "";
+      const r = await fetch(`${cfg.galleryUrl}?limit=12${_kq}`, {
         headers: cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : {},
         credentials: "same-origin",
       });
