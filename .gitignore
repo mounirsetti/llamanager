@@ -28,3 +28,8 @@ dist/
 # project-local data (the daemon's runtime dir lives in $HOME, but a
 # user might point --config at one inside the repo for testing)
 .llamanager/
+
+# Generated media and reports from engine tests. Kept out of git because it
+# is large binary output (multi-MB clips, embedded-media HTML), but the
+# directory itself is intentionally persistent rather than a temp dir.
+test-output/
