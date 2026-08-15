@@ -22,7 +22,6 @@ def test_engine_family_lookup():
     assert ENGINE_FAMILY["mlx"] == "text"
     assert ENGINE_FAMILY["hidream"] == "image"
     assert ENGINE_FAMILY["flux2"] == "image"
-    assert ENGINE_FAMILY["krea"] == "image"
     assert ENGINE_FAMILY["ideogram4"] == "image"
     assert engine_family("llama") == "text"
     assert engine_family("hidream") == "image"
@@ -47,22 +46,6 @@ def test_detect_engine_for_flux2_dir(tmp_path: Path):
     (d / "flux2-dev-Q6_K.gguf").write_bytes(b"")
     (d / "ae.safetensors").write_bytes(b"")
     assert detect_engine_for_path(d) == "flux2"
-
-
-def test_detect_engine_for_krea_dir(tmp_path: Path):
-    from llamanager.config import detect_engine_for_path
-    d = tmp_path / "Krea-2-Turbo-GGUF"
-    d.mkdir()
-    (d / "krea2_turbo-Q6_K.gguf").write_bytes(b"")
-    assert detect_engine_for_path(d) == "krea"
-
-
-def test_detect_engine_for_original_krea_dir(tmp_path: Path):
-    from llamanager.config import detect_engine_for_path
-    d = tmp_path / "Krea-2-Turbo"
-    d.mkdir()
-    (d / "model_index.json").write_text('{"_class_name":"Krea2Pipeline"}')
-    assert detect_engine_for_path(d) == "krea"
 
 
 def test_detect_engine_for_ideogram4_dir(tmp_path: Path):
@@ -261,121 +244,6 @@ def test_flux2_progress_parser():
     assert ev is not None
     assert ev.step == 3
     assert ev.total == 28
-
-
-def test_krea_adapter_builds_argv_for_selected_quant(tmp_path: Path):
-    from llamanager.engines import krea
-    from llamanager.config import Config, Profile
-    from llamanager.engines._base import ImageRequest
-
-    fake_py = tmp_path / "python"
-    fake_py.write_bytes(b"")
-    cfg = Config()
-    cfg.z_image_python = str(fake_py)
-    model = tmp_path / "vantagewithai" / "Krea-2-Turbo-GGUF"
-    model.mkdir(parents=True)
-    (model / "krea2_turbo-Q6_K.gguf").write_bytes(b"")
-    (model / "krea2_turbo-Q8_0.gguf").write_bytes(b"")
-    prof = Profile(
-        name="krea",
-        image_model_type="krea2_turbo-Q8_0.gguf",
-        image_steps=8,
-        image_guidance=1.0,
-        image_negative_prompt="blur",
-        image_lora_weights="gokaygokay/Krea-2-Realism-LoRA",
-        image_lora_scale=0.8,
-    )
-    req = ImageRequest(
-        prompt="test", width=1024, height=1024,
-        steps=None, seed=123, n=1,
-    )
-    argv, env = krea.build_command(cfg, model, prof, req, tmp_path / "out.png")
-    assert "_krea_runner.py" in argv[2]
-    assert "--gguf" in argv
-    assert argv[argv.index("--gguf") + 1].endswith("krea2_turbo-Q8_0.gguf")
-    assert "--negative_prompt" in argv
-    assert "blur" in argv
-    assert "--lora" in argv
-    assert argv[argv.index("--lora") + 1] == "gokaygokay/Krea-2-Realism-LoRA"
-    assert "--lora-scale" in argv
-    assert float(argv[argv.index("--lora-scale") + 1]) == 0.8
-    assert env["PYTHONIOENCODING"] == "utf-8"
-
-
-def test_krea_adapter_builds_argv_for_original_repo(tmp_path: Path):
-    from llamanager.engines import krea
-    from llamanager.config import Config, Profile
-    from llamanager.engines._base import ImageRequest
-
-    fake_py = tmp_path / "python"
-    fake_py.write_bytes(b"")
-    cfg = Config()
-    cfg.z_image_python = str(fake_py)
-    model = tmp_path / "krea" / "Krea-2-Turbo"
-    model.mkdir(parents=True)
-    (model / "model_index.json").write_text('{"_class_name":"Krea2Pipeline"}')
-    prof = Profile(name="krea-original", image_model_type="original")
-    req = ImageRequest(
-        prompt="test", width=1024, height=1024,
-        steps=None, seed=None, n=1,
-    )
-    argv, _env = krea.build_command(cfg, model, prof, req, tmp_path / "out.png")
-    assert "--model_path" in argv
-    assert argv[argv.index("--model_path") + 1] == str(model)
-    assert "--gguf" not in argv
-
-
-def test_krea_adapter_emits_init_image_and_strength(tmp_path: Path):
-    """One ref image => --init-image <path> --strength <s> (img2img)."""
-    from llamanager.engines import krea
-    from llamanager.config import Config, Profile
-    from llamanager.engines._base import ImageRequest
-
-    fake_py = tmp_path / "python"
-    fake_py.write_bytes(b"")
-    cfg = Config()
-    cfg.z_image_python = str(fake_py)
-    model = tmp_path / "krea" / "Krea-2-Turbo"
-    model.mkdir(parents=True)
-    (model / "model_index.json").write_text('{"_class_name":"Krea2Pipeline"}')
-    prof = Profile(name="krea-original", image_model_type="original")
-    req = ImageRequest(
-        prompt="test", width=1024, height=1024, steps=None, seed=None, n=1,
-        ref_images=[tmp_path / "ref.png"], strength=0.45,
-    )
-    argv, _env = krea.build_command(cfg, model, prof, req, tmp_path / "out.png")
-    assert argv[argv.index("--init-image") + 1] == str(tmp_path / "ref.png")
-    assert argv[argv.index("--strength") + 1] == "0.4500"
-
-
-def test_krea_capabilities_advertise_one_reference():
-    from llamanager.engines import krea
-
-    caps = krea.capabilities()
-    assert caps["ref_images_max"] == 1
-    assert caps["strength"] is True
-
-
-def test_krea_adapter_rejects_multiple_references(tmp_path: Path):
-    from llamanager.engines import krea
-    from llamanager.config import Config, Profile
-    from llamanager.engines._base import ImageRequest
-    import pytest
-
-    fake_py = tmp_path / "python"
-    fake_py.write_bytes(b"")
-    cfg = Config()
-    cfg.z_image_python = str(fake_py)
-    model = tmp_path / "krea" / "Krea-2-Turbo"
-    model.mkdir(parents=True)
-    (model / "model_index.json").write_text('{"_class_name":"Krea2Pipeline"}')
-    prof = Profile(name="krea-original", image_model_type="original")
-    req = ImageRequest(
-        prompt="test", width=1024, height=1024, steps=None, seed=None, n=1,
-        ref_images=[tmp_path / "a.png", tmp_path / "b.png"],
-    )
-    with pytest.raises(RuntimeError, match="exactly one reference image"):
-        krea.build_command(cfg, model, prof, req, tmp_path / "out.png")
 
 
 def test_krea_lora_profile_fields_roundtrip(tmp_path: Path):
@@ -769,54 +637,10 @@ def test_profile_roundtrips_new_image_ref_fields(tmp_path: Path):
     assert p.image_strength == 0.55
 
 
-def test_krea_resolves_a_bare_lora_filename_against_the_models_loras_dir(tmp_path):
-    """One picker, two engines: a filename means the model's own loras/ file.
-
-    The ComfyUI engines have always loaded a LoRA by filename from that
-    folder. diffusers needs a real path for the same input, so the adapter
-    resolves it — otherwise picking a local file in the UI would reach
-    load_lora_weights as a bare name and be treated as an HF repo id.
-    """
-    from llamanager.engines import krea
-    from llamanager.config import Config, Profile
-    from llamanager.engines._base import ImageRequest
-
-    fake_py = tmp_path / "python"
-    fake_py.write_bytes(b"")
-    cfg = Config()
-    cfg.z_image_python = str(fake_py)
-    model = tmp_path / "krea" / "Krea-2-Turbo"
-    (model / "loras").mkdir(parents=True)
-    (model / "model_index.json").write_text('{"_class_name": "Krea2Pipeline"}')
-    lora = model / "loras" / "krea2_darkbrush.safetensors"
-    lora.write_bytes(b"w")
-    req = ImageRequest(prompt="t", width=1024, height=576, steps=None,
-                       seed=1, n=1)
-
-    prof = Profile(name="p", image_lora_weights="krea2_darkbrush.safetensors")
-    argv, _ = krea.build_command(cfg, model, prof, req, tmp_path / "o.png")
-    assert argv[argv.index("--lora") + 1] == str(lora)
-
-    # An HF repo id still passes through untouched.
-    prof = Profile(name="p", image_lora_weights="gokaygokay/Krea-2-Realism-LoRA")
-    argv, _ = krea.build_command(cfg, model, prof, req, tmp_path / "o.png")
-    assert argv[argv.index("--lora") + 1] == "gokaygokay/Krea-2-Realism-LoRA"
-
-    # A filename with no file behind it is left alone rather than turned
-    # into a path that does not exist.
-    prof = Profile(name="p", image_lora_weights="not-downloaded.safetensors")
-    argv, _ = krea.build_command(cfg, model, prof, req, tmp_path / "o.png")
-    assert argv[argv.index("--lora") + 1] == "not-downloaded.safetensors"
-
-
-def test_krea_lora_field_is_a_typeable_picker_but_comfy_is_strict(tmp_path):
-    """Both engines offer the folder; only the diffusers one accepts more."""
-    from llamanager.engines import krea, krea_comfy
-
-    kf = next(f for f in krea.profile_schema()
-              if f.key == "image_lora_weights")
-    assert kf.options_dir == "loras" and kf.options_free is True
-    assert "gokaygokay/Krea-2-Realism-LoRA" in (kf.options or [])
+def test_krea_comfy_lora_field_is_restricted_to_the_loras_folder(tmp_path):
+    """ComfyUI can only load a LoRA that is already in the model's folder,
+    so the field is a strict picker — no free-typed repo ids."""
+    from llamanager.engines import krea_comfy
 
     cf = next(f for f in krea_comfy.profile_schema()
               if f.key == "image_lora_weights")

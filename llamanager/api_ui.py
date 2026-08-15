@@ -78,9 +78,6 @@ router = APIRouter(prefix="/ui", tags=["ui"])
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
-KREA_LORA_COLLECTION_API = (
-    "https://huggingface.co/api/collections/krea/krea-2-loras"
-)
 HF_MODEL_TREE_API = "https://huggingface.co/api/models/{repo}/tree/main"
 
 
@@ -3523,85 +3520,6 @@ async def setup_get(request: Request, _: Origin = Depends(require_admin_ui)) -> 
     return templates.TemplateResponse(request, "setup.html", _setup_ctx(request))
 
 
-def _krea_lora_cache(request: Request) -> dict[str, Any]:
-    return getattr(request.app.state, "krea_lora_collection", None) or {
-        "items": [],
-        "error": "",
-        "last_checked": 0.0,
-        "title": "Krea 2 LoRAs",
-        "description": "",
-    }
-
-
-async def _fetch_krea_lora_collection() -> dict[str, Any]:
-    import httpx as _httpx
-
-    async with _httpx.AsyncClient(timeout=20) as client:
-        resp = await client.get(KREA_LORA_COLLECTION_API)
-        resp.raise_for_status()
-        payload = resp.json()
-        raw_items = [
-            item for item in payload.get("items", [])
-            if item.get("repoType") in (None, "model") and item.get("id")
-        ]
-
-        async def enrich(item: dict[str, Any]) -> dict[str, Any]:
-            repo_id = str(item.get("id") or "")
-            filename = ""
-            for provider in item.get("availableInferenceProviders") or []:
-                candidate = provider.get("adapterWeightsPath")
-                if candidate:
-                    filename = str(candidate)
-                    break
-            size = 0
-            if not filename:
-                try:
-                    tree_url = HF_MODEL_TREE_API.format(repo=repo_id)
-                    tree_resp = await client.get(tree_url)
-                    tree_resp.raise_for_status()
-                    for f in tree_resp.json():
-                        path = str(f.get("path") or "")
-                        if path.lower().endswith(".safetensors"):
-                            filename = path
-                            size = int(f.get("size") or (f.get("lfs") or {}).get("size") or 0)
-                            break
-                except Exception:
-                    pass
-            elif repo_id:
-                try:
-                    tree_url = HF_MODEL_TREE_API.format(repo=repo_id)
-                    tree_resp = await client.get(tree_url)
-                    tree_resp.raise_for_status()
-                    for f in tree_resp.json():
-                        if str(f.get("path") or "") == filename:
-                            size = int(f.get("size") or (f.get("lfs") or {}).get("size") or 0)
-                            break
-                except Exception:
-                    pass
-            label = repo_id.rsplit("/", 1)[-1].removeprefix("Krea-2-LoRA-")
-            previews = item.get("widgetOutputUrls") or []
-            return {
-                "repo": repo_id,
-                "filename": filename,
-                "label": label,
-                "downloads": int(item.get("downloads") or 0),
-                "likes": int(item.get("likes") or 0),
-                "updated": item.get("lastModified") or "",
-                "size": size,
-                "size_gb": (size / (1024 ** 3)) if size else 0,
-                "preview": previews[0] if previews else "",
-            }
-
-        items = await asyncio.gather(*(enrich(item) for item in raw_items))
-    return {
-        "items": sorted(items, key=lambda x: x.get("label", "")),
-        "error": "",
-        "last_checked": time.time(),
-        "title": payload.get("title") or "Krea 2 LoRAs",
-        "description": payload.get("description") or "",
-    }
-
-
 def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
     """Context for the Diffusion engines page (full or partial reload).
 
@@ -3668,7 +3586,7 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
 
     # Per-engine install state — surface the most-relevant row so the
     # card can show "running 42%", "done", or "click to install".
-    engines = ("z_image", "krea", "ideogram4", "wan", "minimax_h3",
+    engines = ("z_image", "ideogram4", "wan", "minimax_h3",
                "comfy", "hidream", "flux2")
     install_state: dict[str, Any] = {}
     for eng in engines:
@@ -3733,19 +3651,6 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
     ctx["engine_venv_python"] = {
         e: str(venv_python(cfg, e)) for e in engines
     }
-    try:
-        from .engines import krea as _krea
-        ctx["krea_quant_files"] = [
-            {
-                "filename": fn,
-                "label": fn.removeprefix("krea2_turbo-").removesuffix(".gguf"),
-                "size_gb": _krea.QUANT_SIZE_GB.get(fn),
-            }
-            for fn in _krea.QUANT_FILES
-        ]
-    except Exception:
-        ctx["krea_quant_files"] = []
-    ctx["krea_lora_collection"] = _krea_lora_cache(request)
 
     # Index downloads by repo so each engine card can show in-flight
     # pulls for its own models.
@@ -4138,25 +4043,6 @@ async def setup_diffusion_partial(request: Request,
                                   ) -> HTMLResponse:
     """HTMX-polled fragment so the install/download status updates live
     on the Diffusion engines page without a full reload."""
-    return templates.TemplateResponse(
-        request, "_setup_diffusion_partial.html",
-        _setup_diffusion_ctx(request),
-    )
-
-
-@router.get("/setup-diffusion/krea-loras", response_class=HTMLResponse)
-async def setup_diffusion_krea_loras(request: Request,
-                                     _: Origin = Depends(require_admin_ui)
-                                     ) -> HTMLResponse:
-    try:
-        request.app.state.krea_lora_collection = await _fetch_krea_lora_collection()
-    except Exception as e:
-        previous = _krea_lora_cache(request)
-        request.app.state.krea_lora_collection = {
-            **previous,
-            "error": str(e),
-            "last_checked": time.time(),
-        }
     return templates.TemplateResponse(
         request, "_setup_diffusion_partial.html",
         _setup_diffusion_ctx(request),
@@ -5443,7 +5329,6 @@ def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
         configured = {
             "hidream": bool(cfg.hidream_python and cfg.hidream_repo),
             "z_image": bool(cfg.z_image_python),
-            "krea":    bool(cfg.z_image_python),
             "ideogram4": bool(cfg.ideogram4_python),
             "wan":     bool(cfg.wan_python),
             "minimax_h3": bool(getattr(cfg, "minimax_h3_python", "")),
@@ -5460,7 +5345,6 @@ def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
         label = {
             "hidream": "HiDream-O1-Image",
             "z_image": "Z-Image (Tongyi-MAI / Z-Anime)",
-            "krea":    "Krea 2 Turbo",
             "ideogram4": "Ideogram 4",
             "wan":     "Wan 2.2 (text/image → video)",
             "minimax_h3": "MiniMax-H3 (video + audio)",

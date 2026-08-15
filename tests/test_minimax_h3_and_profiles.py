@@ -311,23 +311,6 @@ def test_video_profile_round_trips_frames_and_fps(tmp_path):
     assert reloaded.video_fps == 16
 
 
-def test_krea_defaults_follow_the_checkpoint_layout(tmp_path):
-    """Regression: ``default_profiles()`` with no model dir returns the GGUF
-    set. Seeding an *original* Diffusers checkpoint with those produces
-    profiles that fail at load time ("GGUF quants are not loadable")."""
-    original = tmp_path / "Krea-2-Turbo"
-    original.mkdir()
-    (original / "model_index.json").write_text(
-        '{"_class_name": "Krea2Pipeline"}', encoding="utf-8")
-
-    with_dir = engines.default_profiles("krea", original)
-    assert all(p["image_model_type"] == "original" for p in with_dir.values())
-
-    without_dir = engines.default_profiles("krea")
-    assert any(str(p["image_model_type"]).endswith(".gguf")
-               for p in without_dir.values())
-
-
 def test_default_profiles_helper_is_total():
     """Unknown engines and adapters without defaults return {} rather than
     raising, so callers can treat every engine uniformly."""

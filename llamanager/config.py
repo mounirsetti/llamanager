@@ -214,7 +214,6 @@ ENGINE_FAMILY: dict[str, str] = {
     "hidream": "image",
     "flux2":   "image",
     "z_image": "image",
-    "krea":    "image",
     "ideogram4": "image",
     "wan":     "video",
     "minimax_h3": "video",
@@ -388,25 +387,6 @@ def _looks_like_wan(d: Path) -> bool:
     return False
 
 
-def _looks_like_krea(d: Path) -> bool:
-    """Krea 2 Turbo directory shapes: original Diffusers or GGUF quants."""
-    if not d.is_dir():
-        return False
-    mi = d / "model_index.json"
-    if mi.is_file():
-        try:
-            import json as _json
-            data = _json.loads(mi.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            data = {}
-        if (data.get("_class_name") or "").strip() == "Krea2Pipeline":
-            return True
-    return any(p.is_file()
-               and p.name.lower().startswith("krea2_turbo-")
-               and p.suffix.lower() == ".gguf"
-               for p in d.iterdir())
-
-
 def _looks_like_ideogram4(d: Path) -> bool:
     """Ideogram 4 official pipeline or Comfy-Org repack layout."""
     if not d.is_dir():
@@ -517,8 +497,6 @@ def detect_engine_for_path(model_path: Path) -> str:
             return "asr"
         if _looks_like_z_image(model_path):
             return "z_image"
-        if _looks_like_krea(model_path):
-            return "krea"
         if _looks_like_ideogram4(model_path):
             return "ideogram4"
         if _looks_like_minimax_h3_comfy(model_path):
