@@ -329,18 +329,27 @@ def collect_output(hist: dict, output_dir: Path, dest: Path) -> Path:
     return dest
 
 
-def parse_set(pairs: list[str]) -> dict[str, object]:
-    """Turn ``--set key=value`` pairs into typed workflow token values.
+def parse_set(pairs: list[str], *, as_text: bool = False) -> dict[str, object]:
+    """Turn ``key=value`` pairs into workflow token values.
 
-    Values are JSON-decoded when possible so numbers arrive as numbers, with a
-    plain-string fallback for the common case of unquoted text (prompts,
-    filenames) that is not valid JSON.
+    ``--set`` JSON-decodes each value so numbers arrive as numbers, falling
+    back to a plain string when the value is not valid JSON.
+
+    ``--set-str`` (``as_text``) never decodes. That distinction matters for
+    caller-supplied text: a prompt of "2024" or "true" is valid JSON, so
+    decoding it would put a number or a boolean where the graph needs a
+    string, and ComfyUI would reject the workflow for a reason that has
+    nothing to do with what the user typed.
     """
     out: dict[str, object] = {}
     for pair in pairs:
         if "=" not in pair:
-            raise SystemExit(f"--set expects key=value, got {pair!r}")
+            flag = "--set-str" if as_text else "--set"
+            raise SystemExit(f"{flag} expects key=value, got {pair!r}")
         key, _, raw = pair.partition("=")
+        if as_text:
+            out[key.strip()] = raw
+            continue
         try:
             out[key.strip()] = json.loads(raw)
         except json.JSONDecodeError:
@@ -375,7 +384,10 @@ def main() -> int:
                    help="frozen API-format workflow template")
     p.add_argument("--output", required=True, type=Path)
     p.add_argument("--set", action="append", default=[], dest="sets",
-                   help="workflow token, e.g. --set WIDTH=1344")
+                   help="workflow token, JSON-decoded, e.g. --set WIDTH=1344")
+    p.add_argument("--set-str", action="append", default=[], dest="set_strs",
+                   help="workflow token kept verbatim as a string; use this "
+                        "for prompts and any caller-supplied text")
     p.add_argument("--init-image", type=Path, default=None,
                    help="uploaded and bound to the INIT_IMAGE token")
     p.add_argument("--bypass", action="append", default=[],
@@ -398,6 +410,7 @@ def main() -> int:
         return 2
 
     values = parse_set(args.sets)
+    values.update(parse_set(args.set_strs, as_text=True))
     work = Path(tempfile.mkdtemp(prefix="llamanager-comfy-"))
     server: ComfyServer | None = None
 

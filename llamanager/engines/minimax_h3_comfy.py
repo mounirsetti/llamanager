@@ -219,7 +219,9 @@ def build_command(
         "--set", f"CLIP={CLIP_FILE}",
         "--set", f"VIDEO_VAE={VIDEO_VAE_FILE}",
         "--set", f"AUDIO_VAE={AUDIO_VAE_FILE}",
-        "--set", f"PROMPT={req.prompt}",
+        # --set-str, not --set: a prompt of "2024" is valid JSON and would
+        # otherwise reach the graph as a number.
+        "--set-str", f"PROMPT={req.prompt}",
         "--set", f"WIDTH={width}",
         "--set", f"HEIGHT={height}",
         "--set", f"LENGTH={length}",

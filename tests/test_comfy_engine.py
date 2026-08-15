@@ -682,3 +682,29 @@ def test_runner_picks_a_free_loopback_port():
     runner = _runner_module()
     a, b = runner._free_port(), runner._free_port()
     assert 1024 < a < 65536 and 1024 < b < 65536
+
+
+def test_a_numeric_prompt_stays_a_string(tmp_path, cfg):
+    """Regression: "2024" is valid JSON, so --set would have turned a prompt
+    into an integer and ComfyUI would reject the graph."""
+    from llamanager.engines import minimax_h3_comfy as m
+    from llamanager.config import Profile
+
+    runner = _runner_module()
+    _fake_comfy_install(cfg, tmp_path)
+    model = _complete_model(tmp_path)
+    img = tmp_path / "f.png"
+    img.write_bytes(b"x")
+
+    argv, _ = m.build_command(cfg, model, Profile(name="p"),
+                              _image_request("2024", [img]),
+                              tmp_path / "o.mp4")
+    # Replay exactly what the runner would parse out of that argv.
+    sets = [argv[i + 1] for i, a in enumerate(argv) if a == "--set"]
+    strs = [argv[i + 1] for i, a in enumerate(argv) if a == "--set-str"]
+    values = runner.parse_set(sets)
+    values.update(runner.parse_set(strs, as_text=True))
+    assert values["PROMPT"] == "2024"
+    assert isinstance(values["PROMPT"], str)
+    # ...while genuinely numeric tokens still arrive as numbers.
+    assert values["WIDTH"] == 1344 and isinstance(values["WIDTH"], int)
