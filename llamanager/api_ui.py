@@ -78,6 +78,13 @@ router = APIRouter(prefix="/ui", tags=["ui"])
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
+# Krea publishes its LoRAs as a live HF collection, so the setup page lists
+# whatever is in it today rather than a frozen catalog copy. The files are
+# downloaded into the ComfyUI Krea model's loras/ folder — krea_comfy is the
+# only Krea engine llamanager ships.
+KREA_LORA_COLLECTION_API = (
+    "https://huggingface.co/api/collections/krea/krea-2-loras"
+)
 HF_MODEL_TREE_API = "https://huggingface.co/api/models/{repo}/tree/main"
 
 
@@ -3520,6 +3527,85 @@ async def setup_get(request: Request, _: Origin = Depends(require_admin_ui)) -> 
     return templates.TemplateResponse(request, "setup.html", _setup_ctx(request))
 
 
+def _krea_lora_cache(request: Request) -> dict[str, Any]:
+    return getattr(request.app.state, "krea_lora_collection", None) or {
+        "items": [],
+        "error": "",
+        "last_checked": 0.0,
+        "title": "Krea 2 LoRAs",
+        "description": "",
+    }
+
+
+async def _fetch_krea_lora_collection() -> dict[str, Any]:
+    import httpx as _httpx
+
+    async with _httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(KREA_LORA_COLLECTION_API)
+        resp.raise_for_status()
+        payload = resp.json()
+        raw_items = [
+            item for item in payload.get("items", [])
+            if item.get("repoType") in (None, "model") and item.get("id")
+        ]
+
+        async def enrich(item: dict[str, Any]) -> dict[str, Any]:
+            repo_id = str(item.get("id") or "")
+            filename = ""
+            for provider in item.get("availableInferenceProviders") or []:
+                candidate = provider.get("adapterWeightsPath")
+                if candidate:
+                    filename = str(candidate)
+                    break
+            size = 0
+            if not filename:
+                try:
+                    tree_url = HF_MODEL_TREE_API.format(repo=repo_id)
+                    tree_resp = await client.get(tree_url)
+                    tree_resp.raise_for_status()
+                    for f in tree_resp.json():
+                        path = str(f.get("path") or "")
+                        if path.lower().endswith(".safetensors"):
+                            filename = path
+                            size = int(f.get("size") or (f.get("lfs") or {}).get("size") or 0)
+                            break
+                except Exception:
+                    pass
+            elif repo_id:
+                try:
+                    tree_url = HF_MODEL_TREE_API.format(repo=repo_id)
+                    tree_resp = await client.get(tree_url)
+                    tree_resp.raise_for_status()
+                    for f in tree_resp.json():
+                        if str(f.get("path") or "") == filename:
+                            size = int(f.get("size") or (f.get("lfs") or {}).get("size") or 0)
+                            break
+                except Exception:
+                    pass
+            label = repo_id.rsplit("/", 1)[-1].removeprefix("Krea-2-LoRA-")
+            previews = item.get("widgetOutputUrls") or []
+            return {
+                "repo": repo_id,
+                "filename": filename,
+                "label": label,
+                "downloads": int(item.get("downloads") or 0),
+                "likes": int(item.get("likes") or 0),
+                "updated": item.get("lastModified") or "",
+                "size": size,
+                "size_gb": (size / (1024 ** 3)) if size else 0,
+                "preview": previews[0] if previews else "",
+            }
+
+        items = await asyncio.gather(*(enrich(item) for item in raw_items))
+    return {
+        "items": sorted(items, key=lambda x: x.get("label", "")),
+        "error": "",
+        "last_checked": time.time(),
+        "title": payload.get("title") or "Krea 2 LoRAs",
+        "description": payload.get("description") or "",
+    }
+
+
 def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
     """Context for the Diffusion engines page (full or partial reload).
 
@@ -3568,6 +3654,15 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
             rel = f"{entry.canonical_id}/{subdir}/{leaf}"
             present[rel] = (cfg.models_dir / rel).is_file()
     ctx["component_present"] = present
+    ctx["krea_lora_collection"] = _krea_lora_cache(request)
+    # Basenames already in the Comfy Krea model's loras/ folder, so the list
+    # can say "on disk" instead of offering the same file again.
+    krea_loras_dir = cfg.models_dir / "Krea-2-Turbo-Comfy" / "loras"
+    try:
+        ctx["krea_lora_on_disk"] = {f.name for f in krea_loras_dir.iterdir()
+                                    if f.is_file()}
+    except OSError:
+        ctx["krea_lora_on_disk"] = set()
     ctx["coex"] = {
         "unload_text_on_arrival": cfg.unload_text_on_arrival,
         "restart_text_after_image": cfg.restart_text_after_image,
@@ -4047,6 +4142,27 @@ async def setup_diffusion_partial(request: Request,
         request, "_setup_diffusion_partial.html",
         _setup_diffusion_ctx(request),
     )
+
+
+@router.get("/setup-diffusion/krea-loras", response_class=HTMLResponse)
+async def setup_diffusion_krea_loras(request: Request,
+                                     _: Origin = Depends(require_admin_ui)
+                                     ) -> HTMLResponse:
+    try:
+        request.app.state.krea_lora_collection = await _fetch_krea_lora_collection()
+    except Exception as e:
+        previous = _krea_lora_cache(request)
+        request.app.state.krea_lora_collection = {
+            **previous,
+            "error": str(e),
+            "last_checked": time.time(),
+        }
+    return templates.TemplateResponse(
+        request, "_setup_diffusion_partial.html",
+        _setup_diffusion_ctx(request),
+    )
+
+
 
 
 @router.get("/setup-diffusion/versions", response_class=HTMLResponse)
