@@ -240,6 +240,18 @@ class Registry:
             if p.is_dir() and p.parent != self.models_dir:
                 image_dirs.add(p.parent)
 
+        # Keep only the outermost directory of each model. The detectors above
+        # fire on components as well as on the model that owns them — a
+        # ComfyUI pack's ``diffusion_models/`` holds a GGUF, and the z_image
+        # runner writes a ``.zimage-scaffold/`` with its own model_index.json —
+        # so without this the picker offered "Krea-2-Turbo-Comfy",
+        # "Krea-2-Turbo-Comfy/diffusion_models" and "Z-Image/.zimage-scaffold"
+        # as if they were three separate models. Nested dirs stay covered by
+        # ``_is_inside_image_dir`` (their parent is still in the set), so their
+        # weights are still kept out of the text passes.
+        image_dirs = {d for d in image_dirs
+                      if not any(other in d.parents for other in image_dirs)}
+
         def _is_inside_image_dir(p: Path) -> bool:
             return any(p == d or d in p.parents for d in image_dirs)
 

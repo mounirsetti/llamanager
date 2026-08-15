@@ -126,6 +126,56 @@ def test_flatten_into_leaves_a_root_level_file_alone(tmp_path):
     assert src.is_file()
 
 
+# ---------------------------------------------- one model, not its components
+
+
+def _comfy_pack(root: Path, name: str, unet: str) -> Path:
+    """A ComfyUI-format model dir: weights sorted into ComfyUI subfolders."""
+    d = root / name
+    (d / "diffusion_models").mkdir(parents=True)
+    (d / "diffusion_models" / unet).write_bytes(b"w")
+    (d / "vae").mkdir()
+    (d / "vae" / "vae.safetensors").write_bytes(b"w")
+    (d / "text_encoders").mkdir()
+    (d / "text_encoders" / "te.safetensors").write_bytes(b"w")
+    return d
+
+
+def test_list_emits_the_model_dir_not_its_component_dirs(tmp_path):
+    """The picker showed three Krea entries and two Z-Image entries.
+
+    Two of those were internals: a ComfyUI pack's ``diffusion_models/`` (it
+    holds ``krea2_turbo-*.gguf``, which the Krea detector claims on its own)
+    and the ``.zimage-scaffold/`` the z_image runner writes beside the
+    weights (its own ``model_index.json`` makes it look like a pipeline).
+    Only the outermost directory is a model.
+    """
+    import json
+
+    _comfy_pack(tmp_path, "Krea-2-Turbo-Comfy", "krea2_turbo-Q6_K.gguf")
+
+    zi = tmp_path / "Z-Image"
+    (zi / ".zimage-scaffold").mkdir(parents=True)
+    index = json.dumps({"_class_name": "ZImagePipeline"})
+    (zi / "model_index.json").write_text(index)
+    (zi / ".zimage-scaffold" / "model_index.json").write_text(index)
+    (zi / "weights.safetensors").write_bytes(b"w")
+
+    ids = sorted(m.model_id for m in _registry(tmp_path).list())
+
+    assert ids == ["Krea-2-Turbo-Comfy", "Z-Image"]
+
+
+def test_list_still_keeps_component_weights_out_of_the_text_models(tmp_path):
+    """The pruning must not undo what it is built on: a pack's GGUF is not
+    a llama model just because nothing else claimed its directory."""
+    _comfy_pack(tmp_path, "MiniMax-H3-Comfy", "MiniMax-H3-FL2VA-Q4_K_M.gguf")
+
+    ids = sorted(m.model_id for m in _registry(tmp_path).list())
+
+    assert ids == ["MiniMax-H3-Comfy"]
+
+
 # ------------------------------------------------- the download route wiring
 
 
