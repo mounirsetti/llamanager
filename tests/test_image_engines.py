@@ -767,3 +767,57 @@ def test_profile_roundtrips_new_image_ref_fields(tmp_path: Path):
     p = m.profiles["hidream-edit"]
     assert p.image_editing_scheduler == "flow_match"
     assert p.image_strength == 0.55
+
+
+def test_krea_resolves_a_bare_lora_filename_against_the_models_loras_dir(tmp_path):
+    """One picker, two engines: a filename means the model's own loras/ file.
+
+    The ComfyUI engines have always loaded a LoRA by filename from that
+    folder. diffusers needs a real path for the same input, so the adapter
+    resolves it — otherwise picking a local file in the UI would reach
+    load_lora_weights as a bare name and be treated as an HF repo id.
+    """
+    from llamanager.engines import krea
+    from llamanager.config import Config, Profile
+    from llamanager.engines._base import ImageRequest
+
+    fake_py = tmp_path / "python"
+    fake_py.write_bytes(b"")
+    cfg = Config()
+    cfg.z_image_python = str(fake_py)
+    model = tmp_path / "krea" / "Krea-2-Turbo"
+    (model / "loras").mkdir(parents=True)
+    (model / "model_index.json").write_text('{"_class_name": "Krea2Pipeline"}')
+    lora = model / "loras" / "krea2_darkbrush.safetensors"
+    lora.write_bytes(b"w")
+    req = ImageRequest(prompt="t", width=1024, height=576, steps=None,
+                       seed=1, n=1)
+
+    prof = Profile(name="p", image_lora_weights="krea2_darkbrush.safetensors")
+    argv, _ = krea.build_command(cfg, model, prof, req, tmp_path / "o.png")
+    assert argv[argv.index("--lora") + 1] == str(lora)
+
+    # An HF repo id still passes through untouched.
+    prof = Profile(name="p", image_lora_weights="gokaygokay/Krea-2-Realism-LoRA")
+    argv, _ = krea.build_command(cfg, model, prof, req, tmp_path / "o.png")
+    assert argv[argv.index("--lora") + 1] == "gokaygokay/Krea-2-Realism-LoRA"
+
+    # A filename with no file behind it is left alone rather than turned
+    # into a path that does not exist.
+    prof = Profile(name="p", image_lora_weights="not-downloaded.safetensors")
+    argv, _ = krea.build_command(cfg, model, prof, req, tmp_path / "o.png")
+    assert argv[argv.index("--lora") + 1] == "not-downloaded.safetensors"
+
+
+def test_krea_lora_field_is_a_typeable_picker_but_comfy_is_strict(tmp_path):
+    """Both engines offer the folder; only the diffusers one accepts more."""
+    from llamanager.engines import krea, krea_comfy
+
+    kf = next(f for f in krea.profile_schema()
+              if f.key == "image_lora_weights")
+    assert kf.options_dir == "loras" and kf.options_free is True
+    assert "gokaygokay/Krea-2-Realism-LoRA" in (kf.options or [])
+
+    cf = next(f for f in krea_comfy.profile_schema()
+              if f.key == "image_lora_weights")
+    assert cf.options_dir == "loras" and cf.options_free is False

@@ -555,7 +555,25 @@
 
       let input;
       const dirFiles = f.options_dir ? ((cfg.dirOptions || {})[modelSel.value] || {})[f.key] : null;
-      if (f.options_dir) {
+      if (f.options_dir && f.options_free) {
+        // Dir-backed but not restricted to it (diffusers loads a LoRA from an
+        // HF repo id too): keep it typeable, list what is on disk plus the
+        // known repos as suggestions.
+        input = document.createElement("input");
+        input.className = "lm-input lm-input--mono";
+        input.type = "text";
+        const dl = document.createElement("datalist");
+        dl.id = `dl-override-${f.key}`;
+        (dirFiles || []).forEach(o => {
+          const op = document.createElement("option"); op.value = o; op.textContent = "in loras/"; dl.appendChild(op);
+        });
+        (f.options || []).forEach(o => {
+          const op = document.createElement("option"); op.value = o; op.textContent = "Hugging Face repo"; dl.appendChild(op);
+        });
+        input.setAttribute("list", dl.id);
+        input.placeholder = placeholder || (dirFiles || [])[0] || (f.options || [])[0] || "";
+        wrap.appendChild(dl);
+      } else if (f.options_dir) {
         // Dir-backed field (LoRA): offer what is actually in the model's
         // folder. Empty folder -> a disabled select that says so, instead of
         // a text box inviting a filename that will be silently ignored.

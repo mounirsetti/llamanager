@@ -621,7 +621,16 @@
         const placeholder = pf[f.key] != null ? String(pf[f.key]) : (f.default != null ? String(f.default) : "");
         let input;
         const dirFiles = f.options_dir ? ((cfg.dirOptions || {})[modelSel.value] || {})[f.key] : null;
-        if (f.options_dir) {
+        if (f.options_dir && f.options_free) {
+          // Typeable (HF repo ids stay valid), with on-disk files suggested.
+          input = document.createElement("input"); input.className = "lm-input lm-input--mono"; input.type = "text";
+          const dl = document.createElement("datalist"); dl.id = `dl-override-${f.key}`;
+          (dirFiles || []).forEach(o => { const op = document.createElement("option"); op.value = o; op.textContent = "in loras/"; dl.appendChild(op); });
+          (f.options || []).forEach(o => { const op = document.createElement("option"); op.value = o; op.textContent = "Hugging Face repo"; dl.appendChild(op); });
+          input.setAttribute("list", dl.id);
+          input.placeholder = placeholder || (dirFiles || [])[0] || (f.options || [])[0] || "";
+          wrap.appendChild(dl);
+        } else if (f.options_dir) {
           // Dir-backed field (LoRA): only what is in the model's folder.
           input = document.createElement("select"); input.className = "lm-input lm-input--mono";
           const blank = document.createElement("option"); blank.value = "";

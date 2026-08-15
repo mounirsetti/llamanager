@@ -90,3 +90,10 @@ class ProfileField:
     # says so when the folder is empty or missing. Without this a LoRA is a
     # blank text box the operator has to guess a filename into.
     options_dir: str = ""
+    # With options_dir: are the on-disk files the ONLY valid values? The
+    # ComfyUI engines load a LoRA by filename from that folder and nothing
+    # else, so they get a strict dropdown. The diffusers engines also accept
+    # an HF repo id, so they get a dropdown that still allows typing — the
+    # suggestions in ``options`` (e.g. known LoRA repos) are offered
+    # alongside the local files rather than replacing them.
+    options_free: bool = False

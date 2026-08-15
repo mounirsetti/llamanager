@@ -207,7 +207,17 @@ def build_command(
     if profile.image_strength is not None:
         argv += ["--true-cfg", str(float(profile.image_strength))]
     if profile.image_lora_weights:
-        argv += ["--lora", profile.image_lora_weights]
+        # A bare filename means "the LoRA sitting in this model's loras/
+        # folder" — the same thing it means for the ComfyUI engines, so the
+        # UI can offer one picker for both. diffusers' load_lora_weights
+        # needs a real path for that case; anything with a slash (an HF repo
+        # id, or a path the operator typed) is passed through untouched.
+        lora = profile.image_lora_weights
+        if "/" not in lora and "\\" not in lora:
+            local = model_path / "loras" / lora
+            if local.is_file():
+                lora = str(local)
+        argv += ["--lora", lora]
     if profile.image_lora_scale is not None:
         argv += ["--lora-scale", str(float(profile.image_lora_scale))]
 
@@ -308,8 +318,10 @@ def profile_schema() -> list[ProfileField]:
         ),
         ProfileField(
             key="image_lora_weights", label="LoRA", kind="text",
-            default="",
-            help="HF repo id or local .safetensors path. Example: gokaygokay/Krea-2-Realism-LoRA.",
+            default="", options_dir="loras", options_free=True,
+            options=[KREA_REALISM_LORA_REPO],
+            help="Pick a file from the model's loras/ folder, or type any HF "
+                 "repo id (e.g. gokaygokay/Krea-2-Realism-LoRA) or path.",
         ),
         ProfileField(
             key="image_lora_scale", label="LoRA scale", kind="float",

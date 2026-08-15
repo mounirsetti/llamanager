@@ -14,9 +14,24 @@
    empty (the server treats empty as "inherit").
 #}
 
-{% macro field_input(field, value, name_prefix="field_", dir_options=None) %}
+{% macro field_input(field, value, name_prefix="field_", dir_options=None, uid="") %}
   {% set fname = name_prefix ~ field.key %}
-  {% if field.options_dir %}
+  {% if field.options_dir and field.options_free %}
+    {# Dir-backed but not restricted to the folder: the diffusers engines
+       also load a LoRA straight from an HF repo id. A datalist keeps the
+       field typeable while still showing what is on disk (and the known
+       repos from ``options``) — a plain <select> here would take away the
+       ability to use any LoRA that isn't downloaded yet. #}
+    {% set files = (dir_options or {}).get(field.key) or [] %}
+    {% set listid = ("dl-" ~ uid ~ "-" ~ fname) | replace("/", "-") | replace(".", "-") %}
+    <input class="lm-input lm-input--mono" type="text" list="{{ listid }}"
+           name="{{ fname }}" value="{{ value }}"
+           placeholder="{% if files %}{{ files[0] }}{% elif field.options %}{{ field.options[0] }}{% endif %}">
+    <datalist id="{{ listid }}">
+      {% for opt in files %}<option value="{{ opt }}">in loras/</option>{% endfor %}
+      {% for opt in (field.options or []) %}<option value="{{ opt }}">Hugging Face repo</option>{% endfor %}
+    </datalist>
+  {% elif field.options_dir %}
     {# Dir-backed field (LoRAs): the valid values are the files sitting in
        the model's own ``options_dir`` folder, so offer those rather than a
        blank box to guess a filename into. ``dir_options`` is None when the
@@ -69,12 +84,12 @@
    ``name_prefix`` lets callers namespace fields (e.g. the image
    composer uses "override_" so the server can tell composer overrides
    apart from a profile-edit save). #}
-{% macro schema_fields(schema, profile=None, name_prefix="field_", dir_options=None) %}
+{% macro schema_fields(schema, profile=None, name_prefix="field_", dir_options=None, uid="") %}
   {% for f in schema %}
   <div class="lm-dm-field">
     <label class="lm-dm-field__label" for="">{{ f.label }}</label>
-    {{ field_input(f, (profile.fields[f.key] if profile and f.key in profile.fields else ''), name_prefix=name_prefix, dir_options=dir_options) }}
-    {% if f.options_dir and not (dir_options or {}).get(f.key) %}
+    {{ field_input(f, (profile.fields[f.key] if profile and f.key in profile.fields else ''), name_prefix=name_prefix, dir_options=dir_options, uid=uid ~ "-" ~ loop.index0) }}
+    {% if f.options_dir and not f.options_free and not (dir_options or {}).get(f.key) %}
     <span class="lm-dm-field__help">
       No files in <code>{{ f.options_dir }}/</code> for this model. Download one
       from <a href="/ui/setup-diffusion">Diffusion engines</a>, or drop a
