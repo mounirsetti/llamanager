@@ -708,3 +708,53 @@ def test_a_numeric_prompt_stays_a_string(tmp_path, cfg):
     assert isinstance(values["PROMPT"], str)
     # ...while genuinely numeric tokens still arrive as numbers.
     assert values["WIDTH"] == 1344 and isinstance(values["WIDTH"], int)
+
+
+# ------------------------------------------------------ model discovery
+
+
+def test_a_comfy_transformer_is_not_listed_as_a_text_model(tmp_path):
+    """Regression: MiniMax-H3's transformer is a .gguf, and the scanner used to
+    treat any .gguf as a standalone llama model. It appeared in /v1/models as a
+    text model an operator could try to load - an 18.5 GB video transformer.
+
+    The engine directory is the GGUF's *grand*parent here, because ComfyUI
+    sorts weights into diffusion_models/ one level down.
+    """
+    from llamanager.engines import minimax_h3_comfy as m
+    reg = _registry(tmp_path)
+    root = tmp_path / "MiniMax-H3-Comfy"
+    for sub in ("diffusion_models", "text_encoders", "vae"):
+        (root / sub).mkdir(parents=True)
+    (root / "diffusion_models" / m.UNET_FILE).write_bytes(b"x")
+    (root / "text_encoders" / m.CLIP_FILE).write_bytes(b"x")
+    (root / "vae" / m.VIDEO_VAE_FILE).write_bytes(b"x")
+    (root / "vae" / m.AUDIO_VAE_FILE).write_bytes(b"x")
+
+    ids = {e.model_id for e in reg.list()}
+    assert "MiniMax-H3-Comfy" in ids, "the model directory itself should list"
+    assert not any(i.endswith(".gguf") for i in ids), (
+        f"no component should list as a standalone model, got {ids}")
+
+
+def test_a_half_downloaded_comfy_model_hides_its_components(tmp_path):
+    """While components are still downloading no adapter claims the directory,
+    but its weights must still not surface as text models."""
+    reg = _registry(tmp_path)
+    root = tmp_path / "Partial-Comfy"
+    (root / "diffusion_models").mkdir(parents=True)
+    (root / "diffusion_models" / "some-model-Q4_K_M.gguf").write_bytes(b"x")
+
+    ids = {e.model_id for e in reg.list()}
+    assert not any(i.endswith(".gguf") for i in ids), ids
+
+
+def test_a_real_standalone_gguf_still_lists_as_a_text_model(tmp_path):
+    """The fix must not hide ordinary llama models."""
+    reg = _registry(tmp_path)
+    d = tmp_path / "unsloth" / "Some-Model-GGUF"
+    d.mkdir(parents=True)
+    (d / "model-Q4_K_M.gguf").write_bytes(b"x")
+
+    ids = {e.model_id for e in reg.list()}
+    assert "unsloth/Some-Model-GGUF/model-Q4_K_M.gguf" in ids

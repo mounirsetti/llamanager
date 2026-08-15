@@ -215,13 +215,30 @@ class Registry:
                 if ENGINE_FAMILY.get(engine, "text") in ("image", "video"):
                     image_dirs.add(d)
         # Flux2 dirs may not have any marker config — detect via file shape.
+        # The engine directory is not always the file's immediate parent:
+        # ComfyUI-format models sort their weights into diffusion_models/,
+        # text_encoders/, vae/ and loras/ one level down, so a match has to be
+        # looked for in every ancestor up to models_dir. Without this a
+        # MiniMax-H3 video transformer would be listed as a standalone llama
+        # text model purely because it has a .gguf extension.
         for p in self.models_dir.rglob("*.gguf"):
-            d = p.parent
-            if d == self.models_dir or d in image_dirs:
-                continue
-            engine = detect_engine_for_path(d)
-            if ENGINE_FAMILY.get(engine, "text") in ("image", "video"):
-                image_dirs.add(d)
+            for d in p.parents:
+                if d == self.models_dir:
+                    break
+                if d in image_dirs:
+                    break
+                engine = detect_engine_for_path(d)
+                if ENGINE_FAMILY.get(engine, "text") in ("image", "video"):
+                    image_dirs.add(d)
+                    break
+
+        # A ComfyUI model that is still downloading has no engine yet (the
+        # adapters require a complete component set), but its weights must not
+        # surface as text models in the meantime. The layout alone is enough
+        # to know they belong to a model directory.
+        for p in self.models_dir.rglob("diffusion_models"):
+            if p.is_dir() and p.parent != self.models_dir:
+                image_dirs.add(p.parent)
 
         def _is_inside_image_dir(p: Path) -> bool:
             return any(p == d or d in p.parents for d in image_dirs)
