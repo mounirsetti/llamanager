@@ -3591,6 +3591,22 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
         "comfyui_python": getattr(cfg, "comfyui_python", ""),
         "comfyui_repo": getattr(cfg, "comfyui_repo", ""),
     }
+    # Catalog entries that are assembled from several repos: the setup card
+    # renders one download button per component, each carrying its own target
+    # directory so the parts land together in one model folder.
+    ctx["catalog_components"] = {
+        e.canonical_id: e
+        for e in diffusion_catalog.CATALOG if e.components
+    }
+    # Which parts are already on disk, so the card shows "on disk" instead of
+    # offering a download that would re-fetch several GB.
+    present: dict[str, bool] = {}
+    for entry in ctx["catalog_components"].values():
+        for _repo, filename, subdir, _gb, _note in entry.components:
+            leaf = filename.rsplit("/", 1)[-1]
+            rel = f"{entry.canonical_id}/{subdir}/{leaf}"
+            present[rel] = (cfg.models_dir / rel).is_file()
+    ctx["component_present"] = present
     ctx["coex"] = {
         "unload_text_on_arrival": cfg.unload_text_on_arrival,
         "restart_text_after_image": cfg.restart_text_after_image,

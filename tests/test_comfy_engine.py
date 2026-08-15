@@ -95,6 +95,37 @@ def test_pull_target_strips_surrounding_slashes(tmp_path):
             == tmp_path / "Model-Comfy" / "vae")
 
 
+def test_flatten_into_strips_the_repo_layout(tmp_path):
+    """A file asked for as ``vae/x.safetensors`` must not land in ``vae/vae/``.
+
+    hf_hub_download reproduces the repo's directory layout under local_dir, so
+    without this the video VAE would end up one level deeper than the adapter
+    looks, and the model would read as incomplete.
+    """
+    reg = _registry(tmp_path)
+    root = tmp_path / "MiniMax-H3-Comfy" / "vae"
+    nested = root / "vae"
+    nested.mkdir(parents=True)
+    src = nested / "video_vae.safetensors"
+    src.write_bytes(b"weights")
+
+    out = reg._flatten_into(root, src)
+
+    assert out == root / "video_vae.safetensors"
+    assert out.read_bytes() == b"weights"
+    assert not nested.exists(), "the emptied repo-shaped dir should be removed"
+
+
+def test_flatten_into_leaves_a_root_level_file_alone(tmp_path):
+    reg = _registry(tmp_path)
+    root = tmp_path / "M" / "diffusion_models"
+    root.mkdir(parents=True)
+    src = root / "model.gguf"
+    src.write_bytes(b"x")
+    assert reg._flatten_into(root, src) == src
+    assert src.is_file()
+
+
 # ------------------------------------------------- the download route wiring
 
 
@@ -166,3 +197,286 @@ def test_download_route_omits_target_dir_when_blank(tmp_path):
     """Existing catalog downloads keep landing at models_dir/<repo>."""
     spy, _ = _call_download(tmp_path, repo="org/model")
     assert spy.calls[0]["target_dir"] is None
+
+
+# ------------------------------------------------------ workflow templating
+
+
+def test_workflow_renders_with_typed_values():
+    """Numbers must arrive as JSON numbers, prompts must survive escaping."""
+    from llamanager.engines import comfy_backend as cb
+    tpl = cb.workflow_path("minimax_h3_i2v_gguf").read_text()
+    graph = cb.render_workflow(tpl, _WORKFLOW_VALUES)
+
+    assert "_comment" not in graph, "the doc block is not a node"
+    assert graph["7"]["inputs"]["width"] == 1344
+    assert isinstance(graph["7"]["inputs"]["width"], int)
+    # A prompt with a quote and a newline must not corrupt the document.
+    assert graph["7"]["inputs"]["prompt"] == 'a "grand" hall\nwith light'
+
+
+def test_workflow_decodes_the_latent_through_both_vaes():
+    """The soundtrack is the point of this engine, so assert the audio branch.
+
+    A regression that dropped VAEDecodeAudio would still produce a playable
+    clip - just a silent one - which is exactly the kind of failure that
+    survives a smoke test.
+    """
+    from llamanager.engines import comfy_backend as cb
+    graph = cb.render_workflow(
+        cb.workflow_path("minimax_h3_i2v_gguf").read_text(), _WORKFLOW_VALUES)
+
+    kinds = {n["class_type"] for n in graph.values()}
+    assert {"VAEDecode", "VAEDecodeAudio"} <= kinds
+    video = next(k for k, n in graph.items() if n["class_type"] == "VAEDecode")
+    audio = next(k for k, n in graph.items()
+                 if n["class_type"] == "VAEDecodeAudio")
+    # Both decode the SAME sampled latent - that is what keeps them in sync.
+    assert graph[video]["inputs"]["samples"] == graph[audio]["inputs"]["samples"]
+    create = next(n for n in graph.values() if n["class_type"] == "CreateVideo")
+    assert create["inputs"]["audio"] == [audio, 0]
+
+
+def test_unsubstituted_token_is_an_error():
+    from llamanager.engines import comfy_backend as cb
+    vals = {k: v for k, v in _WORKFLOW_VALUES.items() if k != "SEED"}
+    with pytest.raises(KeyError, match="SEED"):
+        cb.render_workflow(
+            cb.workflow_path("minimax_h3_i2v_gguf").read_text(), vals)
+
+
+def test_bypassing_the_lora_rewires_its_consumers():
+    """Dropping the LoRA must leave the graph sampling from the base model."""
+    from llamanager.engines import comfy_backend as cb
+    graph = cb.render_workflow(
+        cb.workflow_path("minimax_h3_i2v_gguf").read_text(), _WORKFLOW_VALUES)
+    assert graph["10"]["inputs"]["model"] == ["2", 0]
+
+    cb.bypass_node(graph, "2", "model")
+
+    assert "2" not in graph
+    assert graph["10"]["inputs"]["model"] == ["1", 0]
+    assert graph["11"]["inputs"]["model"] == ["1", 0]
+
+
+_WORKFLOW_VALUES = {
+    "UNET": "t.gguf", "LORA": "l.safetensors", "LORA_STRENGTH": 1.0,
+    "CLIP": "c.gguf", "VIDEO_VAE": "v.safetensors",
+    "AUDIO_VAE": "a.safetensors", "INIT_IMAGE": "in.png",
+    "PROMPT": 'a "grand" hall\nwith light',
+    "WIDTH": 1344, "HEIGHT": 768, "LENGTH": 124, "SEED": 7,
+    "SAMPLER": "res_multistep", "SCHEDULER": "simple", "STEPS": 4,
+    "FPS": 24.0,
+}
+
+
+# ------------------------------------------------------- the video adapter
+
+
+def test_frame_counts_snap_up_to_a_decodable_length():
+    """The video VAE only decodes 17n+5 frames; snapping down would silently
+    shorten the clip, so it must round up."""
+    from llamanager.engines import minimax_h3_comfy as m
+    assert m.snap_length(124) == 124          # already valid (17*7 + 5)
+    assert m.snap_length(100) == 107          # 17*6 + 5
+    assert m.snap_length(1) == 5
+    for n in (5, 60, 200, 362):
+        assert (m.snap_length(n) - 5) % 17 == 0
+        assert m.snap_length(n) >= n
+
+
+def test_dimensions_snap_to_multiples_of_32():
+    from llamanager.engines import minimax_h3_comfy as m
+    assert m.snap_dimension(1344) == 1344
+    assert m.snap_dimension(1000) == 992
+    assert m.snap_dimension(1) == 32
+
+
+def test_detect_requires_the_audio_vae(tmp_path):
+    """A tree without the audio VAE can make pictures but not the soundtrack
+    this engine exists for, so it must not be claimed."""
+    from llamanager.engines import minimax_h3_comfy as m
+    root = tmp_path / "MiniMax-H3-Comfy"
+    (root / "diffusion_models").mkdir(parents=True)
+    (root / "vae").mkdir()
+    (root / "diffusion_models" / "MiniMax-H3-FL2VA-Q4_K_M.gguf").write_bytes(b"x")
+    assert not m.detect(root)
+
+    (root / "vae" / m.AUDIO_VAE_FILE).write_bytes(b"x")
+    assert m.detect(root)
+
+
+def test_detect_ignores_an_unrelated_comfy_model(tmp_path):
+    from llamanager.engines import minimax_h3_comfy as m
+    root = tmp_path / "Other-Comfy"
+    (root / "diffusion_models").mkdir(parents=True)
+    (root / "vae").mkdir()
+    (root / "diffusion_models" / "flux-Q4.gguf").write_bytes(b"x")
+    (root / "vae" / m.AUDIO_VAE_FILE).write_bytes(b"x")
+    assert not m.detect(root)
+
+
+def test_config_detects_the_comfy_variant_before_the_diffusers_one(tmp_path):
+    from llamanager.config import detect_engine_for_path
+    from llamanager.engines import minimax_h3_comfy as m
+    root = tmp_path / "MiniMax-H3-Comfy"
+    (root / "diffusion_models").mkdir(parents=True)
+    (root / "vae").mkdir()
+    (root / "diffusion_models" / "MiniMax-H3-FL2VA-Q4_K_M.gguf").write_bytes(b"x")
+    (root / "vae" / m.AUDIO_VAE_FILE).write_bytes(b"x")
+    assert detect_engine_for_path(root) == "minimax_h3_comfy"
+
+
+def test_engine_family_is_video():
+    from llamanager.config import ENGINE_FAMILY, VIDEO_ENGINES
+    assert ENGINE_FAMILY["minimax_h3_comfy"] == "video"
+    assert "minimax_h3_comfy" in VIDEO_ENGINES
+
+
+def test_build_command_refuses_without_a_reference_image(tmp_path, cfg):
+    """It is an image-to-video model; a text-only request cannot be served."""
+    from llamanager.engines import minimax_h3_comfy as m
+    from llamanager.engines._base import ImageRequest
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    req = _image_request("a hotel lobby", [])
+    with pytest.raises(RuntimeError, match="reference image"):
+        m.build_command(cfg, tmp_path, Profile(name="p"), req,
+                        tmp_path / "o.mp4")
+
+
+def test_build_command_reports_missing_components_by_name(tmp_path, cfg):
+    """Naming the missing file beats ComfyUI's combo-validation error."""
+    from llamanager.engines import minimax_h3_comfy as m
+    from llamanager.engines._base import ImageRequest
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+
+    model = tmp_path / "MiniMax-H3-Comfy"
+    (model / "diffusion_models").mkdir(parents=True)
+    (model / "diffusion_models" / m.UNET_FILE).write_bytes(b"x")
+    img = tmp_path / "frame.png"
+    img.write_bytes(b"x")
+
+    req = _image_request("hotel", [img])
+    with pytest.raises(RuntimeError) as ei:
+        m.build_command(cfg, model, Profile(name="p"), req,
+                        tmp_path / "o.mp4")
+    msg = str(ei.value)
+    assert m.CLIP_FILE in msg and m.AUDIO_VAE_FILE in msg
+
+
+def _image_request(prompt, ref_images):
+    """An ImageRequest with the fields these adapters actually read."""
+    from llamanager.engines._base import ImageRequest
+    return ImageRequest(prompt=prompt, width=0, height=0, steps=None,
+                        seed=None, n=1, ref_images=list(ref_images))
+
+
+def _complete_model(tmp_path):
+    """A model directory with every component the adapter requires."""
+    from llamanager.engines import minimax_h3_comfy as m
+    root = tmp_path / "MiniMax-H3-Comfy"
+    for sub in ("diffusion_models", "text_encoders", "vae", "loras"):
+        (root / sub).mkdir(parents=True, exist_ok=True)
+    (root / "diffusion_models" / m.UNET_FILE).write_bytes(b"x")
+    (root / "text_encoders" / m.CLIP_FILE).write_bytes(b"x")
+    (root / "vae" / m.VIDEO_VAE_FILE).write_bytes(b"x")
+    (root / "vae" / m.AUDIO_VAE_FILE).write_bytes(b"x")
+    (root / "loras" / m.TURBO_LORA_FILE).write_bytes(b"x")
+    return root
+
+
+def _argv_tokens(argv):
+    """Collect the --set KEY=VALUE pairs out of a built argv."""
+    out = {}
+    for i, a in enumerate(argv):
+        if a == "--set" and "=" in argv[i + 1]:
+            k, _, v = argv[i + 1].partition("=")
+            out[k] = v
+    return out
+
+
+def test_build_command_passes_the_turbo_profile_through(tmp_path, cfg):
+    """The default profile must reach the runner as 4 steps with the LoRA."""
+    from llamanager.engines import minimax_h3_comfy as m
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    model = _complete_model(tmp_path)
+    img = tmp_path / "frame.png"
+    img.write_bytes(b"x")
+
+    prof = Profile(name="h3-turbo-4step",
+                   **m.default_profiles()["h3-turbo-4step"])
+    argv, env = m.build_command(cfg, model, prof,
+                                _image_request("a hotel atrium", [img]),
+                                tmp_path / "out.mp4")
+
+    tok = _argv_tokens(argv)
+    assert tok["STEPS"] == "4"
+    assert tok["WIDTH"] == "1344" and tok["HEIGHT"] == "768"
+    assert tok["LENGTH"] == "124"
+    assert tok["FPS"] == "24.0"
+    assert tok["LORA"] == m.TURBO_LORA_FILE
+    assert "--bypass" not in argv, "the LoRA should be wired in, not dropped"
+    assert "--init-image" in argv
+
+
+def test_build_command_drops_the_lora_node_for_the_full_profile(tmp_path, cfg):
+    """Zeroing a LoRA's strength would still load 1.8 GB, so it is bypassed."""
+    from llamanager.engines import minimax_h3_comfy as m
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    model = _complete_model(tmp_path)
+    img = tmp_path / "frame.png"
+    img.write_bytes(b"x")
+
+    prof = Profile(name="h3-full-50step",
+                   **m.default_profiles()["h3-full-50step"])
+    argv, _ = m.build_command(cfg, model, prof,
+                              _image_request("a hotel atrium", [img]),
+                              tmp_path / "out.mp4")
+
+    assert _argv_tokens(argv)["STEPS"] == "50"
+    assert "--bypass" in argv
+    assert argv[argv.index("--bypass") + 1] == "2:model"
+
+
+def test_build_command_snaps_an_odd_frame_count(tmp_path, cfg):
+    from llamanager.engines import minimax_h3_comfy as m
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    model = _complete_model(tmp_path)
+    img = tmp_path / "frame.png"
+    img.write_bytes(b"x")
+
+    prof = Profile(name="p", video_num_frames=100)
+    argv, _ = m.build_command(cfg, model, prof,
+                              _image_request("x", [img]), tmp_path / "o.mp4")
+    assert _argv_tokens(argv)["LENGTH"] == "107"
+
+
+def test_fake_comfy_install(cfg, tmp_path):
+    """Guard the helper itself: a silently-broken fixture would make the
+    argv tests above pass for the wrong reason."""
+    _fake_comfy_install(cfg, tmp_path)
+    assert Path(cfg.comfyui_repo, "main.py").is_file()
+
+
+def _fake_comfy_install(cfg, tmp_path):
+    """Point cfg at a ComfyUI checkout that exists but is never executed.
+
+    build_command only checks these paths are present; the tests here assert
+    on the argv it builds, so nothing is ever run.
+    """
+    repo = tmp_path / "comfyui"
+    repo.mkdir(exist_ok=True)
+    (repo / "main.py").write_text("")
+    py = tmp_path / "python"
+    py.write_text("")
+    cfg.comfyui_python, cfg.comfyui_repo = str(py), str(repo)

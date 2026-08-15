@@ -794,6 +794,35 @@ class Registry:
                 log.exception("failed to auto-create image profile %r for %s",
                               pname, model_id)
 
+    def _flatten_into(self, target_root: Path, local_path: Path) -> Path:
+        """Move a downloaded file directly into ``target_root``.
+
+        ``hf_hub_download`` reproduces the repo's own layout under
+        ``local_dir``, so asking for ``vae/model.safetensors`` writes
+        ``<root>/vae/model.safetensors``. When the caller named an explicit
+        destination that nesting is wrong twice over: it duplicates a
+        directory the caller already chose (``.../vae/vae/model.safetensors``)
+        and it puts the file where the engine adapter will not look for it.
+        An explicit destination means "put the file here", so honour that.
+
+        Returns the file's final path (unchanged when it already sits at the
+        root, e.g. a filename with no directory part).
+        """
+        if local_path.parent == target_root:
+            return local_path
+        dest = _ensure_under(self.models_dir, target_root / local_path.name)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        local_path.replace(dest)
+        # Clean up the now-empty repo-shaped directories we just emptied.
+        parent = local_path.parent
+        while parent != target_root and parent.is_relative_to(target_root):
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+        return dest
+
     def _pull_target(self, repo: str, target_dir: str | None) -> Path:
         """Where a pull's files land.
 
@@ -1009,6 +1038,8 @@ class Registry:
             # Defense in depth: even though we sanitized fn, confirm
             # huggingface_hub didn't write outside the sandbox.
             _ensure_under(self.models_dir, local_path)
+            if target_dir:
+                local_path = self._flatten_into(target_root, local_path)
             try:
                 bytes_done += local_path.stat().st_size
             except OSError:

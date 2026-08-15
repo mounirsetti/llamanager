@@ -238,6 +238,49 @@
 {% endif %}
 {% endmacro %}
 
+{% macro component_downloads(engine, entry) %}
+{# A model assembled from several uploaders: one button per part, each
+   targeting <canonical_id>/<subdir> so the parts land in ONE model folder.
+   Without the shared target they would scatter across four directories named
+   after their repos and no adapter would detect the model. #}
+<div class="lm-engine-section__head">
+  <span>Components</span>
+  <span class="lm-engine-section__meta">
+    {{ '%.1f'|format(entry.approx_size_gb) }} GB for the default set
+  </span>
+</div>
+<p class="lm-engine-section__note">
+  These files come from different uploaders and are downloaded into
+  <code>{{ entry.canonical_id }}/</code> together. Each button opens the
+  destination and free-space check first.
+</p>
+<div style="display: grid; gap: 6px; margin-bottom: 16px;">
+  {% for repo, filename, subdir, size_gb, note in entry.components %}
+  {% set present = component_present.get(entry.canonical_id ~ '/' ~ subdir ~ '/' ~ (filename.split('/')|last)) %}
+  <div style="display: grid; grid-template-columns: 1fr auto auto; gap: 10px;
+              align-items: center; padding: 8px 10px;
+              border: 1px solid var(--bg-3); background: var(--bg-2);">
+    <div style="min-width: 0;">
+      <code style="font-size: 0.75rem; display: block; overflow-wrap: anywhere;">{{ subdir }}/{{ filename.split('/')|last }}</code>
+      <span style="font-size: 0.6875rem; color: var(--fg-2);">{{ note }}</span>
+    </div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, monospace;
+                 font-size: 0.75rem; color: var(--fg-2); white-space: nowrap;">
+      {{ '%.2f'|format(size_gb) }} GB
+    </span>
+    {% if present %}
+    <span class="lm-engine-card__tag" style="white-space: nowrap;">on disk</span>
+    {% else %}
+    <button type="button" class="lm-btn lm-btn--primary lm-btn--xs"
+            data-preflight="engine={{ engine|urlencode }}&kind=model&repo={{ repo|urlencode }}&filename={{ filename|urlencode }}&target_dir={{ (entry.canonical_id ~ '/' ~ subdir)|urlencode }}">
+      Download
+    </button>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endmacro %}
+
 {% macro krea_quant_downloads() %}
 <div class="lm-engine-section__head">
   <span>Original weights</span>
@@ -752,6 +795,60 @@
     {{ download_progress() }}
     {{ engine_models_list('minimax_h3') }}
   </div>
+</div>
+
+
+{# ===================================================================
+   COMFYUI — shared backend for pre-quantised weights
+   =================================================================== #}
+{% set comfy_ready = image_cfg.comfyui_python and image_cfg.comfyui_repo %}
+<div class="lm-engine-card" data-engine="comfy">
+  <div class="lm-engine-card__head">
+    <h2 class="lm-engine-card__name">ComfyUI <em>shared backend</em></h2>
+    <span class="lm-engine-card__tag">GGUF · single-file · image + video</span>
+  </div>
+  <div class="lm-engine-card__status" data-state="{{ 'ready' if comfy_ready else 'idle' }}">
+    {% if comfy_ready %}
+      Ready — checkout at <code style="margin-left: 4px;">{{ image_cfg.comfyui_repo }}</code>
+    {% else %}
+      Not installed. Installing this enables the ComfyUI model variants below.
+    {% endif %}
+  </div>
+
+  <p class="lm-engine-section__note" style="margin-bottom: 14px;">
+    Not a model — a second way to <em>load</em> models. Diffusers can only read
+    the full-precision releases of the big video models, so on a 32&nbsp;GB card
+    it has to quantise tens of gigabytes on the way to the GPU on every request.
+    Measured here that cost <strong>5.8&nbsp;s per tensor</strong> and about
+    50&nbsp;GB of host RAM. ComfyUI reads the community's pre-quantised GGUF and
+    single-file weights directly, so the card does no conversion work.
+    llamanager drives it headlessly: one server per request, shut down when the
+    clip is written, nothing left resident in VRAM.
+  </p>
+
+  {{ install_section('comfy') }}
+
+  {% set h3c = catalog_components.get('MiniMax-H3-Comfy') %}
+  {% if h3c %}
+  <div class="lm-engine-section">
+    <div class="lm-engine-section__head">
+      <span>MiniMax-H3 — video + audio</span>
+      <span class="lm-engine-section__meta">image → video, 24 fps</span>
+    </div>
+    <p class="lm-engine-section__note">
+      {{ h3c.description }}
+    </p>
+    {% if not comfy_ready %}
+    <p class="lm-engine-section__note" style="color: var(--warn);">
+      Install ComfyUI above before downloading these — the weights are only
+      loadable through it.
+    </p>
+    {% endif %}
+    {{ component_downloads('minimax_h3_comfy', h3c) }}
+    {{ download_progress() }}
+    {{ engine_models_list('minimax_h3_comfy') }}
+  </div>
+  {% endif %}
 </div>
 
 

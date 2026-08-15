@@ -194,8 +194,10 @@ def build_command(
             + ", ".join(missing)
             + f". Download the remaining components into {model_path}.")
 
-    use_lora = bool(profile.lora_weights) or profile.lora_weights is None
-    lora_name = profile.lora_weights or TURBO_LORA_FILE
+    # An unset field means "use the shipped distill"; an explicitly emptied
+    # one means "sample without a LoRA" (the h3-full-50step profile).
+    lora_name = profile.image_lora_weights or TURBO_LORA_FILE
+    use_lora = profile.image_lora_weights != ""
     lora_present = (model_path / "loras" / lora_name).is_file()
     if use_lora and not lora_present:
         # Not fatal: without the distill the model still samples, it just
@@ -228,8 +230,8 @@ def build_command(
         "--set", f"SEED={int(seed) if seed is not None else 0}",
     ]
     if use_lora:
-        strength = (profile.lora_scale
-                    if profile.lora_scale is not None else 1.0)
+        strength = (profile.image_lora_scale
+                    if profile.image_lora_scale is not None else 1.0)
         argv += ["--set", f"LORA={lora_name}",
                  "--set", f"LORA_STRENGTH={float(strength)}"]
     else:
@@ -318,13 +320,13 @@ def profile_schema() -> list[ProfileField]:
                  "card. Q3_K_M (14.5 GB) trades detail for headroom.",
         ),
         ProfileField(
-            key="lora_weights", label="Turbo LoRA", kind="text",
+            key="image_lora_weights", label="Turbo LoRA", kind="text",
             default=TURBO_LORA_FILE,
             help="Filename in the model's loras/ folder. Clear it to sample "
                  "without a distill (raise steps to ~50).",
         ),
         ProfileField(
-            key="lora_scale", label="LoRA strength", kind="float",
+            key="image_lora_scale", label="LoRA strength", kind="float",
             default=1.0, help="1.0 is the distill's trained strength.",
         ),
         ProfileField(
@@ -369,8 +371,8 @@ def default_profiles() -> dict[str, dict[str, Any]]:
             "video_num_frames": _DEFAULT_LENGTH,
             "video_fps": FPS,
             "image_model_type": "Q4_K_M",
-            "lora_weights": TURBO_LORA_FILE,
-            "lora_scale": 1.0,
+            "image_lora_weights": TURBO_LORA_FILE,
+            "image_lora_scale": 1.0,
         },
         "h3-turbo-4step-720p": {
             "image_size": "1152x640",
@@ -378,8 +380,8 @@ def default_profiles() -> dict[str, dict[str, Any]]:
             "video_num_frames": _DEFAULT_LENGTH,
             "video_fps": FPS,
             "image_model_type": "Q4_K_M",
-            "lora_weights": TURBO_LORA_FILE,
-            "lora_scale": 1.0,
+            "image_lora_weights": TURBO_LORA_FILE,
+            "image_lora_scale": 1.0,
         },
         "h3-turbo-8step": {
             "image_size": _DEFAULT_SIZE,
@@ -387,8 +389,8 @@ def default_profiles() -> dict[str, dict[str, Any]]:
             "video_num_frames": _DEFAULT_LENGTH,
             "video_fps": FPS,
             "image_model_type": "Q4_K_M",
-            "lora_weights": TURBO_LORA_FILE,
-            "lora_scale": 1.0,
+            "image_lora_weights": TURBO_LORA_FILE,
+            "image_lora_scale": 1.0,
         },
         "h3-full-50step": {
             "image_size": _DEFAULT_SIZE,
@@ -396,6 +398,6 @@ def default_profiles() -> dict[str, dict[str, Any]]:
             "video_num_frames": _DEFAULT_LENGTH,
             "video_fps": FPS,
             "image_model_type": "Q4_K_M",
-            "lora_weights": "",
+            "image_lora_weights": "",
         },
     }
