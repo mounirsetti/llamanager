@@ -827,6 +827,16 @@
     });
 
     // ---- Lightbox ----
+    /* How long this image/clip took to make. Written into the sidecar by
+       image_runner as `generation_s` (engine wall clock, weight loading
+       included); older files only have the request-level `duration_s`. */
+    function fmtGenTime(v) {
+      const s = Number(v);
+      if (!isFinite(s) || s <= 0) return "";
+      if (s < 60) return `${s.toFixed(1)} s`;
+      const m = Math.floor(s / 60), r = Math.round(s % 60);
+      return r ? `${m} min ${r} s` : `${m} min`;
+    }
     function openLightbox(item) {
       const sc = item.sidecar || {};
       const isVideo = item.kind === "video" || (item.name || "").toLowerCase().endsWith(".mp4");
@@ -853,7 +863,7 @@
         ["Model", sc.model_id || sc.model || ""], ["Profile", sc.profile || ""], ["Engine", sc.engine || ""],
         ["Size", (sc.width && sc.height) ? `${sc.width}×${sc.height}` : ""],
         ["Steps", sc.steps != null ? String(sc.steps) : ""], ["Guidance", sc.guidance != null ? String(sc.guidance) : ""],
-        ["Seed", sc.seed != null ? String(sc.seed) : ""], ["Duration", sc.duration_s != null ? `${(+sc.duration_s).toFixed(1)} s` : ""],
+        ["Seed", sc.seed != null ? String(sc.seed) : ""], ["Generation time", fmtGenTime(sc.generation_s != null ? sc.generation_s : sc.duration_s)],
         ["Saved", item.mtime ? new Date(item.mtime * 1000).toLocaleString() : ""],
       ];
       rows.forEach(([k, v]) => {

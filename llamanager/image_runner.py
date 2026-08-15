@@ -411,6 +411,11 @@ class ImageTaskRunner:
                 log.exception("exclusive: pre-image-spawn sweep failed")
 
         full_env = {**os.environ, **env}
+        # Wall clock for this one image, recorded in its sidecar so the
+        # gallery can show what it cost. Starts at the spawn, so it counts
+        # weight loading — the dominant term for most engines — but not the
+        # queue wait, which is not a property of the image.
+        spawn_t0 = time.time()
         log.info("launching %s engine: %s", engine,
                  " ".join(map(str, argv[:4])) + " ...")
         try:
@@ -561,7 +566,10 @@ class ImageTaskRunner:
         try:
             import json
             sidecar_path.write_text(
-                json.dumps(sidecar, indent=2), encoding="utf-8"
+                json.dumps({**sidecar,
+                            "generation_s": round(time.time() - spawn_t0, 2)},
+                           indent=2),
+                encoding="utf-8",
             )
         except OSError:
             log.warning("sidecar write failed for %s", sidecar_path)
