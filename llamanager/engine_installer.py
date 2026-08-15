@@ -110,7 +110,7 @@ CPU_TORCH_INDEX = "https://download.pytorch.org/whl/cpu"
 
 # Engines whose AMD path we know how to wire to repo.radeon.com wheels.
 AMD_WHEEL_ENGINES = {"hidream", "z_image", "krea", "ideogram4", "wan", "asr",
-                     "minimax_h3"}
+                     "minimax_h3", "comfy"}
 # Valid values for the UI/CLI torch-backend selector.
 TORCH_BACKENDS = ("auto", "rocm", "cuda", "mps", "cpu")
 
@@ -156,6 +156,26 @@ class EnginePackages:
     # like sherpa-onnx (onnxruntime) — the installer then skips the CPU
     # torch-index step and the torch import verification.
     needs_torch: bool = True
+    # Git repos to clone before pip runs, as (url, dest-name) pairs. The dest
+    # is relative to the venv root's parent, so sources land next to the venvs
+    # on the big disk rather than in the data dir. Used by engines that are a
+    # program rather than a library (ComfyUI and its custom nodes).
+    repos: tuple[tuple[str, str], ...] = ()
+    # Requirement files to install after ``packages``, relative to the first
+    # cloned repo. Kept separate from ``packages`` because the file only
+    # exists once the clone step has run.
+    requirements: tuple[str, ...] = ()
+    # Extra AMD wheel names to pair alongside torch/torchvision/triton.
+    # ComfyUI imports torchaudio unconditionally (comfy/sd.py pulls in
+    # lightricks' audio VAE at module scope), and PyPI's torchaudio links
+    # against a non-ROCm libtorch — so the ROCm build has to come from
+    # repo.radeon.com like the rest of the set.
+    amd_extra_wheels: tuple[str, ...] = ()
+    # Post-install gate: a shell-style argv run inside the cloned repo with
+    # the engine's python, expected to exit 0. Unlike the torch import check
+    # (a warning), a failing smoke gate fails the install — it exists to catch
+    # an unusable engine before the operator downloads tens of GB of weights.
+    smoke: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -185,6 +205,20 @@ class ResolvedPlan:
     # applies this when ``options['patch_flash_attn']`` is set AND
     # ``cfg.hidream_repo`` is configured.
     supports_flash_attn_patch: bool = False
+
+
+# Install-time gate for the ComfyUI engine (see the `comfy` plan's `smoke`).
+# Kept as a module constant because it is too long to read inline in the plan.
+_COMFY_SMOKE = (
+    "import sys, asyncio; sys.argv = ['main.py']; "
+    "import execution, nodes; "
+    "asyncio.run(nodes.init_extra_nodes(init_api_nodes=False)); "
+    "m = nodes.NODE_CLASS_MAPPINGS; "
+    "missing = [n for n in ('UnetLoaderGGUF', 'CLIPLoaderGGUF') "
+    "if n not in m]; "
+    "print('comfy ok:', len(m), 'nodes'); "
+    "sys.exit('missing GGUF nodes: %s' % missing if missing else 0)"
+)
 
 
 # Generic baselines. The resolver consults ENGINE_PLANS only for engines
@@ -320,6 +354,61 @@ ENGINE_PLANS: dict[str, EnginePackages] = {
             "than thrashing."
         ),
     ),
+    "comfy": EnginePackages(
+        engine="comfy",
+        label="ComfyUI — shared backend for pre-quantised weights",
+        # ComfyUI is a program, not a library: it is cloned rather than
+        # pip-installed, and its own requirements.txt is the dependency list
+        # (see `requirements` below). What we add here is only what the
+        # llamanager runner needs on top.
+        #
+        # WHY THIS ENGINE EXISTS. diffusers cannot open the memory-efficient
+        # weights the community actually ships for large video models.
+        # MiniMaxH3Transformer3DModel has no from_single_file and no GGUF
+        # loader, so on a 32 GB card the diffusers path has to quantise a
+        # bf16 checkpoint on the way to the GPU: measured on gfx1201 that was
+        # 5.8 s/tensor and ~50 GB of host RAM, i.e. over an hour of loading
+        # before a single frame. The same limitation blocks Krea 2 Turbo's
+        # GGUF quants. ComfyUI reads both formats natively, so the weights
+        # arrive already quantised and the card does no conversion work.
+        #
+        # torch/torchvision/torchaudio come from the ROCm wheel step on AMD;
+        # listing them here covers the CUDA and CPU paths, where pip resolves
+        # them normally.
+        # protobuf is the ComfyUI-GGUF node's tokenizer dependency; it is not
+        # in ComfyUI's own requirements.txt.
+        packages=["torch", "torchvision", "torchaudio",
+                  "gguf", "protobuf", "websocket-client"],
+        repos=(
+            ("https://github.com/comfyanonymous/ComfyUI", "comfyui"),
+            # GGUF loader nodes. ComfyUI has no built-in GGUF support; this
+            # node dequantises with pytorch ops rather than custom CUDA
+            # kernels, which is what makes it work on ROCm.
+            ("https://github.com/city96/ComfyUI-GGUF",
+             "comfyui/custom_nodes/ComfyUI-GGUF"),
+        ),
+        requirements=("requirements.txt",),
+        amd_extra_wheels=("torchaudio",),
+        # Start far enough to prove the install is usable. Importing
+        # `execution` pulls in the whole node graph and the model-management
+        # layer, which is where a Python-version or torch-build mismatch
+        # surfaces. Then load the custom nodes and assert the GGUF loader is
+        # actually registered — without it every model recipe here fails at
+        # request time, which is far too late to find out. Verified on Python
+        # 3.14 with ROCm torch 2.10.
+        smoke=("-c", _COMFY_SMOKE),
+        space_mb=9500,
+        notes=(
+            "Shared ComfyUI backend. llamanager drives it headlessly: a "
+            "one-shot server is started per request, handed a frozen "
+            "API-format workflow, and shut down again — the same contract as "
+            "every other image/video engine, so nothing stays resident in "
+            "VRAM between requests. Installing this engine enables the "
+            "MiniMax-H3 (video+audio) and Krea 2 Turbo ComfyUI model "
+            "variants, which run from pre-quantised GGUF weights sized for a "
+            "32 GB card."
+        ),
+    ),
     "asr": EnginePackages(
         engine="asr",
         label="Whisper (transformers) — speech-to-text",
@@ -380,7 +469,7 @@ class _AmdWheel:
 
 _AMD_LINE_RE = re.compile(
     r'<a\s+href="(?P<href>'
-    r'(?P<pkg>torch|torchvision|triton)-'
+    r'(?P<pkg>torch|torchvision|torchaudio|triton)-'
     r'(?P<ver>\d+\.\d+\.\d+)'
     r'%2B[^"]+?'
     r'-(?P<abi>cp\d+)-(?P=abi)-linux_x86_64\.whl)">'
@@ -406,13 +495,21 @@ def _parse_amd_index(html: str, abi: str,
     return out
 
 
-def _select_amd_wheels(wheels: list[_AmdWheel]) -> list[str]:
+def _select_amd_wheels(wheels: list[_AmdWheel],
+                       extras: tuple[str, ...] = ()) -> list[str]:
     """Pick the latest paired (torch, torchvision, triton) set.
 
     AMD ships paired builds — torch, torchvision and triton with the
     same build date are guaranteed-compatible. We pick the highest-semver
     torch, then find torchvision + triton entries from the same date.
     If a pair can't be assembled, return [] (caller falls back).
+
+    ``extras`` names further packages from the same index to append (e.g.
+    ``torchaudio``, which ComfyUI imports unconditionally). They are paired
+    by date like the core three, but an extra that AMD didn't build for this
+    date is skipped rather than failing the whole set: falling back to a
+    generic CPU torch would be a far worse outcome than one missing wheel,
+    and the install's smoke gate reports the real consequence.
     """
     torch_rows = sorted(
         (w for w in wheels if w.pkg == "torch"),
@@ -433,8 +530,14 @@ def _select_amd_wheels(wheels: list[_AmdWheel]) -> list[str]:
         paired[needed] = max(same_date, key=lambda w: w.version)
     # Order matters for pip: install triton first so torch picks it up
     # at install time. (Pip processes the list in order with --no-deps.)
-    return [paired["triton"].url, paired["torch"].url,
+    urls = [paired["triton"].url, paired["torch"].url,
             paired["torchvision"].url]
+    for extra in extras:
+        same_date = [w for w in wheels
+                     if w.pkg == extra and w.date == torch_pick.date]
+        if same_date:
+            urls.append(max(same_date, key=lambda w: w.version).url)
+    return urls
 
 
 def _amd_rocm_index(target_release: str = "") -> str:
@@ -450,7 +553,8 @@ def _amd_rocm_index(target_release: str = "") -> str:
     return f"https://repo.radeon.com/rocm/manylinux/{rel}/"
 
 
-def _resolve_amd_wheel_set(abi: str, emit, target_release: str = "") -> list[str]:
+def _resolve_amd_wheel_set(abi: str, emit, target_release: str = "",
+                           extras: tuple[str, ...] = ()) -> list[str]:
     """Try scrape, fall back to hard-pinned curated set.
 
     ``emit`` is the installer's log emitter — we surface which path was
@@ -465,7 +569,7 @@ def _resolve_amd_wheel_set(abi: str, emit, target_release: str = "") -> list[str
             r = client.get(index_url)
             r.raise_for_status()
         wheels = _parse_amd_index(r.text, abi, base_url=index_url)
-        urls = _select_amd_wheels(wheels)
+        urls = _select_amd_wheels(wheels, extras)
         if urls:
             emit(f"[amd] using scraped wheel set from {index_url}")
             for u in urls:
@@ -547,7 +651,8 @@ def resolve_plan(engine: str, gpu: GpuProfile, emit=None,
         if cfg is not None:
             target_release = getattr(cfg, "hidream_target_rocm_release", "") or ""
         rel = (target_release or AMD_ROCM_REL).strip()
-        wheels = _resolve_amd_wheel_set(abi, emit, target_release)
+        wheels = _resolve_amd_wheel_set(abi, emit, target_release,
+                                        base.amd_extra_wheels)
         # Keep the engine's own pinned HF stack, but let the ROCm wheels
         # provide torch/torchvision (installed first, with --no-deps).
         pkgs = [p for p in base.packages if not _is_torch_pkg(p)]
@@ -978,6 +1083,41 @@ class EngineInstaller:
                     "user@<uid>.service`. The install will continue."
                 )
 
+            # Step 0: source checkouts. Engines that are a program rather than
+            # a library (ComfyUI) need their tree on disk before pip runs,
+            # because their requirements file lives inside it.
+            src_root = venv_root(self.cfg).parent
+            if base is not None and base.repos:
+                if not _has_command("git"):
+                    raise RuntimeError(
+                        "'git' not found on PATH — it is needed to fetch "
+                        f"{base.label}'s source.")
+                for i, (url, dest_rel) in enumerate(base.repos):
+                    dest = src_root / dest_rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    pct = 3 + int(2 * (i + 1) / len(base.repos))
+                    if (dest / ".git").is_dir():
+                        set_progress(pct, f"Updating {dest_rel}")
+                        rc = await self._run_subprocess(
+                            ["git", "-C", str(dest), "pull", "--ff-only"],
+                            cancel, emit)
+                        if rc != 0:
+                            # A local commit or a rebased upstream shouldn't
+                            # abort an install; the existing checkout still
+                            # works and the operator can reset it by hand.
+                            emit(f"[warn] could not fast-forward {dest_rel}; "
+                                 "keeping the existing checkout")
+                    else:
+                        set_progress(pct, f"Cloning {url} into {dest}")
+                        rc = await self._run_subprocess(
+                            ["git", "clone", "--depth", "1", url, str(dest)],
+                            cancel, emit)
+                        if rc != 0:
+                            raise RuntimeError(
+                                f"git clone of {url} failed (exit {rc})")
+                    if cancel.is_set():
+                        raise asyncio.CancelledError()
+
             set_progress(5, f"Creating venv at {venv_root(self.cfg) / engine}")
             venv_dir = venv_root(self.cfg) / engine
             venv_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -1059,6 +1199,27 @@ class EngineInstaller:
             if rc != 0:
                 raise RuntimeError(f"pip install failed (exit {rc})")
 
+            # Step B2: requirement files from the cloned source. Run after the
+            # wheel step so the torch family is already satisfied — a bare
+            # `torch` line then resolves against the installed ROCm build
+            # instead of pulling a generic wheel over the top of it.
+            if base is not None and base.requirements:
+                repo_dir = src_root / base.repos[0][1]
+                for i, rel in enumerate(base.requirements):
+                    req = repo_dir / rel
+                    if not req.is_file():
+                        raise RuntimeError(f"requirements file not found: {req}")
+                    set_progress(75, f"Installing {rel} from {repo_dir.name}")
+                    rc = await self._run_subprocess(
+                        [str(python_path), "-m", "pip", "install",
+                         "--progress-bar", "off", "-r", str(req)],
+                        cancel, emit)
+                    if cancel.is_set():
+                        raise asyncio.CancelledError()
+                    if rc != 0:
+                        raise RuntimeError(
+                            f"installing {rel} failed (exit {rc})")
+
             base_plan = ENGINE_PLANS.get(engine)
             if base_plan is not None and not base_plan.needs_torch:
                 # Pure-pip engine (sherpa-onnx): no torch to verify.
@@ -1091,6 +1252,25 @@ class EngineInstaller:
                 emit("[warn] torch import check failed — installed packages "
                      "may not be runnable on this machine; pointing the "
                      "engine at the new venv anyway.")
+
+            # Smoke gate. Unlike the torch check above this is fatal: its whole
+            # purpose is to fail here, cheaply, rather than after the operator
+            # has downloaded tens of GB of weights for an engine that cannot
+            # start. Run from inside the repo so its own modules import.
+            if base is not None and base.smoke:
+                set_progress(93, f"Smoke-testing {base.label}")
+                repo_dir = src_root / base.repos[0][1] if base.repos else None
+                rc = await self._run_subprocess(
+                    [str(python_path), *base.smoke], cancel, emit,
+                    env=verify_env, cwd=repo_dir)
+                if cancel.is_set():
+                    raise asyncio.CancelledError()
+                if rc != 0:
+                    raise RuntimeError(
+                        f"{base.label} failed its smoke test (exit {rc}). The "
+                        "packages are installed but the engine does not start "
+                        "on this machine — see the log above for the import "
+                        "error. Nothing has been downloaded.")
 
             # Persist the new venv path into the engine's config field.
             self._persist_engine_python(engine, str(python_path))
@@ -1331,9 +1511,14 @@ class EngineInstaller:
         return str(target_py)
 
     async def _run_subprocess(self, argv: list[str], cancel: asyncio.Event,
-                              emit, env: dict[str, str] | None = None) -> int:
+                              emit, env: dict[str, str] | None = None,
+                              cwd: Path | None = None) -> int:
         """Run a subprocess, streaming each stdout/stderr line into the log.
-        Honours ``cancel`` by terminating the child. Returns the exit code."""
+        Honours ``cancel`` by terminating the child. Returns the exit code.
+
+        ``cwd`` runs the child inside a directory — needed for cloned engines
+        whose modules only import from their own source root.
+        """
         emit(f"$ {' '.join(argv)}")
         full_env = {**os.environ, **env} if env else None
         proc = await asyncio.create_subprocess_exec(
@@ -1341,6 +1526,7 @@ class EngineInstaller:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             env=full_env,
+            cwd=str(cwd) if cwd else None,
         )
 
         async def reader() -> None:
@@ -1552,6 +1738,15 @@ class EngineInstaller:
         elif engine == "sherpa":
             kwargs["sherpa_python"] = python_path
             self.cfg.sherpa_python = python_path
+        elif engine == "comfy":
+            kwargs["comfyui_python"] = python_path
+            self.cfg.comfyui_python = python_path
+            # ComfyUI is driven by running its main.py, so the interpreter
+            # alone is not enough — record where the checkout landed too.
+            base = ENGINE_PLANS["comfy"]
+            repo = str(venv_root(self.cfg).parent / base.repos[0][1])
+            kwargs["comfyui_repo"] = repo
+            self.cfg.comfyui_repo = repo
         else:
             return
         try:

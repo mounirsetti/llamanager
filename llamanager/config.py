@@ -823,6 +823,10 @@ class Config:
     # (engines/_wan_runner.py). Typically points at the shared diffusion venv.
     wan_python: str = ""
     minimax_h3_python: str = ""
+    # ComfyUI is a program, not a library: driving it needs both an
+    # interpreter and the path to the checkout whose main.py we run.
+    comfyui_python: str = ""
+    comfyui_repo: str = ""
     # Where per-engine venvs are built. Blank = <data_dir>/venvs.
     # Overridable because the engine stacks are multi-GB and the
     # data dir often lives on a small system partition.
@@ -1217,6 +1221,8 @@ def load_config(path: Path | None = None) -> Config:
         ideogram4_python=str(image_cfg.get("ideogram4_python", "") or ""),
         wan_python=str(image_cfg.get("wan_python", "") or ""),
         minimax_h3_python=str(image_cfg.get("minimax_h3_python", "") or ""),
+        comfyui_python=str(image_cfg.get("comfyui_python", "") or ""),
+        comfyui_repo=str(image_cfg.get("comfyui_repo", "") or ""),
         venvs_dir=(expand(str(image_cfg["venvs_dir"]))
                    if image_cfg.get("venvs_dir") else None),
         asr_python=str(image_cfg.get("asr_python", "") or ""),
@@ -1720,6 +1726,8 @@ def update_image_config(cfg_path: Path, *,
                         ideogram4_python: str | None = None,
                         wan_python: str | None = None,
                         minimax_h3_python: str | None = None,
+                        comfyui_python: str | None = None,
+                        comfyui_repo: str | None = None,
                         venvs_dir: str | None = None,
                         asr_python: str | None = None,
                         whispercpp_binary: str | None = None,
@@ -1761,6 +1769,10 @@ def update_image_config(cfg_path: Path, *,
         img["wan_python"] = wan_python
     if minimax_h3_python is not None:
         img["minimax_h3_python"] = minimax_h3_python
+    if comfyui_python is not None:
+        img["comfyui_python"] = comfyui_python
+    if comfyui_repo is not None:
+        img["comfyui_repo"] = comfyui_repo
     if venvs_dir is not None:
         img["venvs_dir"] = venvs_dir
     if asr_python is not None:
