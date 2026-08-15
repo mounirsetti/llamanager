@@ -593,6 +593,11 @@ def test_every_comfy_workflow_template_is_valid_json_and_fully_tokenised():
         graph = cb.render_workflow(path.read_text(), values)
         for node_id, node in graph.items():
             assert "class_type" in node, f"{path.name}:{node_id}"
+            # Documentation keys must never reach ComfyUI: a top-level one is
+            # a node with no class_type, a per-node one an unknown field.
+            assert not node_id.startswith("_"), f"{path.name}:{node_id}"
+            assert not any(k.startswith("_") for k in node), (
+                f"{path.name}:{node_id} kept a documentation key")
 
 
 # ------------------------------------------------------------- the runner

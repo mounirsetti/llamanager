@@ -42,6 +42,17 @@
     "class_type": "LoadImage",
     "inputs": {"image": "__INIT_IMAGE__"}
   },
+  "17": {
+    "_note": "The opening frame must match the sampled canvas exactly. A still\n    from another engine rarely does - 1280x720 is a common size and 720 is\n    not a multiple of 32 - so it is scaled here rather than left to chance.\n    'center' crop preserves the composition instead of stretching it.",
+    "class_type": "ImageScale",
+    "inputs": {
+      "image": ["6", 0],
+      "upscale_method": "lanczos",
+      "width": "__WIDTH__",
+      "height": "__HEIGHT__",
+      "crop": "center"
+    }
+  },
 
   "7": {
     "class_type": "MiniMaxH3ImageToVideo",
@@ -52,7 +63,7 @@
       "width": "__WIDTH__",
       "height": "__HEIGHT__",
       "length": "__LENGTH__",
-      "first_frame": ["6", 0]
+      "first_frame": ["17", 0]
     }
   },
 

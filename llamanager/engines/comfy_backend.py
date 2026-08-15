@@ -75,9 +75,16 @@ def render_workflow(template_text: str, values: dict[str, Any]) -> dict:
     if leftover:
         raise KeyError(
             f"workflow template has unsubstituted tokens: {leftover}")
-    # The comment block documents the template for humans; ComfyUI would
-    # reject it as a node with no class_type.
-    graph.pop("_comment", None)
+    # Documentation lives in the template alongside the nodes it explains.
+    # ComfyUI would reject a top-level "_comment" as a node with no
+    # class_type, and a per-node "_note" as an unknown field, so both are
+    # stripped here — keeping the explanation next to the thing it explains
+    # without it ever reaching the server.
+    for key in [k for k in graph if k.startswith("_")]:
+        del graph[key]
+    for node in graph.values():
+        for key in [k for k in node if k.startswith("_")]:
+            del node[key]
     return graph
 
 
