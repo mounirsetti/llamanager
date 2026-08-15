@@ -218,6 +218,7 @@ ENGINE_FAMILY: dict[str, str] = {
     "ideogram4": "image",
     "wan":     "video",
     "minimax_h3": "video",
+    "minimax_h3_comfy": "video",
     "asr":     "audio",
     "whispercpp": "audio",
     "sherpa":  "audio",
@@ -286,6 +287,43 @@ def _looks_like_z_image(d: Path) -> bool:
     except (OSError, ValueError):
         return False
     return (data.get("_class_name") or "").strip() == "ZImagePipeline"
+
+
+def _looks_like_comfy_model(d: Path) -> bool:
+    """Any ComfyUI-format model directory: files sorted into ComfyUI folders.
+
+    A ComfyUI model has no ``model_index.json`` — it is a set of single-file
+    weights collected under ``diffusion_models/``, ``text_encoders/`` and
+    ``vae/`` from several uploaders. Requiring both a transformer and a VAE
+    keeps a directory holding one stray download from being claimed.
+    """
+    if not d.is_dir():
+        return False
+    unets = d / "diffusion_models"
+    if not unets.is_dir():
+        return False
+    has_unet = any(f.suffix in (".gguf", ".safetensors")
+                   for f in unets.iterdir() if f.is_file())
+    vae = d / "vae"
+    has_vae = vae.is_dir() and any(
+        f.suffix == ".safetensors" for f in vae.iterdir() if f.is_file())
+    return has_unet and has_vae
+
+
+def _looks_like_minimax_h3_comfy(d: Path) -> bool:
+    """A ComfyUI-format model directory holding MiniMax-H3.
+
+    The audio VAE is part of the test: without it the tree can produce
+    pictures but not the soundtrack this engine exists for.
+    """
+    if not _looks_like_comfy_model(d):
+        return False
+    names = [f.name.lower() for f in (d / "diffusion_models").iterdir()
+             if f.is_file()]
+    if not any("minimax" in n and "h3" in n for n in names):
+        return False
+    return any("audio_vae" in f.name.lower()
+               for f in (d / "vae").iterdir() if f.is_file())
 
 
 def _looks_like_minimax_h3(d: Path) -> bool:
@@ -474,6 +512,8 @@ def detect_engine_for_path(model_path: Path) -> str:
             return "krea"
         if _looks_like_ideogram4(model_path):
             return "ideogram4"
+        if _looks_like_minimax_h3_comfy(model_path):
+            return "minimax_h3_comfy"
         if _looks_like_minimax_h3(model_path):
             return "minimax_h3"
         if _looks_like_wan(model_path):

@@ -3588,6 +3588,8 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
         "ideogram4_python": cfg.ideogram4_python,
         "wan_python": cfg.wan_python,
         "minimax_h3_python": getattr(cfg, "minimax_h3_python", ""),
+        "comfyui_python": getattr(cfg, "comfyui_python", ""),
+        "comfyui_repo": getattr(cfg, "comfyui_repo", ""),
     }
     ctx["coex"] = {
         "unload_text_on_arrival": cfg.unload_text_on_arrival,
@@ -3608,7 +3610,7 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
     # Per-engine install state — surface the most-relevant row so the
     # card can show "running 42%", "done", or "click to install".
     engines = ("z_image", "krea", "ideogram4", "wan", "minimax_h3",
-               "hidream", "flux2")
+               "comfy", "hidream", "flux2")
     install_state: dict[str, Any] = {}
     for eng in engines:
         active = installer.active_for_engine(eng)
@@ -5322,6 +5324,10 @@ def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
             "ideogram4": bool(cfg.ideogram4_python),
             "wan":     bool(cfg.wan_python),
             "minimax_h3": bool(getattr(cfg, "minimax_h3_python", "")),
+            # The ComfyUI-backed models are configured by installing the one
+            # shared ComfyUI engine, not per model.
+            "minimax_h3_comfy": bool(getattr(cfg, "comfyui_python", "")
+                                     and getattr(cfg, "comfyui_repo", "")),
             "flux2":   bool(cfg.flux2_sd_cli),
         }.get(eng_id, False)
 
@@ -5333,6 +5339,7 @@ def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
             "ideogram4": "Ideogram 4",
             "wan":     "Wan 2.2 (text/image → video)",
             "minimax_h3": "MiniMax-H3 (video + audio)",
+            "minimax_h3_comfy": "MiniMax-H3 (ComfyUI, video + audio)",
             "flux2":   "FLUX 2 Dev",
         }.get(eng_id, eng_id)
 

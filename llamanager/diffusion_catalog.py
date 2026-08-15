@@ -39,6 +39,13 @@ class CatalogEntry:
     approx_size_gb: float = 0.0
     description: str = ""  # 1-3 sentences for the catalog row
     homepage: str = ""     # canonical model URL
+    # Models assembled from several uploaders (the ComfyUI family: transformer,
+    # text encoder, VAEs and LoRA each ship from a different repo) list their
+    # parts here as (repo, filename, subdir, size_gb, note). The setup page
+    # renders one download button per part, each targeting
+    # ``canonical_id/subdir`` via the registry's target_dir. ``hf_repo`` above
+    # then names only the primary repo, for the homepage link and search.
+    components: tuple[tuple[str, str, str, float, str], ...] = ()
 
 
 CATALOG: list[CatalogEntry] = [
@@ -175,6 +182,49 @@ CATALOG: list[CatalogEntry] = [
             "21.5 GB of VRAM, which fits a 32 GB card."
         ),
         homepage="https://huggingface.co/MiniMaxAI/MiniMax-H3",
+    ),
+    CatalogEntry(
+        canonical_id="MiniMax-H3-Comfy",
+        engine="minimax_h3_comfy",
+        label="MiniMax-H3 (ComfyUI, video + audio)",
+        hf_repo="realrebelai/MiniMax-H3_GGUFs",
+        # The default recipe only: Q4_K_M transformer + encoder + both VAEs +
+        # LoRA. The Q3_K_M component below is an alternative to the Q4_K_M
+        # transformer, not an addition, so the component sizes sum higher.
+        approx_size_gb=39.3,
+        description=(
+            "The same model as the entry above, in ComfyUI's pre-quantised "
+            "GGUF format instead of bf16 diffusers — 39 GB of downloads "
+            "rather than 140 GB, and no quantise-on-load step. That step is "
+            "the whole reason this variant exists: diffusers has no GGUF or "
+            "single-file loader for MiniMax-H3, so it must convert bf16 "
+            "weights on every load, measured here at 5.8 s/tensor and ~50 GB "
+            "of host RAM. Generates video and its soundtrack together at "
+            "24fps; supply one image as the opening frame. Ships with the "
+            "lightx2v Turbo distill LoRA, which cuts sampling from 50 steps "
+            "to 4. Requires the ComfyUI engine to be installed."
+        ),
+        homepage="https://huggingface.co/MiniMaxAI/MiniMax-H3",
+        components=(
+            ("realrebelai/MiniMax-H3_GGUFs", "MiniMax-H3-FL2VA-Q4_K_M.gguf",
+             "diffusion_models", 18.50,
+             "Transformer, 4-bit. The quality/VRAM sweet spot on a 32 GB card."),
+            ("realrebelai/MiniMax-H3_GGUFs", "MiniMax-H3-FL2VA-Q3_K_M.gguf",
+             "diffusion_models", 14.51,
+             "Transformer, 3-bit. Optional: more headroom, less detail."),
+            ("realrebelai/MiniMax-H3_GGUFs",
+             "qwen3vl-32B-MiniMax-H3-Q4_K_M.gguf", "text_encoders", 13.58,
+             "Qwen3-VL 32B conditioner, 4-bit."),
+            ("Comfy-Org/MiniMax-H3", "vae/minimax_h3_video_vae_fp16.safetensors",
+             "vae", 4.85, "Video VAE (fp16)."),
+            ("Comfy-Org/MiniMax-H3", "vae/minimax_h3_audio_vae_fp32.safetensors",
+             "vae", 0.56,
+             "Audio VAE (fp32). Required — without it the clip is silent."),
+            ("lightx2v/Minimax-h3-Turbo",
+             "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+             "loras", 1.82,
+             "Turbo distill LoRA: 50 sampling steps down to 4."),
+        ),
     ),
     CatalogEntry(
         canonical_id="FLUX.2-dev",

@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from . import (asr, flux2, hidream, ideogram4, krea, minimax_h3, sherpa, wan,
-               whispercpp, z_image)
+from . import (asr, flux2, hidream, ideogram4, krea, minimax_h3,
+               minimax_h3_comfy, sherpa, wan, whispercpp, z_image)
 
 # Public registry. Keys match ``engine_type`` strings used in config.py.
 ADAPTERS = {
@@ -26,6 +26,7 @@ ADAPTERS = {
     "ideogram4": ideogram4,
     "wan": wan,
     "minimax_h3": minimax_h3,
+    "minimax_h3_comfy": minimax_h3_comfy,
     "asr": asr,
     "whispercpp": whispercpp,
     "sherpa": sherpa,
@@ -96,6 +97,6 @@ def default_profiles(engine: str, model_dir=None) -> dict:
 
 __all__ = [
     "ADAPTERS", "get", "capabilities", "default_profiles",
-    "hidream", "flux2", "z_image", "krea", "ideogram4", "wan", "minimax_h3", "asr",
-    "whispercpp", "sherpa",
+    "hidream", "flux2", "z_image", "krea", "ideogram4", "wan", "minimax_h3",
+    "minimax_h3_comfy", "asr", "whispercpp", "sherpa",
 ]
