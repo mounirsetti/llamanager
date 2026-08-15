@@ -13,6 +13,7 @@ No build step — Pico CSS + HTMX, Jinja2 templates, escape-by-default.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import os
@@ -3900,8 +3901,16 @@ async def download_engine_model(request: Request, engine: str,
                                 subfolder: str = Form(""),
                                 filename: str = Form(""),
                                 models_dir: str = Form(""),
+                                target_dir: str = Form(""),
                                 _: None = Depends(require_csrf)) -> Response:
-    """Start an HF whole-repo, subfolder, or single-file diffusion download."""
+    """Start an HF whole-repo, subfolder, or single-file diffusion download.
+
+    ``target_dir`` (relative to the models directory) lets several repos
+    contribute files to one model folder, which is how ComfyUI-format models
+    are assembled: transformer, text encoder, VAEs and LoRA each come from a
+    different uploader but must sit together under one directory for the
+    adapter to detect them.
+    """
     reg: Registry = request.app.state.registry
     cfg = request.app.state.cfg
     # The confirm dialog can repoint the shared models directory before a
@@ -3931,16 +3940,17 @@ async def download_engine_model(request: Request, engine: str,
     try:
         # Estimate size up-front so the progress bar can show a total.
         bare_repo = source.removeprefix("hf://").removeprefix("hf:")
+        dest = target_dir.strip().strip("/") or None
         if fn:
             size = await reg.estimate_repo_size(bare_repo, files=[fn])
             reg.start_pull(source=source, files=[fn],
                            subfolder=None, whole_repo=False,
-                           bytes_total=size)
+                           bytes_total=size, target_dir=dest)
         else:
             size = await reg.estimate_repo_size(bare_repo, sub)
             reg.start_pull(source=source, files=None,
                            subfolder=sub, whole_repo=True,
-                           bytes_total=size)
+                           bytes_total=size, target_dir=dest)
     except Exception as e:
         return _error_html(f"pull failed: {e}", status_code=400)
     return RedirectResponse("/ui/setup-diffusion", status_code=303)
@@ -3954,6 +3964,7 @@ async def setup_diffusion_preflight(request: Request,
                                     subfolder: str = "",
                                     filename: str = "",
                                     dest: str = "",
+                                    target_dir: str = "",
                                     _: Origin = Depends(require_admin_ui)
                                     ) -> HTMLResponse:
     """Destination + free-space check, rendered into the confirm dialog.
@@ -4024,7 +4035,19 @@ async def setup_diffusion_preflight(request: Request,
                 source_label = "catalog estimate (hub size unavailable)"
             else:
                 source_label = "unknown — hub size unavailable"
-        target = Path(dest) if dest.strip() else cfg.models_dir
+        models_root = Path(dest) if dest.strip() else cfg.models_dir
+        # Free space is a property of the filesystem, so probing the models
+        # root is equivalent to probing the sub-path — and the sub-path does
+        # not exist yet on the first component of a multi-repo model.
+        target = models_root
+        sub_dir = target_dir.strip().strip("/")
+        extra_note = (
+            "This is the shared models directory; changing it repoints "
+            "every model llamanager knows about.")
+        if sub_dir:
+            extra_note += (
+                f" These files land in <code>{html.escape(sub_dir)}/</code>, "
+                "alongside the model's other components.")
         ctx = {
             "action": f"/ui/setup-diffusion/engine/{engine}/download-model",
             "title": f"Download {repo_clean}",
@@ -4032,11 +4055,9 @@ async def setup_diffusion_preflight(request: Request,
             "dest_field": "models_dir",
             "size_source": source_label,
             "confirm_label": "Download here",
-            "extra_note": (
-                "This is the shared models directory; changing it repoints "
-                "every model llamanager knows about."),
+            "extra_note": extra_note,
             "passthrough": {"repo": repo_clean, "subfolder": subfolder.strip(),
-                            "filename": fn},
+                            "filename": fn, "target_dir": sub_dir},
         }
 
     ctx["preflight"] = disk_preflight(Path(target), required)

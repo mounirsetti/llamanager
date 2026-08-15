@@ -351,7 +351,8 @@ class Registry:
     def start_pull(self, *, source: str, files: list[str] | None,
                    subfolder: str | None = None,
                    whole_repo: bool = False,
-                   bytes_total: int = 0) -> str:
+                   bytes_total: int = 0,
+                   target_dir: str | None = None) -> str:
         """Kick off a background download.
 
         Modes:
@@ -366,6 +367,15 @@ class Registry:
 
         ``bytes_total`` lets the caller seed the progress bar when the
         size is known up-front (e.g. computed via :meth:`estimate_repo_size`).
+
+        ``target_dir`` overrides where the files land, relative to
+        ``models_dir`` (e.g. ``"MiniMax-H3-Comfy/diffusion_models"``).
+        Without it a pull always lands in ``models_dir/<hf-repo>``, which
+        makes it impossible to assemble ONE runnable model out of files
+        published across several repos — the normal case for ComfyUI-style
+        models, where the transformer, text encoder, VAEs and LoRA each
+        come from a different uploader. Path traversal is rejected by
+        ``_ensure_under``, same as every other target.
         """
         download_id = secrets.token_urlsafe(8)
         # Stash mode metadata inside files_json so the run loop can
@@ -374,6 +384,7 @@ class Registry:
             "files": files or [],
             "subfolder": subfolder or "",
             "whole_repo": bool(whole_repo) or bool(subfolder),
+            "target_dir": target_dir or "",
         }
         self.db.execute(
             "INSERT INTO downloads(id, source, files_json, status, "
@@ -387,13 +398,14 @@ class Registry:
             self._run_pull(download_id, source, files or [],
                            subfolder or None,
                            bool(whole_repo) or bool(subfolder),
-                           cancel),
+                           cancel, target_dir or None),
         )
         self._tasks[download_id] = task
         self.db.log_event("download_started", {
             "id": download_id, "source": source,
             "files": files or [], "subfolder": subfolder or "",
             "whole_repo": bool(whole_repo) or bool(subfolder),
+            "target_dir": target_dir or "",
         })
         return download_id
 
@@ -782,19 +794,38 @@ class Registry:
                 log.exception("failed to auto-create image profile %r for %s",
                               pname, model_id)
 
+    def _pull_target(self, repo: str, target_dir: str | None) -> Path:
+        """Where a pull's files land.
+
+        Defaults to ``models_dir/<hf-repo>``. ``target_dir`` overrides that
+        with an explicit path relative to ``models_dir``, which is what lets
+        several repos contribute to one model directory (ComfyUI-style models
+        take their transformer, text encoder, VAEs and LoRA from different
+        uploaders). Both forms go through ``_ensure_under``, so a crafted
+        ``../`` in either the repo id or the override is rejected rather than
+        escaping the models directory.
+        """
+        rel = (target_dir or "").strip().strip("/")
+        if not rel:
+            return _ensure_under(self.models_dir, self.models_dir / repo)
+        return _ensure_under(self.models_dir, self.models_dir / rel)
+
+
     async def _run_pull(self, did: str, source: str, files: list[str],
                         subfolder: str | None,
                         whole_repo: bool,
-                        cancel: asyncio.Event) -> None:
+                        cancel: asyncio.Event,
+                        target_dir: str | None = None) -> None:
         try:
             self._set_download(did, status="running")
             # Convert HF web URLs to hf:// sources automatically
             source, files = self._normalise_hf_url(source, files)
             if source.startswith("hf://") or source.startswith("hf:"):
                 if whole_repo or subfolder:
-                    await self._pull_hf_snapshot(did, source, subfolder, cancel)
+                    await self._pull_hf_snapshot(did, source, subfolder, cancel,
+                                                 target_dir)
                 else:
-                    await self._pull_hf(did, source, files, cancel)
+                    await self._pull_hf(did, source, files, cancel, target_dir)
             elif source.startswith("http://") or source.startswith("https://"):
                 await self._pull_http(did, source, files[0] if files else None, cancel)
             else:
@@ -819,7 +850,8 @@ class Registry:
 
     async def _pull_hf_snapshot(self, did: str, source: str,
                                  subfolder: str | None,
-                                 cancel: asyncio.Event) -> None:
+                                 cancel: asyncio.Event,
+                                 target_dir: str | None = None) -> None:
         """Fetch an entire HF repo (or a single subfolder) via
         ``snapshot_download``. Used for Diffusers pipelines like
         Z-Image and Z-Anime where the model is a tree of files."""
@@ -827,7 +859,7 @@ class Registry:
 
         repo = _sanitize_hf_repo(source.removeprefix("hf://").removeprefix("hf:"))
         token = os.environ.get(self.cfg.hf_token_env or "", None) or None
-        target_root = _ensure_under(self.models_dir, self.models_dir / repo)
+        target_root = self._pull_target(repo, target_dir)
         target_root.mkdir(parents=True, exist_ok=True)
 
         allow_patterns: list[str] | None = None
@@ -850,6 +882,15 @@ class Registry:
                 # A multi-component pull still needs the repo-root index files
                 # (model_index.json / modular_model_index.json), or the
                 # pipeline has nothing to assemble the components from.
+                #
+                # NOTE: huggingface_hub matches these with fnmatch, where ``*``
+                # spans ``/`` — so this also drags in every nested .json/.txt,
+                # not just the root ones. That is configs and tokenizer files,
+                # tens of MB, and the alternative (enumerating root filenames
+                # we cannot know in advance) risks missing the index and
+                # leaving the checkpoint unloadable. Measured on MiniMax-H3:
+                # 68 MB of stray configs against 268 GB of weights correctly
+                # skipped, so the trade is worth it.
                 allow_patterns += ["*.json", "*.txt"]
 
         loop = asyncio.get_running_loop()
@@ -907,7 +948,8 @@ class Registry:
             raise RuntimeError(err)
 
     async def _pull_hf(self, did: str, source: str, files: list[str],
-                       cancel: asyncio.Event) -> None:
+                       cancel: asyncio.Event,
+                       target_dir: str | None = None) -> None:
         """Use huggingface_hub.hf_hub_download in a thread, one file at a time.
 
         Monitors incomplete download files to report progress while the
@@ -922,7 +964,7 @@ class Registry:
         files = [_sanitize_hf_file(f) for f in files]
 
         token = os.environ.get(self.cfg.hf_token_env or "", None) or None
-        target_root = _ensure_under(self.models_dir, self.models_dir / repo)
+        target_root = self._pull_target(repo, target_dir)
         target_root.mkdir(parents=True, exist_ok=True)
 
         bytes_done = 0

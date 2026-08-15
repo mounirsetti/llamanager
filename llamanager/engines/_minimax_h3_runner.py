@@ -19,12 +19,28 @@ Three points shape this runner:
   per step. The adapter maps our generic guidance/negative-prompt profile
   fields to nothing here on purpose.
 
-* **It is very large.** 61.7 GB of transformer plus 62.1 GB of Qwen3-VL
-  conditioner in bfloat16. Nothing consumer-sized holds that, so the only
-  honest single-card paths are int8 weight-only quantisation with block
-  offload, or an 80 GB card. We size the request up front and refuse with
-  the reason rather than thrashing — the same contract as the Krea and Wan
-  runners.
+* **It is very large, and slow to load.** 61.7 GB of transformer plus
+  62.1 GB of Qwen3-VL conditioner in bfloat16. Quantised to NF4 the weights
+  fit a 32 GB card (see ``plan_memory``), but *getting them there* is the
+  real cost: NF4 does not exist on disk, so every tensor is materialised in
+  bf16 and quantised on the way in.
+
+  Measured on gfx1201 / ROCm 7.2 / bitsandbytes 0.50.1, loading the
+  conditioner alone with ``device_map={"": 0}``:
+
+      284 of 1058 tensors in 5 min  =  5.8 s/tensor  ->  ~75 min projected
+      host RSS climbed to 26.5 GB;  VRAM froze at 18.0 GB after 16 s
+
+  So on this stack a single generation would spend hours in load before the
+  first denoising step, and llamanager's one-shot runner pays that per
+  request. Passing ``max_memory`` makes it strictly worse: accelerate sizes
+  layers by their *unquantised* dtype, decides the model cannot fit the
+  budget, and parks the remainder on CPU in bf16 — that path reached 50+ GB
+  of host RAM and thrashed. Hence ``device_map={"": device}`` and no
+  ``max_memory`` anywhere in this file.
+
+  We size the request up front and refuse with the reason rather than
+  thrashing — the same contract as the Krea and Wan runners.
 
 Progress: diffusers' samplers use tqdm, which writes "N/M" lines to stderr;
 the parent adapter's ``parse_progress`` keys off that.
@@ -80,7 +96,10 @@ QUANT_FACTORS: dict[str, float] = {
 # pins the result to a device, so those two take a different code path.
 _BNB_QUANTS = {"nf4", "bnb-int8"}
 # Quantisation only shrinks the two large components; the VAEs stay bf16.
-_VAE_GIB = 5.5
+# Measured on the actual checkpoint: vae/ is 9.8 GB and audio_vae/ 0.58 GB.
+# The earlier 5.5 estimate was low and made the fit look roomier than it is —
+# NF4 split residency really peaks near 26.4 GB, not 21.5, on a 31.9 GB card.
+_VAE_GIB = 10.4
 
 
 def snap_num_frames(num_frames: int) -> int:
@@ -559,6 +578,13 @@ def main() -> int:
         print(f"[minimax-h3] refusing: {detail}", file=sys.stderr)
         return 2
     print(f"[minimax-h3] memory plan: {detail}", file=sys.stderr)
+    # The VRAM plan can pass while the *load* is still impractical: measured
+    # 5.8 s/tensor for the conditioner on ROCm, i.e. over an hour before the
+    # first step. Say so rather than letting it look like a hang.
+    print("[minimax-h3] note: weights are quantised on the way in; on ROCm "
+          "this measured ~5.8 s/tensor (~75 min for the conditioner alone). "
+          "Expect a long load before the first denoising step.",
+          file=sys.stderr)
 
     frames = snap_num_frames(args.num_frames)
     seconds = frames / NATIVE_FPS

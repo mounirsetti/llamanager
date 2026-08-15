@@ -157,7 +157,10 @@ def test_split_residency_halves_the_resident_peak():
     joint = t + c + mod._VAE_GIB
     split = max(t, c) + mod._VAE_GIB
     assert split < joint
-    assert split == pytest.approx(21.0, abs=0.5)
+    # 15.5 (int4 conditioner) + 10.4 (bf16 VAEs, measured on the real
+    # checkpoint: vae/ 9.8 GB + audio_vae/ 0.58 GB). An earlier 5.5 GB
+    # estimate for the VAEs made this look like 21 GB.
+    assert split == pytest.approx(25.9, abs=0.5)
 
 
 def test_int4_plus_split_fits_a_32gb_card(monkeypatch):
