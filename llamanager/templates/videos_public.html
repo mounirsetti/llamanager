@@ -194,6 +194,21 @@
       border: 2px solid var(--bg-3); border-top-color: var(--accent);
       border-radius: 50%; animation: gen-spin 0.8s linear infinite;
     }
+    /* Cancel lives on the tile being generated, not on the composer: the
+       thing you want to stop is the one you are looking at. */
+    .gen-live__cancel {
+      position: absolute; top: 8px; right: 8px; z-index: 2;
+      width: 22px; height: 22px; padding: 0; line-height: 1;
+      display: inline-flex; align-items: center; justify-content: center;
+      border: 1px solid var(--bg-3); border-radius: 50%;
+      background: var(--bg-2); color: var(--fg-2);
+      font-size: 0.75rem; cursor: pointer;
+      transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+    }
+    .gen-live__cancel:hover {
+      color: var(--danger, var(--accent)); border-color: currentColor;
+      background: var(--bg-1);
+    }
     @keyframes gen-spin { to { transform: rotate(360deg); } }
     .gen-empty {
       grid-column: 1 / -1; color: var(--fg-2); text-align: center;
@@ -450,7 +465,6 @@
           <div class="gen-bar__actions">
             <button type="button" class="gen-iconbtn" id="gen-attach" title="Attach reference image" hidden>📎</button>
             <button type="button" class="gen-iconbtn" id="gen-history-btn" title="Prompt history">🕘</button>
-            <button type="button" class="gen-iconbtn" id="lm-img-cancel" title="Cancel" hidden>✕</button>
             <button type="submit" class="lm-btn lm-btn--primary gen-generate" id="lm-img-generate">Generate</button>
           </div>
         </div>
@@ -568,7 +582,7 @@
 
     const modelSel = $("lm-img-model"), profileSel = $("lm-img-profile"), overrides = $("lm-img-overrides");
     const promptEl = $("lm-img-prompt"), seedEl = $("lm-img-seed"), seedDice = $("lm-img-seed-dice");
-    const form = $("lm-img-composer"), submitBtn = $("lm-img-generate"), cancelBtn = $("lm-img-cancel");
+    const form = $("lm-img-composer"), submitBtn = $("lm-img-generate");
     const errorEl = $("lm-img-error"), engineHint = $("lm-img-engine-hint");
     const grid = $("gen-grid"), emptyEl = $("gen-empty"), loadMore = $("gen-loadmore");
     const modelBtn = $("gen-modelbtn"), modelBtnName = $("gen-modelbtn-name");
@@ -948,15 +962,16 @@
       const div = document.createElement("div"); div.className = "gen-card gen-card--live";
       div.style.setProperty("--card-ar", String(requestedAspect()));
       div.innerHTML = `<div class="gen-live__spinner"></div><div class="gen-live__phase">Queued…</div>
-        <div class="gen-live__bar"><div class="gen-live__fill"></div></div><div class="gen-live__prompt"></div>`;
+        <div class="gen-live__bar"><div class="gen-live__fill"></div></div><div class="gen-live__prompt"></div><button type="button" class="gen-live__cancel" title="Cancel this generation" aria-label="Cancel this generation">✕</button>`;
       div.querySelector(".gen-live__prompt").textContent = prompt;
+      div.querySelector(".gen-live__cancel").addEventListener("click", cancelGeneration);
       grid.insertBefore(div, grid.firstChild); spanCard(div);
       emptyEl.hidden = true; return div;
     }
     function updateLive(txt, pct) { if (!liveCard) return; liveCard.querySelector(".gen-live__phase").textContent = txt; if (pct != null) liveCard.querySelector(".gen-live__fill").style.width = `${pct}%`; }
     function removeLive() { if (liveCard) { liveCard.remove(); liveCard = null; } updateEmpty(); }
-    function setBusy(busy) { state.inFlight = busy; submitBtn.disabled = busy; cancelBtn.hidden = !busy; hintEl.innerHTML = busy ? "Generating — you can keep browsing the feed." : "&nbsp;"; }
-    cancelBtn.addEventListener("click", () => { if (state.abort) state.abort.abort(); });
+    function setBusy(busy) { state.inFlight = busy; submitBtn.disabled = busy; hintEl.innerHTML = busy ? "Generating — you can keep browsing the feed." : "&nbsp;"; }
+    function cancelGeneration() { if (state.abort) state.abort.abort(); }
 
     const stage = { phase: "", pos: -1, step: null, total: null };
     function renderStage() {

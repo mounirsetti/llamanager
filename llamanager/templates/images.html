@@ -122,6 +122,23 @@
   }
   @keyframes gen-pulse { 50% { opacity: 0.25; transform: scale(0.7); } }
   .gen-live__idx { margin-left: auto; color: var(--fg-3); letter-spacing: 0.06em; }
+  /* Cancel lives on the tile being generated, not on the composer: the
+     thing you want to stop is the one you are looking at, and with several
+     tiles in flight the dock button could not say which. */
+  .gen-live__cancel {
+    margin-left: 6px; flex-shrink: 0;
+    width: 20px; height: 20px; padding: 0; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--bg-3); border-radius: 50%;
+    background: var(--bg-2); color: var(--fg-2);
+    font-size: 0.6875rem; cursor: pointer;
+    transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+  }
+  .gen-live__cancel:hover {
+    color: var(--danger, var(--accent)); border-color: currentColor;
+    background: var(--bg-1);
+  }
+  .gen-live__cancel:disabled { opacity: 0.5; cursor: default; }
 
   .gen-live__body {
     flex: 1; display: flex; flex-direction: column;
@@ -545,7 +562,6 @@
         <div class="gen-bar__actions">
           <button type="button" class="gen-iconbtn" id="gen-attach" title="Attach reference image" hidden>📎</button>
           <button type="button" class="gen-iconbtn" id="gen-history-btn" title="Prompt history">🕘</button>
-          <button type="button" class="gen-iconbtn" id="lm-img-cancel" title="Cancel" hidden>✕</button>
           <button type="submit" class="lm-btn lm-btn--primary gen-generate" id="lm-img-generate">
             <span class="gen-generate__spin" id="gen-generate-spin" hidden></span>
             <span id="gen-generate-label">Generate</span>
@@ -612,7 +628,6 @@
   const nEl        = $("lm-img-n");
   const form       = $("lm-img-composer");
   const submitBtn  = $("lm-img-generate");
-  const cancelBtn  = $("lm-img-cancel");
   const errorEl    = $("lm-img-error");
   const engineHint = $("lm-img-engine-hint");
 
@@ -1180,6 +1195,8 @@
         <div class="gen-live__top">
           <span class="gen-live__dot"></span><span class="gen-live__label">Generating</span>
           <span class="gen-live__idx"></span>
+          <button type="button" class="gen-live__cancel" title="Cancel this generation"
+                  aria-label="Cancel this generation">✕</button>
         </div>
         <div class="gen-live__body">
           <div class="gen-live__spinner"></div>
@@ -1190,6 +1207,8 @@
         <div class="gen-live__bar is-indeterminate"><div class="gen-live__fill"></div></div>
         <div class="gen-live__prompt"></div>`;
       div.style.setProperty("--card-ar", String(ar));
+      div.querySelector(".gen-live__cancel")
+         .addEventListener("click", cancelGeneration);
       if (n > 1) div.querySelector(".gen-live__idx").textContent = `${i + 1} / ${n}`;
       div.querySelector(".gen-live__prompt").textContent = prompt;
       cards.push(div);
@@ -1359,7 +1378,6 @@
     submitBtn.classList.toggle("is-busy", busy);
     genSpin.hidden = !busy;
     genLabel.textContent = busy ? "Generating…" : "Generate";
-    cancelBtn.hidden = !busy;
     feedLive.hidden = !busy;
     hintEl.classList.toggle("is-live", busy);
     if (!busy) {
@@ -1371,10 +1389,15 @@
   // of the stream — and since a dropped client no longer stops the job
   // (so a refresh doesn't kill your generation), that would leave the
   // engine running with the UI claiming it had stopped.
-  cancelBtn.addEventListener("click", async () => {
+  async function cancelGeneration() {
     const id = state.requestId;
+    // Every tile of an n>1 run belongs to one queued request, so cancelling
+    // from any of them stops the run — disable all of them, not just the
+    // one clicked, so the UI cannot suggest otherwise.
+    const buttons = live.cards
+      .map(c => c.querySelector(".gen-live__cancel")).filter(Boolean);
+    buttons.forEach(b => { b.disabled = true; });
     if (id) {
-      cancelBtn.disabled = true;
       try {
         const r = await fetch(cfg.cancelUrlTpl.replace("{id}", encodeURIComponent(id)), {
           method: "POST",
@@ -1385,7 +1408,7 @@
       } catch (e) {
         showError(`Could not cancel: ${e.message}`);
       } finally {
-        cancelBtn.disabled = false;
+        buttons.forEach(b => { b.disabled = false; });
       }
     }
     // Drop our stream too, so the UI unwinds without waiting for the
@@ -1396,7 +1419,7 @@
       state.detached = false;
       clearLive(); setBusy(false); forgetInFlight();
     }
-  });
+  }
 
   const stage = { phase: "", pos: -1, step: null, total: null };
   let sawResult = false;

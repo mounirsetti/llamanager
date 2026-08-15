@@ -114,6 +114,21 @@
     border: 2px solid var(--bg-3); border-top-color: var(--accent);
     border-radius: 50%; animation: gen-spin 0.8s linear infinite;
   }
+  /* Cancel lives on the tile being generated, not on the composer: the
+     thing you want to stop is the one you are looking at. */
+  .gen-live__cancel {
+    position: absolute; top: 8px; right: 8px; z-index: 2;
+    width: 22px; height: 22px; padding: 0; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--bg-3); border-radius: 50%;
+    background: var(--bg-2); color: var(--fg-2);
+    font-size: 0.75rem; cursor: pointer;
+    transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+  }
+  .gen-live__cancel:hover {
+    color: var(--danger, var(--accent)); border-color: currentColor;
+    background: var(--bg-1);
+  }
   @keyframes gen-spin { to { transform: rotate(360deg); } }
 
   .gen-empty {
@@ -346,7 +361,16 @@
   }
 </style>
 
-<form id="lm-img-composer" class="lm-img-form" autocomplete="off">
+{# hx-boost="false" is load-bearing here, exactly as on the images page:
+   base.html wraps the content block in hx-boost="true" + hx-ext="morph", and
+   boost intercepts form *submits* too. Pressing Generate fired a boosted GET
+   /ui/videos alongside the real POST; the morphed response replaced #gen-grid
+   underneath the running job, so the live tile and its progress were written
+   to detached nodes and the page showed nothing. Only Ctrl+Enter (which never
+   raises a submit event) appeared to work. See images.html for the long
+   version. #}
+<form id="lm-img-composer" class="lm-img-form" autocomplete="off"
+      hx-boost="false">
   <div class="gen-shell">
 
     {# ---- Feed ---- #}
@@ -406,7 +430,6 @@
         <div class="gen-bar__actions">
           <button type="button" class="gen-iconbtn" id="gen-attach" title="Attach first-frame image" hidden>📎</button>
           <button type="button" class="gen-iconbtn" id="gen-history-btn" title="Prompt history">🕘</button>
-          <button type="button" class="gen-iconbtn" id="lm-img-cancel" title="Cancel" hidden>✕</button>
           <button type="submit" class="lm-btn lm-btn--primary gen-generate" id="lm-img-generate">Generate</button>
         </div>
       </div>
@@ -443,7 +466,8 @@
     mediaKind: "video",
     galleryUrl: "/ui/images/gallery",
     fileUrlPrefix: "/ui/images/file/",
-    generationsUrl: "/v1/videos/generations"
+    generationsUrl: "/v1/videos/generations",
+    cancelUrlTpl: "/admin/queue/{id}/cancel"
   };
 </script>
 
@@ -453,7 +477,8 @@
   const $ = (id) => document.getElementById(id);
   const HISTORY_KEY = "lm_img_prompt_history";
 
-  const state = { nextBefore: null, inFlight: false, abort: null, seenUrls: new Set(), refs: [] };
+  const state = { nextBefore: null, inFlight: false, abort: null, requestId: null,
+                  seenUrls: new Set(), refs: [] };
 
   const modelSel   = $("lm-img-model");
   const profileSel = $("lm-img-profile");
@@ -463,7 +488,6 @@
   const seedDice   = $("lm-img-seed-dice");
   const form       = $("lm-img-composer");
   const submitBtn  = $("lm-img-generate");
-  const cancelBtn  = $("lm-img-cancel");
   const errorEl    = $("lm-img-error");
   const engineHint = $("lm-img-engine-hint");
 
@@ -1010,8 +1034,11 @@
       <div class="gen-live__spinner"></div>
       <div class="gen-live__phase">Queued…</div>
       <div class="gen-live__bar"><div class="gen-live__fill"></div></div>
-      <div class="gen-live__prompt"></div>`;
+      <div class="gen-live__prompt"></div>
+      <button type="button" class="gen-live__cancel" title="Cancel this generation" aria-label="Cancel this generation">✕</button>`;
     div.querySelector(".gen-live__prompt").textContent = prompt;
+    div.querySelector(".gen-live__cancel")
+       .addEventListener("click", cancelGeneration);
     grid.insertBefore(div, grid.firstChild);
     // Masonry rows are 4px; a tile with no span occupies one row and the
     // rest of the feed tiles straight over it.
@@ -1029,10 +1056,30 @@
   function setBusy(busy) {
     state.inFlight = busy;
     submitBtn.disabled = busy;
-    cancelBtn.hidden = !busy;
     hintEl.innerHTML = busy ? "Generating — you can keep browsing the feed." : "&nbsp;";
   }
-  cancelBtn.addEventListener("click", () => { if (state.abort) state.abort.abort(); });
+  /* Cancel must reach the server: aborting our own stream only stops the
+     page listening, and a video render is minutes of GPU time. */
+  async function cancelGeneration() {
+    const id = state.requestId;
+    const btn = liveCard ? liveCard.querySelector(".gen-live__cancel") : null;
+    if (btn) btn.disabled = true;
+    if (id) {
+      try {
+        const r = await fetch(cfg.cancelUrlTpl.replace("{id}", encodeURIComponent(id)), {
+          method: "POST",
+          headers: cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : {},
+          credentials: "same-origin",
+        });
+        if (!r.ok && r.status !== 404) showError(`Could not cancel: HTTP ${r.status}`);
+      } catch (e) {
+        showError(`Could not cancel: ${e.message}`);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+    if (state.abort) state.abort.abort();
+  }
 
   const stage = { phase: "", pos: -1, step: null, total: null };
   function renderStage() {
@@ -1129,6 +1176,9 @@
         body: JSON.stringify(body), signal: ctrl.signal, credentials: "same-origin",
       });
       if (!r.ok) { const t = await r.text(); throw new Error(`HTTP ${r.status}: ${t.slice(0, 240)}`); }
+      // Needed to stop the job server-side; a dropped stream alone leaves the
+      // GPU rendering a clip nobody is waiting for.
+      state.requestId = r.headers.get("x-llamanager-request-id") || null;
       const reader = r.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
@@ -1150,7 +1200,7 @@
         if (!promptEl.value.trim()) { promptEl.value = promptText; autosize(); }
       }
     } finally {
-      setBusy(false); state.abort = null; removeLive();
+      setBusy(false); state.abort = null; state.requestId = null; removeLive();
     }
   }
 
