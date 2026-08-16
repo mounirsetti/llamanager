@@ -325,10 +325,22 @@
     .chat-login-error { font-size: 0.8125rem; color: var(--bad); display: none; }
 
     /* Logo: show correct variant per theme */
-    .login-logo--light { display: none; }
-    .login-logo--dark { display: inline; }
-    [data-theme="light"] .login-logo--light { display: inline; }
-    [data-theme="light"] .login-logo--dark { display: none; }
+    /* Shared wordmark lockup — same two numbers as base.html and
+       assets/logo.svg (tools/build_brand_assets.py). */
+    .lm-wordmark {
+      --wm-dot: 0.21em;
+      --wm-gap: 0.26em;
+      font-family: 'Fraunces', Georgia, serif; font-weight: 400;
+      font-variation-settings: 'opsz' 96, 'SOFT' 30;
+      letter-spacing: -0.015em; color: var(--fg-0);
+      display: inline-flex; align-items: center; gap: var(--wm-gap);
+      white-space: nowrap;
+    }
+    .lm-wordmark__dot {
+      width: var(--wm-dot); height: var(--wm-dot); border-radius: 999px;
+      background: var(--accent); flex-shrink: 0; align-self: center;
+      transform: translateY(0.06em);
+    }
     .login-theme { margin-top: 8px; }
 
     /* Per-message thinking blocks */
@@ -491,8 +503,7 @@
   <!-- Login screen -->
   <div id="login-screen" class="chat-login">
     <div style="text-align: center;">
-      <img src="/logo-dark.svg" alt="llamanager" class="login-logo login-logo--dark" style="height: 36px; margin-bottom: 6px;">
-      <img src="/logo.svg" alt="llamanager" class="login-logo login-logo--light" style="height: 36px; margin-bottom: 6px;">
+      <div class="lm-wordmark" style="font-size: 1.5rem; margin-bottom: 6px;">llamanager<span class="lm-wordmark__dot"></span></div>
       <div style="font-size: 0.6875rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-2);">chat</div>
     </div>
     <div class="chat-login-box">

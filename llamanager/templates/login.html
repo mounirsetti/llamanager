@@ -112,23 +112,23 @@
       flex-direction: column;
       gap: 28px;
     }
-    .brand {
-      display: flex;
-      align-items: baseline;
-      gap: 8px;
-      font-family: 'Fraunces', Charter, Georgia, serif;
-      font-size: 1.5rem;
-      font-variation-settings: 'opsz' 96;
-      letter-spacing: -0.015em;
+    /* Shared wordmark lockup — same two numbers as base.html and
+       assets/logo.svg (tools/build_brand_assets.py). */
+    .lm-wordmark {
+      --wm-dot: 0.21em;
+      --wm-gap: 0.26em;
+      font-family: 'Fraunces', Georgia, serif; font-weight: 400;
+      font-variation-settings: 'opsz' 96, 'SOFT' 30;
+      letter-spacing: -0.015em; color: var(--fg-0);
+      display: inline-flex; align-items: center; gap: var(--wm-gap);
+      white-space: nowrap;
     }
-    .brand::after {
-      content: '';
-      width: 7px;
-      height: 7px;
-      border-radius: 999px;
-      background: var(--accent);
-      transform: translateY(-3px);
+    .lm-wordmark__dot {
+      width: var(--wm-dot); height: var(--wm-dot); border-radius: 999px;
+      background: var(--accent); flex-shrink: 0; align-self: center;
+      transform: translateY(0.06em);
     }
+    .brand { font-size: 1.5rem; }
     h1 {
       font-family: 'Fraunces', Charter, Georgia, serif;
       font-size: clamp(2rem, 2vw + 1rem, 2.5rem);
@@ -208,7 +208,7 @@
 </head>
 <body>
   <div class="card">
-    <div class="brand">llamanager</div>
+    <div class="lm-wordmark brand">llamanager<span class="lm-wordmark__dot"></span></div>
     <div>
       <h1>Sign in <em>with an admin key</em></h1>
       <p class="lede">Paste a bearer key from <code class="footnote">~/.llamanager</code> or the bootstrap key printed on first launch.</p>

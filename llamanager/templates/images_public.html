@@ -117,6 +117,22 @@
     .img-login-box input:focus { outline: 0; border-color: var(--accent); }
     .img-login-box .lm-btn--primary { padding: 11px 12px; border-radius: 10px; font-size: 0.875rem; }
     .img-login-error { color: var(--bad); font-size: 0.8125rem; min-height: 1.2em; }
+    /* Shared wordmark lockup — same two numbers as base.html and
+       assets/logo.svg (tools/build_brand_assets.py). */
+    .lm-wordmark {
+      --wm-dot: 0.21em;
+      --wm-gap: 0.26em;
+      font-family: 'Fraunces', Georgia, serif; font-weight: 400;
+      font-variation-settings: 'opsz' 96, 'SOFT' 30;
+      letter-spacing: -0.015em; color: var(--fg-0);
+      display: inline-flex; align-items: center; gap: var(--wm-gap);
+      white-space: nowrap;
+    }
+    .lm-wordmark__dot {
+      width: var(--wm-dot); height: var(--wm-dot); border-radius: 999px;
+      background: var(--accent); flex-shrink: 0; align-self: center;
+      transform: translateY(0.06em);
+    }
     .img-login__brand {
       font-family: 'Fraunces', Georgia, serif; font-size: 1.5rem; font-weight: 400;
       font-variation-settings: 'opsz' 120, 'SOFT' 40; color: var(--fg-0);
@@ -125,9 +141,6 @@
       font-size: 0.625rem; letter-spacing: 0.16em; text-transform: uppercase;
       color: var(--fg-3); margin-top: 4px;
     }
-    .login-logo--light { display: none; }
-    [data-theme="light"] .login-logo--light { display: inline; }
-    [data-theme="light"] .login-logo--dark { display: none; }
     .theme-btns { display: flex; gap: 4px; }
     .theme-btns button {
       /* Icon-only: three options in the width the two words used to take. */
@@ -172,9 +185,12 @@
       display: flex; align-items: center; justify-content: space-between;
       padding: 0 2px 10px; gap: 12px;
     }
-    .gen-topbar__brand { display: flex; align-items: center; gap: 8px; }
-    .gen-topbar__brand img { height: 22px; }
-    .gen-topbar__brand span {
+    .gen-topbar__brand { display: flex; align-items: baseline; gap: 8px; }
+    /* Sized to the 22px-tall logo image this used to be. */
+    .gen-topbar__wordmark { font-size: 1rem; }
+    /* Scoped to the page label: an unscoped `span` rule now also matches the
+       wordmark and its dot, which live in spans. */
+    .gen-topbar__label {
       font-size: 0.625rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg-3);
     }
     .gen-topbar__actions { display: flex; align-items: center; gap: 8px; }
@@ -444,7 +460,7 @@
   <!-- Login screen -->
   <div id="login-screen" class="img-login">
     <div style="text-align: center;">
-      <div class="img-login__brand">llamanager</div>
+      <div class="lm-wordmark img-login__brand">llamanager<span class="lm-wordmark__dot"></span></div>
       <div class="img-login__eyebrow">Image studio</div>
     </div>
     <div class="img-login-box">
@@ -468,9 +484,8 @@
 
       <div class="gen-topbar">
         <div class="gen-topbar__brand">
-          <img src="/logo-dark.svg" alt="llamanager" class="login-logo--dark">
-          <img src="/logo.svg" alt="llamanager" class="login-logo--light">
-          <span>images</span>
+          <span class="lm-wordmark gen-topbar__wordmark">llamanager<span class="lm-wordmark__dot"></span></span>
+          <span class="gen-topbar__label">images</span>
         </div>
         <div class="gen-topbar__actions">
           <div class="theme-btns" role="group">

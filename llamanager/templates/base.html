@@ -189,27 +189,54 @@
       overflow-y: auto;
       overscroll-behavior: contain;
     }
-    .lm-brand {
+    /* The wordmark lockup, in one place.
+     *
+     * Every surface used to hand-roll this — the rail with a flex gap *and*
+     * a margin (9px in total), the login with ::after and a translateY, the
+     * public pages with an <img> of a differently-shaped SVG, and the public
+     * login with no dot at all. assets/logo.svg is generated from the same
+     * two numbers (tools/build_brand_assets.py), so the drawn and the typed
+     * wordmark are now the same lockup.
+     *
+     * --wm-dot is a size, not a colour: in the rail the dot doubles as the
+     * llama-server status light, elsewhere it is the accent. */
+    .lm-wordmark {
+      --wm-dot: 0.21em;
+      --wm-gap: 0.26em;
       font-family: 'Fraunces', 'Iowan Old Style', Charter, Georgia, serif;
-      font-size: 1.375rem;
       font-weight: 400;
       font-variation-settings: 'opsz' 96, 'SOFT' 30;
       letter-spacing: -0.015em;
       color: var(--fg-0);
-      display: flex;
-      align-items: baseline;
-      gap: 3px;
+      display: inline-flex;
+      align-items: center;      /* optical, not baseline: the dot has none */
+      gap: var(--wm-gap);
+      white-space: nowrap;
+    }
+    .lm-wordmark__dot {
+      width: var(--wm-dot);
+      height: var(--wm-dot);
+      border-radius: 999px;
+      background: var(--accent);
+      flex-shrink: 0;
+      /* Sit on the x-height, where the drawn mark puts it. */
+      align-self: center;
+      transform: translateY(0.06em);
+    }
+    .lm-brand {
+      font-size: 1.375rem;
     }
     .lm-brand::after { display: none; }
+    /* The rail's dot is the status light: bigger than the brand dot so it
+       reads as a state, and coloured by it. */
     .lm-status-dot {
-      display: inline-block;
-      width: 7px;
-      height: 7px;
+      --wm-dot: 7px;
+      width: var(--wm-dot);
+      height: var(--wm-dot);
       border-radius: 999px;
-      margin-left: 6px;
-      vertical-align: middle;
-      transform: translateY(-1px);
       flex-shrink: 0;
+      align-self: center;
+      transform: translateY(0.06em);
     }
     .lm-status-dot--running {
       background: var(--ok);
@@ -1693,10 +1720,12 @@
   <div class="lm-shell">
     <aside class="lm-rail">
       <div style="display:flex;flex-direction:column;gap:6px;">
-        <a href="/ui/" class="lm-brand" style="position:relative; text-decoration:none; color:inherit;">
+        <a href="/ui/" class="lm-wordmark lm-brand" style="text-decoration:none; color:inherit;">
           llamanager
-          {# Override the ::after dot with a status-coloured one #}
-          <span class="lm-status-dot lm-status-dot--{{ dot_status }}" aria-label="llama-server {{ dot_status }}"></span>
+          {# Same lockup as assets/logo.svg; here the dot carries the
+             llama-server state instead of the accent colour. #}
+          <span class="lm-wordmark__dot lm-status-dot lm-status-dot--{{ dot_status }}"
+                aria-label="llama-server {{ dot_status }}"></span>
         </a>
         {% if dot_status == 'running' %}
         <div class="lm-meta">local inference, supervised</div>
