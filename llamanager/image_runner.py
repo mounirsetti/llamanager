@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import engines, exclusive as _exclusive, runtime_state as rt
+from .auth import validate_origin_name
 from .config import Config, Profile, ENGINE_FAMILY, detect_engine_for_path
 from .db import DB
 from .engines._base import ImageRequest, ProgressEvent
@@ -63,10 +64,18 @@ class ImageResult:
 
 
 def _gallery_dir(cfg: Config, origin: str) -> Path:
-    """Per-day, per-origin output directory under cfg.images_dir."""
-    safe_origin = "".join(c for c in origin if c.isalnum() or c in "-_") or "anon"
+    """Per-day, per-origin output directory under cfg.images_dir.
+
+    The origin name is used verbatim. It is validated at creation
+    (``auth.validate_origin_name``) so that exactly this mapping is injective;
+    sanitising here instead silently merged distinct origins into one
+    directory, and the gallery routes then let each read the other's history.
+    An origin predating that validation fails loudly here rather than writing
+    into somebody else's folder.
+    """
+    validate_origin_name(origin)
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    d = cfg.images_dir / day / safe_origin
+    d = cfg.images_dir / day / origin
     d.mkdir(parents=True, exist_ok=True)
     return d
 

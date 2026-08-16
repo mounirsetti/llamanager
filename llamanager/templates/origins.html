@@ -123,7 +123,12 @@
     <div class="lm-form-row">
       <div class="lm-field">
         <label class="lm-field-label" for="origin-name">Name</label>
-        <input id="origin-name" class="lm-input" type="text" name="name" required>
+        {# The name is also this origin's gallery directory, which is what
+           keeps its generations private, so the shape is enforced server-side
+           too (auth.validate_origin_name). #}
+        <input id="origin-name" class="lm-input" type="text" name="name" required
+               pattern="[A-Za-z0-9][A-Za-z0-9_\-]{0,63}" maxlength="64"
+               title="Letters, digits, '-' or '_'; starts with a letter or digit. This is also the name of the origin's private gallery folder.">
       </div>
       <div class="lm-field" style="max-width: 9rem;">
         <label class="lm-field-label" for="origin-priority">Priority</label>

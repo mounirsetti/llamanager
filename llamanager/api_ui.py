@@ -2388,8 +2388,19 @@ async def origins_create_ui(request: Request, name: str = Form(...),
             error=f"origin '{name}' already exists",
         ), status_code=409)
     al = _parse_allowed_models(allow_all, allowed_models)
-    origin, key = am.create_origin(name=name, priority=priority,
-                                   allowed_models=al, is_admin=is_admin)
+    try:
+        origin, key = am.create_origin(name=name, priority=priority,
+                                       allowed_models=al, is_admin=is_admin)
+    except ValueError as e:
+        # Name shape is enforced because it doubles as the gallery directory
+        # (auth.validate_origin_name); show it inline like the duplicate case.
+        return templates.TemplateResponse(request, "origins.html", _ctx(
+            request,
+            origins=[o.to_public() for o in am.list_origins()],
+            all_model_ids=_all_model_ids(request),
+            new_key=None,
+            error=str(e),
+        ), status_code=400)
     return templates.TemplateResponse(request, "origins.html", _ctx(
         request,
         origins=[o.to_public() for o in am.list_origins()],

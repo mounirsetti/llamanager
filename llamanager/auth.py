@@ -21,6 +21,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -33,6 +34,32 @@ from argon2.exceptions import VerifyMismatchError
 from .db import DB
 
 log = logging.getLogger(__name__)
+
+#: An origin's name IS its gallery directory on disk (see
+#: ``image_runner._gallery_dir``), and that directory is the boundary that
+#: keeps one origin from reading another's generations. The boundary only
+#: holds if name -> directory is injective, so names are restricted to
+#: characters that pass through it unchanged instead of being sanitised at
+#: write time. Sanitising was the bug: "gal probe" and "gal.probe" are two
+#: distinct origins that both stripped to "galprobe", and each could list and
+#: download the other's images.
+ORIGIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+def validate_origin_name(name: str) -> str:
+    """Return ``name`` if it is usable as an origin name, else raise.
+
+    Raises ValueError naming the offending value — callers turn it into a 400.
+    """
+    if not isinstance(name, str) or not ORIGIN_NAME_RE.match(name):
+        raise ValueError(
+            f"invalid origin name {name!r}: use 1-64 characters of letters, "
+            "digits, '-' or '_', starting with a letter or digit. The name is "
+            "also the origin's gallery directory, and anything looser would "
+            "let two origins share one directory."
+        )
+    return name
+
 
 _HASHER = PasswordHasher()
 _KEY_PREFIX = "lm_"  # so a stray key in a logfile is identifiable.
@@ -277,6 +304,7 @@ class AuthManager:
     def create_origin(self, *, name: str, priority: int | None = None,
                       allowed_models: list[str] | None = None,
                       is_admin: bool = False) -> tuple[Origin, str]:
+        validate_origin_name(name)
         key = generate_key()
         origin_id = self._insert(
             name=name,

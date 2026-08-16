@@ -721,11 +721,11 @@ def create_app(config_path: Path | None = None,
             return JSONResponse({"detail": "kind must be image or video"},
                                 status_code=400)
         origin = await _origin_from_request(request)
-        # Mirror the on-disk name produced by image_runner._gallery_dir
-        safe_origin = "".join(c for c in origin.name
-                              if c.isalnum() or c in "-_") or "anon"
+        # The directory name IS the origin name (image_runner._gallery_dir);
+        # no sanitising here, because a many-to-one transform is what let two
+        # origins share a gallery.
         payload = _list_gallery(cfg.images_dir,
-                                origin_filter=safe_origin,
+                                origin_filter=origin.name,
                                 limit=limit, before=before, kind=kind)
         return JSONResponse(payload)
 
@@ -740,9 +740,7 @@ def create_app(config_path: Path | None = None,
         from .api_ui import _safe_path_components, _gallery_media_type
         from fastapi.responses import FileResponse as _FileResponse
         bearer_origin = await _origin_from_request(request)
-        safe_origin = "".join(c for c in bearer_origin.name
-                              if c.isalnum() or c in "-_") or "anon"
-        if origin != safe_origin:
+        if origin != bearer_origin.name:
             raise HTTPException(status_code=403,
                                 detail="cannot access another origin's gallery")
         _safe_path_components(day, origin, name)

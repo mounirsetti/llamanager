@@ -348,10 +348,13 @@ async def origins_create(request: Request, body: CreateOriginBody,
     am: AuthManager = request.app.state.auth
     if am.get_origin_by_name(body.name):
         raise HTTPException(status_code=409, detail="origin name already exists")
-    origin, key = am.create_origin(
-        name=body.name, priority=body.priority,
-        allowed_models=body.allowed_models, is_admin=body.is_admin,
-    )
+    try:
+        origin, key = am.create_origin(
+            name=body.name, priority=body.priority,
+            allowed_models=body.allowed_models, is_admin=body.is_admin,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return JSONResponse({"origin": origin.to_public(), "api_key": key},
                         status_code=201)
 
