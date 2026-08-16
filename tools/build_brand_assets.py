@@ -162,6 +162,10 @@ def rasterise() -> None:
         print("skip PNGs: pip install playwright && playwright install chromium")
         return
     jobs = [("app-icon.svg", "icon-light"), ("app-icon-dark.svg", "icon-dark")]
+    # The raster wordmarks served at /logo.png. Cut from the same SVG so they
+    # cannot drift back to an older lockup — they carried the overlapping dot
+    # for months after the SVG was fixed, because nothing regenerated them.
+    wordmarks = [("logo.svg", "logo"), ("logo-dark.svg", "logo-dark")]
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
         for src, stem in jobs:
@@ -174,6 +178,17 @@ def rasterise() -> None:
                 page.screenshot(path=str(ASSETS / f"{stem}-{px}.png"))
                 page.close()
                 print(f"wrote {stem}-{px}.png")
+        for src, stem in wordmarks:
+            svg = (ASSETS / src).read_text(encoding="utf-8")
+            h = 144
+            w = round(h * 256 / 72)                # the wordmark's aspect
+            page = browser.new_page(viewport={"width": w, "height": h})
+            page.set_content(
+                f'<body style="margin:0">{svg.replace(chr(60) + "svg ", chr(60) + f"svg width={w} height={h} ")}</body>')
+            page.wait_for_timeout(120)
+            page.screenshot(path=str(ASSETS / f"{stem}.png"), omit_background=True)
+            page.close()
+            print(f"wrote {stem}.png ({w}x{h})")
         browser.close()
 
 
