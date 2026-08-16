@@ -11,17 +11,50 @@
 
   <script>
     (function () {
-      try {
-        var stored = localStorage.getItem('lm-theme');
-        var theme = stored || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
-        document.documentElement.setAttribute('data-theme', theme);
+      var MQ = window.matchMedia('(prefers-color-scheme: light)');
+      function resolve(pref) {
+        return (pref === 'light' || pref === 'dark')
+          ? pref : (MQ.matches ? 'light' : 'dark');
+      }
+      function apply(pref) {
+        var theme = resolve(pref), root = document.documentElement;
+        root.setAttribute('data-theme', theme);         // what the CSS reads
+        root.setAttribute('data-theme-pref', pref);     // what the buttons read
         var fav = document.getElementById('lm-favicon');
         var tc = document.getElementById('lm-theme-color');
         if (fav) fav.href = theme === 'light' ? '/favicon.svg' : '/favicon-dark.svg';
         if (tc) tc.content = theme === 'light' ? '#f8f6f3' : '#201e17';
+        var btns = document.querySelectorAll('[data-theme-set]');
+        for (var i = 0; i < btns.length; i++) {
+          btns[i].setAttribute(
+            'aria-pressed',
+            btns[i].getAttribute('data-theme-set') === pref ? 'true' : 'false');
+        }
+      }
+      // Page scripts drive the switcher through these two.
+      window.__lmSetTheme = function (pref) {
+        try { localStorage.setItem('lm-theme', pref); } catch (e) {}
+        apply(pref);
+      };
+      window.__lmSyncTheme = function () {
+        apply(document.documentElement.getAttribute('data-theme-pref') || 'system');
+      };
+      try {
+        var stored = localStorage.getItem('lm-theme');
+        // Anything else (absent, or an old value) means "follow the system",
+        // which is what this page did before the preference was explicit.
+        apply(stored === 'light' || stored === 'dark' ? stored : 'system');
       } catch (e) {
         document.documentElement.setAttribute('data-theme', 'dark');
       }
+      // Follow the OS live while the preference is "system" — no reload.
+      var onOsChange = function () {
+        if (document.documentElement.getAttribute('data-theme-pref') === 'system') {
+          apply('system');
+        }
+      };
+      if (MQ.addEventListener) MQ.addEventListener('change', onOsChange);
+      else if (MQ.addListener) MQ.addListener(onOsChange);
     })();
   </script>
 
