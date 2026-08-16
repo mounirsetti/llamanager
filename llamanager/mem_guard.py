@@ -497,10 +497,18 @@ class SwapIoSampler:
 
     def __init__(self) -> None:
         self._prev: tuple[float, int, int] | None = None   # (ts, pin, pout)
-        self._rate: float | None = None
+        self._rate: tuple[float, float] | None = None
 
-    def sample(self) -> float | None:
-        """MB/s of swap traffic (in + out), or None while unknown."""
+    def sample(self) -> tuple[float, float] | None:
+        """``(total, out)`` MB/s of swap traffic, or None while unknown.
+
+        The two directions mean opposite things and must not be added up for
+        the pressure decision. ``pswpout`` is the kernel evicting anonymous
+        pages — the box is short of RAM *now*. ``pswpin`` is a process
+        touching a page that was evicted earlier: the cost of a squeeze that
+        has already passed, and exactly what a box does while it *recovers*.
+        The total is kept for display only.
+        """
         counters = read_swap_io_pages()
         if counters is None:
             return None
@@ -516,8 +524,10 @@ class SwapIoSampler:
         if dt > self.MAX_DT:
             self._rate = None
             return None
-        pages = max(0, pin - prev[1]) + max(0, pout - prev[2])
-        self._rate = (pages * _PAGE_BYTES) / dt / (1024 ** 2)
+        mb = lambda pages: (pages * _PAGE_BYTES) / dt / (1024 ** 2)  # noqa: E731
+        pages_in = max(0, pin - prev[1])
+        pages_out = max(0, pout - prev[2])
+        self._rate = (mb(pages_in + pages_out), mb(pages_out))
         return self._rate
 
 
@@ -530,10 +540,14 @@ class MemState:
     ram_available_gb: float
     swap_total_gb: float
     swap_used_gb: float
-    #: Swap traffic in MB/s, or None when it could not be sampled (first
-    #: reading, non-Linux host, stale baseline). None means *unknown* — the
-    #: classifier simply doesn't consult the traffic signal.
+    #: Total swap traffic in MB/s (in + out), or None when it could not be
+    #: sampled (first reading, non-Linux host, stale baseline). Display only:
+    #: see ``swap_out_mb_s`` for the signal the classifier uses.
     swap_io_mb_s: float | None = None
+    #: Swap-*out* rate in MB/s — pages being evicted, i.e. real pressure.
+    #: None means *unknown*, and the classifier then skips the traffic signal
+    #: rather than reading it as zero.
+    swap_out_mb_s: float | None = None
 
     @property
     def ram_available_frac(self) -> float:
@@ -546,8 +560,13 @@ class MemState:
                 if self.swap_total_gb else 0.0)
 
     def summary(self) -> str:
-        io = ("" if self.swap_io_mb_s is None
-              else f", swap I/O {self.swap_io_mb_s:.1f} MB/s")
+        # Both numbers, because "50 MB/s of swap I/O" reads as an emergency
+        # when it is entirely page-ins from a squeeze that already ended.
+        io = ""
+        if self.swap_io_mb_s is not None:
+            io = f", swap I/O {self.swap_io_mb_s:.1f} MB/s"
+            if self.swap_out_mb_s is not None:
+                io += f" (out {self.swap_out_mb_s:.1f})"
         return (f"RAM {self.ram_available_gb:.1f}/{self.ram_total_gb:.1f} GB free, "
                 f"swap {self.swap_used_gb:.1f}/{self.swap_total_gb:.1f} GB used{io}")
 
@@ -556,12 +575,14 @@ def read_mem_state() -> MemState:
     vm = psutil.virtual_memory()
     sw = psutil.swap_memory()
     gb = lambda b: b / (1024 ** 3)  # noqa: E731
+    io = _SWAP_IO.sample()
     return MemState(
         ram_total_gb=gb(vm.total),
         ram_available_gb=gb(vm.available),
         swap_total_gb=gb(sw.total),
         swap_used_gb=gb(sw.used),
-        swap_io_mb_s=_SWAP_IO.sample(),
+        swap_io_mb_s=None if io is None else io[0],
+        swap_out_mb_s=None if io is None else io[1],
     )
 
 
@@ -575,7 +596,11 @@ def classify_pressure(state: MemState, th: MemThresholds) -> Pressure:
       once short of RAM, not that it is now. It only escalates while free RAM
       is itself below ``swap_gate_avail_frac``; otherwise a swap file left
       full by an old spike would pin the guard at CRITICAL forever.
-    * **Swap traffic** — live thrash, trusted unconditionally when known.
+    * **Swap traffic** — live thrash, trusted unconditionally when known,
+      but only the *out* direction. Page-ins are how a box recovers: after a
+      big render released its RAM this guard saw 37-55 MB/s of pure swap-in
+      with 46 of 61 GB free and called it CRITICAL, restarting the text
+      engine to reclaim memory that was already free.
     """
     level = Pressure.OK
     if state.ram_available_frac < th.crit_avail_frac:
@@ -588,11 +613,11 @@ def classify_pressure(state: MemState, th: MemThresholds) -> Pressure:
             level = Pressure.CRITICAL
         elif state.swap_used_frac > th.warn_swap_frac:
             level = max(level, Pressure.WARN)
-    # Swap traffic — the box is paging right now, regardless of headroom.
-    if state.swap_io_mb_s is not None:
-        if state.swap_io_mb_s > th.crit_swap_io_mb_s:
+    # Swap traffic — the box is *evicting* right now, regardless of headroom.
+    if state.swap_out_mb_s is not None:
+        if state.swap_out_mb_s > th.crit_swap_io_mb_s:
             level = Pressure.CRITICAL
-        elif state.swap_io_mb_s > th.warn_swap_io_mb_s:
+        elif state.swap_out_mb_s > th.warn_swap_io_mb_s:
             level = max(level, Pressure.WARN)
     return Pressure(level)
 

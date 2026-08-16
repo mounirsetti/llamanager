@@ -2823,6 +2823,10 @@ def _mem_guard_ctx(cfg) -> dict:
         # None until the sampler has two readings — the template renders "—".
         out["mem_swap_io_mb_s"] = (None if st.swap_io_mb_s is None
                                    else round(st.swap_io_mb_s, 1))
+        # The out-rate is the half that means pressure; the total on its own
+        # reads as alarming while the box is merely paging things back in.
+        out["mem_swap_out_mb_s"] = (None if st.swap_out_mb_s is None
+                                    else round(st.swap_out_mb_s, 1))
         out["mem_pressure"] = mem_guard.classify_pressure(
             st, mem_guard.MemThresholds.from_cfg(cfg)).name.lower()
     except Exception as e:  # noqa: BLE001 — display-only

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 
+import dataclasses
+
 import pytest
 
 from llamanager import mem_guard as mg
@@ -219,10 +221,13 @@ def test_cache_ram_scales_down_with_pressure():
 
 # ---------- pressure classification ----------
 
-def _state(avail_frac, swap_frac, ram=61.0, swap=8.0, io=None):
+def _state(avail_frac, swap_frac, ram=61.0, swap=8.0, io=None, io_out=None):
+    """``io`` is total traffic (display); ``io_out`` is the eviction rate the
+    classifier reads. Passing only ``io`` models traffic of unknown direction
+    — which must not escalate."""
     return mg.MemState(ram_total_gb=ram, ram_available_gb=ram * avail_frac,
                        swap_total_gb=swap, swap_used_gb=swap * swap_frac,
-                       swap_io_mb_s=io)
+                       swap_io_mb_s=io, swap_out_mb_s=io_out)
 
 
 @pytest.mark.parametrize("avail,swap,expected", [
@@ -253,13 +258,43 @@ def test_full_swap_with_free_ram_is_not_pressure():
     assert mg.classify_pressure(s, th) is mg.Pressure.OK
 
 
-def test_swap_traffic_escalates_regardless_of_headroom():
-    """Traffic is live thrash — it counts even with RAM to spare."""
+def test_swap_out_escalates_regardless_of_headroom():
+    """Eviction is live thrash — it counts even with RAM to spare."""
     th = mg.MemThresholds()
-    assert mg.classify_pressure(_state(0.50, 0.2, io=5.0), th) is mg.Pressure.WARN
-    assert mg.classify_pressure(_state(0.50, 0.2, io=50.0), th) is mg.Pressure.CRITICAL
+    assert mg.classify_pressure(
+        _state(0.50, 0.2, io=6.0, io_out=5.0), th) is mg.Pressure.WARN
+    assert mg.classify_pressure(
+        _state(0.50, 0.2, io=60.0, io_out=50.0), th) is mg.Pressure.CRITICAL
     # Unknown traffic (None) must not be read as zero *or* as pressure.
     assert mg.classify_pressure(_state(0.50, 0.2, io=None), th) is mg.Pressure.OK
+
+
+def test_swap_in_alone_is_recovery_not_pressure():
+    """2026-08-16: after a 14-minute MiniMax-H3 render released its RAM, the
+    box paged 19 GB of desktop back in. The guard summed both directions and
+    saw 37-55 MB/s with 46/61 GB free, logged CRITICAL four times and armed an
+    engine restart each time. Page-ins are the recovery, not the squeeze."""
+    th = mg.MemThresholds()
+    s = mg.MemState(ram_total_gb=60.9, ram_available_gb=46.2,
+                    swap_total_gb=72.0, swap_used_gb=28.2,
+                    swap_io_mb_s=55.4, swap_out_mb_s=0.0)
+    assert mg.classify_pressure(s, th) is mg.Pressure.OK
+    # The same box while it is actually being squeezed still escalates.
+    squeezed = dataclasses.replace(s, swap_out_mb_s=55.4)
+    assert mg.classify_pressure(squeezed, th) is mg.Pressure.CRITICAL
+
+
+def test_sampler_splits_the_two_directions(monkeypatch):
+    """The rate pair is (total, out): a burst of pure page-ins reports its
+    size in the total and zero in the out-rate."""
+    sampler = mg.SwapIoSampler()
+    pages = [(0, 0), (256 * 1024, 0)]        # 1 GiB in, nothing out
+    monkeypatch.setattr(mg, "read_swap_io_pages", lambda: pages.pop(0))
+    t = [1000.0, 1001.0]
+    monkeypatch.setattr(mg.time, "monotonic", lambda: t.pop(0))
+    assert sampler.sample() is None          # first reading has no baseline
+    total, out = sampler.sample()
+    assert round(total) == 1024 and out == 0.0
 
 
 def test_no_swap_box_ignores_swap_signal():
@@ -292,14 +327,16 @@ def test_swap_io_sampler_rate(monkeypatch):
     monkeypatch.setattr(mg.time, "monotonic", lambda: clock[0])
     s = mg.SwapIoSampler()
     assert s.sample() is None                 # first reading: no baseline yet
-    # 512 pages in + 512 out = 1024 pages x 4 KiB = 4 MiB over 2s = 2 MB/s.
+    # 512 pages in + 512 out = 1024 pages x 4 KiB = 4 MiB over 2s = 2 MB/s
+    # total, of which the out half is 1 MB/s. The pair is (total, out).
     counters.append((1512, 2512))
     clock[0] = 102.0
-    rate = s.sample()
-    assert rate == pytest.approx(1024 * mg._PAGE_BYTES / 2 / (1024 ** 2), rel=0.01)
+    total, out = s.sample()
+    assert total == pytest.approx(1024 * mg._PAGE_BYTES / 2 / (1024 ** 2), rel=0.01)
+    assert out == pytest.approx(512 * mg._PAGE_BYTES / 2 / (1024 ** 2), rel=0.01)
     # A quiet interval reads as zero, not as the previous rate.
     clock[0] = 104.0
-    assert s.sample() == 0.0
+    assert s.sample() == (0.0, 0.0)
     # A gap longer than MAX_DT re-baselines rather than averaging over it.
     clock[0] = 104.0 + mg.SwapIoSampler.MAX_DT + 1
     counters.append((99999, 99999))
