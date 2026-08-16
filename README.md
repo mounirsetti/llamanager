@@ -31,9 +31,9 @@
 
 ---
 
-llamanager runs on a single host you already own. It installs the inference engines, downloads model weights from Hugging Face, supervises the processes, queues requests with per-origin priorities, and exposes everything behind one OpenAI-compatible (and Anthropic-compatible) endpoint. Text and image families share the same dashboard, the same queue, and the same auth.
+llamanager runs on a single host you already own. It installs the inference engines, downloads model weights from Hugging Face, supervises the processes, queues requests with per-origin priorities, and exposes everything behind one OpenAI-compatible (and Anthropic-compatible) endpoint. Text, image, video and audio families share the same dashboard, the same queue, and the same auth.
 
-The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silicon. The image side runs three diffusion stacks: HiDream-O1-Image, FLUX 2 via `sd.cpp`, and Z-Image (Tongyi-MAI), with Z-Anime supported as a Z-Image fine-tune. New engines plug in as small adapter modules.
+The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silicon. The image side runs Z-Image (Tongyi-MAI, with Z-Anime as a fine-tune), HiDream-O1-Image, FLUX 2 via `sd.cpp`, Ideogram 4, and Krea 2 Turbo. The video side runs Wan 2.2 TI2V-5B and MiniMax-H3, writing mp4 into the same gallery. Most engines are one-shot `diffusers` subprocesses; where the community only ships pre-quantised weights `diffusers` cannot open, llamanager drives a private headless **ComfyUI** instead. New engines plug in as small adapter modules.
 
 <p align="center">
   <img src="assets/screenshot-llm-models.png" alt="llamanager LLM models page — installed models with sizes and per-model profiles, the loaded model highlighted, and the sticky text + image model picker across the top" width="900">
@@ -59,6 +59,10 @@ The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silic
   - [Download models](#download-models)
   - [Reference images (editing, composition, img2img)](#reference-images-editing-composition-img2img)
   - [Sharing the GPU with the text engine](#sharing-the-gpu-with-the-text-engine)
+- [Video models](#video-models)
+  - [Engines](#video-engines)
+  - [Generating video](#generating-video)
+  - [Fitting a clip in VRAM](#fitting-a-clip-in-vram)
 - [Speech-to-text (ASR)](#speech-to-text-asr)
   - [Install the engine](#install-the-engine)
   - [Add a model](#add-a-model)
@@ -109,18 +113,25 @@ Full design notes are in [`llamanager-spec.md`](llamanager-spec.md).
 
 ## Supported engines
 
-| family    | engine                       | inference path                          | install flow                                |
-|-----------|------------------------------|-----------------------------------------|---------------------------------------------|
-| text      | `llama` (llama.cpp)          | persistent HTTP server                  | auto-install from the LLM engines page      |
-| text      | `mlx`                        | persistent HTTP server (Apple Silicon)  | manual: `pip install mlx-lm`                |
-| diffusion | `hidream` (HiDream-O1-Image) | one-shot Python subprocess              | auto-install venv + deps                    |
-| diffusion | `flux2` (FLUX 2 via sd.cpp)  | one-shot `sd-cli` binary                | manual: download from sd.cpp releases       |
-| diffusion | `z_image` (Z-Image / Z-Anime)| one-shot Python subprocess (diffusers)  | auto-install venv + deps                    |
-| audio     | `asr` (Whisper, transformers)| warm HTTP worker (transformers)          | reuse the diffusion venv (1 click), or build a dedicated one |
-| audio     | `whispercpp` (whisper.cpp / GGML)| warm HTTP worker (native `whisper-cli`) | **Build from source with Vulkan** (1 click) |
-| audio     | `sherpa` (sherpa-onnx, streaming)| warm HTTP worker (onnxruntime)          | pip install (torch-free, 1 click)          |
+| family | engine | inference path | install flow |
+|--------|--------|----------------|--------------|
+| text  | `llama` (llama.cpp)               | persistent HTTP server                  | auto-install from the LLM engines page |
+| text  | `mlx`                             | persistent HTTP server (Apple Silicon)  | manual: `pip install mlx-lm` |
+| image | `z_image` (Z-Image / Z-Anime)     | one-shot Python subprocess (diffusers)  | auto-install venv + deps |
+| image | `hidream` (HiDream-O1-Image)      | one-shot Python subprocess              | auto-install venv + deps |
+| image | `flux2` (FLUX 2 via sd.cpp)       | one-shot `sd-cli` binary                | manual: download from sd.cpp releases |
+| image | `ideogram4` (Ideogram 4)          | one-shot Python subprocess              | auto-install venv + deps (weights are gated) |
+| image | `krea_comfy` (Krea 2 Turbo)       | one-shot job on a private ComfyUI       | install the shared ComfyUI engine once |
+| video | `wan` (Wan 2.2 TI2V-5B)           | one-shot Python subprocess (diffusers)  | auto-install venv + deps |
+| video | `minimax_h3_comfy` (MiniMax-H3)   | one-shot job on a private ComfyUI       | install the shared ComfyUI engine once |
+| video | `minimax_h3` (MiniMax-H3, diffusers) | one-shot Python subprocess           | auto-install venv + deps — see the note below |
+| audio | `asr` (Whisper, transformers)     | warm HTTP worker (transformers)         | reuse the diffusion venv (1 click), or build a dedicated one |
+| audio | `whispercpp` (whisper.cpp / GGML) | warm HTTP worker (native `whisper-cli`) | **Build from source with Vulkan** (1 click) |
+| audio | `sherpa` (sherpa-onnx, streaming) | warm HTTP worker (onnxruntime)          | pip install (torch-free, 1 click) |
 
-Adding a new engine is a single Python module in [`llamanager/engines/`](llamanager/engines/) plus three lines of registration. The existing engines live there as references — the three audio engines all speak one warm-worker protocol (`/healthz`, `/transcribe`, `/transcribe_pcm`), so the runner, streaming, and UI stay engine-agnostic.
+**The ComfyUI backend.** Two engines above don't call `diffusers` at all. For the big video models the community ships pre-quantised GGUF weights, and `diffusers` has no loader for them: `MiniMaxH3Transformer3DModel` has neither `from_single_file` nor a GGUF path, so the diffusers route has to quantise the bf16 weights on every load (measured at ~50 GB of host RAM on a 64 GB box, never completing). ComfyUI opens those files directly. llamanager installs one headless ComfyUI (`comfy`), and each model that needs it is a thin adapter that starts a private server on a free port, submits one frozen API-format workflow, copies the output, and shuts the server down. `minimax_h3` (the diffusers route) is still registered for hardware that can afford the bf16 weights; on a 32 GB card use `minimax_h3_comfy`.
+
+Adding a new engine is a single Python module in [`llamanager/engines/`](llamanager/engines/) plus three lines of registration. The existing engines live there as references — the three audio engines all speak one warm-worker protocol (`/healthz`, `/transcribe`, `/transcribe_pcm`), so the runner, streaming, and UI stay engine-agnostic, and the two ComfyUI-backed adapters share one backend module the same way.
 
 ## Platforms and GPUs
 
@@ -235,13 +246,13 @@ How "an update exists" is decided per engine:
   release tag; **MLX** against the latest PyPI version.
 - **llamanager** compares against the latest GitHub release tag (editable
   installs are skipped — update the checkout with `git pull` yourself).
-- **Diffusion engines** (`hidream`, `z_image`) track the `diffusers` release
-  llamanager pins and is tested against (currently `0.38.0`, the first release
-  that ships `ZImagePipeline`). Auto-update fires only when the engine's
-  installed `diffusers` is *older* than that pin — which happens when you
-  update llamanager to a build that bumped the pin. It never chases git `main`
-  or jumps ahead of the tested release, and only fires for an already-installed
-  engine. (`flux2` has no auto-install path, so no switch.)
+- **Diffusion engines** (`hidream`, `z_image`, `ideogram4`, `wan`) track the
+  `diffusers` release llamanager pins and is tested against. Auto-update fires
+  only when the engine's installed `diffusers` is *older* than that pin — which
+  happens when you update llamanager to a build that bumped the pin. It never
+  chases git `main` or jumps ahead of the tested release, and only fires for an
+  already-installed engine. (`flux2` has no auto-install path, so no switch;
+  the ComfyUI-backed models update with the `comfy` engine itself.)
 
 ## Install
 
@@ -572,19 +583,23 @@ the UI toggle, which orchestrate the transition correctly.
 
 ## Diffusion models
 
-Two pages cover the image side. The **Diffusion engines** page (`/ui/setup-diffusion`) is the one-stop shop for setup: per-engine setup cards, dependency installer, model downloader with progress, and the coexistence policy at the bottom. The **Diffusion models** page (`/ui/diffusion-models`) is where you manage what's actually installed: a catalog of known-good models joined against what's on disk, an Activate button to pick the dashboard/API default, and the per-image-model profile editor (CRUD + clone + materialize built-in defaults). The catalog rows for not-yet-installed entries link back to the engines page with the canonical HF repo pre-suggested.
+Two pages cover setup and inventory for both the image and video lanes. The **Diffusion engines** page (`/ui/setup-diffusion`) is the one-stop shop for setup: per-engine setup cards, dependency installer, model downloader with progress, and the coexistence policy at the bottom. The **Diffusion models** page (`/ui/diffusion-models`) is where you manage what's actually installed: a catalog of known-good models joined against what's on disk, an Activate button to pick the dashboard/API default, and the per-image-model profile editor (CRUD + clone + materialize built-in defaults). The catalog rows for not-yet-installed entries link back to the engines page with the canonical HF repo pre-suggested.
 
 Both pages also have CLI counterparts under `llamanager diffusion` — see [CLI](#cli).
 
-Three engines are wired today:
+Five image engines are wired today. Video models live on their own page — see [Video models](#video-models).
 
 | engine | layout | typical disk | typical VRAM | reference model |
 |--------|--------|--------------|--------------|-----------------|
 | Z-Image (Tongyi-MAI) | Diffusers pipeline (`model_index.json` + `transformer/`, `text_encoder/`, `vae/`) | ~20 GB | ~14 GB at bf16 | [Tongyi-MAI/Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image) |
 | HiDream-O1-Image | tokenizer + safetensors shards | ~33 GB | ~16 GB | [HiDream-ai/HiDream-O1-Image](https://huggingface.co/HiDream-ai/HiDream-O1-Image) |
 | FLUX 2 (sd.cpp) | flux*.gguf + ae.safetensors + text-encoder GGUF | varies by quant | ~12-27 GB | community GGUF re-hosts |
+| Ideogram 4 | Diffusers pipeline, fp8 (`diffusion_models/`, `text_encoders/`) | ~27.5 GB | fp8 on AMD; nf4 is CUDA-oriented per Ideogram | [ideogram-ai/ideogram-4-fp8](https://huggingface.co/ideogram-ai/ideogram-4-fp8) (gated, non-commercial) |
+| Krea 2 Turbo | ComfyUI layout (`diffusion_models/`, `text_encoders/`, `vae/`, `loras/`) | ~15 GB for the default set | fits a 32 GB card at Q6_K, whole pipeline resident | [Comfy-Org/Krea-2](https://huggingface.co/Comfy-Org/Krea-2) + [GGUF quants](https://huggingface.co/vantagewithai/Krea-2-Turbo-GGUF) |
 
 Z-Image's adapter also handles fine-tunes that ship the same Diffusers layout, including [SeeSee21/Z-Anime](https://huggingface.co/SeeSee21/Z-Anime). Z-Anime's full repo is 203 GB, so the download form lets you specify a `diffusers/` subfolder and pull only the runnable variant (~12-20 GB).
+
+Krea 2 Turbo runs only through ComfyUI. The 26 GB bf16 checkpoint has a diffusers pipeline, but on a 32 GB card it cannot reach 1024x1024 — Krea's masked attention falls back to the math SDPA backend on ROCm, so activations grow with tokens² — and its Qwen3-VL-4B conditioner takes ~12 minutes to reach the GPU from safetensors. The GGUF route loads the same conditioner in about a second and renders 1024x1024 at 8 steps in ~30 s, so that is the route llamanager ships. Guidance-distilled: 8 steps, cfg 1.0, no negative prompt. Style LoRAs are listed live from Krea's Hugging Face collection on the engines page and download into the model's own `loras/` folder.
 
 ### Install dependencies
 
@@ -594,7 +609,12 @@ Each engine card on the Diffusion engines page has an `Install dependencies` but
 |--------|---------------------|------------|
 | Z-Image | torch, transformers, accelerate, huggingface_hub, safetensors, Pillow, sentencepiece, `diffusers==0.38.0` (first release shipping `ZImagePipeline`) | ~8.5 GB |
 | HiDream | GPU-aware. On AMD: official ROCm wheels (torch+rocm7.2.1, torchvision, triton) from `repo.radeon.com` + pinned `transformers==4.57.1`, `accelerate==1.13.0`, `diffusers==0.38.0`, etc. On NVIDIA/CPU: generic CUDA/CPU torch + the same HF pins. | ~7.5–9 GB |
+| Ideogram 4 | torch + the official `ideogram-oss/ideogram4` package from git | ~9.5 GB |
+| Wan 2.2 | torch, transformers, accelerate, `diffusers` (WanPipeline), imageio + ffmpeg for mp4 muxing | ~9 GB |
+| ComfyUI | clones ComfyUI + ComfyUI-GGUF into its own venv, GPU-aware wheels (AMD gets ROCm torch **and** torchaudio from `repo.radeon.com` — ComfyUI imports torchaudio unconditionally) | ~10 GB |
 | FLUX 2 | (no auto-install — see below) | — |
+
+The ComfyUI engine is installed once and shared: both Krea 2 Turbo and MiniMax-H3 run on it, so their model cards only offer weight downloads, not a second dependency install.
 
 The installer streams pip's stdout into the page, so you can watch it work and cancel mid-flight. Failures surface inline with the last 200 KB of log.
 
@@ -619,7 +639,26 @@ For HiDream, point at `HiDream-ai/HiDream-O1-Image` and leave the subfolder blan
 
 For FLUX 2, the canonical fp16 weights live at `black-forest-labs/FLUX.2-dev`; for runnable GGUF quants search Hugging Face for community re-hosts.
 
-Downloads land in `~/.llamanager/models/<repo>/...` (or `<repo>/<subfolder>/...` for subfolder pulls). llamanager auto-detects the layout, registers the model with the right engine, and seeds default profiles on first detection (`z-image-fast`, `z-image-quality`; `hidream-dev`, `hidream-full`; `flux2-fast`, `flux2-quality`).
+Ideogram 4's weights are gated: accept the licence on
+[ideogram-ai/ideogram-4-fp8](https://huggingface.co/ideogram-ai/ideogram-4-fp8)
+and set `HF_TOKEN` before downloading. They are non-commercial.
+
+**Multi-part models.** Krea 2 Turbo and MiniMax-H3 are assembled from several
+uploaders — transformer, conditioner, VAE and LoRA each come from a different
+repo but must land in one folder for the adapter to detect the model. Their
+cards render one button per component, each carrying its own target directory,
+with a size and an "on disk" marker so you never re-fetch a part you already
+have. Pick one transformer quant (Q6_K is the default recommendation for Krea
+on a 32 GB card) plus the required conditioner and VAE; the rest are optional
+alternatives.
+
+Downloads land in `~/.llamanager/models/<repo>/...` (or `<repo>/<subfolder>/...`
+for subfolder pulls, or `<model>/<part>/...` for component pulls). llamanager
+auto-detects the layout, registers the model with the right engine, and seeds
+default profiles on first detection (`z-image-fast`, `z-image-quality`;
+`hidream-dev`, `hidream-full`; `flux2-fast`, `flux2-quality`; `kreac-best`,
+`kreac-draft`, `kreac-wide`; `wan-best`, `wan-5s`, `wan-draft`, `wan-720p`;
+`h3-turbo-4step`, `h3-turbo-8step`, `h3-full-50step`).
 
 ### Generating from the API
 
@@ -650,7 +689,17 @@ Omit `model` to use the saved default diffusion model from the top bar. Streamin
 | HiDream-O1-Image | 2–8 | Composition / multi-subject. Optionally steer layout with `layout_bboxes`. |
 | FLUX 2 / sd.cpp  | exactly 1 | img2img. Forwarded as sd-cli's `--init-img` with `--strength` controlling how much of the init image is preserved (`0.0` = exact copy, `1.0` = full re-generation). |
 | FLUX 2 / sd.cpp  | 2+ | Rejected with 400. sd-cli's init-image path is single-slot. |
-| Z-Image          | any | Currently ignored. The base Z-Image pipeline doesn't accept refs. |
+| Z-Image          | exactly 1 | img2img. `strength` sets how much of the init image survives. |
+| Ideogram 4       | any | Currently ignored — text-to-image only. |
+| Krea 2 Turbo     | any | Currently ignored. ComfyUI runs the text-to-image graph. |
+
+Video models take references on `/v1/videos/generations` in the same shape:
+
+| engine | refs | what it does |
+|---|---|---|
+| Wan 2.2 | 0 or 1 | With no image, text→video. With one, it becomes the first frame. |
+| MiniMax-H3 (ComfyUI) | exactly 1 | The opening frame. **Required** — the model is image-to-video, and a request without one is rejected before the GPU is touched. |
+| MiniMax-H3 (diffusers) | 1–2 | First and optional last keyframe. |
 
 Request fields (alongside the usual `prompt`, `model`, `size`, `n`, `seed`, `profile`, `response_format`, `stream`):
 
@@ -702,13 +751,39 @@ curl -X POST http://localhost:7200/v1/images/generations \
 
 ### Generating from the UI
 
-Open <http://localhost:7200/ui/images>. Three-pane workspace: an on-disk gallery on the left (every PNG under `~/.llamanager/images/YYYY-MM-DD/<origin>/`, newest first, lazy-loaded), the selected image plus its sidecar metadata in the center, and a schema-driven composer on the right.
+Open <http://localhost:7200/ui/images> (or `/ui/videos` for clips). One scrolling
+feed of everything on disk under `~/.llamanager/images/YYYY-MM-DD/<origin>/`,
+newest first, with the composer docked at the bottom. Tiles are shaped to the
+media rather than cropped to squares, so portrait, square and landscape sit
+side by side.
 
-The composer auto-renders the right fields per engine by walking each adapter's `profile_schema()` — the same mechanism the Diffusion models page uses for profile editing. Pick a model, optionally pick one of its profiles to pre-fill the override placeholders, then override any individual field per-request. Generation streams back via SSE so the `<progress>` bar advances step-by-step rather than just toggling between "Queued" and "Done". When the request finishes, the new image is auto-prepended to the gallery and selected.
+The composer auto-renders the right fields per engine by walking each adapter's
+`profile_schema()` — the same mechanism the Diffusion models page uses for
+profile editing. Pick a model, optionally pick one of its profiles to pre-fill
+the override placeholders, then override any individual field per-request.
+⌘/Ctrl+Enter generates without reaching for the button, and the prompt box
+empties on submit (the text stays on the live tile and in the history popover,
+so nothing is lost).
 
-Selected images surface their full sidecar (model, profile, seed, size, steps, guidance, duration) plus `Reuse prompt` / `Reuse seed` shortcuts that push the value back into the composer. Generated PNGs and a sidecar JSON live under `~/.llamanager/images/YYYY-MM-DD/<origin>/`. The gallery is size-capped (`[image].max_disk_gb = 10` by default, oldest-first GC).
+While a job runs, one **live tile per requested image** sits at the head of the
+feed, already the shape and size of the result. It shows the phase (queued,
+loading model, step *n*/*N*, saving), a progress bar, elapsed time and the
+prompt, and carries the **cancel** button — cancelling from any tile of a batch
+stops the run. When the image lands it replaces its own tile in place, so the
+answer to "where will it appear?" is always "right here". Progress streams over
+SSE, and because a generation is a queued job rather than a property of the
+page, reloading re-attaches to a run already in flight instead of losing it.
 
-There's also a public sibling page at `/images` for non-admin API-key holders. Same three-pane layout; instead of the admin session cookie it accepts a bearer key (pasted on a login screen, stored in localStorage) and scopes the gallery to that origin's own directory.
+Clicking a tile opens it full-size with its sidecar: model, profile, engine,
+size, steps, guidance, seed, **generation time** and when it was saved, plus
+`Reuse prompt` / `Reuse seed` / `Use as reference` shortcuts that push the value
+back into the composer. Each output writes a sidecar JSON next to it. The
+gallery is size-capped (`[image].max_disk_gb = 10` by default, oldest-first GC).
+
+Public siblings live at `/images` and `/videos` for non-admin API-key holders.
+Same layout; instead of the admin session cookie they accept a bearer key
+(pasted on a login screen, stored in localStorage) and scope the gallery to that
+origin's own directory.
 
 ### Sharing the GPU with the text engine
 
@@ -740,6 +815,80 @@ toggleable from the Slots page) which leaves every LLM slot loaded
 when an image task arrives.
 
 Cancellation: cancelling a queued image request removes it before it starts. Cancelling an in-flight one terminates the subprocess (SIGTERM, escalating to SIGKILL after 5 s) so the GPU is freed promptly.
+
+## Video models
+
+Video is its own family, with its own page (`/ui/videos`) and its own endpoint
+(`POST /v1/videos/generations`). Everything else is shared with the image lane:
+the same queue, the same per-origin priorities, the same gallery on disk, and
+the same profile editor. Clips are written as `.mp4` next to the images, and
+the gallery plays them on hover and in the lightbox.
+
+### <a id="video-engines"></a>Engines
+
+| engine | model | reference input | typical disk | notes |
+|--------|-------|-----------------|--------------|-------|
+| `wan` | [Wan 2.2 TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers) | 1 first frame (optional) | ~28 GB | text→video and image→video through `diffusers` |
+| `minimax_h3_comfy` | [MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) | 1 opening frame (**required**) | ~39 GB | image→video with audio, through ComfyUI |
+| `minimax_h3` | MiniMax-H3, diffusers route | 2 keyframes (first, last) | ~140 GB | bf16 only — see the ComfyUI note under [Supported engines](#supported-engines) |
+
+MiniMax-H3 is an image-to-video model: a request without a reference image is
+rejected before it reaches the GPU. Wan runs from a prompt alone, and takes an
+optional first frame.
+
+### Generating video
+
+```bash
+curl -sS http://localhost:7200/v1/videos/generations \
+  -H "Authorization: Bearer $LLAMANAGER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "model": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "profile": "wan-best",
+        "prompt": "a paper boat drifting down a rain gutter, macro, shallow depth of field",
+        "response_format": "url"
+      }'
+```
+
+Frame count and fps come from the selected profile (`video_num_frames`,
+`video_fps`); size, steps and guidance work exactly as they do for images. Send
+`"image": "<base64 or data URL>"` to drive image→video. `"stream": true` gives
+the same SSE progress comments as the image endpoint, and the finished clip is
+saved to the gallery either way.
+
+**Pick a profile explicitly.** A request that names no profile does *not* fall
+back to the model's saved default — that fallback only applies to the model set
+as the global default in the top bar. Without one, the engine's own built-in
+defaults apply, which for `wan` is 1280x704 at 121 frames: the heaviest bucket,
+and more than a 32 GB card can do (see below). The same is true from the UI,
+where the profile picker starts on *(use engine defaults)*.
+
+### Fitting a clip in VRAM
+
+Video attention is 3D — it spans every frame at once — so cost grows with
+(pixels × frames)², not linearly. Both video engines estimate the peak before
+they load anything and refuse with a specific message rather than dying in an
+allocator:
+
+```
+1280x704 x 121 frames needs ~112.3 GiB (27280 attention tokens) but this GPU
+has 31.9 GiB. Wan's 3D attention grows with tokens^2 and uses the math backend
+on ROCm. Lower the resolution or frame count (832x480 at 49 frames fits).
+```
+
+Measured on a 32 GB card (Radeon AI PRO R9700), for `wan`:
+
+| size | frames | peak VRAM | verdict |
+|------|--------|-----------|---------|
+| 832x480  | 49  | ~10 GB   | comfortable |
+| 1152x640 | 49  | ~17.3 GB | the quality/VRAM sweet spot (`wan-best`) |
+| 832x480  | 81  | ~19 GB   | longer clip, lower detail (`wan-5s`) |
+| 1280x704 | 121 | ~112 GB  | needs a much bigger card (`wan-720p`) |
+
+The seeded profiles cover the first three; `wan-720p` exists for hardware that
+can run it. If a generation fails with `rc=1`, the engine log
+(`~/.llamanager/logs/wan.log`, or the Logs page) holds the estimate and the
+suggestion.
 
 ## Speech-to-text (ASR)
 
