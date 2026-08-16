@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import (
     FileResponse, JSONResponse, RedirectResponse, Response,
 )
@@ -531,14 +531,46 @@ def create_app(config_path: Path | None = None,
 
     # ---- PWA support ----
 
+    #: One manifest per installable surface, keyed by the ``?app=`` value each
+    #: template states: (name, short_name, start_url, description).
+    #:
+    #: ``start_url`` is what a home-screen icon opens, and it is per-surface for
+    #: a reason. A single app-wide manifest sent EVERY install to "/ui/" — so a
+    #: non-admin key holder who added /images to their home screen was launched
+    #: into the operator console's login, which by design refuses their key
+    #: ("invalid admin key"), with no address bar in standalone display and no
+    #: link out. There is deliberately no default here: a page that links the
+    #: manifest must say which surface it is, or the request fails loudly.
+    _PWA_SURFACES = {
+        "admin": ("llamanager", "llamanager",
+                  "/ui/", "Local LLM inference manager"),
+        "chat": ("llamanager chat", "lm chat",
+                 "/chat", "Chat with locally-served models"),
+        "images": ("llamanager images", "lm images",
+                   "/images", "Generate images locally"),
+        "videos": ("llamanager videos", "lm videos",
+                   "/videos", "Generate video locally"),
+    }
+
     @app.get("/manifest.json", include_in_schema=False)
-    async def pwa_manifest():
+    async def pwa_manifest(request: Request):
         import json as _json
+        surface = request.query_params.get("app")
+        if surface not in _PWA_SURFACES:
+            raise HTTPException(
+                status_code=400,
+                detail=("/manifest.json requires ?app=<surface>, naming the "
+                        "page that links it; known surfaces: "
+                        + ", ".join(sorted(_PWA_SURFACES))),
+            )
+        name, short_name, start_url, description = _PWA_SURFACES[surface]
         manifest = {
-            "name": "llamanager",
-            "short_name": "llamanager",
-            "description": "Local LLM inference manager",
-            "start_url": "/ui/",
+            "name": name,
+            "short_name": short_name,
+            "description": description,
+            "start_url": start_url,
+            # Scope stays app-wide: an in-app link to another surface should
+            # open in the app, not bounce out to a browser tab.
             "scope": "/",
             "display": "standalone",
             "background_color": "#201e17",

@@ -11,7 +11,10 @@
 {% endif %}
 
 {% if new_key and new_key.key %}
-<aside class="lm-callout">
+{# data-lm-reveal: base.html scrolls this into view after the swap instead of
+   restoring the scroll position, so a key minted from the form at the bottom
+   of the page can't be missed. It is shown once and cannot be re-read. #}
+<aside class="lm-callout" data-lm-reveal>
   <div class="lm-callout-eyebrow">Shown once</div>
   <div class="lm-callout-title">New API key for &ldquo;{{ new_key.name }}&rdquo;</div>
   <p style="margin: 0; color: var(--fg-1); font-size: 0.875rem;">

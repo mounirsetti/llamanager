@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark light">
   <title>{% block title %}llamanager{% endblock %}</title>
   <link rel="icon" id="lm-favicon" href="/favicon-dark.svg" type="image/svg+xml">
-  <link rel="manifest" href="/manifest.json">
+  <link rel="manifest" href="/manifest.json?app=admin">
   <meta name="theme-color" id="lm-theme-color" content="#201e17">
 
   {# Theme is set before any paint to prevent a light-flash on dark
@@ -2544,7 +2544,21 @@
         // Fragment GETs (polls, search, fs-browser) leave pendingY untouched.
       });
       function restore(e) {
-        if (pendingY === null || e.detail.target !== document.body) return;
+        if (e.detail.target !== document.body) return;
+        // A swap that rendered a shown-once secret overrides keeping the
+        // operator's place: the new-key callout renders at the TOP of the
+        // page while the form that mints it sits at the bottom, so restoring
+        // the scroll position left the one thing they must copy offscreen.
+        var reveal = document.querySelector('[data-lm-reveal]');
+        if (reveal) {
+          pendingY = null;
+          var top = reveal.getBoundingClientRect().top + window.scrollY - 24;
+          if (top < 0) top = 0;
+          window.scrollTo(0, top);
+          requestAnimationFrame(function () { window.scrollTo(0, top); });
+          return;
+        }
+        if (pendingY === null) return;
         var y = pendingY;
         pendingY = null;
         window.scrollTo(0, y);
