@@ -15,7 +15,9 @@ engines stay long-running HTTP servers, image engines are tasks.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import io
 import logging
 import os
 import secrets
@@ -101,6 +103,42 @@ def _enforce_disk_cap(cfg: Config) -> None:
             continue
         if total <= cap_bytes:
             break
+
+
+#: Long side of the reference thumbnails stored in a sidecar. Big enough to
+#: recognise the picture in the details panel, small enough that eight of them
+#: (the per-request cap) stay well under a megabyte of JSON.
+_REF_THUMB_PX = 384
+
+
+def _ref_thumbnails(paths: list[Path]) -> list[str]:
+    """Downscaled data URIs for the reference images used by one generation.
+
+    The staged originals live under ``data_dir/refs/<request_id>`` and are
+    deleted as soon as the run finishes, so a sidecar that merely named them
+    would point at nothing. Embedding a thumbnail keeps the answer to "what
+    did I feed this?" attached to the output forever, survives the gallery's
+    disk-cap GC, needs no new route, and cannot leave orphans behind.
+
+    Best-effort by design: this is metadata, and a decode failure must never
+    cost the operator a finished image.
+    """
+    out: list[str] = []
+    for p in paths:
+        try:
+            from PIL import Image
+
+            with Image.open(p) as im:
+                im = im.convert("RGB")
+                im.thumbnail((_REF_THUMB_PX, _REF_THUMB_PX))
+                buf = io.BytesIO()
+                im.save(buf, format="JPEG", quality=72, optimize=True)
+            out.append("data:image/jpeg;base64,"
+                       + base64.b64encode(buf.getvalue()).decode("ascii"))
+        except Exception:  # noqa: BLE001 — metadata only
+            log.warning("could not thumbnail reference image %s", p,
+                        exc_info=True)
+    return out
 
 
 class ImageTaskRunner:
@@ -280,6 +318,13 @@ class ImageTaskRunner:
                             "steps": per_req.steps,
                             "seed": per_req.seed,
                         }
+                        # Which references went in. Kept as thumbnails
+                        # because the staged files are deleted below.
+                        if per_req.ref_images:
+                            thumbs = _ref_thumbnails(per_req.ref_images)
+                            if thumbs:
+                                sidecar_base["ref_thumbs"] = thumbs
+                            sidecar_base["ref_count"] = len(per_req.ref_images)
                         # What the request *asked for* is not always what
                         # runs: HiDream's dev recipe hardwires its step count
                         # and disables guidance, so a 28-step image could be

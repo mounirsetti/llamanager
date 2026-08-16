@@ -371,6 +371,44 @@
     }
     .gen-lb-meta__row { display: flex; gap: 8px; font-size: 0.8125rem; line-height: 1.4; }
     .gen-lb-meta__label { color: var(--fg-2); min-width: 78px; text-transform: uppercase; letter-spacing: 0.07em; font-size: 0.625rem; padding-top: 3px; }
+    /* References used by a generation — thumbnails carried in the sidecar,
+       since the staged originals are deleted when the run finishes. */
+    /* Gallery picker: choose a previously generated image as the first
+       frame, instead of hunting for a file you already made here. */
+    .gen-pick { position: fixed; inset: 0; z-index: 60; display: flex;
+      align-items: center; justify-content: center; padding: 24px;
+      background: oklch(0 0 0 / 0.62); }
+    .gen-pick[hidden] { display: none; }
+    .gen-pick__panel { background: var(--bg-1); border: 1px solid var(--bg-3);
+      border-radius: 12px; width: min(920px, 100%); max-height: 82vh;
+      display: flex; flex-direction: column; overflow: hidden; }
+    .gen-pick__head { display: flex; align-items: center; gap: 10px;
+      padding: 12px 14px; border-bottom: 1px solid var(--bg-3); }
+    .gen-pick__title { font-size: 0.8125rem; color: var(--fg-1); }
+    .gen-pick__hint { font-size: 0.6875rem; color: var(--fg-2); margin-left: auto; }
+    .gen-pick__grid { overflow-y: auto; padding: 12px; display: grid; gap: 8px;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+    .gen-pick__grid img { width: 100%; aspect-ratio: 1; object-fit: cover;
+      display: block; border: 1px solid var(--bg-3); border-radius: 8px;
+      cursor: pointer; transition: border-color 140ms ease, transform 140ms ease; }
+    .gen-pick__grid img:hover { border-color: var(--accent); transform: translateY(-2px); }
+    .gen-pick__empty { padding: 28px; text-align: center; color: var(--fg-2);
+      font-size: 0.8125rem; }
+    .gen-lb-refs { margin-top: 12px; }
+    .gen-lb-refs__label {
+      font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--fg-2); margin-bottom: 6px;
+    }
+    .gen-lb-refs__row { display: flex; gap: 6px; flex-wrap: wrap; }
+    .gen-lb-refs__row img {
+      width: 64px; height: 64px; object-fit: cover; display: block;
+      border: 1px solid var(--bg-3); border-radius: 6px; cursor: zoom-in;
+      transition: width 160ms ease, height 160ms ease;
+    }
+    .gen-lb-refs__row img.is-zoomed {
+      width: 100%; height: auto; max-height: 40vh; object-fit: contain;
+      cursor: zoom-out;
+    }
     .gen-lb-prompt { padding: 8px 10px; background: var(--bg-0); border-left: 2px solid var(--accent); font-size: 0.8125rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
     .gen-lb-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; padding-top: 8px; }
     .gen-lightbox__close {
@@ -515,7 +553,8 @@
           <textarea id="lm-img-prompt" class="gen-prompt" rows="1"
                     placeholder="Describe the video you want… (⌘/Ctrl+Enter to generate)"></textarea>
           <div class="gen-bar__actions">
-            <button type="button" class="gen-iconbtn" id="gen-attach" title="Attach reference image" hidden>📎</button>
+            <button type="button" class="gen-iconbtn" id="gen-attach" title="Attach reference image from a file" hidden>📎</button>
+            <button type="button" class="gen-iconbtn" id="gen-pickgallery" title="Pick a reference from the gallery" hidden>🖼</button>
             <button type="button" class="gen-iconbtn" id="gen-history-btn" title="Prompt history">🕘</button>
             <button type="submit" class="lm-btn lm-btn--primary gen-generate" id="lm-img-generate">Generate</button>
           </div>
@@ -527,6 +566,16 @@
   </form>
 
   <!-- Lightbox -->
+  <div class="gen-pick" id="gen-pick" hidden>
+    <div class="gen-pick__panel">
+      <div class="gen-pick__head">
+        <span class="gen-pick__title">Pick a first frame from the gallery</span>
+        <span class="gen-pick__hint" id="gen-pick-hint"></span>
+        <button type="button" class="lm-btn lm-btn--ghost lm-btn--xs" id="gen-pick-close">Close</button>
+      </div>
+      <div class="gen-pick__grid" id="gen-pick-grid"></div>
+    </div>
+  </div>
   <div class="gen-lightbox" id="gen-lightbox" hidden>
     <button type="button" class="gen-lightbox__close" id="gen-lb-close" aria-label="Close">✕</button>
     <div class="gen-lightbox__panel">
@@ -755,6 +804,7 @@
     function applyCaps() {
       const c = caps(); const max = c.ref_images_max || 0;
       attachBtn.hidden = max < 1;
+    pickBtn.hidden = max < 1;
       if (state.refs.length > max) state.refs = state.refs.slice(0, max);
       strengthWrap.hidden = !c.strength;
       keepAspWrap.hidden = !c.keep_original_aspect;
@@ -791,6 +841,71 @@
       });
     }
     attachBtn.addEventListener("click", () => fileInput.click());
+    // ---------- Gallery picker (reference images) ----------
+    // The first frame is nearly always something generated here already, so
+    // offer the gallery directly rather than sending the operator to the file
+    // system to find it. Images only — this is an image→video input.
+    const pickWrap = $("gen-pick"), pickGrid = $("gen-pick-grid"),
+          pickHint = $("gen-pick-hint"), pickBtn = $("gen-pickgallery");
+    function closePicker() { pickWrap.hidden = true; pickGrid.innerHTML = ""; }
+    async function openPicker() {
+      const max = (caps().ref_images_max || 0);
+      if (max < 1) return;
+      pickWrap.hidden = false;
+      pickGrid.innerHTML = "";
+      pickHint.textContent = "Loading…";
+      try {
+        const r = await fetch(`${cfg.galleryUrl}?limit=60&kind=image`, {
+          headers: cfg.apiKey ? {"Authorization": "Bearer " + cfg.apiKey} : {},
+          credentials: "same-origin",
+        });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const payload = await r.json();
+        const items = payload.items || [];
+        pickHint.textContent = items.length ? `${items.length} newest` : "";
+        if (!items.length) {
+          const e = document.createElement("div");
+          e.className = "gen-pick__empty";
+          e.textContent = "No generated images yet — make one on the Images page first.";
+          pickGrid.appendChild(e);
+          return;
+        }
+        items.forEach(it => {
+          const im = document.createElement("img");
+          im.loading = "lazy";
+          im.src = it.url;
+          im.alt = it.name || "";
+          im.title = (it.sidecar && it.sidecar.prompt) || it.name || "";
+          im.addEventListener("click", async () => {
+            try {
+              const rr = await fetch(it.url, {
+                headers: cfg.apiKey ? {"Authorization": "Bearer " + cfg.apiKey} : {},
+                credentials: "same-origin",
+              });
+              const blob = await rr.blob();
+              const reader = new FileReader();
+              reader.onload = () => {
+                if (addRefDataUrl(reader.result, it.name)) closePicker();
+              };
+              reader.readAsDataURL(blob);
+            } catch (e) {
+              showError("Could not load that image: " + e.message);
+            }
+          });
+          pickGrid.appendChild(im);
+        });
+      } catch (e) {
+        pickHint.textContent = "";
+        const err = document.createElement("div");
+        err.className = "gen-pick__empty";
+        err.textContent = "Could not load the gallery: " + e.message;
+        pickGrid.appendChild(err);
+      }
+    }
+    pickBtn.addEventListener("click", openPicker);
+    $("gen-pick-close").addEventListener("click", closePicker);
+    pickWrap.addEventListener("click", (e) => { if (e.target === pickWrap) closePicker(); });
+
     fileInput.addEventListener("change", () => { addFiles(fileInput.files); fileInput.value = ""; });
     strengthEl.addEventListener("input", () => { strengthEl.dataset.touched = "1"; strengthVal.textContent = (+strengthEl.value).toFixed(2); });
     ["dragenter", "dragover"].forEach(ev => dock.addEventListener(ev, (e) => { if ((caps().ref_images_max || 0) < 1) return; e.preventDefault(); dock.classList.add("is-dragover"); }));
@@ -893,6 +1008,44 @@
       const m = Math.floor(s / 60), r = Math.round(s % 60);
       return r ? `${m} min ${r} s` : `${m} min`;
     }
+    // References this output was generated from. The sidecar carries
+    // thumbnails (the staged originals are deleted with the request), so
+    // "what did I feed this?" survives as long as the image does.
+    function renderLbRefs(sc) {
+      let box = lbMeta.parentElement.querySelector(".gen-lb-refs");
+      if (!box) {
+        box = document.createElement("div");
+        box.className = "gen-lb-refs";
+        lbMeta.insertAdjacentElement("afterend", box);
+      }
+      box.innerHTML = "";
+      const thumbs = sc.ref_thumbs || [];
+      const count = sc.ref_count || thumbs.length;
+      box.hidden = !count;
+      if (!count) return;
+      const label = document.createElement("div");
+      label.className = "gen-lb-refs__label";
+      label.textContent = count > 1 ? count + " reference images" : "Reference image";
+      box.appendChild(label);
+      if (!thumbs.length) {
+        const note = document.createElement("div");
+        note.className = "gen-lb-refs__label";
+        note.textContent = "(thumbnails unavailable)";
+        box.appendChild(note);
+        return;
+      }
+      const row = document.createElement("div");
+      row.className = "gen-lb-refs__row";
+      thumbs.forEach((src, i) => {
+        const im = document.createElement("img");
+        im.src = src;
+        im.alt = "Reference " + (i + 1);
+        im.title = "Reference " + (i + 1) + " — click to enlarge";
+        im.addEventListener("click", () => im.classList.toggle("is-zoomed"));
+        row.appendChild(im);
+      });
+      box.appendChild(row);
+    }
     function openLightbox(item) {
       const sc = item.sidecar || {};
       const isVideo = item.kind === "video" || (item.name || "").toLowerCase().endsWith(".mp4");
@@ -928,6 +1081,7 @@
         const l = document.createElement("span"); l.className = "gen-lb-meta__label"; l.textContent = k;
         const val = document.createElement("span"); val.textContent = v; r.appendChild(l); r.appendChild(val); lbMeta.appendChild(r);
       });
+      renderLbRefs(sc);
       lbPrompt.hidden = !sc.prompt; lbPrompt.textContent = sc.prompt || "";
       lbActions.innerHTML = "";
       const mkBtn = (label, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = "lm-btn lm-btn--ghost lm-btn--xs"; b.textContent = label; b.addEventListener("click", fn); lbActions.appendChild(b); };

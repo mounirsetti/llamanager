@@ -371,6 +371,23 @@
     }
     .gen-lb-meta__row { display: flex; gap: 8px; font-size: 0.8125rem; line-height: 1.4; }
     .gen-lb-meta__label { color: var(--fg-2); min-width: 78px; text-transform: uppercase; letter-spacing: 0.07em; font-size: 0.625rem; padding-top: 3px; }
+    /* References used by a generation — thumbnails carried in the sidecar,
+       since the staged originals are deleted when the run finishes. */
+    .gen-lb-refs { margin-top: 12px; }
+    .gen-lb-refs__label {
+      font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--fg-2); margin-bottom: 6px;
+    }
+    .gen-lb-refs__row { display: flex; gap: 6px; flex-wrap: wrap; }
+    .gen-lb-refs__row img {
+      width: 64px; height: 64px; object-fit: cover; display: block;
+      border: 1px solid var(--bg-3); border-radius: 6px; cursor: zoom-in;
+      transition: width 160ms ease, height 160ms ease;
+    }
+    .gen-lb-refs__row img.is-zoomed {
+      width: 100%; height: auto; max-height: 40vh; object-fit: contain;
+      cursor: zoom-out;
+    }
     .gen-lb-prompt { padding: 8px 10px; background: var(--bg-0); border-left: 2px solid var(--accent); font-size: 0.8125rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
     .gen-lb-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; padding-top: 8px; }
     .gen-lightbox__close {
@@ -893,6 +910,44 @@
       const m = Math.floor(s / 60), r = Math.round(s % 60);
       return r ? `${m} min ${r} s` : `${m} min`;
     }
+    // References this output was generated from. The sidecar carries
+    // thumbnails (the staged originals are deleted with the request), so
+    // "what did I feed this?" survives as long as the image does.
+    function renderLbRefs(sc) {
+      let box = lbMeta.parentElement.querySelector(".gen-lb-refs");
+      if (!box) {
+        box = document.createElement("div");
+        box.className = "gen-lb-refs";
+        lbMeta.insertAdjacentElement("afterend", box);
+      }
+      box.innerHTML = "";
+      const thumbs = sc.ref_thumbs || [];
+      const count = sc.ref_count || thumbs.length;
+      box.hidden = !count;
+      if (!count) return;
+      const label = document.createElement("div");
+      label.className = "gen-lb-refs__label";
+      label.textContent = count > 1 ? count + " reference images" : "Reference image";
+      box.appendChild(label);
+      if (!thumbs.length) {
+        const note = document.createElement("div");
+        note.className = "gen-lb-refs__label";
+        note.textContent = "(thumbnails unavailable)";
+        box.appendChild(note);
+        return;
+      }
+      const row = document.createElement("div");
+      row.className = "gen-lb-refs__row";
+      thumbs.forEach((src, i) => {
+        const im = document.createElement("img");
+        im.src = src;
+        im.alt = "Reference " + (i + 1);
+        im.title = "Reference " + (i + 1) + " — click to enlarge";
+        im.addEventListener("click", () => im.classList.toggle("is-zoomed"));
+        row.appendChild(im);
+      });
+      box.appendChild(row);
+    }
     function openLightbox(item) {
       const sc = item.sidecar || {};
       lbImg.src = ""; authObjectUrl(item).then(url => { lbImg.src = url; }).catch(() => {});
@@ -910,6 +965,7 @@
         const l = document.createElement("span"); l.className = "gen-lb-meta__label"; l.textContent = k;
         const val = document.createElement("span"); val.textContent = v; r.appendChild(l); r.appendChild(val); lbMeta.appendChild(r);
       });
+      renderLbRefs(sc);
       lbPrompt.hidden = !sc.prompt; lbPrompt.textContent = sc.prompt || "";
       lbActions.innerHTML = "";
       const mkBtn = (label, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = "lm-btn lm-btn--ghost lm-btn--xs"; b.textContent = label; b.addEventListener("click", fn); lbActions.appendChild(b); };

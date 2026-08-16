@@ -781,3 +781,36 @@ def test_per_image_request_carries_every_field():
         if f.name in ("seed", "n", "ref_images"):
             continue
         assert getattr(per, f.name) == getattr(req, f.name), f.name
+
+
+# ---- reference provenance in the sidecar ----------------------------------
+
+def test_ref_thumbnails_are_small_self_contained_data_uris(tmp_path):
+    """The staged reference files are deleted when a run finishes, so the
+    sidecar embeds thumbnails instead of naming paths that will not exist.
+    They have to stay small: eight of them (the per-request cap) ride along
+    in every sidecar."""
+    from PIL import Image
+    from llamanager.image_runner import _ref_thumbnails
+
+    big = tmp_path / "ref.png"
+    Image.new("RGB", (2048, 2048), (180, 60, 40)).save(big)
+    out = _ref_thumbnails([big])
+    assert len(out) == 1
+    assert out[0].startswith("data:image/jpeg;base64,")
+    assert len(out[0]) < 120_000, "thumbnail should be tens of KB, not MB"
+
+    # A missing or corrupt reference must not cost the operator an image.
+    assert _ref_thumbnails([tmp_path / "nope.png"]) == []
+
+
+def test_runner_records_references_before_deleting_them():
+    """Regression: the sidecar has to be built while the staged refs still
+    exist — the runner removes their directory once the run completes."""
+    import inspect
+    from llamanager import image_runner
+
+    src = inspect.getsource(image_runner.ImageTaskRunner.run)
+    assert "_ref_thumbnails(per_req.ref_images)" in src
+    assert src.index("_ref_thumbnails") < src.index("rmtree"), (
+        "thumbnails must be taken before the ref directory is removed")

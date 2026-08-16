@@ -782,7 +782,15 @@ page, reloading re-attaches to a run already in flight instead of losing it.
 Clicking a tile opens it full-size with its sidecar: model, profile, engine,
 size, steps, guidance, seed, **generation time** and when it was saved, plus
 `Reuse prompt` / `Reuse seed` / `Use as reference` shortcuts that push the value
-back into the composer. Each output writes a sidecar JSON next to it. The
+back into the composer. If the output was generated **from** reference images,
+they appear as thumbnails under the metadata — click one to enlarge it. The
+staged originals are deleted when a run finishes, so the sidecar carries a
+downscaled copy of each: the answer to "what did I feed this?" outlives both
+the request and the gallery's disk-cap GC.
+
+On the video pages the composer offers two ways to supply the first frame: 📎
+takes a file, and 🖼 opens the **image gallery** so you can pick something you
+already generated here, without going through the file system. Each output writes a sidecar JSON next to it. The
 gallery is size-capped (`[image].max_disk_gb = 10` by default, oldest-first GC).
 
 Public siblings live at `/images` and `/videos` for non-admin API-key holders.
