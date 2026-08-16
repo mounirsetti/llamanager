@@ -2250,15 +2250,44 @@
       window.__lmSyncTheme();
     })();
 
+    /* The handlers in this block are delegated on ``document``, which an
+       hx-boost body swap never replaces — but it DOES re-run this inline
+       script, so binding them unguarded stacks one more listener per
+       navigation. That is why deleting an origin used to ask six times: five
+       boosted swaps had left six live confirm() listeners on the document.
+       Bind once per document; the per-element handlers above are re-bound
+       deliberately, because the swap detaches the nodes they sit on. */
+    if (!window.__lmDelegatedInit) {
+    window.__lmDelegatedInit = true;
+
     /* Confirm dialog wired up via data-confirm rather than inline onsubmit
        handlers, so attacker-controlled names/paths are never injected
        into a JavaScript context. */
     document.addEventListener('submit', function (e) {
       var form = e.target;
       if (!form || !form.getAttribute) return;
-      var msg = form.getAttribute('data-confirm');
+      // Most templates hang data-confirm on the <form>, but a few hang it on
+      // the submit <button> (e.g. the diffusion/ASR "Delete profile" buttons).
+      // Reading only the form silently skipped the prompt on exactly those —
+      // a destructive action with no confirmation at all. Check the submitter's
+      // nearest [data-confirm] ancestor (which covers the form) as well.
+      var holder = null;
+      if (e.submitter && e.submitter.closest) {
+        holder = e.submitter.closest('[data-confirm]');
+      }
+      if (!holder && form.hasAttribute('data-confirm')) holder = form;
+      if (!holder) return;
+      var msg = holder.getAttribute('data-confirm');
       if (msg && !window.confirm(msg)) {
         e.preventDefault();
+        // preventDefault alone cancels only the NATIVE submit. These forms are
+        // hx-boosted, and htmx's own submit handler (bound on the form) does
+        // not consult defaultPrevented — so "Cancel" still fired the boosted
+        // POST and the origin/model/slot was destroyed anyway. This listener
+        // runs in the capture phase on ``document``, i.e. before the event
+        // reaches the form, so stopping propagation here is what actually
+        // cancels the action.
+        e.stopPropagation();
       }
     }, true);
 
@@ -2331,6 +2360,8 @@
         }
       }
     });
+
+    } /* end __lmDelegatedInit guard */
 
     /* Live context-size advice in the profile editor. Each ctx input carries
        the model's KV rate + this machine's VRAM/RAM as data-* attributes
@@ -2435,6 +2466,13 @@
     }
     lmInitCtxAdvice();
 
+    /* Also document-delegated, so same one-time bind as above: a stacked
+       configRequest listener would rewrite the same `path` param once per
+       navigation, and a stacked click listener would clear the browser panel
+       repeatedly. */
+    if (!window.__lmFsBrowserInit) {
+    window.__lmFsBrowserInit = true;
+
     /* Inline file/folder browser: inject the source input's current
        value as the `path` query param before htmx fires. CSP blocks
        hx-vals="js:..." because we don't ship 'unsafe-eval', so the
@@ -2477,6 +2515,8 @@
         if (host2) host2.innerHTML = '';
       }
     });
+
+    } /* end __lmFsBrowserInit guard */
 
     /* These three handlers attach to document.body. hx-boost re-runs inline
        scripts when it swaps the body, so guard against double-binding (which
