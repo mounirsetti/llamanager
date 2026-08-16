@@ -814,3 +814,32 @@ def test_runner_records_references_before_deleting_them():
     assert "_ref_thumbnails(per_req.ref_images)" in src
     assert src.index("_ref_thumbnails") < src.index("rmtree"), (
         "thumbnails must be taken before the ref directory is removed")
+
+
+def test_favicon_keeps_a_clear_pixel_between_the_wordmark_and_the_dot():
+    """The tab icon is drawn into a 16px box: the whole 512-unit tile maps to
+    16 device pixels, so 1px = 32 units. The tray icon's 15-unit gap is 0.47px
+    there — the dot and the "m" land in the same pixel and fuse, which is what
+    "the dot prints on top of the m" looked like. Guard the two numbers that
+    keep them apart."""
+    import re
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    svg = (root / "assets" / "favicon.svg").read_text(encoding="utf-8")
+    circle = re.search(r'<circle cx="([\d.]+)" cy="[\d.]+" r="([\d.]+)"', svg)
+    assert circle, "favicon should carry a single accent dot"
+    cx, r = float(circle.group(1)), float(circle.group(2))
+
+    # Where the outlined glyphs actually end: the path is placed by a
+    # translate()/scale() pair, so read the transform and the path's extent.
+    m = re.search(r'transform="translate\(([\d.-]+) [\d.-]+\) scale\(([\d.]+)\)"', svg)
+    assert m, "glyphs should be outlined and placed with translate/scale"
+    tx, s = float(m.group(1)), float(m.group(2))
+    xs = [float(v) for v in re.findall(r'[ML](-?[\d.]+) -?[\d.]+', svg)]
+    ink_end = tx + max(xs) * s
+
+    units_per_px_at_16 = 512 / 16
+    gap_px = (cx - r - ink_end) / units_per_px_at_16
+    assert gap_px >= 1.0, f"only {gap_px:.2f}px between the m and the dot at 16px"
+    assert (2 * r) / units_per_px_at_16 >= 2.0, "dot renders smaller than 2px at 16px"

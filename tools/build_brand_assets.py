@@ -102,17 +102,30 @@ def build_wordmark(dark: bool) -> str:
     return _svg(body, round(width, 1), 72)
 
 
-def build_icon(dark: bool) -> str:
+#: A favicon is drawn into a 16px box, where the whole 512-unit tile maps to
+#: 16 device pixels: 1px = 32 units. The tray icon's spacing (15 units) is
+#: 0.47px there, so the dot and the "m" land in the same pixel and merge —
+#: the dot looks printed on the letter. These two numbers are the smallest
+#: that keep a clear pixel between them at 16px, and they only apply to the
+#: favicon: the tray/PWA icons are displayed large and keep their own
+#: proportions.
+FAVICON_GAP_UNITS = 56.0        # 1.75px at 16px
+FAVICON_DOT_R = 0.075           # of the tile; 2.4px diameter at 16px
+
+
+def build_icon(dark: bool, *, favicon: bool = False) -> str:
     """Square "llam" tile — the tray icon's layout, as an SVG.
 
     Proportions come from icon-*-512.png: ink from 0.027W to 0.847W, band
-    centred, dot at 0.9287W / 0.5967W with r 0.0527W.
+    centred, dot at 0.9287W / 0.5967W with r 0.0527W. ``favicon=True`` widens
+    the dot and its gap so both survive a 16px render (see the constants).
     """
     W = 512.0
-    r = 0.0527 * W
+    r = (FAVICON_DOT_R if favicon else 0.0527) * W
     dot_cx, dot_cy = 0.9287 * W, 0.5967 * W
     left = 0.027 * W
-    right = dot_cx - r - GAP_RATIO * 2 * r         # where the ink must end
+    gap = FAVICON_GAP_UNITS if favicon else GAP_RATIO * 2 * r
+    right = dot_cx - r - gap                       # where the ink must end
     top, bottom = 0.326 * W, 0.699 * W             # measured ink band
 
     # Shape once at a nominal size, then fit the ink box to the measured band.
@@ -148,7 +161,7 @@ def rasterise() -> None:
     except ImportError:
         print("skip PNGs: pip install playwright && playwright install chromium")
         return
-    jobs = [("favicon.svg", "icon-light"), ("favicon-dark.svg", "icon-dark")]
+    jobs = [("app-icon.svg", "icon-light"), ("app-icon-dark.svg", "icon-dark")]
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
         for src, stem in jobs:
@@ -168,8 +181,12 @@ def main() -> None:
     for name, svg in (
         ("logo.svg", build_wordmark(dark=False)),
         ("logo-dark.svg", build_wordmark(dark=True)),
-        ("favicon.svg", build_icon(dark=False)),
-        ("favicon-dark.svg", build_icon(dark=True)),
+        ("favicon.svg", build_icon(dark=False, favicon=True)),
+        ("favicon-dark.svg", build_icon(dark=True, favicon=True)),
+        # The tray/PWA source keeps the proportions of the icon this project
+        # already shipped; only the tab icon is tuned for 16px.
+        ("app-icon.svg", build_icon(dark=False)),
+        ("app-icon-dark.svg", build_icon(dark=True)),
     ):
         (ASSETS / name).write_text(svg, encoding="utf-8")
         print(f"wrote {name} ({len(svg)} bytes)")

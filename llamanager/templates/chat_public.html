@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
   <title>Chat - llamanager</title>
-  <link rel="icon" id="lm-favicon" href="/favicon-dark.svg" type="image/svg+xml">
+  <link rel="icon" id="lm-favicon" href="/favicon-dark.svg?v=2" type="image/svg+xml">
   <link rel="manifest" href="/manifest.json?app=chat">
   <meta name="theme-color" id="lm-theme-color" content="#201e17">
 
@@ -22,7 +22,7 @@
         root.setAttribute('data-theme-pref', pref);     // what the buttons read
         var fav = document.getElementById('lm-favicon');
         var tc = document.getElementById('lm-theme-color');
-        if (fav) fav.href = theme === 'light' ? '/favicon.svg' : '/favicon-dark.svg';
+        if (fav) fav.href = theme === 'light' ? '/favicon.svg?v=2' : '/favicon-dark.svg?v=2';
         if (tc) tc.content = theme === 'light' ? '#f8f6f3' : '#201e17';
         var btns = document.querySelectorAll('[data-theme-set]');
         for (var i = 0; i < btns.length; i++) {
