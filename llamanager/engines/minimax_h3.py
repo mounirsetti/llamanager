@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Config, Profile
-from ._base import ImageRequest, ProfileField, ProgressEvent
+from ._base import (ImageRequest, ProfileField, ProgressEvent, pick_model_type,
+                    pick_scheduler)
 
 log = logging.getLogger(__name__)
 
@@ -177,10 +178,10 @@ def build_command(
     # ``image_model_type`` doubles as the precision selector here, and
     # ``image_editing_scheduler`` as the memory strategy — reusing the generic
     # profile columns keeps this engine inside the existing schema.
-    quantize = (profile.image_model_type or "int8").strip().lower()
+    quantize = (pick_model_type(req, profile) or "int8").lower()
     if quantize in QUANT_OPTIONS:
         argv += ["--quantize", quantize]
-    strategy = (profile.image_editing_scheduler or "split").strip().lower()
+    strategy = (pick_scheduler(req, profile) or "split").lower()
     offload, residency = MEMORY_STRATEGIES.get(strategy, ("none", "split"))
     argv += ["--offload", offload, "--residency", residency]
     if req.ref_images:

@@ -689,3 +689,95 @@ def test_hidream_probe_and_spawn_share_the_rocm_env(monkeypatch):
     hidream._HELP_PROBE_CACHE.clear()
     assert hidream._supports_steps_flag(Path("/py"), Path(__file__)) is True
     assert "/opt/rocm/lib" in seen["env"]["LD_LIBRARY_PATH"]
+
+
+# ---- request-level overrides (model_type / guidance / editing_scheduler) ----
+
+def _img_req(**kw):
+    from llamanager.engines._base import ImageRequest
+    base = dict(prompt="p", width=0, height=0, steps=None, seed=None, n=1)
+    base.update(kw)
+    return ImageRequest(**base)
+
+
+def test_request_overrides_beat_the_profile_and_the_engine_default():
+    """Precedence is request > profile > engine default, for all three knobs."""
+    from llamanager.config import Profile
+    from llamanager.engines import _base
+
+    empty, prof = Profile(name="e"), Profile(
+        name="p", image_model_type="dev", image_guidance=5.0,
+        image_editing_scheduler="flash")
+
+    # Nothing set anywhere.
+    assert _base.pick_model_type(_img_req(), empty) == ""
+    assert _base.pick_guidance(_img_req(), empty) is None
+    assert _base.pick_scheduler(_img_req(), empty) == ""
+    # Profile only.
+    assert _base.pick_model_type(_img_req(), prof) == "dev"
+    assert _base.pick_guidance(_img_req(), prof) == 5.0
+    assert _base.pick_scheduler(_img_req(), prof) == "flash"
+    # Request wins, including over a profile that set the same knob.
+    req = _img_req(model_type="full", guidance=1.5, editing_scheduler="flow_match")
+    assert _base.pick_model_type(req, prof) == "full"
+    assert _base.pick_guidance(req, prof) == 1.5
+    assert _base.pick_scheduler(req, prof) == "flow_match"
+    # And over an empty profile — the reported bug: "Recipe: full" with the
+    # profile picker left on "(use engine defaults)" used to fall through to
+    # the engine default and silently run dev.
+    assert _base.pick_model_type(req, empty) == "full"
+    # guidance 0.0 is a value, not "unset".
+    assert _base.pick_guidance(_img_req(guidance=0.0), prof) == 0.0
+
+
+def test_images_endpoint_forwards_the_three_dropped_overrides():
+    """Regression: the composer sends model_type/guidance/editing_scheduler
+    and the handler discarded all three."""
+    import inspect
+    from llamanager import api_v1
+
+    src = inspect.getsource(api_v1.images_generations)
+    for field in ("model_type", "guidance", "editing_scheduler"):
+        assert f"{field}={field}_override" in src, field
+
+
+def test_hidream_sidecar_reports_what_the_recipe_actually_runs(tmp_path):
+    """The dev recipe hardwires 28 steps and guidance 0.0 whatever was asked,
+    so effective_params must correct the request rather than echo it."""
+    from llamanager.config import Config, Profile
+    from llamanager.engines import hidream
+
+    cfg = Config()
+    dev = hidream.effective_params(cfg, tmp_path, Profile(name="p"),
+                                   _img_req(steps=100))
+    assert dev["model_type"] == "dev"
+    assert dev["steps"] == 28 and dev["guidance"] == 0.0
+
+    full = hidream.effective_params(
+        cfg, tmp_path, Profile(name="p"),
+        _img_req(model_type="full", steps=12, guidance=4.0))
+    assert full["model_type"] == "full"
+    assert full["steps"] == 12 and full["guidance"] == 4.0
+
+
+def test_per_image_request_carries_every_field():
+    """The runner splits an n>1 request into one ImageRequest per sample. It
+    used to list the fields by hand, so anything added to ImageRequest was
+    dropped before the adapter saw it — the bug that made model_type,
+    guidance and editing_scheduler inert. Only per-sample values may differ."""
+    import dataclasses
+    import inspect
+    from llamanager import image_runner
+
+    src = inspect.getsource(image_runner.ImageTaskRunner.run)
+    assert "per_req = replace(" in src, (
+        "build the per-sample request with dataclasses.replace so new fields "
+        "are carried automatically")
+
+    req = _img_req(model_type="full", guidance=4.0,
+                   editing_scheduler="flow_match", steps=17, seed=None)
+    per = dataclasses.replace(req, seed=99, n=1, ref_images=[])
+    for f in dataclasses.fields(req):
+        if f.name in ("seed", "n", "ref_images"):
+            continue
+        assert getattr(per, f.name) == getattr(req, f.name), f.name

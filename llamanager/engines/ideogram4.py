@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Config, Profile
-from ._base import ImageRequest, ProfileField, ProgressEvent
+from ._base import (ImageRequest, ProfileField, ProgressEvent, pick_model_type,
+                    pick_scheduler)
 
 log = logging.getLogger(__name__)
 
@@ -84,10 +85,10 @@ def build_command(
 
     width, height = _resolved_size(profile, req)
     seed = req.seed if req.seed is not None else profile.image_seed
-    quant = profile.image_model_type or _DEFAULT_QUANT
+    quant = pick_model_type(req, profile) or _DEFAULT_QUANT
     if quant not in QUANTIZATIONS:
         quant = _DEFAULT_QUANT
-    preset = profile.image_editing_scheduler or _DEFAULT_PRESET
+    preset = pick_scheduler(req, profile) or _DEFAULT_PRESET
     if preset not in PRESETS:
         preset = _DEFAULT_PRESET
 

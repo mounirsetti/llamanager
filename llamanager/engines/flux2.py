@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Config, Profile
-from ._base import ImageRequest, ProfileField, ProgressEvent
+from ._base import ImageRequest, ProfileField, ProgressEvent, pick_guidance
 
 log = logging.getLogger(__name__)
 
@@ -118,7 +118,8 @@ def build_command(
     width, height = _resolved_size(profile, req)
     steps = _resolved_steps(profile, req)
     seed = req.seed if req.seed is not None else profile.image_seed
-    cfg_scale = float(profile.image_guidance) if profile.image_guidance is not None else _DEFAULT_CFG
+    _g = pick_guidance(req, profile)
+    cfg_scale = float(_g) if _g is not None else _DEFAULT_CFG
 
     argv: list[str] = [
         str(sd_cli),

@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Config, Profile
-from ._base import ImageRequest, ProfileField, ProgressEvent
+from ._base import (ImageRequest, ProfileField, ProgressEvent, pick_guidance,
+                    pick_model_type, pick_scheduler)
 
 log = logging.getLogger(__name__)
 
@@ -128,8 +129,8 @@ def build_command(
     width, height = _resolved_size(profile, req)
     steps = _resolved_steps(profile, req)
     seed = req.seed if req.seed is not None else profile.image_seed
-    guidance = (profile.image_guidance
-                if profile.image_guidance is not None else _DEFAULT_GUIDANCE)
+    _g = pick_guidance(req, profile)
+    guidance = _g if _g is not None else _DEFAULT_GUIDANCE
     num_frames = (profile.video_num_frames
                   if profile.video_num_frames is not None else _DEFAULT_NUM_FRAMES)
     fps = profile.video_fps if profile.video_fps is not None else _DEFAULT_FPS
@@ -150,10 +151,12 @@ def build_command(
         argv += ["--seed", str(int(seed))]
     if profile.image_negative_prompt:
         argv += ["--negative_prompt", profile.image_negative_prompt]
-    if profile.image_editing_scheduler:
-        argv += ["--vae-device", profile.image_editing_scheduler]
-    if profile.image_model_type:
-        argv += ["--dtype", profile.image_model_type]
+    _vae_device = pick_scheduler(req, profile)
+    if _vae_device:
+        argv += ["--vae-device", _vae_device]
+    _dtype = pick_model_type(req, profile)
+    if _dtype:
+        argv += ["--dtype", _dtype]
 
     # One reference image → image-to-video (the image is the first frame).
     if req.ref_images:

@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Config, Profile
-from ._base import ImageRequest, ProfileField, ProgressEvent
+from ._base import (ImageRequest, ProfileField, ProgressEvent, pick_guidance,
+                    pick_model_type, pick_scheduler)
 
 log = logging.getLogger(__name__)
 
@@ -127,8 +128,8 @@ def _resolved_steps(profile: Profile, req: ImageRequest) -> int:
     return _DEFAULT_STEPS
 
 
-def _unet_for(profile: Profile) -> str:
-    quant = (profile.image_model_type or "").strip().upper()
+def _unet_for(profile: Profile, req: ImageRequest) -> str:
+    quant = pick_model_type(req, profile).upper()
     entry = QUANT_FILES.get(quant) or QUANT_FILES[DEFAULT_QUANT]
     return entry[0]
 
@@ -166,9 +167,9 @@ def build_command(
     width, height = _resolved_size(profile, req)
     steps = _resolved_steps(profile, req)
     seed = req.seed if req.seed is not None else profile.image_seed
-    unet = _unet_for(profile)
-    cfg_scale = (profile.image_guidance
-                 if profile.image_guidance is not None else _DEFAULT_CFG)
+    unet = _unet_for(profile, req)
+    _g = pick_guidance(req, profile)
+    cfg_scale = _g if _g is not None else _DEFAULT_CFG
 
     clip_file, workflow_name = resolve_text_encoder(model_path)
     missing = cb.missing_files(model_path, {
@@ -195,7 +196,7 @@ def build_command(
         "--set", f"HEIGHT={height}",
         "--set", f"STEPS={steps}",
         "--set", f"CFG={float(cfg_scale)}",
-        "--set", f"SAMPLER={profile.image_editing_scheduler or _DEFAULT_SAMPLER}",
+        "--set", f"SAMPLER={pick_scheduler(req, profile) or _DEFAULT_SAMPLER}",
         "--set", f"SCHEDULER={_DEFAULT_SCHEDULER}",
         "--set", f"SEED={int(seed) if seed is not None else 0}",
     ]

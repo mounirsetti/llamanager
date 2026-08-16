@@ -41,6 +41,18 @@ class ImageRequest:
     # 1.0 = full regeneration). Ignored by HiDream — its editing recipe is
     # scheduler-controlled, not strength-controlled.
     strength: float | None = None
+    # Per-request forms of the three typed profile knobs, so a caller can
+    # override them without saving a profile. Engines read them through the
+    # pick_* helpers below, which apply one precedence everywhere: request >
+    # profile > the engine's own default. ``None`` means "not specified",
+    # not "zero" — guidance 0.0 is a meaningful value.
+    #
+    # They exist because the composer has always *sent* model_type, guidance
+    # and editing_scheduler while the API dropped them, so choosing
+    # "Recipe: full" with no profile saved silently ran HiDream's dev recipe.
+    model_type: str | None = None
+    guidance: float | None = None
+    editing_scheduler: str | None = None
 
 
 @dataclass
@@ -60,6 +72,26 @@ class AudioRequest:
     # When True, return word-level output ({w,t0,t1,p}) + audio_ms in the
     # ``{type:"transcript", …}`` envelope. Heavier (cross-attentions).
     word_timestamps: bool = False
+
+
+def pick_model_type(req: "ImageRequest", profile) -> str:
+    """Engine "model type" knob (recipe / quant / dtype), or "" if unset."""
+    return (req.model_type or profile.image_model_type or "").strip()
+
+
+def pick_guidance(req: "ImageRequest", profile) -> float | None:
+    """Guidance scale, or None when neither request nor profile set one."""
+    if req.guidance is not None:
+        return float(req.guidance)
+    if profile.image_guidance is not None:
+        return float(profile.image_guidance)
+    return None
+
+
+def pick_scheduler(req: "ImageRequest", profile) -> str:
+    """Scheduler / sampler / preset knob, or "" if unset."""
+    return (req.editing_scheduler or profile.image_editing_scheduler
+            or "").strip()
 
 
 @dataclass

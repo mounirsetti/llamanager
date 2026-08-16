@@ -32,7 +32,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Config, Profile
-from ._base import ImageRequest, ProfileField, ProgressEvent
+from ._base import (ImageRequest, ProfileField, ProgressEvent, pick_model_type,
+                    pick_scheduler)
 
 log = logging.getLogger(__name__)
 
@@ -134,9 +135,9 @@ def _resolved_steps(profile: Profile, req: ImageRequest) -> int:
     return _DEFAULT_STEPS
 
 
-def _unet_for(profile: Profile) -> str:
+def _unet_for(profile: Profile, req: ImageRequest) -> str:
     """Transformer file for the profile's quant, defaulting to Q4_K_M."""
-    quant = (profile.image_model_type or "").strip().upper()
+    quant = pick_model_type(req, profile).upper()
     entry = QUANT_FILES.get(quant)
     return entry[0] if entry else UNET_FILE
 
@@ -179,7 +180,7 @@ def build_command(
     steps = _resolved_steps(profile, req)
     length = snap_length(profile.video_num_frames or _DEFAULT_LENGTH)
     seed = req.seed if req.seed is not None else profile.image_seed
-    unet = _unet_for(profile)
+    unet = _unet_for(profile, req)
 
     # Fail before starting a server if a component is missing: "vae/... not
     # found" is a far better message than ComfyUI's combo-validation error.
@@ -227,7 +228,7 @@ def build_command(
         "--set", f"LENGTH={length}",
         "--set", f"STEPS={steps}",
         "--set", f"FPS={float(FPS)}",
-        "--set", f"SAMPLER={profile.image_editing_scheduler or _DEFAULT_SAMPLER}",
+        "--set", f"SAMPLER={pick_scheduler(req, profile) or _DEFAULT_SAMPLER}",
         "--set", f"SCHEDULER={_DEFAULT_SCHEDULER}",
         "--set", f"SEED={int(seed) if seed is not None else 0}",
     ]

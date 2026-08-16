@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Config, Profile
-from ._base import ImageRequest, ProfileField, ProgressEvent
+from ._base import (ImageRequest, ProfileField, ProgressEvent, pick_guidance,
+                    pick_model_type, pick_scheduler)
 
 log = logging.getLogger(__name__)
 
@@ -167,7 +168,7 @@ def build_command(
     if not inference_py.exists():
         raise RuntimeError(f"hidream inference.py not found: {inference_py}")
 
-    model_type = (profile.image_model_type or _DEFAULT_MODEL_TYPE).lower()
+    model_type = (pick_model_type(req, profile) or _DEFAULT_MODEL_TYPE).lower()
     if model_type not in ("dev", "full"):
         model_type = _DEFAULT_MODEL_TYPE
     width, height = _resolved_size(profile, req)
@@ -194,8 +195,9 @@ def build_command(
         argv += ["--num_inference_steps", str(int(steps))]
     if seed is not None:
         argv += ["--seed", str(int(seed))]
-    if profile.image_guidance is not None and model_type == "full":
-        argv += ["--guidance_scale", str(float(profile.image_guidance))]
+    guidance = pick_guidance(req, profile)
+    if guidance is not None and model_type == "full":
+        argv += ["--guidance_scale", str(float(guidance))]
 
     # Reference images: forwarded as one or more positional values to
     # --ref_images. Upstream treats one ref + --model_type dev as editing
@@ -211,8 +213,9 @@ def build_command(
         # branch is taken (exactly one ref + dev model). Sending it in
         # other configs is harmless — argparse accepts and the pipeline
         # discards.
-        if profile.image_editing_scheduler:
-            sched = profile.image_editing_scheduler.lower()
+        sched_raw = pick_scheduler(req, profile)
+        if sched_raw:
+            sched = sched_raw.lower()
             if sched in ("flow_match", "flash"):
                 argv += ["--editing_scheduler", sched]
     if req.layout_bboxes:
@@ -259,6 +262,36 @@ def parse_progress(line: str) -> ProgressEvent | None:
     if total <= 0 or total > 5000 or step < 0 or step > total:
         return None
     return ProgressEvent(step=step, total=total)
+
+
+def effective_params(cfg: Config, model_path: Path, profile: Profile,
+                     req: ImageRequest) -> dict[str, Any]:
+    """What this engine will *actually* use, for the sidecar.
+
+    The runner records the request as asked, which is misleading here: the
+    dev recipe hardwires 28 timesteps and guidance 0.0 regardless of what
+    was sent, so an image generated at 28 steps could be filed as "100".
+    Reported values are resolved the same way build_command resolves them.
+    """
+    model_type = (pick_model_type(req, profile) or _DEFAULT_MODEL_TYPE).lower()
+    if model_type not in ("dev", "full"):
+        model_type = _DEFAULT_MODEL_TYPE
+    width, height = _resolved_size(profile, req)
+    out: dict[str, Any] = {
+        "model_type": model_type,
+        "width": width,
+        "height": height,
+    }
+    if model_type == "full":
+        out["steps"] = _resolved_steps(profile, req, model_type)
+        guidance = pick_guidance(req, profile)
+        if guidance is not None:
+            out["guidance"] = float(guidance)
+    else:
+        # Upstream's dev branch: DEFAULT_TIMESTEPS, guidance disabled.
+        out["steps"] = _DEFAULT_STEPS_DEV
+        out["guidance"] = 0.0
+    return out
 
 
 def profile_schema() -> list[ProfileField]:

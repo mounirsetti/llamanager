@@ -22,7 +22,7 @@ import secrets
 import shutil
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -251,17 +251,18 @@ class ImageTaskRunner:
                         # and the other reference-input knobs are shared across
                         # the whole batch — they describe the input, not the
                         # individual sample.
-                        per_req = ImageRequest(
-                            prompt=req.prompt,
-                            width=req.width,
-                            height=req.height,
-                            steps=req.steps,
-                            seed=req.seed if req.seed is not None else _new_seed(),
+                        # replace(), not a hand-listed copy: this used to
+                        # enumerate every field, so each new one added to
+                        # ImageRequest was silently dropped on its way to the
+                        # adapter — which is how model_type/guidance/
+                        # editing_scheduler arrived from the API and never
+                        # reached the engine. Only per-sample values differ.
+                        per_req = replace(
+                            req,
+                            seed=(req.seed if req.seed is not None
+                                  else _new_seed()),
                             n=1,
                             ref_images=list(req.ref_images),
-                            keep_original_aspect=req.keep_original_aspect,
-                            layout_bboxes=req.layout_bboxes,
-                            strength=req.strength,
                         )
                         seed_used = per_req.seed
                         out_path = gallery / _new_image_filename(
@@ -279,6 +280,21 @@ class ImageTaskRunner:
                             "steps": per_req.steps,
                             "seed": per_req.seed,
                         }
+                        # What the request *asked for* is not always what
+                        # runs: HiDream's dev recipe hardwires its step count
+                        # and disables guidance, so a 28-step image could be
+                        # filed as "steps: 100". Adapters that can resolve
+                        # their own knobs report them here and win.
+                        resolve = getattr(adapter, "effective_params", None)
+                        if resolve is not None:
+                            try:
+                                sidecar_base.update(
+                                    resolve(self.cfg, model_path, profile,
+                                            per_req))
+                            except Exception:  # noqa: BLE001 — metadata only
+                                log.exception(
+                                    "%s: effective_params failed; recording "
+                                    "the requested values", engine)
                         try:
                             await self._run_one(
                                 engine=engine,

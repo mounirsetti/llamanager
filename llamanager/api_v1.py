@@ -1309,10 +1309,12 @@ async def images_generations(request: Request) -> Response:
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="seed must be an integer")
 
-    # Per-request step count. Every image adapter's _resolved_steps() checks
-    # req.steps before the profile, the composer's override field sends it,
-    # and the video endpoint has always honoured it — but this handler used
-    # to hardcode None, so the field was accepted and silently dropped.
+    # Per-request overrides. The composer has always sent these alongside
+    # `size` and `seed`; this handler used to accept and discard them, so a
+    # UI selection with no profile saved silently fell through to the
+    # engine's built-in default (picking HiDream's "full" recipe ran "dev").
+    # Precedence, applied by the engines' pick_* helpers: request > profile
+    # > engine default.
     steps_raw = body.get("steps")
     steps_override: int | None = None
     if steps_raw is not None and steps_raw != "":
@@ -1322,6 +1324,29 @@ async def images_generations(request: Request) -> Response:
             raise HTTPException(status_code=400, detail="steps must be an integer")
         if steps_override < 1:
             raise HTTPException(status_code=400, detail="steps must be >= 1")
+
+    guidance_raw = body.get("guidance")
+    guidance_override: float | None = None
+    if guidance_raw is not None and guidance_raw != "":
+        try:
+            guidance_override = float(guidance_raw)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400,
+                                detail="guidance must be a number")
+
+    def _opt_str(key: str) -> str | None:
+        v = body.get(key)
+        if v is None or v == "":
+            return None
+        if not isinstance(v, str):
+            raise HTTPException(status_code=400, detail=f"{key} must be a string")
+        return v.strip() or None
+
+    # Free-form because every engine spells them differently (HiDream
+    # dev/full, Ideogram fp8/nf4, Krea Q6_K, Z-Image dtype). The adapter
+    # validates against its own vocabulary and falls back to its default.
+    model_type_override = _opt_str("model_type")
+    editing_scheduler_override = _opt_str("editing_scheduler")
 
     # ---- reference-image inputs (llamanager extension) -------------------
     # Accept ``image`` (single) or ``images`` (list); the OpenAI Images
@@ -1424,6 +1449,9 @@ async def images_generations(request: Request) -> Response:
         width=width,
         height=height,
         steps=steps_override,   # None -> adapter pulls from profile/defaults
+        model_type=model_type_override,
+        guidance=guidance_override,
+        editing_scheduler=editing_scheduler_override,
         seed=seed_int,
         n=n,
         ref_images=ref_paths,
