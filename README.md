@@ -118,7 +118,7 @@ Full design notes are in [`llamanager-spec.md`](llamanager-spec.md).
 | text  | `llama` (llama.cpp)               | persistent HTTP server                  | auto-install from the LLM engines page |
 | text  | `mlx`                             | persistent HTTP server (Apple Silicon)  | manual: `pip install mlx-lm` |
 | image | `z_image` (Z-Image / Z-Anime)     | one-shot Python subprocess (diffusers)  | auto-install venv + deps |
-| image | `hidream` (HiDream-O1-Image)      | one-shot Python subprocess              | auto-install venv + deps |
+| image | `hidream` (HiDream-O1-Image)      | one-shot Python subprocess              | auto-install venv + deps + source checkout |
 | image | `flux2` (FLUX 2 via sd.cpp)       | one-shot `sd-cli` binary                | manual: download from sd.cpp releases |
 | image | `ideogram4` (Ideogram 4)          | one-shot Python subprocess              | auto-install venv + deps (weights are gated) |
 | image | `krea_comfy` (Krea 2 Turbo)       | one-shot job on a private ComfyUI       | install the shared ComfyUI engine once |
@@ -608,7 +608,7 @@ Each engine card on the Diffusion engines page has an `Install dependencies` but
 | engine | what gets installed | rough size |
 |--------|---------------------|------------|
 | Z-Image | torch, transformers, accelerate, huggingface_hub, safetensors, Pillow, sentencepiece, `diffusers==0.38.0` (first release shipping `ZImagePipeline`) | ~8.5 GB |
-| HiDream | GPU-aware. On AMD: official ROCm wheels (torch+rocm7.2.1, torchvision, triton) from `repo.radeon.com` + pinned `transformers==4.57.1`, `accelerate==1.13.0`, `diffusers==0.38.0`, etc. On NVIDIA/CPU: generic CUDA/CPU torch + the same HF pins. | ~7.5–9 GB |
+| HiDream | GPU-aware. On AMD: official ROCm wheels (torch+rocm7.2.1, torchvision, triton) from `repo.radeon.com` + pinned `transformers==4.57.1`, `accelerate==1.13.0`, `diffusers==0.38.0`, etc. On NVIDIA/CPU: generic CUDA/CPU torch + the same HF pins. Also clones HiDream-O1-Image, installs its `requirements.txt`, and writes both `hidream_python` and `hidream_repo` back to config. | ~7.5–9 GB |
 | Ideogram 4 | torch + the official `ideogram-oss/ideogram4` package from git | ~9.5 GB |
 | Wan 2.2 | torch, transformers, accelerate, `diffusers` (WanPipeline), imageio + ffmpeg for mp4 muxing | ~9 GB |
 | ComfyUI | clones ComfyUI + ComfyUI-GGUF into its own venv, GPU-aware wheels (AMD gets ROCm torch **and** torchaudio from `repo.radeon.com` — ComfyUI imports torchaudio unconditionally) | ~10 GB |
@@ -620,7 +620,12 @@ The installer streams pip's stdout into the page, so you can watch it work and c
 
 FLUX 2 uses the `sd-cli` binary from [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp), which ships per-backend builds (Vulkan, CUDA, ROCm) that are too platform-specific to auto-install reliably. Download the matching release zip, extract, and point the `sd-cli executable` field on the engine card at the binary.
 
-HiDream auto-detects the GPU family (probes `/dev/kfd` for AMD ROCm, `nvidia-smi` for NVIDIA) and installs the matching wheel set. On AMD the card also offers a one-checkbox patch that flips `use_flash_attn: True` to `False` in `<hidream_repo>/models/pipeline.py` — required because the upstream pipeline hardcodes flash-attn, which isn't available on AMD ROCm. The patch keeps a `.bak`. If `<hidream_repo>` isn't set when you click install, the patch step is skipped with a note; set the path and re-run. On AMD, the installer also surfaces a warning if the llamanager process isn't a member of the `render` group, since HIP needs `/dev/kfd` access.
+HiDream auto-detects the GPU family (probes `/dev/kfd` for AMD ROCm, `nvidia-smi` for NVIDIA) and installs the matching wheel set. It is run as a program rather than imported, so the installer also clones `HiDream-ai/HiDream-O1-Image` next to the venvs and records the path — there is no manual checkout step.
+
+Two source patches are applied on install, both keeping a `.bak`:
+
+- `models/pipeline.py`: flips `"use_flash_attn": True` to `False` **when `flash_attn` cannot be imported in the freshly built venv** — always the case on ROCm, where no wheel exists, and the upstream import is fatal. The checkbox on the engine card still forces it on hardware where flash-attn is importable but unwanted.
+- `inference.py`: adds `--num_inference_steps` to the argparse block and threads it into the pipeline calls, so profile and per-request step counts reach the model. Without it the script exits 2 on an unrecognised argument. The adapter probes `inference.py --help` before sending the flag, so a hand-rolled checkout without the patch still works (at upstream's fixed step counts). On AMD, the installer also surfaces a warning if the llamanager process isn't a member of the `render` group, since HIP needs `/dev/kfd` access.
 
 Z-Image's auto-install still picks a generic `torch` wheel — on AMD ROCm or Apple Silicon you should build that venv yourself with the right vendor wheels and point the engine at it.
 

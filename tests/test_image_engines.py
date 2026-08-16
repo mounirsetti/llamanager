@@ -645,3 +645,47 @@ def test_krea_comfy_lora_field_is_restricted_to_the_loras_folder(tmp_path):
     cf = next(f for f in krea_comfy.profile_schema()
               if f.key == "image_lora_weights")
     assert cf.options_dir == "loras" and cf.options_free is False
+
+
+def test_images_endpoint_forwards_a_request_step_count():
+    """Regression: /v1/images/generations parsed `steps` and then built the
+    ImageRequest with steps=None, so the composer's per-request override (and
+    any API caller's) was accepted and silently ignored. Every adapter's
+    _resolved_steps() prefers req.steps over the profile, so the value has to
+    survive the handler."""
+    import inspect
+    from llamanager import api_v1
+
+    src = inspect.getsource(api_v1.images_generations)
+    assert "steps=steps_override" in src, (
+        "images_generations must pass the parsed step override into "
+        "ImageRequest, not None")
+    assert 'body.get("steps")' in src
+
+
+def test_hidream_probe_and_spawn_share_the_rocm_env(monkeypatch):
+    """The --num_inference_steps probe runs `inference.py --help`, which
+    imports torch. Without the ROCm lib dirs that import dies and the probe
+    reads the failure as "flag unsupported", silently dropping every step
+    override — so the probe must use the same env as the spawn."""
+    from llamanager.engines import hidream
+
+    monkeypatch.setattr("llamanager.gpu_detect.rocm_lib_dirs",
+                        lambda: ["/opt/rocm/lib"])
+    env = hidream._rocm_env()
+    assert env["LD_LIBRARY_PATH"].startswith("/opt/rocm/lib")
+
+    seen = {}
+
+    class _R:
+        stdout = "--num_inference_steps"
+        stderr = ""
+
+    def _fake_run(argv, **kw):
+        seen.update(kw)
+        return _R()
+
+    monkeypatch.setattr(hidream.subprocess, "run", _fake_run)
+    hidream._HELP_PROBE_CACHE.clear()
+    assert hidream._supports_steps_flag(Path("/py"), Path(__file__)) is True
+    assert "/opt/rocm/lib" in seen["env"]["LD_LIBRARY_PATH"]

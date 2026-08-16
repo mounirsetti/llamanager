@@ -9,6 +9,7 @@ Reference: docs/hidream.md (also reachable in the operator's notes at
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -81,6 +82,26 @@ def _resolved_steps(profile: Profile, req: ImageRequest, model_type: str) -> int
     return _DEFAULT_STEPS_FULL if model_type == "full" else _DEFAULT_STEPS_DEV
 
 
+def _rocm_env() -> dict[str, str]:
+    """LD_LIBRARY_PATH additions for AMD ROCm, or ``{}`` elsewhere.
+
+    The torch wheels dlopen system ROCm libs (libroctx64, libroctracer, …)
+    from /opt/rocm/**/lib, which is not on the default linker path. Without
+    this, *anything* that imports torch in the engine venv dies with
+    "libroctx64.so.4: cannot open shared object file" — including
+    ``inference.py --help``, which is how _supports_steps_flag decides
+    whether the script understands a step override. That failure mode is
+    silent: the probe reads the ImportError as "flag not supported" and
+    every profile/request step count is quietly ignored.
+    """
+    from ..gpu_detect import rocm_lib_dirs
+    dirs = rocm_lib_dirs()
+    if not dirs:
+        return {}
+    prior = os.environ.get("LD_LIBRARY_PATH", "")
+    return {"LD_LIBRARY_PATH": os.pathsep.join(dirs + ([prior] if prior else []))}
+
+
 def _supports_steps_flag(python: Path, inference_py: Path) -> bool:
     """Does the local ``inference.py`` accept ``--num_inference_steps``?
 
@@ -103,6 +124,7 @@ def _supports_steps_flag(python: Path, inference_py: Path) -> bool:
         r = subprocess.run(
             [str(python), str(inference_py), "--help"],
             capture_output=True, text=True, timeout=30,
+            env={**os.environ, **_rocm_env()},
         )
         text = (r.stdout or "") + (r.stderr or "")
     except (OSError, subprocess.SubprocessError):
@@ -214,6 +236,9 @@ def build_command(
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUTF8": "1",
     }
+    # AMD ROCm needs the system libs on the linker path; no-op elsewhere.
+    # Same treatment the z_image and wan adapters already apply.
+    env.update(_rocm_env())
     return argv, env
 
 

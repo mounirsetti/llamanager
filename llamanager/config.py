@@ -111,9 +111,11 @@ lock_model_loading = false
 accepting_requests = true
 
 [image]
-# Image-engine paths. Both stacks have hardware-pinned dependency chains
-# (see docs/hidream.md and docs/flux2.md) and are NOT auto-installed —
-# set these to point at an existing install.
+# Image-engine paths. HiDream is auto-installed from the Diffusion engines
+# page — the installer builds the venv, clones HiDream-O1-Image and writes
+# both paths below, so you only set them by hand to point at an existing
+# install. FLUX 2 ships per-backend `sd-cli` binaries that are too
+# platform-specific to fetch reliably, so that one stays manual.
 # hidream_python    = "/path/to/.venv-hidream/bin/python"
 # hidream_repo      = "/path/to/HiDream-O1-Image"
 # flux2_sd_cli      = "/path/to/sd-cli"

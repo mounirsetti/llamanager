@@ -276,13 +276,28 @@ ENGINE_PLANS: dict[str, EnginePackages] = {
             f"diffusers=={DIFFUSERS_PIN}", "huggingface_hub", "safetensors",
             "Pillow", "einops", "sentencepiece",
         ],
+        # HiDream is run as a program (`inference.py`), not imported as a
+        # library, so the checkout is part of the install rather than a
+        # manual step: without it the adapter raises "hidream_repo is not
+        # configured" on the first request. The path is written back to
+        # config the same way the interpreter is.
+        repos=(("https://github.com/HiDream-ai/HiDream-O1-Image.git",
+                "hidream-source"),),
+        # Upstream's own list, installed after the wheel step so its bare
+        # `torch>=2.10` resolves against the ROCm build already present
+        # instead of pulling a generic one over the top. It adds what
+        # inference.py needs beyond the pinned set above (numpy, tqdm,
+        # scipy) plus the prompt-agent extras.
+        requirements=("requirements.txt",),
         space_mb=7500,
         notes=(
             "Auto-detects the GPU family. On AMD/ROCm 7.2+ this installs "
             "the official AMD wheels (torch + torchvision + triton from "
-            "repo.radeon.com) and offers to patch hidream-source's "
-            "pipeline.py to disable flash-attn. On NVIDIA, installs the "
-            "generic CUDA torch wheel."
+            "repo.radeon.com). Clones HiDream-O1-Image, installs its "
+            "requirements.txt, and patches pipeline.py to disable "
+            "flash-attn when the kernel is not importable in the new venv "
+            "(always the case on ROCm). On NVIDIA, installs the generic "
+            "CUDA torch wheel."
         ),
     ),
     "wan": EnginePackages(
@@ -1303,12 +1318,26 @@ class EngineInstaller:
             # Persist the new venv path into the engine's config field.
             self._persist_engine_python(engine, str(python_path))
 
-            # Optional: patch hidream-source/models/pipeline.py to flip
-            # use_flash_attn True → False. Only fires when the option
-            # is set, the plan supports it, and the repo path is known.
-            if plan.supports_flash_attn_patch and options.get("patch_flash_attn"):
-                set_progress(95, "Patching pipeline.py (use_flash_attn=False)")
-                self._apply_flash_attn_patch(engine, emit)
+            # Patch hidream-source/models/pipeline.py to flip use_flash_attn
+            # True → False when the kernel cannot be imported in the venv we
+            # just built. Upstream hardcodes True and the import is fatal, and
+            # there is no flash_attn wheel for ROCm at all — so on AMD this is
+            # the difference between a working engine and an ImportError on the
+            # first request. Asking the operator to tick a box for something
+            # the machine can answer for itself only produced silent failures.
+            # The checkbox still forces the patch on hardware where flash-attn
+            # *is* importable but unwanted.
+            if plan.supports_flash_attn_patch:
+                set_progress(94, "Checking for flash-attn")
+                has_flash_attn = await self._run_subprocess(
+                    [str(python_path), "-c", "import flash_attn"],
+                    cancel, emit, env=verify_env) == 0
+                if options.get("patch_flash_attn") or not has_flash_attn:
+                    set_progress(95, "Patching pipeline.py (use_flash_attn=False)")
+                    self._apply_flash_attn_patch(engine, emit)
+                else:
+                    emit("[ok] flash_attn imports in this venv — leaving "
+                         "use_flash_attn=True")
 
             # Always-on: add --num_inference_steps to hidream-source's
             # argparse and thread it into the pipeline call. Without this
@@ -1675,20 +1704,23 @@ class EngineInstaller:
                             or "--num-inference-steps" in text)
 
         # Step 1: inject argparse registration if missing. Anchor on the
-        # first existing parser.add_argument(...) line so we land in the
-        # right argparse block with the right indentation.
+        # first existing <parser>.add_argument(...) line so we land in the
+        # right argparse block with the right indentation — and reuse
+        # whatever that parser is called. Upstream renamed it `parser` ->
+        # `p` at one point, which silently skipped this patch and left the
+        # engine rejecting --num_inference_steps with exit 2.
         if not already_declared:
             anchor = re.search(
-                r'(^[ \t]*)parser\.add_argument\([^\n]*\n',
+                r'(^[ \t]*)([A-Za-z_][A-Za-z_0-9]*)\.add_argument\([^\n]*\n',
                 text, flags=re.MULTILINE,
             )
             if not anchor:
                 emit(f"[warn] --num_inference_steps patch: no "
-                     f"parser.add_argument() found in {inference}; skipped.")
+                     f"<parser>.add_argument() found in {inference}; skipped.")
                 return
-            indent = anchor.group(1)
+            indent, parser_name = anchor.group(1), anchor.group(2)
             injection = (
-                f'{indent}parser.add_argument('
+                f'{indent}{parser_name}.add_argument('
                 '"--num_inference_steps", type=int, default=None, '
                 'help="Override default step count (llamanager patch)")\n'
             )
@@ -1760,6 +1792,12 @@ class EngineInstaller:
         elif engine == "hidream":
             kwargs["hidream_python"] = python_path
             self.cfg.hidream_python = python_path
+            # The adapter runs <hidream_repo>/inference.py, so the
+            # interpreter alone is not enough — record the checkout too.
+            base = ENGINE_PLANS["hidream"]
+            repo = str(venv_root(self.cfg).parent / base.repos[0][1])
+            kwargs["hidream_repo"] = repo
+            self.cfg.hidream_repo = repo
         elif engine == "asr":
             kwargs["asr_python"] = python_path
             self.cfg.asr_python = python_path

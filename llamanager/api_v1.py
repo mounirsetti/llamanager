@@ -1309,6 +1309,20 @@ async def images_generations(request: Request) -> Response:
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="seed must be an integer")
 
+    # Per-request step count. Every image adapter's _resolved_steps() checks
+    # req.steps before the profile, the composer's override field sends it,
+    # and the video endpoint has always honoured it — but this handler used
+    # to hardcode None, so the field was accepted and silently dropped.
+    steps_raw = body.get("steps")
+    steps_override: int | None = None
+    if steps_raw is not None and steps_raw != "":
+        try:
+            steps_override = int(steps_raw)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="steps must be an integer")
+        if steps_override < 1:
+            raise HTTPException(status_code=400, detail="steps must be >= 1")
+
     # ---- reference-image inputs (llamanager extension) -------------------
     # Accept ``image`` (single) or ``images`` (list); the OpenAI Images
     # API uses both spellings depending on the route. We unify them here.
@@ -1409,7 +1423,7 @@ async def images_generations(request: Request) -> Response:
         prompt=prompt,
         width=width,
         height=height,
-        steps=None,    # adapter pulls from profile/defaults
+        steps=steps_override,   # None -> adapter pulls from profile/defaults
         seed=seed_int,
         n=n,
         ref_images=ref_paths,
