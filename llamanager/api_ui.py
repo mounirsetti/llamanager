@@ -3309,10 +3309,78 @@ def _gallery_media_type(name: str) -> str | None:
     return None
 
 
+#: Gallery files are content-addressed in practice — a name is never reused
+#: for different bytes — so browsers may cache them for a year without
+#: revalidating. ``private`` keeps shared proxies out of a bearer-gated
+#: resource. Thumbnails inherit the same policy: a regenerated thumbnail is
+#: only ever a re-render of the same original.
+GALLERY_CACHE_CONTROL = "private, max-age=31536000, immutable"
+
+
+def _resolve_gallery_file(images_dir: Path, day: str, origin: str,
+                          name: str) -> tuple[Path, str]:
+    """Validate the three path components and return ``(path, media_type)``.
+
+    Raises the same 400/404s the file routes always raised; shared by the
+    admin and public variants of both the file and the thumbnail routes so
+    the four of them cannot drift on traversal handling.
+    """
+    _safe_path_components(day, origin, name)
+    media_type = _gallery_media_type(name)
+    if media_type is None:
+        raise HTTPException(status_code=400,
+                            detail="only .png / .mp4 files are served here")
+    p = (images_dir / day / origin / name).resolve()
+    try:
+        p.relative_to(images_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="path escapes images_dir")
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return p, media_type
+
+
+def serve_gallery_file(images_dir: Path, day: str, origin: str,
+                       name: str) -> Response:
+    """FileResponse for an original gallery file, with the long cache policy."""
+    from fastapi.responses import FileResponse as _FileResponse
+    p, media_type = _resolve_gallery_file(images_dir, day, origin, name)
+    return _FileResponse(p, media_type=media_type,
+                         headers={"Cache-Control": GALLERY_CACHE_CONTROL})
+
+
+async def serve_gallery_thumb(images_dir: Path, day: str, origin: str,
+                              name: str) -> Response:
+    """FileResponse for the JPEG thumbnail of a gallery file.
+
+    Generated on first request (in a worker thread) and cached under
+    ``images_dir/.thumbs``. A generation failure surfaces as 503 with the
+    cause in ``detail`` — the client renders an error tile with a retry,
+    it never gets a silent blank.
+    """
+    from fastapi.responses import FileResponse as _FileResponse
+    from . import thumbs as _thumbs
+    src, _ = _resolve_gallery_file(images_dir, day, origin, name)
+    dst = _thumbs.thumb_path(images_dir, day, origin, name)
+    try:
+        await _thumbs.ensure_thumbnail_async(src, dst)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="not found")
+    except _thumbs.ThumbError as e:
+        raise HTTPException(status_code=503, detail=f"thumbnail: {e}")
+    except Exception as e:  # noqa: BLE001 — decode errors of arbitrary kinds
+        log.warning("thumbnail failed for %s", src, exc_info=True)
+        raise HTTPException(status_code=503,
+                            detail=f"thumbnail: {type(e).__name__}: {e}")
+    return _FileResponse(dst, media_type="image/jpeg",
+                         headers={"Cache-Control": GALLERY_CACHE_CONTROL})
+
+
 def _list_gallery(images_dir: Path, *, origin_filter: str | None = None,
                   limit: int = 200,
                   before: float | None = None,
-                  kind: str | None = None) -> dict[str, Any]:
+                  kind: str | None = None,
+                  url_prefix: str = "/ui/images") -> dict[str, Any]:
     """Walk ``images_dir`` newest-first and return a JSON-ready gallery page.
 
     Layout on disk is ``<images_dir>/<day>/<origin>/<name>.png`` (written by
@@ -3323,6 +3391,10 @@ def _list_gallery(images_dir: Path, *, origin_filter: str | None = None,
 
     ``origin_filter`` scopes the listing to one origin name (already
     sanitised by the caller); ``before`` paginates via mtime cursor.
+    ``url_prefix`` is the route family the caller serves files under:
+    ``/ui/images`` for the cookie-authenticated admin pages, ``/images`` for
+    the bearer-authenticated public pages. Emitting admin URLs to a bearer
+    client sent every tile to the login redirect.
     """
     if not images_dir.exists():
         return {"items": [], "next_before": None}
@@ -3331,8 +3403,10 @@ def _list_gallery(images_dir: Path, *, origin_filter: str | None = None,
     # naming used by _gallery_dir, but fall back to mtime sort for any
     # directory that doesn't follow the convention.
     try:
+        # Dot-dirs are ours (``.thumbs`` — see thumbs.py), never gallery days.
         day_dirs = sorted(
-            (p for p in images_dir.iterdir() if p.is_dir()),
+            (p for p in images_dir.iterdir()
+             if p.is_dir() and not p.name.startswith(".")),
             key=lambda p: p.name,
             reverse=True,
         )
@@ -3391,7 +3465,13 @@ def _list_gallery(images_dir: Path, *, origin_filter: str | None = None,
             "mtime": it["_mtime"],
             "size": it["size"],
             "kind": it.get("kind", "image"),
-            "url": f"/ui/images/file/{it['day']}/{it['origin']}/{it['name']}",
+            "url": f"{url_prefix}/file/{it['day']}/{it['origin']}/{it['name']}",
+            "thumb_url": (f"{url_prefix}/thumb/{it['day']}/{it['origin']}/"
+                          f"{it['name']}"),
+            # Reported by the runner in the sidecar; lets the client shape
+            # the tile before any pixel arrives (no masonry reflow jank).
+            "width": sidecar.get("width"),
+            "height": sidecar.get("height"),
             "sidecar": sidecar,
         })
     return {"items": out, "next_before": next_before}
@@ -3457,26 +3537,18 @@ async def images_status(request: Request,
 @router.get("/images/file/{day}/{origin}/{name}")
 async def images_file_serve(request: Request, day: str, origin: str, name: str,
                             _: Origin = Depends(require_admin_ui)) -> Response:
-    """Serve a previously generated PNG. Authenticated by the same admin
-    session that owns the rest of /ui. Path components are sanitised
+    """Serve a previously generated PNG / MP4. Authenticated by the same
+    admin session that owns the rest of /ui. Path components are sanitised
     against traversal."""
-    from fastapi.responses import FileResponse as _FileResponse
-    cfg = request.app.state.cfg
-    for seg in (day, origin, name):
-        if "/" in seg or "\\" in seg or ".." in seg or "\x00" in seg:
-            raise HTTPException(status_code=400, detail="invalid path component")
-    media_type = _gallery_media_type(name)
-    if media_type is None:
-        raise HTTPException(status_code=400,
-                            detail="only .png / .mp4 files are served here")
-    p = (cfg.images_dir / day / origin / name).resolve()
-    try:
-        p.relative_to(cfg.images_dir.resolve())
-    except ValueError:
-        raise HTTPException(status_code=400, detail="path escapes images_dir")
-    if not p.exists() or not p.is_file():
-        raise HTTPException(status_code=404, detail="not found")
-    return _FileResponse(p, media_type=media_type)
+    return serve_gallery_file(request.app.state.cfg.images_dir, day, origin, name)
+
+
+@router.get("/images/thumb/{day}/{origin}/{name}")
+async def images_thumb_serve(request: Request, day: str, origin: str, name: str,
+                             _: Origin = Depends(require_admin_ui)) -> Response:
+    """JPEG thumbnail of a gallery file (built on demand, cached on disk)."""
+    return await serve_gallery_thumb(request.app.state.cfg.images_dir,
+                                     day, origin, name)
 
 
 # ---------- logs ----------

@@ -22,6 +22,8 @@ dependencies = [
     "tomlkit>=0.12",
     "psutil>=5.9",
     "aiosqlite>=0.19",
+    # Gallery thumbnails (thumbs.py) and reference-image sidecar previews.
+    "pillow>=10",
 ]
 
 [project.optional-dependencies]
@@ -29,7 +31,7 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 windows-service = ["pywin32>=306; sys_platform == 'win32'"]
 # System-tray / menu-bar helper (`llamanager tray`). Optional so headless
 # server installs stay lean.
-tray = ["pystray>=0.19", "pillow>=10"]
+tray = ["pystray>=0.19"]
 
 [project.scripts]
 llamanager = "llamanager.cli:main"

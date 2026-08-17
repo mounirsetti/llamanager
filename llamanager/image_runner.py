@@ -87,7 +87,11 @@ def _enforce_disk_cap(cfg: Config) -> None:
         return
     entries: list[tuple[float, Path]] = []
     total = 0
-    for root, _, files in os.walk(cfg.images_dir):
+    from .thumbs import THUMBS_DIRNAME, drop_thumbnail
+    for root, dirs, files in os.walk(cfg.images_dir):
+        # The thumbnail cache is derived data: not counted against the cap
+        # and not GC'd on its own — each thumb goes when its original goes.
+        dirs[:] = [d for d in dirs if d != THUMBS_DIRNAME]
         for fn in files:
             p = Path(root) / fn
             try:
@@ -107,6 +111,7 @@ def _enforce_disk_cap(cfg: Config) -> None:
             sidecar = p.with_suffix(p.suffix + ".json")
             with contextlib.suppress(OSError):
                 sidecar.unlink()
+            drop_thumbnail(cfg.images_dir, p)
             total -= size
         except OSError:
             continue
@@ -643,6 +648,12 @@ class ImageTaskRunner:
             )
         except OSError:
             log.warning("sidecar write failed for %s", sidecar_path)
+
+        # Build the gallery thumbnail now, off the event loop, so the first
+        # gallery view after this run doesn't pay the decode. Best-effort:
+        # the thumb route regenerates on demand if this fails.
+        from .thumbs import warm_thumbnail
+        await asyncio.to_thread(warm_thumbnail, self.cfg.images_dir, out_path)
 
         # Reset state to idle.
         self._reset_runtime_state(failed=False)

@@ -609,6 +609,7 @@
   </div>
 </div>
 
+{% include "_gallery_media.html" %}
 <script>
   window.LM_IMAGES_CFG = {
     imageModels: {{ image_models_json | safe }},
@@ -979,22 +980,12 @@
     div.dataset.url = item.url;
     const isVideo = item.kind === "video" ||
                     (item.name || "").toLowerCase().endsWith(".mp4");
-    if (isVideo) {
-      const vid = document.createElement("video");
-      vid.src = item.url; vid.muted = true; vid.loop = true;
-      vid.playsInline = true; vid.preload = "metadata";
-      vid.addEventListener("loadedmetadata",
-        () => fitCardToMedia(div, vid.videoWidth, vid.videoHeight));
-      vid.addEventListener("mouseenter", () => { vid.play().catch(() => {}); });
-      vid.addEventListener("mouseleave", () => { vid.pause(); });
-      div.appendChild(vid);
-    } else {
-      const img = document.createElement("img");
-      img.loading = "lazy"; img.src = item.url;
-      img.addEventListener("load",
-        () => fitCardToMedia(div, img.naturalWidth, img.naturalHeight));
-      div.appendChild(img);
-    }
+    // Thumbnail, lazy + bounded + visible-on-failure (see _gallery_media.html).
+    // Cookie-authenticated page: the <img> can point at the route directly.
+    LMGalleryMedia.attach(div, item, {
+      authHeaders: null, isVideo,
+      onSize: (w, h) => fitCardToMedia(div, w, h),
+    });
     const sc = item.sidecar || {};
     if (sc.prompt) {
       const cap = document.createElement("div");

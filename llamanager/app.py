@@ -726,37 +726,37 @@ def create_app(config_path: Path | None = None,
         # origins share a gallery.
         payload = _list_gallery(cfg.images_dir,
                                 origin_filter=origin.name,
-                                limit=limit, before=before, kind=kind)
+                                limit=limit, before=before, kind=kind,
+                                url_prefix="/images")
         return JSONResponse(payload)
+
+    async def _public_gallery_origin(request: Request, origin: str):
+        """Resolve the bearer and confine it to its own gallery folder."""
+        from .api_v1 import _origin_from_request
+        bearer_origin = await _origin_from_request(request)
+        if origin != bearer_origin.name:
+            raise HTTPException(status_code=403,
+                                detail="cannot access another origin's gallery")
 
     @app.get("/images/file/{day}/{origin}/{name}")
     async def images_file_serve_public(request: Request,
                                        day: str, origin: str,
                                        name: str) -> Response:
-        """Bearer-authenticated PNG serving for the public gallery. The path
-        is constrained to this origin's own directory to avoid leaking
+        """Bearer-authenticated PNG / MP4 serving for the public gallery. The
+        path is constrained to this origin's own directory to avoid leaking
         other users' galleries."""
-        from .api_v1 import _origin_from_request
-        from .api_ui import _safe_path_components, _gallery_media_type
-        from fastapi.responses import FileResponse as _FileResponse
-        bearer_origin = await _origin_from_request(request)
-        if origin != bearer_origin.name:
-            raise HTTPException(status_code=403,
-                                detail="cannot access another origin's gallery")
-        _safe_path_components(day, origin, name)
-        media_type = _gallery_media_type(name)
-        if media_type is None:
-            raise HTTPException(status_code=400,
-                                detail="only .png / .mp4 files are served here")
-        p = (cfg.images_dir / day / origin / name).resolve()
-        try:
-            p.relative_to(cfg.images_dir.resolve())
-        except ValueError:
-            raise HTTPException(status_code=400,
-                                detail="path escapes images_dir")
-        if not p.exists() or not p.is_file():
-            raise HTTPException(status_code=404, detail="not found")
-        return _FileResponse(p, media_type=media_type)
+        from .api_ui import serve_gallery_file
+        await _public_gallery_origin(request, origin)
+        return serve_gallery_file(cfg.images_dir, day, origin, name)
+
+    @app.get("/images/thumb/{day}/{origin}/{name}")
+    async def images_thumb_serve_public(request: Request,
+                                        day: str, origin: str,
+                                        name: str) -> Response:
+        """Bearer-authenticated thumbnail, same origin confinement."""
+        from .api_ui import serve_gallery_thumb
+        await _public_gallery_origin(request, origin)
+        return await serve_gallery_thumb(cfg.images_dir, day, origin, name)
 
     @app.get("/")
     async def root() -> JSONResponse:

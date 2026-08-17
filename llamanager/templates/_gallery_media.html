@@ -1,0 +1,229 @@
+{# Gallery tile media loader — shared by images.html, videos.html and their
+   bearer-authenticated public twins.
+
+   What it fixes: the grid used to fetch every full-size PNG / whole MP4 the
+   moment the listing arrived (60 at once, ~1–5 MB each), draw nothing until
+   each finished, and swallow every failure — a dropped request left a blank
+   tile forever. Now a tile:
+     * reserves its aspect ratio from the listing before any byte arrives;
+     * loads the server-side JPEG thumbnail (thumbs.py), not the original;
+     * loads only when it scrolls near the viewport, at most MAX_INFLIGHT
+       at a time, newest-visible first;
+     * shows a visible error state with a Retry button when a load fails.
+   Originals are still used for the lightbox and for hover-preview of clips.
+
+   API: LMGalleryMedia.attach(card, item, opts)
+     opts.authHeaders  () => headers   bearer pages: media fetched as blobs;
+                       null            cookie pages: <img src> straight.
+     opts.isVideo      boolean
+     opts.onSize       (w, h) => void  called with intrinsic dimensions.
+#}
+<style>
+  .gen-card { background: var(--bg-2); }
+  .gen-card .gen-thumb {
+    opacity: 0; transition: opacity 260ms ease, transform 400ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+  .gen-card .gen-thumb.is-loaded { opacity: 1; }
+  /* Live-preview <video> sits over the poster and only exists while
+     hovering a clip; it inherits the img/video fill rule from the page. */
+  .gen-card .gen-preview { position: absolute; inset: 0; }
+  .gen-card__play {
+    position: absolute; left: 50%; top: 50%; width: 40px; height: 40px;
+    transform: translate(-50%, -50%);
+    border-radius: 999px; background: oklch(0 0 0 / 0.55);
+    box-shadow: 0 0 0 1px oklch(1 0 0 / 0.25) inset;
+    pointer-events: none; z-index: 1;
+    display: flex; align-items: center; justify-content: center;
+    transition: opacity 160ms ease;
+  }
+  .gen-card__play::after {
+    content: ""; display: block; margin-left: 3px;
+    border-style: solid; border-width: 8px 0 8px 13px;
+    border-color: transparent transparent transparent #fff;
+  }
+  .gen-card.is-previewing .gen-card__play { opacity: 0; }
+  .gen-card__err {
+    position: absolute; inset: 0; z-index: 2;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 8px; padding: 10px; text-align: center;
+    font-size: 0.6875rem; line-height: 1.35; color: var(--fg-2);
+    background: var(--bg-2);
+  }
+  .gen-card__err code { font-size: 0.625rem; color: var(--fg-3); word-break: break-word; }
+  .gen-card__err button {
+    font: inherit; font-size: 0.6875rem; font-weight: 500;
+    padding: 4px 10px; border-radius: 6px; cursor: pointer;
+    color: var(--fg-0); background: var(--bg-1); border: 1px solid var(--fg-3);
+  }
+  .gen-card__err button:hover { border-color: var(--fg-1); }
+  @media (prefers-reduced-motion: reduce) {
+    .gen-card .gen-thumb { transition: none; }
+  }
+</style>
+<script>
+window.LMGalleryMedia = (function () {
+  "use strict";
+  // Concurrent tile loads. Six matches the per-host HTTP/1.1 connection
+  // budget, so a burst of tiles never queues behind itself in the browser
+  // and never starves the listing / generation requests.
+  var MAX_INFLIGHT = 6;
+  var PREFETCH_MARGIN = "600px 0px";
+  var inflight = 0;
+  var waiting = [];
+
+  function schedule(job) {
+    return new Promise(function (resolve, reject) {
+      waiting.push({ job: job, resolve: resolve, reject: reject });
+      pump();
+    });
+  }
+  function pump() {
+    while (inflight < MAX_INFLIGHT && waiting.length) {
+      // LIFO: the tile that most recently entered the viewport is the one
+      // the user is looking at now — the earlier ones may have scrolled by.
+      var w = waiting.pop();
+      inflight++;
+      Promise.resolve().then(w.job).then(
+        function (v) { inflight--; w.resolve(v); pump(); },
+        function (e) { inflight--; w.reject(e); pump(); });
+    }
+  }
+
+  // Bearer-gated URL → object URL, cached per URL so the lightbox and the
+  // download link reuse the same bytes.
+  var blobCache = new Map();
+  function fetchBlobUrl(url, headers) {
+    var hit = blobCache.get(url);
+    if (hit) return hit;
+    var p = fetch(url, { headers: headers, credentials: "same-origin" }).then(function (r) {
+      if (!r.ok) {
+        return r.text().then(function (t) {
+          var detail = t;
+          try { detail = JSON.parse(t).detail || t; } catch (e) {}
+          throw new Error("HTTP " + r.status + (detail ? " — " + String(detail).slice(0, 160) : ""));
+        });
+      }
+      return r.blob();
+    }).then(function (b) { return URL.createObjectURL(b); });
+    p.catch(function () { blobCache.delete(url); });
+    blobCache.set(url, p);
+    return p;
+  }
+
+  function loadImage(img, src) {
+    return new Promise(function (resolve, reject) {
+      img.onload = function () { resolve(); };
+      img.onerror = function () { reject(new Error("image decode failed")); };
+      img.src = src;
+    });
+  }
+
+  var observer = ("IntersectionObserver" in window) ? new IntersectionObserver(function (entries) {
+    entries.forEach(function (en) {
+      if (!en.isIntersecting) return;
+      observer.unobserve(en.target);
+      var start = en.target.__lmLoad;
+      if (start) start();
+    });
+  }, { rootMargin: PREFETCH_MARGIN }) : null;
+
+  function attach(card, item, opts) {
+    var authHeaders = opts.authHeaders || null;
+    var isVideo = !!opts.isVideo;
+    var onSize = opts.onSize || function () {};
+    var thumbUrl = item.thumb_url;
+    if (!thumbUrl) throw new Error("gallery item has no thumb_url: " + (item.url || item.name));
+
+    // Shape the tile from the listing so the masonry doesn't reflow when
+    // the pixels land. Videos report their size on the sidecar too.
+    if (item.width && item.height) onSize(item.width, item.height);
+
+    var img = document.createElement("img");
+    img.className = "gen-thumb";
+    img.alt = (item.sidecar && item.sidecar.prompt) ? String(item.sidecar.prompt).slice(0, 120) : (item.name || "");
+    img.decoding = "async";
+    img.draggable = false;
+    card.appendChild(img);
+
+    var playBadge = null;
+    if (isVideo) {
+      playBadge = document.createElement("div");
+      playBadge.className = "gen-card__play";
+      playBadge.setAttribute("aria-hidden", "true");
+      card.appendChild(playBadge);
+    }
+
+    var errBox = null;
+    function clearError() {
+      if (errBox) { errBox.remove(); errBox = null; }
+    }
+    function showError(err) {
+      clearError();
+      errBox = document.createElement("div");
+      errBox.className = "gen-card__err";
+      var msg = document.createElement("div");
+      msg.textContent = isVideo ? "Couldn't load the poster" : "Couldn't load the thumbnail";
+      var code = document.createElement("code");
+      code.textContent = (err && err.message) ? err.message : String(err);
+      var btn = document.createElement("button");
+      btn.type = "button"; btn.textContent = "Retry";
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();   // don't open the lightbox for a broken tile
+        clearError();
+        load();
+      });
+      errBox.appendChild(msg); errBox.appendChild(code); errBox.appendChild(btn);
+      errBox.addEventListener("click", function (e) { e.stopPropagation(); });
+      card.appendChild(errBox);
+    }
+
+    var loading = false, loaded = false;
+    function load() {
+      if (loading || loaded) return;
+      loading = true;
+      schedule(function () {
+        if (authHeaders) {
+          return fetchBlobUrl(thumbUrl, authHeaders()).then(function (u) { return loadImage(img, u); });
+        }
+        return loadImage(img, thumbUrl);
+      }).then(function () {
+        loading = false; loaded = true;
+        img.classList.add("is-loaded");
+        onSize(img.naturalWidth, img.naturalHeight);
+      }, function (err) {
+        loading = false;
+        showError(err);
+      });
+    }
+    card.__lmLoad = load;
+    if (observer) observer.observe(card); else load();
+
+    // Clips: hover plays the original over the poster (desktop only —
+    // there is no hover on touch, and a tap opens the lightbox anyway).
+    if (isVideo && window.matchMedia && window.matchMedia("(hover: hover) and (pointer: fine)").matches) {
+      var vid = null;
+      card.addEventListener("mouseenter", function () {
+        if (!loaded) return;
+        if (!vid) {
+          vid = document.createElement("video");
+          vid.className = "gen-preview";
+          vid.muted = true; vid.loop = true; vid.playsInline = true; vid.preload = "auto";
+          card.appendChild(vid);
+          var srcReady = authHeaders ? fetchBlobUrl(item.url, authHeaders()) : Promise.resolve(item.url);
+          srcReady.then(function (u) { vid.src = u; return vid.play(); })
+                  .then(function () { card.classList.add("is-previewing"); })
+                  .catch(function () { /* autoplay refused or fetch failed: poster stays */ });
+        } else {
+          vid.play().then(function () { card.classList.add("is-previewing"); }).catch(function () {});
+        }
+      });
+      card.addEventListener("mouseleave", function () {
+        if (vid) { vid.pause(); }
+        card.classList.remove("is-previewing");
+      });
+    }
+  }
+
+  return { attach: attach, fetchBlobUrl: fetchBlobUrl };
+})();
+</script>

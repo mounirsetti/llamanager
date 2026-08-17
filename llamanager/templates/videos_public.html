@@ -603,6 +603,7 @@
     </div>
   </div>
 
+  {% include "_gallery_media.html" %}
   <script>
     window.LM_IMAGES_CFG = {
       imageModels: {{ image_models_json | safe }},
@@ -704,14 +705,9 @@
     let liveCard = null;
 
     function shortName(id) { const p = id.split("/"); return p[p.length - 1]; }
-    // Bearer-gated PNG → object URL, cached on the item to avoid refetch.
-    async function authObjectUrl(item) {
-      if (item._blobUrl) return item._blobUrl;
-      const r = await fetch(item.url, {headers: AUTH()});
-      if (!r.ok) throw new Error(String(r.status));
-      item._blobUrl = URL.createObjectURL(await r.blob());
-      return item._blobUrl;
-    }
+    // Bearer-gated original → object URL. Shares the loader's cache, so the
+    // lightbox / download / hover-preview all reuse one fetch per file.
+    function authObjectUrl(item) { return LMGalleryMedia.fetchBlobUrl(item.url, AUTH()); }
 
     // ---- Settings / model ----
     function populateModelDropdown() {
@@ -959,22 +955,12 @@
     function cardFor(item) {
       const div = document.createElement("div"); div.className = "gen-card"; div.dataset.url = item.url;
       const isVideo = item.kind === "video" || (item.name || "").toLowerCase().endsWith(".mp4");
-      authObjectUrl(item).then(url => {
-        if (isVideo) {
-          const vid = document.createElement("video"); vid.src = url; vid.muted = true; vid.loop = true;
-          vid.playsInline = true; vid.preload = "metadata";
-          vid.addEventListener("loadedmetadata",
-            () => fitCardToMedia(div, vid.videoWidth, vid.videoHeight));
-          vid.addEventListener("mouseenter", () => { vid.play().catch(() => {}); });
-          vid.addEventListener("mouseleave", () => { vid.pause(); });
-          div.appendChild(vid);
-        } else {
-          const img = document.createElement("img"); img.loading = "lazy"; img.src = url;
-          img.addEventListener("load",
-            () => fitCardToMedia(div, img.naturalWidth, img.naturalHeight));
-          div.appendChild(img);
-        }
-      }).catch(() => {});
+      // Thumbnail via bearer fetch → blob, lazy + bounded + visible-on-failure
+      // (see _gallery_media.html). Originals only for lightbox / hover.
+      LMGalleryMedia.attach(div, item, {
+        authHeaders: AUTH, isVideo,
+        onSize: (w, h) => fitCardToMedia(div, w, h),
+      });
       const sc = item.sidecar || {};
       if (sc.prompt) { const cap = document.createElement("div"); cap.className = "gen-card__cap"; cap.textContent = sc.prompt; div.appendChild(cap); }
       div.addEventListener("click", () => openLightbox(item));
@@ -1076,11 +1062,11 @@
           wrap.appendChild(lbVid);
         }
         lbVid.hidden = false; lbVid.removeAttribute("src");
-        authObjectUrl(item).then(url => { lbVid.src = url; }).catch(() => {});
+        authObjectUrl(item).then(url => { lbVid.src = url; }).catch(e => showError("Could not load the clip: " + e.message));
       } else {
         lbImg.hidden = false; lbImg.src = "";
         if (lbVid) { lbVid.pause(); lbVid.hidden = true; lbVid.removeAttribute("src"); }
-        authObjectUrl(item).then(url => { lbImg.src = url; }).catch(() => {});
+        authObjectUrl(item).then(url => { lbImg.src = url; }).catch(e => showError("Could not load the image: " + e.message));
       }
       lbMeta.innerHTML = "";
       const rows = [
