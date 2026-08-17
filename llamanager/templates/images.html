@@ -625,6 +625,8 @@
     galleryUrl: "/ui/images/gallery",
     statusUrl: "/ui/images/status",
     cancelUrlTpl: "/admin/queue/{id}/cancel",
+    // Admin pages only: permanent removal of a gallery item.
+    deleteUrlTpl: "/admin/gallery/{day}/{origin}/{name}",
     fileUrlPrefix: "/ui/images/file/",
     generationsUrl: "/v1/images/generations"
   };
@@ -1160,6 +1162,40 @@
     dl.href = item.url; dl.download = item.name || "image.png"; lbActions.appendChild(dl);
     if (sc.prompt) mkBtn("Reuse prompt", () => { promptEl.value = sc.prompt; autosize(); closeLightbox(); promptEl.focus(); });
     if (sc.seed != null) mkBtn("Reuse seed", () => { seedEl.value = String(sc.seed); closeLightbox(); });
+    // Admin-only, permanent: original + sidecar + thumbnail. Two clicks —
+    // the first turns the button into a red confirm, the second deletes.
+    // Incognito tiles exist only in this tab and have nothing to delete.
+    if (!sc.incognito && cfg.deleteUrlTpl && item.day && item.origin && item.name) {
+      const del = document.createElement("button");
+      del.type = "button"; del.className = "lm-btn lm-btn--ghost lm-btn--xs gen-lb-delete";
+      del.textContent = "Delete"; del.title = "Permanently remove this from the gallery";
+      let armed = false, timer = null;
+      const disarm = () => { armed = false; del.textContent = "Delete"; del.classList.remove("is-armed"); if (timer) { clearTimeout(timer); timer = null; } };
+      del.addEventListener("click", async () => {
+        if (!armed) {
+          armed = true; del.textContent = "Delete permanently?"; del.classList.add("is-armed");
+          timer = setTimeout(disarm, 5000);   // an unconfirmed arm quietly resets
+          return;
+        }
+        disarm(); del.disabled = true; del.textContent = "Deleting…";
+        try {
+          const url = cfg.deleteUrlTpl.replace("{day}", encodeURIComponent(item.day))
+            .replace("{origin}", encodeURIComponent(item.origin)).replace("{name}", encodeURIComponent(item.name));
+          const r = await fetch(url, { method: "DELETE",
+            headers: cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : {}, credentials: "same-origin" });
+          if (!r.ok) { let t = ""; try { t = (await r.json()).detail || ""; } catch {} throw new Error(`HTTP ${r.status}${t ? " — " + t : ""}`); }
+          const card = grid.querySelector(`.gen-card[data-url="${CSS.escape(item.url)}"]`);
+          if (card) card.remove();
+          state.seenUrls.delete(item.url);
+          closeLightbox(); updateEmpty();
+        } catch (e) {
+          del.disabled = false; del.textContent = "Delete";
+          showError(`Could not delete: ${e.message}`);
+        }
+      });
+      lbActions.appendChild(del);
+    }
+
     if ((caps().ref_images_max || 0) > 0) mkBtn("Use as reference", async () => {
       try {
         const r = await fetch(item.url, {headers: cfg.apiKey ? {"Authorization": "Bearer " + cfg.apiKey} : {}, credentials: "same-origin"});

@@ -72,6 +72,14 @@
   }
   /* The in-flight tile has its cancel button top-right: centre the badge. */
   .gen-card--live .gen-card__incog { right: auto; left: 50%; transform: translateX(-50%); }
+  /* ---- Delete (admin lightbox) ----
+     First click arms: the ghost button turns into a red outline asking for
+     confirmation; second click deletes; 5 s of nothing disarms it. */
+  .gen-lb-delete.is-armed {
+    color: var(--accent); border-color: var(--accent);
+    background: color-mix(in oklab, var(--accent) 10%, transparent);
+  }
+  .gen-lb-delete.is-armed:hover { color: #fff; background: var(--accent); }
   @media (prefers-reduced-motion: reduce) {
     .gen-card .gen-thumb { transition: none; }
   }

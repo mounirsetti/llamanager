@@ -155,6 +155,28 @@ async def queue_cancel(request: Request, request_id: str,
     return JSONResponse({"ok": True})
 
 
+@router.delete("/gallery/{day}/{origin}/{name}")
+async def gallery_delete(request: Request, day: str, origin: str, name: str,
+                         admin: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Permanently remove a generated image or video from the gallery.
+
+    Admin-only, bearer-authenticated (like the other /admin mutations, so
+    the admin pages can call it with their session key and no CSRF dance).
+    Removes the original, its sidecar and its cached thumbnail; there is no
+    trash and no undo. Logged to the activity feed with who did it.
+    """
+    from .api_ui import delete_gallery_file
+    cfg = request.app.state.cfg
+    removed = delete_gallery_file(cfg.images_dir, day, origin, name)
+    request.app.state.db.log_event("gallery_delete", {
+        "day": day, "origin": origin, "name": name,
+        "bytes": removed["bytes"], "by": admin.name,
+    })
+    log.info("gallery: %s deleted %s/%s/%s (%d bytes)",
+             admin.name, day, origin, name, removed["bytes"])
+    return JSONResponse({"ok": True, "removed": removed})
+
+
 @router.post("/queue/{request_id}/cancel")
 async def queue_cancel_in_flight(request: Request, request_id: str,
                                  _: Origin = Depends(admin_origin)) -> JSONResponse:

@@ -243,6 +243,10 @@ def _fmt_event(kind: str, payload: dict[str, Any]) -> tuple[str, str] | None:
             return ("info", f"Origin key rotated (id {p.get('id')})")
         case "bootstrap_created":
             return ("info", "Bootstrap origin created")
+        case "gallery_delete":
+            who = p.get("by") or "admin"
+            return ("info", f"gallery: {who} deleted "
+                            f"{p.get('day')}/{p.get('origin')}/{p.get('name')}")
         case _:
             # Unknown kind — render a compact fallback so it isn't silently lost
             return ("info", f"event: {kind} {payload!r}")

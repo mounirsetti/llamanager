@@ -3354,6 +3354,40 @@ def serve_gallery_file(images_dir: Path, day: str, origin: str,
                          headers={"Cache-Control": GALLERY_CACHE_CONTROL})
 
 
+def delete_gallery_file(images_dir: Path, day: str, origin: str,
+                        name: str) -> dict[str, Any]:
+    """Permanently remove one gallery item: the original, its sidecar JSON
+    and its cached thumbnail. Empty origin/day folders left behind are
+    pruned. Raises the same 400/404s as the serving routes. Returns what
+    was removed, for the caller's audit event."""
+    from . import thumbs as _thumbs
+    p, _ = _resolve_gallery_file(images_dir, day, origin, name)
+    removed: dict[str, Any] = {"file": str(p), "bytes": p.stat().st_size,
+                               "sidecar": False, "thumbnail": False}
+    sidecar = p.with_name(p.name + ".json")
+    thumb = _thumbs.thumb_path(images_dir, day, origin, name)
+    p.unlink()
+    try:
+        sidecar.unlink()
+        removed["sidecar"] = True
+    except FileNotFoundError:
+        pass
+    try:
+        thumb.unlink()
+        removed["thumbnail"] = True
+    except FileNotFoundError:
+        pass
+    # Best-effort tidy: an origin folder with nothing left in it, then the
+    # day folder, then the matching thumbnail folders. rmdir refuses a
+    # non-empty directory, which is exactly the check we want.
+    for d in (p.parent, p.parent.parent, thumb.parent, thumb.parent.parent):
+        try:
+            d.rmdir()
+        except OSError:
+            pass
+    return removed
+
+
 async def serve_gallery_thumb(images_dir: Path, day: str, origin: str,
                               name: str) -> Response:
     """FileResponse for the JPEG thumbnail of a gallery file.

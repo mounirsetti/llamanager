@@ -1295,6 +1295,10 @@ The UI has streaming token display, multiple conversations stored in localStorag
 
 **Image input (vision).** When the currently-selected profile has an `mmproj` configured (i.e. it's vision-capable), a paperclip button appears next to the textarea. Click it (or drop files) to attach PNG/JPEG/WEBP/GIF images up to 10 MB each; thumbnails show above the input. On send, the message goes out as an OpenAI multimodal `content` array (`[{type:"text",text:"..."}, {type:"image_url",image_url:{url:"data:image/png;base64,..."}}]`) that llama-server with `--mmproj` consumes directly. Switching to a profile without `mmproj` hides the paperclip and clears any pending attachments. The public `/chat` page does the same — the bearer's `allowed_models` decides which profiles even appear in the dropdown.
 
+## Deleting from the gallery (admins)
+
+Open any tile on `/ui/images` or `/ui/videos` and use **Delete** in the lightbox — the button first arms itself as *Delete permanently?* (a second click within 5 s confirms; otherwise it resets) and then removes the original, its sidecar JSON and its cached thumbnail, pruning the origin/day folders when they become empty. There is no trash and no undo. Under the hood it is `DELETE /admin/gallery/{day}/{origin}/{name}` with an admin bearer key (`403` for anyone else), and every deletion is written to the activity feed with the admin's origin name.
+
 ## Incognito (admins)
 
 An admin can run a chat, an image or a video generation that leaves nothing behind. Tick **Incognito** in the chat rail (`/ui/chat`) or in the composer settings pane (`/ui/images`, `/ui/videos`), or send `"incognito": true` in the request body of `/v1/chat/completions`, `/v1/images/generations` or `/v1/videos/generations` with an admin origin's key (non-admin origins get `403`).
