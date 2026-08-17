@@ -56,6 +56,22 @@
     color: var(--fg-0); background: var(--bg-1); border: 1px solid var(--fg-3);
   }
   .gen-card__err button:hover { border-color: var(--fg-1); }
+  /* ---- Incognito (admin pages) ----
+     The composer toggle, the in-flight tile and the finished tile all share
+     the dashed-accent cue: this one exists only in this tab's memory. */
+  .lm-img-incognito { grid-column: 1 / -1; padding: 10px 12px; border: 1px dashed var(--accent); border-radius: 8px; }
+  .lm-img-incognito__label { display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--fg-0); }
+  .lm-img-incognito__label input { accent-color: var(--accent); margin: 0; }
+  .gen-card--incognito { border-style: dashed; border-color: var(--accent); }
+  .gen-card__incog {
+    /* Top-right: the "NEW" ribbon owns the top-left corner of a fresh tile. */
+    position: absolute; top: 8px; right: 8px; z-index: 2; pointer-events: none;
+    font-size: 0.5625rem; letter-spacing: 0.12em; text-transform: uppercase; font-weight: 600;
+    padding: 2px 7px; border-radius: 4px; color: #fff;
+    background: oklch(0 0 0 / 0.6); border: 1px dashed var(--accent);
+  }
+  /* The in-flight tile has its cancel button top-right: centre the badge. */
+  .gen-card--live .gen-card__incog { right: auto; left: 50%; transform: translateX(-50%); }
   @media (prefers-reduced-motion: reduce) {
     .gen-card .gen-thumb { transition: none; }
   }
@@ -224,6 +240,93 @@ window.LMGalleryMedia = (function () {
     }
   }
 
-  return { attach: attach, fetchBlobUrl: fetchBlobUrl };
+  // Incognito results never touch the gallery, so the page cannot pick
+  // them up from the listing. Build gallery-shaped items straight from the
+  // b64 payload of /v1/images|videos/generations; the blob URLs live only
+  // as long as this document. ``sidecar`` mirrors what the runner would have
+  // written so the lightbox metadata reads the same.
+  function b64ToBlobUrl(b64, mime) {
+    var bin = atob(b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return URL.createObjectURL(new Blob([bytes], { type: mime }));
+  }
+  // A clip's poster is normally a server-made JPEG; for an in-memory clip
+  // we grab the first frame ourselves. Resolves to a blob URL.
+  function posterFromVideoUrl(url) {
+    return new Promise(function (resolve, reject) {
+      var v = document.createElement("video");
+      v.muted = true; v.playsInline = true; v.preload = "auto"; v.src = url;
+      var done = false;
+      function grab() {
+        if (done) return; done = true;
+        try {
+          var c = document.createElement("canvas");
+          c.width = v.videoWidth || 640; c.height = v.videoHeight || 360;
+          c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+          c.toBlob(function (b) {
+            if (!b) { reject(new Error("poster capture failed")); return; }
+            resolve({ url: URL.createObjectURL(b), width: v.videoWidth, height: v.videoHeight });
+          }, "image/jpeg", 0.85);
+        } catch (e) { reject(e); }
+      }
+      v.addEventListener("loadeddata", function () {
+        // Seek a hair in so the decoder has a real frame to paint.
+        try { v.currentTime = Math.min(0.05, (v.duration || 1) / 4); } catch (e) { grab(); }
+      });
+      v.addEventListener("seeked", grab);
+      v.addEventListener("error", function () { reject(new Error("video decode failed")); });
+    });
+  }
+
+  // Resolves to gallery-shaped items (async because clips need a poster).
+  function itemsFromB64Payload(payload, opts) {
+    var kind = opts.kind || "image";
+    var mime = kind === "video" ? "video/mp4" : "image/png";
+    var ext = kind === "video" ? ".mp4" : ".png";
+    var meta = payload.llamanager || {};
+    var jobs = [];
+    (payload.data || []).forEach(function (d, i) {
+      if (!d || !d.b64_json) return;
+      var url = b64ToBlobUrl(d.b64_json, mime);
+      var base = {
+        url: url, thumb_url: url,
+        name: "incognito-" + (i + 1) + ext,
+        kind: kind, mtime: Date.now() / 1000,
+        width: opts.width || null, height: opts.height || null,
+        sidecar: {
+          incognito: true,
+          prompt: opts.prompt || d.revised_prompt || "",
+          engine: meta.engine, model_id: meta.model, profile: meta.profile,
+          seed: meta.seed, generation_s: meta.duration_s,
+          width: opts.width || null, height: opts.height || null,
+        },
+      };
+      if (kind === "video") {
+        jobs.push(posterFromVideoUrl(url).then(function (p) {
+          base.thumb_url = p.url;
+          if (p.width && p.height) {
+            base.width = p.width; base.height = p.height;
+            base.sidecar.width = p.width; base.sidecar.height = p.height;
+          }
+          return base;
+        }));
+      } else {
+        jobs.push(Promise.resolve(base));
+      }
+    });
+    return Promise.all(jobs);
+  }
+  function markIncognito(card) {
+    card.classList.add("gen-card--incognito");
+    if (!card.querySelector(".gen-card__incog")) {
+      var tag = document.createElement("span");
+      tag.className = "gen-card__incog"; tag.textContent = "Incognito";
+      card.appendChild(tag);
+    }
+  }
+
+  return { attach: attach, fetchBlobUrl: fetchBlobUrl,
+           itemsFromB64Payload: itemsFromB64Payload, markIncognito: markIncognito };
 })();
 </script>

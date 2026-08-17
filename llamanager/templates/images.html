@@ -649,6 +649,10 @@
   const seedEl     = $("lm-img-seed");
   const seedDice   = $("lm-img-seed-dice");
   const nEl        = $("lm-img-n");
+  // Admin-only incognito toggle (rendered by the composer partial only when
+  // the route allows it). Off on every page load on purpose.
+  const incognitoEl = $("lm-img-incognito");
+  const isIncognito = () => !!(incognitoEl && incognitoEl.checked);
   const form       = $("lm-img-composer");
   const submitBtn  = $("lm-img-generate");
   const errorEl    = $("lm-img-error");
@@ -987,6 +991,7 @@
       onSize: (w, h) => fitCardToMedia(div, w, h),
     });
     const sc = item.sidecar || {};
+    if (sc.incognito) LMGalleryMedia.markIncognito(div);
     if (sc.prompt) {
       const cap = document.createElement("div");
       cap.className = "gen-card__cap"; cap.textContent = sc.prompt;
@@ -1197,6 +1202,7 @@
       n: Math.max(1, parseInt(nEl.value || "1", 10) || 1),
       stream: true, response_format: "b64_json",
     };
+    if (isIncognito()) body.incognito = true;
     if (profileSel.value) body.profile = profileSel.value;
     if (seedEl.value !== "") body.seed = parseInt(seedEl.value, 10);
     const o = collectOverrides();
@@ -1475,6 +1481,11 @@
 
   const stage = { phase: "", pos: -1, step: null, total: null };
   let sawResult = false;
+  // Incognito run in flight: the result arrives in the SSE payload (b64)
+  // and never lands in the gallery, so we keep it here until the
+  // placeholders are resolved from it.
+  let incognitoRun = false;
+  let incognitoPayload = null;
   function renderStage() {
     let txt = "Sending…", pct = null;
     if (stage.phase === "queued") {
@@ -1537,6 +1548,7 @@
       // until their images are actually in the DOM.
       stage.phase = "saving"; renderStage();
       sawResult = true;
+      if (incognitoRun) incognitoPayload = payload;
     }
   }
 
@@ -1566,7 +1578,9 @@
     if (!promptEl.value.trim()) { showError("Prompt is empty."); return; }
 
     const promptText = promptEl.value.trim();
-    pushHistory(promptText);
+    incognitoRun = isIncognito();
+    incognitoPayload = null;
+    if (!incognitoRun) pushHistory(promptText);
     setBusy(true);
     stage.phase = ""; stage.pos = -1; stage.step = null; stage.total = null;
     sawResult = false;
@@ -1579,7 +1593,8 @@
     // it in place kept the composer expanded over the feed.
     promptEl.value = ""; autosize();
     makeLiveCards(promptText, body.n);
-    rememberInFlight(promptText, body.n);
+    if (incognitoRun) live.cards.forEach(LMGalleryMedia.markIncognito);
+    else rememberInFlight(promptText, body.n);
     updateLive("Sending…", null);
     $("gen-feed").scrollTop = 0;
 
@@ -1618,7 +1633,16 @@
       // Resolve the placeholders into their images before tearing them
       // down, so the tiles never blink out and back in — the spinner
       // turns into the picture in the exact spot it occupied.
-      if (sawResult) {
+      if (sawResult && incognitoRun) {
+        // Nothing on disk to refresh from: the tiles come straight out of
+        // the response and live only in this tab.
+        try {
+          const items = await LMGalleryMedia.itemsFromB64Payload(incognitoPayload || {}, {
+            kind: "image", prompt: promptText,
+          });
+          resolveLiveWith(items);
+        } catch (e) { showError(`Could not display the incognito result: ${e.message}`); }
+      } else if (sawResult) {
         await refreshFront({resolve: true});
         // The gallery walk can miss a file that landed a beat after the
         // result event; one retry beats leaving the user to reload.
@@ -1627,6 +1651,7 @@
           await refreshFront({resolve: true});
         }
       }
+      incognitoPayload = null;
       clearLive();
       setBusy(false);
       state.abort = null;

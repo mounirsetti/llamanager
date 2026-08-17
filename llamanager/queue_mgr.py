@@ -91,6 +91,11 @@ class QueuedRequest:
     # conversation retention is 0.
     prompt_text: str | None = None
     response_parts: list[str] = field(default_factory=list)
+    # Admin-requested "leave nothing behind": the handler captures no
+    # prompt/response text (live or persisted), image/video output is
+    # rendered outside the gallery and discarded once delivered, and the
+    # DB row is flagged so the UI can explain its emptiness.
+    incognito: bool = False
 
     def heap_key(self) -> tuple[int, float, int]:
         # higher priority first → negate. Then FIFO by enqueued_at, then seq.
@@ -182,6 +187,7 @@ class QueueManager:
                       profile_required: str | None = None,
                       task_type: str | None = None,
                       caller: dict[str, Any] | None = None,
+                      incognito: bool = False,
                       ) -> QueuedRequest:
         active_pending = len(self._heap) - self._cancelled_in_heap
         if active_pending + len(self._in_flight) >= self.cfg.max_queue_depth:
@@ -197,12 +203,14 @@ class QueueManager:
             task_type=task_type,
             enqueued_at=time.time(),
             seq=next(self._seq),
+            incognito=incognito,
         )
         self.db.insert_request(
             request_id=req.request_id,
             origin_id=origin.id,
             model=model_required,
             priority=req.priority,
+            incognito=incognito,
         )
         # Surface the inbound request on the activity feed *and* in the
         # raw log file. The text family carries actual user prompts; the
@@ -218,12 +226,14 @@ class QueueManager:
             # Best-effort caller identity (peer addr, User-Agent, local PID).
             # Absent/empty when the source can't be determined.
             "caller": caller or None,
+            "incognito": incognito,
         })
         label = "chat" if req.task_type == "text" else req.task_type
         target = f"`{model_required}`" if model_required else "default model"
         caller_tail = f" {format_caller(caller)}" if caller else ""
-        log.info("%s: request from %s%s for %s (id=%s)",
-                 label, origin.name, caller_tail, target, req.request_id)
+        log.info("%s: %srequest from %s%s for %s (id=%s)",
+                 label, "incognito " if incognito else "",
+                 origin.name, caller_tail, target, req.request_id)
         self._last_busy_monotonic = time.monotonic()
         async with self._cv:
             heapq.heappush(self._heap, (req.heap_key(), req))
@@ -413,7 +423,8 @@ class QueueManager:
         # response on a cancel/error is worth keeping. Skip entirely when the
         # operator set conversation retention to 0 (no content on disk).
         text_fields: dict[str, Any] = {}
-        if getattr(self.cfg, "conversation_retention_days", 0) > 0:
+        if (getattr(self.cfg, "conversation_retention_days", 0) > 0
+                and not req.incognito):
             pt = _clip_text(prompt_text)
             if pt is not None:
                 text_fields["prompt_text"] = pt
@@ -451,6 +462,7 @@ class QueueManager:
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "error": error,
+            "incognito": req.incognito,
         })
         # Same beat, but written through Python logging so it lands in
         # the raw llamanager.log file (which doesn't tail the DB events
@@ -983,6 +995,7 @@ def _request_public(req: QueuedRequest | None) -> dict[str, Any] | None:
         "enqueued_at": req.enqueued_at,
         "started_at": req.started_at,
         "finished_at": req.finished_at,
+        "incognito": req.incognito,
     }
 
 

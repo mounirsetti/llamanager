@@ -56,6 +56,12 @@
     <div class="lm-reqd__error">{{ req.error }}</div>
     {% endif %}
 
+    {% if req.incognito %}
+    <section class="lm-reqd__section">
+      <div class="lm-reqd__label">Incognito</div>
+      <p class="lm-empty">Requested by an admin in incognito mode: no prompt, response, or output was kept.</p>
+    </section>
+    {% else %}
     <section class="lm-reqd__section">
       <div class="lm-reqd__label">Prompt</div>
       {% if req.prompt_text %}
@@ -77,6 +83,7 @@
       <p class="lm-empty">Not recorded.</p>
       {% endif %}
     </section>
+    {% endif %}
   </div>
 </div>
 {% endif %}

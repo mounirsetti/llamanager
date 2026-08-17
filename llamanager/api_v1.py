@@ -41,7 +41,8 @@ from .audio_runner import (
 )
 from .engines._base import AudioRequest, ImageRequest
 from .image_runner import (
-    ImageError, ImageTaskRunner, resolve_image_engine, resolve_video_engine,
+    ImageError, ImageTaskRunner, discard_ephemeral, resolve_image_engine,
+    resolve_video_engine,
 )
 from .intake import MESSAGE as INTAKE_MESSAGE, is_accepting, require_open
 from .queue_mgr import Cancelled, QueueManager, QueueFull, QueuedRequest
@@ -251,6 +252,28 @@ def _render_content(content: Any) -> str:
                 parts.append(str(p))
         return "".join(parts)
     return str(content)
+
+
+def _pop_incognito(body: dict[str, Any], origin: Origin) -> bool:
+    """Consume the ``incognito`` request field; admin origins only.
+
+    Incognito means "leave nothing behind": no prompt / response text (live
+    or persisted), no gallery file, no sidecar, no thumbnail. The request
+    row and the activity beat remain (with an ``incognito`` flag) so queue
+    accounting and timing stay honest. The field is popped so it never
+    reaches llama-server or an engine adapter.
+    """
+    raw = body.pop("incognito", None)
+    if raw is None:
+        return False
+    if not isinstance(raw, bool):
+        raise HTTPException(status_code=400,
+                            detail="incognito must be a boolean")
+    if raw and not origin.is_admin:
+        raise HTTPException(status_code=403,
+                            detail="incognito mode is available to admin "
+                                   "origins only")
+    return raw
 
 
 def _extract_prompt_text(body: dict[str, Any]) -> str:
@@ -655,6 +678,7 @@ async def _handle_inference(
     qm: QueueManager = request.app.state.queue
     sm: ServerManager = request.app.state.sm
     cfg: Config = request.app.state.cfg
+    incognito = _pop_incognito(body, origin)
 
     # Resolve the model from the X-Llamanager-Model header or the OpenAI
     # ``model`` field in the body. A request for an unknown or not-permitted
@@ -685,6 +709,7 @@ async def _handle_inference(
             model_required=model_required,
             profile_required=profile_required,
             caller=await describe_caller(request),
+            incognito=incognito,
         )
     except QueueFull:
         raise HTTPException(status_code=503, detail="queue full")
@@ -692,9 +717,11 @@ async def _handle_inference(
     # Snapshot the prompt for the request-detail view before we forward.
     # When retention is on, hang it (and a live response buffer) off the
     # queued request so the detail view can show the conversation *while it
-    # is still running*, not only once it finishes.
-    prompt_text = _extract_prompt_text(body)
-    retain = getattr(request.app.state.cfg, "conversation_retention_days", 0) > 0
+    # is still running*, not only once it finishes. Incognito requests
+    # capture nothing at all — not even in memory.
+    retain = (getattr(request.app.state.cfg, "conversation_retention_days", 0) > 0
+              and not incognito)
+    prompt_text = _extract_prompt_text(body) if retain else None
     if retain:
         qr.prompt_text = prompt_text
 
@@ -1252,6 +1279,15 @@ async def images_generations(request: Request) -> Response:
         body = json.loads(body_bytes) if body_bytes else {}
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="invalid JSON body")
+    # Permission first: whether an origin may go incognito doesn't depend
+    # on which model it asked for. Same for the format rule: a URL would
+    # have to point at a file we keep, and incognito keeps none.
+    incognito = _pop_incognito(body, origin)
+    if incognito and str(body.get("response_format") or "b64_json").lower() != "b64_json":
+        raise HTTPException(
+            status_code=400,
+            detail="incognito requires response_format 'b64_json'",
+        )
 
     prompt = body.get("prompt") or ""
     if not isinstance(prompt, str) or not prompt.strip():
@@ -1425,11 +1461,12 @@ async def images_generations(request: Request) -> Response:
             profile_required=profile_required,
             task_type="image",
             caller=await describe_caller(request),
+            incognito=incognito,
         )
     except QueueFull:
         raise HTTPException(status_code=503, detail="queue full")
 
-    if cfg.conversation_retention_days > 0:
+    if cfg.conversation_retention_days > 0 and not incognito:
         qr.prompt_text = prompt  # visible in the detail view while generating
 
     # Stage refs to disk *after* enqueue so we have a stable request_id to
@@ -1507,6 +1544,15 @@ async def videos_generations(request: Request) -> Response:
         body = json.loads(body_bytes) if body_bytes else {}
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="invalid JSON body")
+    # Permission first: whether an origin may go incognito doesn't depend
+    # on which model it asked for. Same for the format rule: a URL would
+    # have to point at a file we keep, and incognito keeps none.
+    incognito = _pop_incognito(body, origin)
+    if incognito and str(body.get("response_format") or "url").lower() != "b64_json":
+        raise HTTPException(
+            status_code=400,
+            detail="incognito requires response_format 'b64_json'",
+        )
 
     prompt = body.get("prompt") or ""
     if not isinstance(prompt, str) or not prompt.strip():
@@ -1599,11 +1645,12 @@ async def videos_generations(request: Request) -> Response:
             # rules and mutual exclusion with the text server.
             task_type="image",
             caller=await describe_caller(request),
+            incognito=incognito,
         )
     except QueueFull:
         raise HTTPException(status_code=503, detail="queue full")
 
-    if cfg.conversation_retention_days > 0:
+    if cfg.conversation_retention_days > 0 and not incognito:
         qr.prompt_text = prompt
 
     try:
@@ -1668,6 +1715,9 @@ def _consume_detached_result(task: asyncio.Task) -> None:
     exc = task.exception()
     if exc is not None:
         log.info("image job finished after its client disconnected: %s", exc)
+        return
+    # Nobody will ever read an incognito result whose client left; drop it.
+    discard_ephemeral(task.result())
 
 
 async def _images_blocking(
@@ -1712,6 +1762,7 @@ async def _images_blocking(
                 request_id=qr.request_id,
                 origin_name=qr.origin.name,
                 cancel_event=qr.cancel,
+                incognito=qr.incognito,
             )
         except asyncio.CancelledError:
             err = "cancelled"
@@ -1739,6 +1790,7 @@ async def _images_blocking(
             error = str(e)
             raise HTTPException(status_code=502, detail=error)
         payload = _build_image_response(result, response_format, request)
+        discard_ephemeral(result)   # incognito: bytes are in `payload` now
         headers = {"x-llamanager-request-id": qr.request_id}
         return JSONResponse(content=payload, headers=headers)
     except Cancelled:
@@ -1822,6 +1874,7 @@ async def _images_stream(
                 origin_name=qr.origin.name,
                 progress_cb=_on_progress,
                 cancel_event=qr.cancel,
+                incognito=qr.incognito,
             )
         except asyncio.CancelledError:
             err = "cancelled"
@@ -1912,6 +1965,7 @@ async def _images_stream(
                 return
 
             final_payload = _build_image_response(result, response_format, request)
+            discard_ephemeral(result)   # incognito: bytes are in the payload
             yield f"data: {json.dumps(final_payload)}\n\n".encode("utf-8")
             yield b"data: [DONE]\n\n"
         except Exception as e:

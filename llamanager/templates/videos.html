@@ -540,6 +540,10 @@
   const overrides  = $("lm-img-overrides");
   const promptEl   = $("lm-img-prompt");
   const seedEl     = $("lm-img-seed");
+  // Admin-only incognito toggle (rendered by the composer partial only when
+  // the route allows it). Off on every page load on purpose.
+  const incognitoEl = $("lm-img-incognito");
+  const isIncognito = () => !!(incognitoEl && incognitoEl.checked);
   const seedDice   = $("lm-img-seed-dice");
   const form       = $("lm-img-composer");
   const submitBtn  = $("lm-img-generate");
@@ -937,6 +941,7 @@
       authHeaders: null, isVideo,
       onSize: (w, h) => fitCardToMedia(div, w, h),
     });
+    if (item.sidecar && item.sidecar.incognito) LMGalleryMedia.markIncognito(div);
     const sc = item.sidecar || {};
     if (sc.prompt) {
       const cap = document.createElement("div");
@@ -1143,8 +1148,11 @@
   function buildRequestBody() {
     const body = {
       model: modelSel.value, prompt: promptEl.value.trim(),
-      stream: true, response_format: "url",
+      stream: true,
+      // Incognito keeps no file, so the clip has to come back inline.
+      response_format: isIncognito() ? "b64_json" : "url",
     };
+    if (isIncognito()) body.incognito = true;
     if (profileSel.value) body.profile = profileSel.value;
     if (seedEl.value !== "") body.seed = parseInt(seedEl.value, 10);
     const o = collectOverrides();
@@ -1282,9 +1290,20 @@
       showError(msg);
     } else {
       stage.phase = "saving"; renderStage();
-      refreshFront();
+      if (incognitoRun) {
+        // Nothing on disk to refresh from: the clip is in this payload and
+        // lives only in this tab.
+        LMGalleryMedia.itemsFromB64Payload(payload, { kind: "video", prompt: incognitoPrompt })
+          .then(items => { prependItems(items); removeLive(); })
+          .catch(e => showError(`Could not display the incognito clip: ${e.message}`));
+      } else {
+        refreshFront();
+      }
     }
   }
+  // Incognito run in flight: result arrives inline (b64), never in the gallery.
+  let incognitoRun = false;
+  let incognitoPrompt = "";
 
   async function refreshFront() {
     try {
@@ -1306,10 +1325,12 @@
     if (!promptEl.value.trim()) { showError("Prompt is empty."); return; }
 
     const promptText = promptEl.value.trim();
-    pushHistory(promptText);
+    incognitoRun = isIncognito(); incognitoPrompt = promptText;
+    if (!incognitoRun) pushHistory(promptText);
     setBusy(true);
     stage.phase = ""; stage.pos = -1; stage.step = null; stage.total = null;
     liveCard = makeLiveCard(promptText);
+    if (incognitoRun) LMGalleryMedia.markIncognito(liveCard);
     updateLive("Sending…", 0);
     $("gen-feed").scrollTop = 0;
 

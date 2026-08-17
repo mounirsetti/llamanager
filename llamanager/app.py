@@ -203,6 +203,18 @@ def create_app(config_path: Path | None = None,
         except Exception:  # noqa: BLE001 — best-effort, never block startup
             log.exception("startup: orphaned-request reconciliation failed")
 
+        # An incognito image/video that was mid-generation when the previous
+        # process died may have left its scratch output behind; nothing will
+        # ever deliver it, so it must not survive a restart.
+        try:
+            from .image_runner import sweep_incognito_dir
+            n = sweep_incognito_dir(cfg)
+            if n:
+                log.info("startup: removed %d leftover incognito output "
+                         "director%s", n, "y" if n == 1 else "ies")
+        except Exception:  # noqa: BLE001 — best-effort, never block startup
+            log.exception("startup: incognito sweep failed")
+
         # Same treatment for download rows the previous process left
         # ``running``: the Registry that owned their cancel Event is gone, so
         # they show "DOWNLOADING" forever and Cancel can't reach them.
@@ -485,7 +497,10 @@ def create_app(config_path: Path | None = None,
                 "https://cdnjs.cloudflare.com https://unpkg.com; "
                 "style-src 'self' 'unsafe-inline' "
                 "https://fonts.googleapis.com; "
-                "img-src 'self' data:; "
+                # blob: — in-memory media the page itself created (incognito
+                # image / video results never touch the server's disk).
+                "img-src 'self' data: blob:; "
+                "media-src 'self' blob:; "
                 "connect-src 'self'; "
                 "font-src 'self' data: https://fonts.gstatic.com; "
                 "object-src 'none'; "

@@ -1455,18 +1455,19 @@ async def request_detail(request: Request, request_id: str,
             "error": live.error,
             "prompt_text": live.prompt_text if retain else None,
             "response_text": (partial if retain else None) or None,
+            "incognito": live.incognito,
         }
         return templates.TemplateResponse(
             request, "_request_detail.html",
             # Only self-refresh when there's live content to stream.
-            _ctx(request, req=req, active=retain),
+            _ctx(request, req=req, active=retain and not live.incognito),
         )
 
     row = db.query_one(
         "SELECT r.id, r.origin_id, o.name AS origin_name, r.model, r.priority,"
         " r.status, r.enqueued_at, r.started_at, r.finished_at,"
         " r.prompt_tokens, r.completion_tokens, r.error,"
-        " r.prompt_text, r.response_text"
+        " r.prompt_text, r.response_text, r.incognito"
         " FROM requests r LEFT JOIN origins o ON r.origin_id = o.id"
         " WHERE r.id = ?",
         (request_id,),
@@ -3270,6 +3271,9 @@ async def videos_view(request: Request,
         request,
         api_key=sess["key"] if sess else "",
         active="videos",
+        # Admin session by construction (require_admin_ui): the composer
+        # may offer incognito. The public pages never set this.
+        incognito_available=True,
         **ctx,
     ))
 
@@ -3284,6 +3288,7 @@ async def images_view(request: Request,
     return templates.TemplateResponse(request, "images.html", _ctx(
         request,
         api_key=sess["key"] if sess else "",
+        incognito_available=True,
         **ctx,
     ))
 

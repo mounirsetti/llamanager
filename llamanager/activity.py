@@ -146,7 +146,8 @@ def _fmt_event(kind: str, payload: dict[str, Any]) -> tuple[str, str] | None:
             )
             caller = format_caller(p.get("caller"))
             who = f"{origin_name} {caller}" if caller else origin_name
-            return ("info", f"{label}: request from {who} for {target}")
+            kind = "incognito request" if p.get("incognito") else "request"
+            return ("info", f"{label}: {kind} from {who} for {target}")
         case "request_done":
             task = p.get("task_type") or "text"
             label = "chat" if task == "text" else task

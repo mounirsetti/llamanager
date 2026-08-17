@@ -51,6 +51,7 @@ class _FakeQR:
         self.error = None
         self.ready = asyncio.Event()
         self.cancel = asyncio.Event()
+        self.incognito = False
 
 
 class _FakeQM:

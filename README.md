@@ -1295,6 +1295,21 @@ The UI has streaming token display, multiple conversations stored in localStorag
 
 **Image input (vision).** When the currently-selected profile has an `mmproj` configured (i.e. it's vision-capable), a paperclip button appears next to the textarea. Click it (or drop files) to attach PNG/JPEG/WEBP/GIF images up to 10 MB each; thumbnails show above the input. On send, the message goes out as an OpenAI multimodal `content` array (`[{type:"text",text:"..."}, {type:"image_url",image_url:{url:"data:image/png;base64,..."}}]`) that llama-server with `--mmproj` consumes directly. Switching to a profile without `mmproj` hides the paperclip and clears any pending attachments. The public `/chat` page does the same — the bearer's `allowed_models` decides which profiles even appear in the dropdown.
 
+## Incognito (admins)
+
+An admin can run a chat, an image or a video generation that leaves nothing behind. Tick **Incognito** in the chat rail (`/ui/chat`) or in the composer settings pane (`/ui/images`, `/ui/videos`), or send `"incognito": true` in the request body of `/v1/chat/completions`, `/v1/images/generations` or `/v1/videos/generations` with an admin origin's key (non-admin origins get `403`).
+
+What "nothing" means:
+
+| surface | normally | incognito |
+|---|---|---|
+| request row (`requests` table) | model, origin, timing, tokens, **prompt and response text** (when retention > 0) | same row, **no text**, flagged `incognito=1` — the request-detail view says so instead of "not recorded" |
+| activity feed / `llamanager.log` | `chat: request from …` | `chat: incognito request from …` (still no prompt content, as before) |
+| image / video output | PNG/MP4 + sidecar JSON (prompt, seed…) in the gallery, thumbnail, disk-cap accounting | rendered into `~/.llamanager/incognito/<request_id>/`, returned inline as `b64_json` (required — `url` is refused with `400`), directory deleted the moment the bytes are in the response; **no sidecar, no thumbnail, never listed** |
+| browser (admin pages) | chat history, prompt history and the "reattach after reload" hint in localStorage; gallery tiles from disk | none of that is written; the result is shown once from memory (dashed accent border + `Incognito` badge) and is gone on reload |
+
+Not covered, by design: llama-server's in-RAM prompt cache (never on disk), the engine subprocess's argv while it runs, and the `X-Llamanager-*`/model headers. The public bearer pages (`/chat`, `/images`, `/videos`) don't offer the toggle — incognito is an operator feature — but an admin key may pass the body flag from any client.
+
 ## Auto-start at boot or login
 
 One command, four modes, all three platforms:

@@ -38,6 +38,21 @@
      LM_IMAGES_CFG.enginesSchema when the model selection changes. #}
   <div id="lm-img-overrides" class="lm-img-overrides"></div>
 
+  {# Admin-only (the flag is set by the /ui routes, never by the public
+     pages). The server refuses ``incognito`` from non-admin origins. #}
+  {% if incognito_available %}
+  <div class="lm-img-field lm-img-incognito">
+    <label class="lm-img-field__label lm-img-incognito__label" for="lm-img-incognito">
+      <input type="checkbox" id="lm-img-incognito" form="lm-img-composer"> Incognito
+    </label>
+    <span class="lm-img-field__help">
+      Nothing is kept: no file in the gallery, no prompt in the request log,
+      no entry in your prompt history. The result is shown once, here — leave
+      the page and it is gone.
+    </span>
+  </div>
+  {% endif %}
+
   <div class="lm-img-row">
     <div class="lm-img-field" style="flex: 1;">
       <label class="lm-img-field__label" for="lm-img-seed">Seed</label>

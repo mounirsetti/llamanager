@@ -173,6 +173,29 @@
   }
   .chat-md-toggle { display: flex; align-items: center; gap: 6px; font-size: 0.6875rem; color: var(--fg-2); }
   .chat-md-toggle input { accent-color: var(--accent); }
+  /* ---- Incognito ----
+     An admin-only chat that is never written anywhere: not to the request
+     log on the server, not to this browser's history. The rail shows a
+     dashed pseudo-entry while it is open, the composer takes a dashed
+     accent border, and a strip above the messages says what is going on. */
+  .chat-history-item--incognito {
+    border: 1px dashed var(--accent); border-radius: 6px; color: var(--fg-0);
+    background: color-mix(in oklab, var(--accent) 8%, transparent);
+  }
+  .chat-history-item--incognito .chat-history-del { display: none; }
+  .chat-incognito-banner {
+    display: none; align-items: center; gap: 8px;
+    padding: 6px 12px; font-size: 0.6875rem; letter-spacing: 0.04em;
+    color: var(--fg-1); background: color-mix(in oklab, var(--accent) 10%, var(--bg-0));
+    border-bottom: 1px dashed var(--accent);
+  }
+  .chat-incognito-banner::before {
+    content: ""; width: 8px; height: 8px; border-radius: 999px;
+    background: var(--accent); flex-shrink: 0;
+  }
+  .chat-incognito-banner b { font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+  .chat-app.is-incognito .chat-incognito-banner { display: flex; }
+  .chat-app.is-incognito .chat-input-row { border-style: dashed; border-color: var(--accent); }
   /* markdown rendered content */
   .chat-md p { margin: 0 0 0.5em; }
   .chat-md p:last-child { margin-bottom: 0; }
@@ -417,6 +440,9 @@
       <label class="chat-md-toggle">
         <input type="checkbox" id="toggle-md"> Markdown
       </label>
+      <label class="chat-md-toggle" title="Admin only: this chat is not recorded on the server (no prompt or reply in the request log) and not saved in this browser. It disappears when you leave the page.">
+        <input type="checkbox" id="toggle-incognito"> Incognito
+      </label>
     </div>
   </div>
 
@@ -452,6 +478,10 @@
       <span id="chat-speed" class="chat-speed" style="display: none;"></span>
       <button type="button" class="chat-drawer-close"
               data-chat-toggle="settings" aria-label="Close settings">✕</button>
+    </div>
+
+    <div class="chat-incognito-banner" id="chat-incognito-banner" role="status">
+      <b>Incognito</b> — nothing from this chat is kept: not on the server, not in this browser. It is gone when you leave the page.
     </div>
 
     {# Messages #}
@@ -493,6 +523,8 @@
   var historyListEl = document.getElementById('history-list');
   var historyNewBtn = document.getElementById('history-new');
   var toggleMd = document.getElementById('toggle-md');
+  var toggleIncognito = document.getElementById('toggle-incognito');
+  var chatAppEl = document.getElementById('chat-app');
   var speedEl = document.getElementById('chat-speed');
   var apiKey = {{ api_key | tojson }};
   var streaming = false;
@@ -650,7 +682,31 @@
 
   function loadHistory() { try { chats = JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch (e) { chats = []; } }
   function saveHistory() { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(chats)); } catch (e) {} }
-  function saveActive() { try { if (activeChat) localStorage.setItem(ACTIVE_KEY, activeChat.id); } catch (e) {} }
+  // An incognito chat is never the remembered "active" chat: on reload
+  // there is nothing to come back to.
+  function saveActive() { try { if (activeChat && !activeChat.incognito) localStorage.setItem(ACTIVE_KEY, activeChat.id); } catch (e) {} }
+
+  // ---- Incognito (admin-only, in-memory only) ----
+  // The chat object lives in this closure and is deliberately kept out of
+  // ``chats``, so every saveHistory() call in the file leaves it alone.
+  // The server side is told per request (body.incognito) and records no
+  // prompt / response text for it.
+  var INCOGNITO_ID = '__incognito__';
+  function startIncognitoChat() {
+    activeChat = { id: INCOGNITO_ID, title: 'Incognito chat', messages: [],
+                   system: systemEl.value, draft: '', incognito: true };
+    chatAppEl.classList.add('is-incognito');
+    inputEl.value = '';
+    autoResize();
+    renderMessages();
+    renderHistoryList();
+    inputEl.focus();
+  }
+  function endIncognito() {
+    chatAppEl.classList.remove('is-incognito');
+    activeChat = null;
+    if (chats.length) switchTo(chats[0].id); else newChat();
+  }
   function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 
   function newChat() {
@@ -661,6 +717,12 @@
   }
 
   function switchTo(id) {
+    if (id === INCOGNITO_ID) return;   // already the active (in-memory) chat
+    if (activeChat && activeChat.incognito) {
+      // Leaving the incognito chat drops it; the toggle follows.
+      chatAppEl.classList.remove('is-incognito');
+      toggleIncognito.checked = false;
+    }
     activeChat = chats.find(function (c) { return c.id === id; }) || null;
     if (!activeChat) { if (chats.length) switchTo(chats[0].id); return; }
     systemEl.value = activeChat.system || 'You are a helpful assistant.';
@@ -682,6 +744,16 @@
 
   function renderHistoryList() {
     historyListEl.innerHTML = '';
+    if (activeChat && activeChat.incognito) {
+      var inc = document.createElement('button');
+      inc.className = 'chat-history-item chat-history-item--active chat-history-item--incognito';
+      inc.setAttribute('data-id', INCOGNITO_ID);
+      var incLabel = document.createElement('span');
+      incLabel.className = 'chat-history-label';
+      incLabel.textContent = 'Incognito chat';
+      inc.appendChild(incLabel);
+      historyListEl.appendChild(inc);
+    }
     for (var i = 0; i < chats.length; i++) {
       var c = chats[i];
       var btn = document.createElement('button');
@@ -711,7 +783,12 @@
     }
   });
   historyNewBtn.addEventListener('click', function () {
-    newChat();
+    // "New" while incognito starts a fresh incognito chat, not a saved one.
+    if (activeChat && activeChat.incognito) startIncognitoChat(); else newChat();
+    if (isMobileChat()) closeDrawers();
+  });
+  toggleIncognito.addEventListener('change', function () {
+    if (toggleIncognito.checked) startIncognitoChat(); else endIncognito();
     if (isMobileChat()) closeDrawers();
   });
 
@@ -814,7 +891,9 @@
     title.textContent = 'What can I help with?';
     var sub = document.createElement('div');
     sub.className = 'chat-welcome__sub';
-    sub.textContent = 'Chatting with the model loaded on this machine — privately, on your own hardware.';
+    sub.textContent = (activeChat && activeChat.incognito)
+      ? 'Incognito: this conversation is not saved on the server or in this browser.'
+      : 'Chatting with the model loaded on this machine — privately, on your own hardware.';
     var chips = document.createElement('div');
     chips.className = 'chat-suggests';
     WELCOME_SUGGESTS.forEach(function (s) {
@@ -1185,6 +1264,7 @@
     scrollToBottom();
 
     var body = { model: 'any', stream: true, messages: [] };
+    if (activeChat.incognito) body.incognito = true;
     var sys = activeChat.system || systemEl.value.trim();
     if (sys) body.messages.push({ role: 'system', content: sys });
     for (var i = 0; i < activeChat.messages.length; i++) {

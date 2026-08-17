@@ -61,6 +61,45 @@ class ImageResult:
     seed: int | None
     duration_s: float
     sidecar: dict[str, Any] = field(default_factory=dict)
+    # Set for incognito runs: the directory holding the output(s), outside
+    # the gallery. The API layer deletes it (``discard_ephemeral``) as soon
+    # as the bytes have been handed to the client.
+    ephemeral_dir: Path | None = None
+
+
+def _incognito_dir(cfg: Config, request_id: str) -> Path:
+    """Scratch output directory for one incognito request.
+
+    Deliberately *not* under ``images_dir``: nothing under the gallery
+    tree may be a file the gallery walk / disk cap / thumbnailer would
+    ever see. Lives under data_dir so it shares the gallery's filesystem
+    (no cross-device surprises for large video outputs).
+    """
+    d = cfg.data_dir / "incognito" / request_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def discard_ephemeral(result: "ImageResult") -> None:
+    """Delete an incognito run's output directory. Idempotent."""
+    d = result.ephemeral_dir
+    if d is None:
+        return
+    shutil.rmtree(d, ignore_errors=True)
+    result.ephemeral_dir = None
+
+
+def sweep_incognito_dir(cfg: Config) -> int:
+    """Remove leftovers under ``data_dir/incognito`` (e.g. after a crash
+    mid-request). Returns the number of request directories removed."""
+    root = cfg.data_dir / "incognito"
+    if not root.is_dir():
+        return 0
+    n = 0
+    for d in root.iterdir():
+        shutil.rmtree(d, ignore_errors=True)
+        n += 1
+    return n
 
 
 def _gallery_dir(cfg: Config, origin: str) -> Path:
@@ -225,8 +264,14 @@ class ImageTaskRunner:
         origin_name: str,
         progress_cb: Callable[[ProgressEvent], Any] | None = None,
         cancel_event: asyncio.Event | None = None,
+        incognito: bool = False,
     ) -> ImageResult:
         """Generate ``req.n`` images for ``model_id``.
+
+        ``incognito`` renders into a per-request scratch directory instead
+        of the gallery, writes no sidecar and no thumbnail, and leaves the
+        deletion of that directory to the caller (``discard_ephemeral``)
+        once the bytes are delivered.
 
         Holds the per-runner lock for the full generation: this enforces
         single-task mutual exclusion in the image family.
@@ -264,7 +309,8 @@ class ImageTaskRunner:
         output_ext = str(
             engines.capabilities(engine).get("output_ext") or "png").lstrip(".")
 
-        gallery = _gallery_dir(self.cfg, origin_name)
+        gallery = (_incognito_dir(self.cfg, request_id) if incognito
+                   else _gallery_dir(self.cfg, origin_name))
         outputs: list[Path] = []
         seed_used: int | None = None
         n = max(1, int(req.n))
@@ -367,6 +413,7 @@ class ImageTaskRunner:
                                 progress_cb=progress_cb,
                                 sidecar=sidecar_base,
                                 cancel_event=cancel_event,
+                                incognito=incognito,
                             )
                         except Exception:
                             self._record_failure()
@@ -380,7 +427,8 @@ class ImageTaskRunner:
                 # Recovery: window resets after a successful run.
                 self._failures.clear()
 
-            _enforce_disk_cap(self.cfg)
+            if not incognito:
+                _enforce_disk_cap(self.cfg)
             duration = time.time() - t0
             # When n > 1 we return the *first* image as the canonical result
             # alongside a manifest of all paths inside sidecar.
@@ -399,7 +447,15 @@ class ImageTaskRunner:
                 seed=seed_used,
                 duration_s=duration,
                 sidecar=sidecar,
+                ephemeral_dir=gallery if incognito else None,
             )
+        except BaseException:
+            # An incognito run that failed / was cancelled must not leave a
+            # half-written file behind; the success path hands the directory
+            # to the API layer instead (it deletes after delivery).
+            if incognito:
+                shutil.rmtree(gallery, ignore_errors=True)
+            raise
         finally:
             # The run lock is released by now on every exit path, so the
             # GPU is genuinely free. Poke the queue: a text request may be
@@ -433,6 +489,7 @@ class ImageTaskRunner:
         progress_cb: Callable[[ProgressEvent], Any] | None,
         sidecar: dict[str, Any],
         cancel_event: asyncio.Event | None = None,
+        incognito: bool = False,
     ) -> None:
         log_path = self.cfg.logs_dir / f"{engine}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -635,6 +692,16 @@ class ImageTaskRunner:
         if not out_path.exists():
             self._reset_runtime_state(failed=True)
             raise ImageError(f"engine reported success but no output file at {out_path}")
+
+        if incognito:
+            # Nothing but the pixels: no sidecar (it would carry the
+            # prompt), no thumbnail, no output path in the activity feed.
+            self._reset_runtime_state(failed=False)
+            self.db.log_event("image_generate_done", {
+                "request_id": request_id, "engine": engine,
+                "model": model_id, "incognito": True,
+            })
+            return
 
         # Write sidecar metadata.
         sidecar_path = out_path.with_suffix(out_path.suffix + ".json")

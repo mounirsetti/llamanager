@@ -182,6 +182,14 @@ def _downloads_family_migration() -> str:
 # downloads instead of one global list.
 SCHEMA_VERSIONS.append(_downloads_family_migration())
 
+# v9: incognito requests. An admin may ask for a chat / image / video request
+# to leave no content behind: no prompt/response text, no gallery file, no
+# sidecar. The row itself stays (queue accounting, timing, token counts) and
+# is flagged so the UI can say why it has no text.
+SCHEMA_VERSIONS.append(
+    "ALTER TABLE requests ADD COLUMN incognito INTEGER NOT NULL DEFAULT 0;"
+)
+
 
 def _connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -240,11 +248,14 @@ class DB:
 
     # ---- request lifecycle ----
     def insert_request(self, *, request_id: str, origin_id: int | None,
-                       model: str | None, priority: int) -> None:
+                       model: str | None, priority: int,
+                       incognito: bool = False) -> None:
         self.conn.execute(
-            "INSERT INTO requests(id, origin_id, model, priority, status, enqueued_at)"
-            " VALUES (?, ?, ?, ?, 'queued', ?)",
-            (request_id, origin_id, model, priority, time.time()),
+            "INSERT INTO requests(id, origin_id, model, priority, status,"
+            " enqueued_at, incognito)"
+            " VALUES (?, ?, ?, ?, 'queued', ?, ?)",
+            (request_id, origin_id, model, priority, time.time(),
+             1 if incognito else 0),
         )
 
     def update_request_status(self, request_id: str, status: str,
