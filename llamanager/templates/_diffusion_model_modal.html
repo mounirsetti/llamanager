@@ -253,10 +253,22 @@
         </form>
 
         {# ---- Existing profiles ---- #}
+        {# Built-ins are seeded when a model is first registered, so a
+           profile shipped by a later update never reaches a model that was
+           registered before it. Compute what is missing and offer it below,
+           whether or not this model already has profiles — offering it only
+           on the empty state is how two engine updates went unnoticed. #}
+        {% set saved_names = row.profiles|map(attribute='name')|list %}
+        {% set missing_defaults = eng.default_profiles
+                                  |rejectattr('name', 'in', saved_names)|list %}
         <div class="lm-dm-section">
           <div class="lm-dm-section__head">
             <span>Profiles</span>
-            <span class="lm-dm-engine__meta">{{ row.profiles|length }} saved</span>
+            <span class="lm-dm-engine__meta">
+              {{ row.profiles|length }} saved{% if missing_defaults %} ·
+              {{ missing_defaults|length }} built-in
+              {{- 's' if missing_defaults|length != 1 }} not added{% endif %}
+            </span>
           </div>
 
           {% if row.profiles %}
@@ -315,15 +327,29 @@
               </div>
             </details>
             {% endfor %}
-          {% elif eng.default_profiles %}
-            {# Show built-in defaults read-only with a Materialize button. #}
+          {% elif not eng.default_profiles %}
+            <p class="lm-dm-empty">No profiles saved and the engine has no built-in defaults to materialize.</p>
+          {% endif %}
+
+          {% if missing_defaults %}
+            {# Built-in defaults this model does not have, read-only, with
+               the button that writes them. The endpoint skips names that
+               already exist, so this only ever adds. #}
             <div class="lm-dm-default-block">
               <p style="font-size: 0.8125rem; color: var(--fg-2); margin: 0 0 8px;">
+                {% if row.profiles %}
+                The <code>{{ eng.id }}</code> engine ships
+                {{ missing_defaults|length }} built-in
+                profile{% if missing_defaults|length != 1 %}s{% endif %}
+                this model does not have yet — newer than the model's own
+                setup, so nothing added {% if missing_defaults|length != 1 %}them{% else %}it{% endif %}:
+                {% else %}
                 No saved profiles. The <code>{{ eng.id }}</code> engine ships
-                {{ eng.default_profiles|length }} built-in default{% if eng.default_profiles|length != 1 %}s{% endif %}:
+                {{ missing_defaults|length }} built-in default{% if missing_defaults|length != 1 %}s{% endif %}:
+                {% endif %}
               </p>
               <ul style="margin: 0 0 10px; font-size: 0.8125rem;">
-                {% for d in eng.default_profiles %}
+                {% for d in missing_defaults %}
                 <li>
                   <strong>{{ d.name }}</strong>:
                   {% set parts = [] %}
@@ -337,13 +363,13 @@
                 <input type="hidden" name="model_id" value="{{ row.model_id }}">
                 <input type="hidden" name="engine" value="{{ eng.id }}">
                 <button type="submit" class="lm-btn lm-btn--ghost lm-btn--sm"
-                        data-confirm="Write the {{ eng.default_profiles|length }} built-in default profile(s) to config.toml so they become editable?">
-                  Materialize defaults as editable
+                        data-confirm="Write the {{ missing_defaults|length }} missing built-in profile(s) to config.toml so they become editable? Existing profiles are left alone.">
+                  {% if row.profiles %}Add the missing built-in
+                  profile{% if missing_defaults|length != 1 %}s{% endif %}
+                  {% else %}Materialize defaults as editable{% endif %}
                 </button>
               </form>
             </div>
-          {% else %}
-            <p class="lm-dm-empty">No profiles saved and the engine has no built-in defaults to materialize.</p>
           {% endif %}
 
           {# ---- Add a new profile ---- #}

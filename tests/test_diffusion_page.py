@@ -136,3 +136,78 @@ def test_saving_an_engine_path_reopens_that_engine(app):
                     follow_redirects=False)
     assert r.status_code == 303
     assert r.headers["location"] == "/ui/diffusion?open=engine:z_image"
+
+
+def _install_h3(app):
+    """Enough of a MiniMax-H3 tree for detect() to claim it, so the modal
+    renders its installed body (the profiles live there)."""
+    from llamanager.engines import minimax_h3_comfy as m
+    root = app.state.cfg.models_dir / "MiniMax-H3-Comfy"
+    for sub in ("diffusion_models", "text_encoders", "vae", "loras"):
+        (root / sub).mkdir(parents=True, exist_ok=True)
+    (root / "diffusion_models" / m.UNET_FILE).write_bytes(b"x")
+    (root / "vae" / m.AUDIO_VAE_FILE).write_bytes(b"x")
+    return root
+
+
+def _save_profile(app, model_id, name, fields):
+    """Save one profile and reload it into the app, as the UI routes do."""
+    from llamanager.config import Profile, load_config, save_profile
+    path = app.state.cfg.config_path
+    save_profile(path, model_id, name, Profile(name=name, **fields))
+    app.state.cfg = load_config(path)
+
+
+def test_a_model_with_profiles_is_still_offered_the_missing_builtins(app):
+    """Built-ins are seeded at registration, so a profile shipped by a later
+    update never reaches a model registered before it. Offering them only on
+    the empty state is how two engine updates went unnoticed for a week."""
+    _install_h3(app)
+    _save_profile(app, "MiniMax-H3-Comfy",
+                  "mine", {"image_steps": 4})
+    html = _admin(app).get("/ui/diffusion/model",
+                           params={"id": "MiniMax-H3-Comfy"}).text
+
+    assert "Add the missing built-in" in html
+    assert "built-ins not added" in html
+    # The shipped names it does not have, and not the one it does.
+    assert "h3-turbo-baked-8step" in html and "h3-ref2va-4step" in html
+    assert "materialize-defaults" in html
+
+
+def test_a_model_holding_every_builtin_is_offered_nothing(app):
+    """The block must disappear once there is nothing left to add, or it
+    reads as an action that never completes."""
+    _install_h3(app)
+    from llamanager.engines import minimax_h3_comfy as m
+    for name, fields in m.default_profiles().items():
+        _save_profile(app, "MiniMax-H3-Comfy",
+                      name, fields)
+    html = _admin(app).get("/ui/diffusion/model",
+                           params={"id": "MiniMax-H3-Comfy"}).text
+
+    assert "Add the missing built-in" not in html
+    assert "not added" not in html
+
+
+def test_materialize_adds_only_what_is_missing(app):
+    """The button is additive: it must never overwrite a profile the
+    operator has edited."""
+    _install_h3(app)
+    from llamanager.config import load_config
+    _save_profile(app, "MiniMax-H3-Comfy",
+                  "h3-turbo-4step", {"image_steps": 99})
+    client = _admin(app)
+    m = re.search(r'name="csrf_token" value="([^"]+)"',
+                  client.get("/ui/diffusion").text)
+    r = client.post("/ui/diffusion-models/profiles/materialize-defaults",
+                    data={"csrf_token": m.group(1),
+                          "model_id": "MiniMax-H3-Comfy",
+                          "engine": "minimax_h3_comfy"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+
+    saved = load_config(app.state.cfg.config_path).get_model(
+        "MiniMax-H3-Comfy").profiles
+    assert "h3-ref2va-4step" in saved
+    assert saved["h3-turbo-4step"].image_steps == 99, "edited profile clobbered"
