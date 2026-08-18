@@ -54,6 +54,12 @@ _DEFAULT_SCHEDULER = "simple"
 # Component filenames. A model directory is assembled from four uploaders, so
 # these are the names the download buttons write and the workflow expects.
 UNET_FILE = "MiniMax-H3-FL2VA-Q4_K_M.gguf"
+# The community turbo bake: the same 50-block FL2VA, but with the lightx2v
+# 8-step distill fused into the weights and the adaln projection stored
+# against a curve basis ([8, 96768] per block instead of [96768, 2688]).
+# Same per-step cost, 8.3 GB less resident: measured 2026-08-18 on gfx1201,
+# 37 s/step against 39 s/step, transformer load 16 s against 76 s.
+TURBO_UNET_FILE = "minimax_h3_fl2va_turbo_Q4_K_M.gguf"
 CLIP_FILE = "qwen3vl-32B-MiniMax-H3-Q4_K_M.gguf"
 VIDEO_VAE_FILE = "minimax_h3_video_vae_fp16.safetensors"
 AUDIO_VAE_FILE = "minimax_h3_audio_vae_fp32.safetensors"
@@ -64,7 +70,13 @@ TURBO_LORA_FILE = (
 QUANT_FILES: dict[str, tuple[str, float]] = {
     "Q4_K_M": (UNET_FILE, 18.50),
     "Q3_K_M": ("MiniMax-H3-FL2VA-Q3_K_M.gguf", 14.51),
+    "Q4_K_M-Turbo": (TURBO_UNET_FILE, 10.61),
 }
+
+# Transformers that already carry the distill. Loading a Turbo LoRA on top of
+# one of these applies the distill twice, which is a silent quality loss, so
+# the combination is refused rather than quietly corrected.
+BAKED_DISTILL_UNETS = frozenset({TURBO_UNET_FILE})
 
 SIZE_BUCKETS = [
     "1344x768", "768x1344",     # native canvas, landscape / portrait
@@ -136,10 +148,22 @@ def _resolved_steps(profile: Profile, req: ImageRequest) -> int:
 
 
 def _unet_for(profile: Profile, req: ImageRequest) -> str:
-    """Transformer file for the profile's quant, defaulting to Q4_K_M."""
-    quant = pick_model_type(req, profile).upper()
-    entry = QUANT_FILES.get(quant)
-    return entry[0] if entry else UNET_FILE
+    """Transformer file for the profile's quant.
+
+    An unset quant means this entry's default transformer. An unknown one is
+    an error: quietly substituting Q4_K_M — which is what this did until the
+    quant names stopped being plain uppercase — renders at a quality and VRAM
+    cost the caller never asked for, and says nothing about it.
+    """
+    quant = pick_model_type(req, profile).strip()
+    if not quant:
+        return UNET_FILE
+    for name, (filename, _gb) in QUANT_FILES.items():
+        if name.upper() == quant.upper():
+            return filename
+    raise RuntimeError(
+        f"unknown MiniMax-H3 transformer quant {quant!r} — pick one of "
+        + ", ".join(sorted(QUANT_FILES)))
 
 
 def build_command(
@@ -199,6 +223,12 @@ def build_command(
     # one means "sample without a LoRA" (the h3-full-50step profile).
     lora_name = profile.image_lora_weights or TURBO_LORA_FILE
     use_lora = profile.image_lora_weights != ""
+
+    if unet in BAKED_DISTILL_UNETS and use_lora:
+        raise RuntimeError(
+            f"{unet} already has the Turbo distill fused into its weights; "
+            f"loading {lora_name} on top would apply it twice. Clear the "
+            "'Turbo LoRA' field on this profile (and use 8 steps).")
     lora_present = (model_path / "loras" / lora_name).is_file()
     if use_lora and not lora_present:
         # Not fatal: without the distill the model still samples, it just
@@ -215,7 +245,7 @@ def build_command(
         "--model-path", str(model_path),
         "--workflow", str(workflow),
         "--output", str(out_path),
-        "--init-image", str(req.ref_images[0]),
+        "--image", f"INIT_IMAGE={req.ref_images[0]}",
         "--set", f"UNET={unet}",
         "--set", f"CLIP={CLIP_FILE}",
         "--set", f"VIDEO_VAE={VIDEO_VAE_FILE}",
@@ -324,7 +354,10 @@ def profile_schema() -> list[ProfileField]:
             key="image_model_type", label="Transformer quant", kind="select",
             default="Q4_K_M", options=sorted(QUANT_FILES),
             help="Q4_K_M (18.5 GB) is the quality/VRAM sweet spot on a 32 GB "
-                 "card. Q3_K_M (14.5 GB) trades detail for headroom.",
+                 "card. Q3_K_M (14.5 GB) trades detail for headroom. "
+                 "Q4_K_M-Turbo (10.6 GB) has the 8-step distill fused in, so "
+                 "it needs the LoRA field cleared and 8 steps; it loads in a "
+                 "sixth of the time and leaves 8 GB more VRAM free.",
         ),
         ProfileField(
             key="image_lora_weights", label="Turbo LoRA", kind="text",
@@ -368,6 +401,10 @@ def default_profiles() -> dict[str, dict[str, Any]]:
     distill collapses 50 sampling steps to 4, which is what makes a video
     model practical on one consumer card.
 
+    ``h3-turbo-baked-8step`` runs the community turbo bake, which carries the
+    8-step distill in its weights. Same sampling cost per step, but it loads
+    in a sixth of the time and holds 8.3 GB less VRAM.
+
     ``h3-full-50step`` drops the LoRA. It is the reference quality bar and is
     roughly an order of magnitude slower; keep it for final renders.
     """
@@ -398,6 +435,15 @@ def default_profiles() -> dict[str, dict[str, Any]]:
             "image_model_type": "Q4_K_M",
             "image_lora_weights": TURBO_LORA_FILE,
             "image_lora_scale": 1.0,
+        },
+        "h3-turbo-baked-8step": {
+            "image_size": _DEFAULT_SIZE,
+            "image_steps": 8,
+            "video_num_frames": _DEFAULT_LENGTH,
+            "video_fps": FPS,
+            "image_model_type": "Q4_K_M-Turbo",
+            # Fused into the transformer — a LoRA here would double it.
+            "image_lora_weights": "",
         },
         "h3-full-50step": {
             "image_size": _DEFAULT_SIZE,

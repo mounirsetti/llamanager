@@ -1,0 +1,182 @@
+{
+  "_comment": [
+    "Krea 2 reference conditioning via ComfyUI-Krea2-Ostris-Edit.",
+    "The pack this graph is built for: github.com/ostris/ComfyUI-Krea2-Ostris-Edit,",
+    "which krea2_style_reference and the openpose LoRA were trained against.",
+    "",
+    "Different geometry from pack A, which is why it is a different file",
+    "and why the LoRA \u2014 not a mode switch \u2014 chooses between them. Here the",
+    "references are appended to the image token sequence and conditioned",
+    "at timestep 0 ('index_timestep_zero'), and Qwen3-VL sees them at a",
+    "deliberately coarse 384x384 total pixels. Feeding a pack A LoRA this",
+    "graph is out of distribution, not merely suboptimal.",
+    "",
+    "The VAE is wired into the TEXT ENCODE node, which is where this pack",
+    "attaches the reference latents to the conditioning; the patch node",
+    "then consumes them off the conditioning rather than from a socket.",
+    "That patch node is a no-op when no reference latents are present.",
+    "",
+    "kv_cache stays false: it is only correct for LoRAs trained with",
+    "ai-toolkit's kv_cache kwarg, and none of the ones we ship were.",
+    "",
+    "Nodes 12/13 are the optional 2nd and 3rd references; unused slots are",
+    "dropped from the graph before submission."
+  ],
+  "1": {
+    "class_type": "UnetLoaderGGUF",
+    "inputs": {
+      "unet_name": "__UNET__"
+    }
+  },
+  "2": {
+    "_note": "The edit LoRA is not optional here the way a style LoRA is in the t2i graph: it IS the recipe. Without it the patched forward feeds source tokens to a model never trained to read them.",
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "lora_name": "__LORA__",
+      "strength_model": "__LORA_STRENGTH__"
+    }
+  },
+  "3": {
+    "_note": "fp8_scaled conditioner, via ComfyUI's own CLIPLoader. Used only when the GGUF pair is absent: it costs ~700 s per request on gfx1201. It carries the Qwen3-VL vision weights natively, which image grounding requires.",
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "__CLIP__",
+      "type": "krea2"
+    }
+  },
+  "4": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "__VAE__"
+    }
+  },
+  "5": {
+    "_note": "Positive. The VAE connection is what turns the reference images into reference latents on the conditioning.",
+    "class_type": "TextEncodeKrea2OstrisEdit",
+    "inputs": {
+      "clip": [
+        "3",
+        0
+      ],
+      "prompt": "__PROMPT__",
+      "vae": [
+        "4",
+        0
+      ],
+      "image1": [
+        "11",
+        0
+      ],
+      "image2": [
+        "12",
+        0
+      ],
+      "image3": [
+        "13",
+        0
+      ]
+    }
+  },
+  "6": {
+    "_note": "Negative: text-only, no images and no VAE \u2014 per the pack's own reference wiring. Unused at cfg 1.0.",
+    "class_type": "TextEncodeKrea2OstrisEdit",
+    "inputs": {
+      "clip": [
+        "3",
+        0
+      ],
+      "prompt": ""
+    }
+  },
+  "7": {
+    "_note": "EmptySD3LatentImage, not EmptyLatentImage: Krea 2's VAE is 16-channel and this latent is read by the patch node for the target geometry, not only by the sampler (which would have fixed the channel count itself).",
+    "class_type": "EmptySD3LatentImage",
+    "inputs": {
+      "width": "__WIDTH__",
+      "height": "__HEIGHT__",
+      "batch_size": 1
+    }
+  },
+  "8": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "10",
+        0
+      ],
+      "seed": "__SEED__",
+      "steps": "__STEPS__",
+      "cfg": "__CFG__",
+      "sampler_name": "__SAMPLER__",
+      "scheduler": "__SCHEDULER__",
+      "positive": [
+        "5",
+        0
+      ],
+      "negative": [
+        "6",
+        0
+      ],
+      "latent_image": [
+        "7",
+        0
+      ],
+      "denoise": 1.0
+    }
+  },
+  "9": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "8",
+        0
+      ],
+      "vae": [
+        "4",
+        0
+      ]
+    }
+  },
+  "10": {
+    "class_type": "Krea2OstrisEditModelPatch",
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ],
+      "kv_cache": false
+    }
+  },
+  "11": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__REF_IMAGE__"
+    }
+  },
+  "12": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__REF_IMAGE_B__"
+    }
+  },
+  "13": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__REF_IMAGE_C__"
+    }
+  },
+  "15": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "9",
+        0
+      ],
+      "filename_prefix": "llamanager/krea2-edit"
+    }
+  }
+}

@@ -137,6 +137,29 @@ def bypass_node(graph: dict, node_id: str, passthrough_input: str) -> dict:
     return graph
 
 
+def drop_node(graph: dict, node_id: str) -> dict:
+    """Remove a node and every link that pointed at it.
+
+    The counterpart to ``bypass_node`` for nodes that have nothing to pass
+    through: a ``LoadImage`` feeding an optional reference slot has no
+    upstream input to rewire to, so an unused one must be deleted outright
+    and the consumer's input key removed with it.
+
+    This is only correct for OPTIONAL inputs. Dropping a node that feeds a
+    required one leaves the consumer missing that key, which ComfyUI rejects
+    at validation with the input's name — loud, and at the right layer.
+    """
+    if node_id not in graph:
+        raise KeyError(f"cannot drop node {node_id}: not in the graph")
+    del graph[node_id]
+    for other in graph.values():
+        for name, value in list(other.get("inputs", {}).items()):
+            if isinstance(value, list) and len(value) == 2 \
+                    and str(value[0]) == str(node_id):
+                del other["inputs"][name]
+    return graph
+
+
 def missing_files(model_dir: Path, required: dict[str, str]) -> list[str]:
     """Names from ``{subdir: filename}`` that are not present on disk.
 

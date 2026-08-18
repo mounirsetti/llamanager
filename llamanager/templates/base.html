@@ -75,7 +75,7 @@
           referrerpolicy="no-referrer"></script>
   {# Idiomorph: morph-style HTMX swap that preserves form state, open
      <details>, focus, and scroll position when a parent partial is
-     re-rendered (e.g. the 2s polls on /ui/models and /ui/setup-diffusion).
+     re-rendered (e.g. the 2s polls on /ui/models and /ui/diffusion).
      Without this, a poll that re-renders the wrapper would wipe any
      in-flight profile-edit form the operator had open. #}
   {# Pinned to 0.7.3: 0.3.0 crashed when a swap morphed the <body> (the
@@ -936,6 +936,773 @@
       margin-left: auto;
     }
 
+    /* ---------- status tiles ------------------------------------------
+       A grid whose 2px gaps ARE the rules: children sit on --bg-0 over a
+       --bg-3 field, so the seams read as hairlines and no tile carries a
+       border of its own. Lifted from the dashboard's System panel, which
+       invented the pattern inline; DESIGN.md's "never a grid of identical
+       bordered cards" is satisfied because there are no card borders.
+
+       A tile is a status vignette with ONE action: the whole surface opens
+       a detail modal, and the footer holds the single thing an operator
+       most often wants without opening anything. */
+    .lm-tiles {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 2px;
+      padding: 2px;
+      margin-bottom: 8px;
+    }
+    /* The seam is drawn by each tile's own 2px ring rather than by a field
+       colour behind the grid: with a background the last row's EMPTY cells
+       render as slabs of --bg-3 (seven engines in a four-column grid leaves
+       one), and rings simply aren't there when a cell is. Neighbouring rings
+       overlap exactly across the 2px gap, so the seams stay hairline. */
+    .lm-tile {
+      position: relative;
+      background: var(--bg-0);
+      box-shadow: 0 0 0 2px var(--bg-3);
+      padding: 16px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 0;
+      transition: background 120ms ease;
+    }
+    .lm-tile:hover { background: var(--bg-1); }
+    /* The opener is a stretched button covering the tile. It must be a
+       <button>, not an <a>: hx-boost turns links into navigations, and this
+       has to stay an htmx fetch into the shared dialog. */
+    .lm-tile__open {
+      position: static;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      align-items: flex-start;
+      appearance: none;
+      background: none;
+      border: 0;
+      padding: 0;
+      margin: 0;
+      font: inherit;
+      color: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+    .lm-tile__open::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+    }
+    .lm-tile__open:focus-visible::after {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+    .lm-tile__eyebrow {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.625rem;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+      overflow-wrap: anywhere;
+    }
+    /* Sans, not Fraunces: DESIGN.md keeps the serif for >=24px only. */
+    .lm-tile__title {
+      font-size: 0.9375rem;
+      font-weight: 500;
+      color: var(--fg-0);
+      overflow-wrap: anywhere;
+    }
+    .lm-tile__status {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 0.8125rem;
+      color: var(--fg-1);
+    }
+    .lm-tile__status::before {
+      content: '';
+      width: 7px; height: 7px;
+      border-radius: 999px;
+      background: var(--fg-3);
+      display: inline-block;
+      flex-shrink: 0;
+    }
+    .lm-tile__status[data-state="ready"]::before { background: var(--ok); }
+    .lm-tile__status[data-state="busy"]::before  { background: var(--warn); }
+    .lm-tile__status[data-state="error"]::before { background: var(--bad); }
+    .lm-tile__facts {
+      font-size: 0.75rem;
+      color: var(--fg-2);
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+    /* 2px hairline, per DESIGN.md's progress rule — no gradients, no height. */
+    .lm-tile__bar {
+      height: 2px;
+      background: var(--bg-3);
+      overflow: hidden;
+    }
+    .lm-tile__bar span {
+      display: block;
+      height: 100%;
+      background: var(--accent);
+      transition: width 250ms ease;
+    }
+    /* Footer actions sit ABOVE the stretched opener, or clicking Download
+       would open the modal instead of running the action. */
+    .lm-tile__actions {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: auto;
+      padding-top: 4px;
+    }
+    .lm-tile__actions form { display: inline; margin: 0; }
+    .lm-tile--default { box-shadow: inset 2px 0 0 var(--accent); }
+
+    /* ---------- engine cards, sections, progress ------------------------
+       These used to live in setup_diffusion.html / diffusion_models.html /
+       setup.html. They are global now because the fragments that use them
+       are rendered into the shared dialog from any page — a modal styled
+       only on the page that happens to define its CSS is a bug waiting for
+       the first reuse (it already was one: .lm-update-btn was defined only
+       in setup.html while the diffusion partial used it, so the versions
+       button rendered both its idle and busy labels). */
+    /* ===== Per-engine card composition. Reuses lm-* tokens from base. ===== */
+
+    .lm-engine-card {
+      border: 1px solid var(--bg-3);
+      background: var(--bg-1);
+      padding: 22px 24px;
+      margin-bottom: 20px;
+      position: relative;
+    }
+    .lm-engine-card__head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-bottom: 4px;
+    }
+    .lm-engine-card__name {
+      font-family: 'Fraunces', serif;
+      font-size: 1.375rem;
+      margin: 0;
+      letter-spacing: -0.01em;
+      color: var(--fg-0);
+    }
+    .lm-engine-card__name em {
+      font-style: italic;
+      color: var(--fg-2);
+      font-weight: normal;
+    }
+    .lm-engine-card__tag {
+      font-size: 0.6875rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+    }
+    .lm-engine-card__status {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 0.8125rem;
+      color: var(--fg-1);
+      margin: 6px 0 18px;
+    }
+    .lm-engine-card__status::before {
+      content: '';
+      width: 7px; height: 7px;
+      border-radius: 999px;
+      background: var(--fg-3);
+      display: inline-block;
+      flex-shrink: 0;
+    }
+    .lm-engine-card__status[data-state="ready"]::before { background: var(--ok); }
+    .lm-engine-card__status[data-state="busy"]::before  { background: var(--warn); }
+    .lm-engine-card__status[data-state="error"]::before { background: var(--bad); }
+
+    /* Section dividers inside an engine card */
+    .lm-engine-section {
+      border-top: 1px solid var(--bg-3);
+      margin-top: 18px;
+      padding-top: 16px;
+    }
+    .lm-engine-section__head {
+      font-size: 0.6875rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+      margin-bottom: 10px;
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .lm-engine-section__meta {
+      font-size: 0.75rem;
+      color: var(--fg-3);
+      letter-spacing: 0;
+      text-transform: none;
+    }
+    .lm-engine-section__note {
+      font-size: 0.75rem;
+      color: var(--fg-2);
+      max-width: 70ch;
+      margin: 0 0 12px;
+      line-height: 1.5;
+    }
+
+    /* Progress meter, used for both pip-install and HF download. */
+    .lm-progress {
+      margin-top: 12px;
+      padding: 10px 14px;
+      background: var(--bg-2);
+      border: 1px solid var(--bg-3);
+      border-radius: 2px;
+    }
+    .lm-progress__head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 0.8125rem;
+      color: var(--fg-1);
+      margin-bottom: 8px;
+    }
+    .lm-progress__pct {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-variant-numeric: tabular-nums;
+      color: var(--fg-0);
+    }
+    .lm-progress__bar {
+      height: 4px;
+      background: var(--bg-3);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .lm-progress__fill {
+      height: 100%;
+      background: var(--accent);
+      transition: width 250ms ease;
+    }
+    .lm-progress__fill--ok    { background: var(--ok); }
+    .lm-progress__fill--bad   { background: var(--bad); }
+    .lm-progress__fill--warn  { background: var(--warn); }
+    .lm-progress__log {
+      margin-top: 10px;
+      max-height: 140px;
+      overflow-y: auto;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.6875rem;
+      line-height: 1.5;
+      color: var(--fg-2);
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .lm-progress__row-actions { margin-top: 8px; }
+
+    .lm-pkg-list {
+      list-style: none;
+      padding: 0;
+      margin: 6px 0 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 8px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.75rem;
+      color: var(--fg-2);
+    }
+    .lm-pkg-list li {
+      padding: 2px 8px;
+      background: var(--bg-2);
+      border: 1px solid var(--bg-3);
+      border-radius: 2px;
+    }
+
+    /* ====== Diffusion models page ====== */
+    .lm-dm-engine {
+      display: flex; flex-direction: column; gap: 8px;
+      margin-bottom: 24px;
+    }
+    .lm-dm-engine__head {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: 8px; padding: 4px 0 8px;
+      border-bottom: 1px solid var(--bg-3);
+    }
+    .lm-dm-engine__title { font-size: 0.875rem; color: var(--fg-1); }
+    .lm-dm-engine__meta { font-size: 0.75rem; color: var(--fg-2); }
+
+    .lm-dm-model {
+      border: 1px solid var(--bg-3);
+      background: var(--bg-1);
+      padding: 12px 14px;
+    }
+    .lm-dm-model + .lm-dm-model { margin-top: 6px; }
+    .lm-dm-model__head {
+      display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+      margin-bottom: 4px;
+    }
+    .lm-dm-model__name { font-size: 0.9375rem; color: var(--fg-0); margin: 0; }
+    .lm-dm-model__desc {
+      font-size: 0.8125rem; color: var(--fg-2);
+      max-width: 80ch; margin: 4px 0 12px;
+    }
+
+    .lm-dm-pill {
+      display: inline-block;
+      padding: 1px 7px;
+      font-size: 0.6875rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      border: 1px solid var(--bg-3);
+      color: var(--fg-2);
+      border-radius: 2px;
+    }
+    .lm-dm-pill--ok     { color: var(--ok); border-color: var(--ok); }
+    .lm-dm-pill--accent { color: var(--accent); border-color: var(--accent); }
+    .lm-dm-pill--muted  { color: var(--fg-3); border-color: var(--bg-3); }
+
+    .lm-dm-section { margin-top: 12px; }
+    .lm-dm-section__head {
+      display: flex; align-items: baseline; gap: 8px;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--fg-2);
+      margin-bottom: 6px;
+    }
+
+    .lm-dm-profile {
+      border: 1px solid var(--bg-3);
+      background: var(--bg-0);
+      margin-bottom: 4px;
+    }
+    .lm-dm-profile.is-default { border-color: var(--accent); }
+    .lm-dm-profile summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 6px 10px;
+      display: flex; align-items: center; gap: 10px;
+      font-size: 0.8125rem;
+    }
+    .lm-dm-profile summary::before {
+      content: "▸";
+      color: var(--fg-3);
+      transition: transform 120ms ease;
+    }
+    .lm-dm-profile[open] summary::before {
+      transform: rotate(90deg);
+    }
+    .lm-dm-profile__name { color: var(--fg-0); }
+    .lm-dm-profile__summary { color: var(--fg-2); font-size: 0.75rem; }
+    .lm-dm-profile__body {
+      padding: 10px 12px 12px;
+      border-top: 1px solid var(--bg-3);
+    }
+
+    .lm-dm-field {
+      display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px;
+    }
+    .lm-dm-field__label {
+      font-size: 0.75rem; color: var(--fg-2);
+      text-transform: uppercase; letter-spacing: 0.1em;
+    }
+    .lm-dm-field__help { font-size: 0.75rem; color: var(--fg-3); }
+
+    .lm-dm-actions {
+      display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px;
+    }
+    .lm-dm-actions form { display: inline; }
+
+    .lm-dm-empty {
+      color: var(--fg-3); font-size: 0.8125rem;
+      padding: 8px 0;
+    }
+
+    .lm-dm-default-block {
+      background: var(--bg-0);
+      border: 1px dashed var(--bg-3);
+      padding: 10px 12px;
+      margin-bottom: 8px;
+    }
+    .lm-dm-default-block code { color: var(--fg-1); }
+
+    .lm-update-flag { color: var(--accent); font-weight: 500; }
+    .lm-update-ok   { color: var(--ok); }
+    .lm-update-err  { color: var(--bad); }
+
+    .lm-update-btn { position: relative; }
+    .lm-update-btn .lm-update-btn__busy { display: none; }
+    .lm-update-btn.htmx-request .lm-update-btn__idle { display: none; }
+    .lm-update-btn.htmx-request .lm-update-btn__busy { display: inline; color: var(--warn); }
+
+    .lm-btn--sm { padding: 6px 12px; font-size: 0.8125rem; }
+
+    .lm-preflight-dialog {
+      border: 1px solid var(--bg-3);
+      background: var(--bg-0);
+      color: var(--fg-0);
+      padding: 0;
+      max-width: 620px;
+      width: calc(100vw - 32px);
+    }
+    .lm-preflight-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+    .lm-preflight { padding: 22px 24px; display: block; }
+    .lm-preflight__title {
+      font-family: 'Fraunces', serif; font-size: 1.25rem; margin: 0 0 4px;
+      letter-spacing: -0.01em;
+    }
+    .lm-preflight__sub {
+      font-size: 0.8125rem; color: var(--fg-2); margin: 0 0 16px; max-width: 62ch;
+    }
+    .lm-preflight__table {
+      width: 100%; border-collapse: collapse; margin: 14px 0 4px;
+      font-size: 0.8125rem;
+    }
+    .lm-preflight__table th {
+      text-align: left; font-weight: 500; color: var(--fg-2);
+      padding: 6px 10px 6px 0; white-space: nowrap; width: 1%;
+    }
+    .lm-preflight__table td { padding: 6px 10px 6px 0; }
+    .lm-preflight__table td.n {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-variant-numeric: tabular-nums; white-space: nowrap;
+    }
+    .lm-preflight__table td.n[data-verdict="insufficient"] { color: var(--bad); }
+    .lm-preflight__table td.n[data-verdict="tight"]        { color: var(--warn); }
+    .lm-preflight__table td.n[data-verdict="ok"]           { color: var(--ok); }
+    .lm-preflight__src { color: var(--fg-3); font-size: 0.75rem; }
+    .lm-preflight__note {
+      font-size: 0.75rem; color: var(--fg-2); margin: 8px 0 0; max-width: 66ch;
+      line-height: 1.5;
+    }
+    .lm-preflight__alert {
+      margin: 12px 0 0; padding: 10px 12px; font-size: 0.8125rem;
+      border-left: 2px solid var(--warn); background: var(--bg-1);
+    }
+    .lm-preflight__alert[data-level="bad"] { border-left-color: var(--bad); }
+    .lm-preflight__actions {
+      display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px;
+    }
+
+    /* ---------- LLM engine picker + installed variants ------------------
+       Moved here from setup.html for the same reason as the diffusion card
+       CSS: these render inside the shared modal, which exists on every
+       page. */
+
+    /* ===== Setup-page specific composition. Builds on lm-* tokens in base. ===== */
+
+    .lm-setup-eyebrow {
+      font-size: 0.6875rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+      font-weight: 500;
+    }
+
+    /* ---- Engine hero (active engine summary) ---- */
+    .lm-engine-hero {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 28px;
+      align-items: end;
+      padding: 26px 28px 24px;
+      margin-top: 32px;
+      border: 1px solid var(--bg-3);
+      background:
+        linear-gradient(180deg, var(--accent-soft), transparent 80%),
+        var(--bg-1);
+      position: relative;
+      overflow: hidden;
+    }
+    .lm-engine-hero::before {
+      /* a quiet decorative ruler in the corner */
+      content: "";
+      position: absolute;
+      top: 14px; right: 18px;
+      width: 56px; height: 1px;
+      background: var(--fg-3);
+      opacity: 0.6;
+    }
+    .lm-engine-hero__name {
+      font-family: 'Fraunces', serif;
+      font-variation-settings: 'opsz' 96, 'SOFT' 30;
+      font-size: 2rem;
+      font-weight: 400;
+      line-height: 1.05;
+      letter-spacing: -0.015em;
+      color: var(--fg-0);
+      margin: 8px 0 4px;
+    }
+    .lm-engine-hero__name em {
+      font-style: italic;
+      color: var(--accent);
+    }
+    .lm-engine-hero__meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px 22px;
+      margin-top: 12px;
+      font-size: 0.8125rem;
+      color: var(--fg-1);
+    }
+    .lm-engine-hero__meta dt {
+      font-size: 0.6875rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+      margin-bottom: 2px;
+    }
+    .lm-engine-hero__meta dd {
+      margin: 0;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.8125rem;
+      color: var(--fg-1);
+      word-break: break-all;
+    }
+    .lm-engine-hero__missing {
+      font-family: 'Fraunces', serif;
+      font-style: italic;
+      font-size: 1.375rem;
+      color: var(--fg-2);
+      line-height: 1.2;
+    }
+
+    /* ---- Hardware dossier ---- */
+    .lm-dossier {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 10px;
+      padding: 8px 14px 8px 12px;
+      border-left: 2px solid var(--accent);
+      background: var(--bg-1);
+      font-size: 0.8125rem;
+      color: var(--fg-1);
+      margin: 20px 0 0;
+    }
+    .lm-dossier__label {
+      font-size: 0.6875rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+    }
+    .lm-dossier__pick {
+      font-family: 'Fraunces', serif;
+      font-style: italic;
+      font-size: 1rem;
+      color: var(--fg-0);
+    }
+
+    /* ---- Card picker (radio-as-card) ---- */
+    .lm-pick {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      border: 0;
+    }
+    .lm-pick--sources { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .lm-pick--backends { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .lm-pick legend {
+      font-size: 0.6875rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+      margin-bottom: 10px;
+      padding: 0;
+    }
+    .lm-pick__opt { position: relative; }
+    .lm-pick__opt input {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .lm-pick__card {
+      display: block;
+      padding: 14px 16px;
+      border: 1px solid var(--bg-3);
+      background: var(--bg-1);
+      cursor: pointer;
+      transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+      position: relative;
+    }
+    .lm-pick__card:hover {
+      border-color: var(--bg-4);
+      background: var(--bg-2);
+    }
+    .lm-pick__opt input:checked + .lm-pick__card {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+    .lm-pick__opt input:checked + .lm-pick__card::before {
+      /* selection nib on the left edge */
+      content: "";
+      position: absolute;
+      left: -1px; top: -1px; bottom: -1px;
+      width: 3px;
+      background: var(--accent);
+    }
+    .lm-pick__opt input:focus-visible + .lm-pick__card {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .lm-pick__opt input:disabled + .lm-pick__card {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .lm-pick__title-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+    .lm-pick__title {
+      font-family: 'Fraunces', serif;
+      font-variation-settings: 'opsz' 36, 'SOFT' 20;
+      font-size: 1.0625rem;
+      font-weight: 500;
+      color: var(--fg-0);
+      letter-spacing: -0.005em;
+    }
+    .lm-pick__chip {
+      font-size: 0.6875rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+    }
+    .lm-pick__chip--suggested {
+      color: var(--accent);
+      font-weight: 500;
+    }
+    .lm-pick__desc {
+      font-size: 0.8125rem;
+      color: var(--fg-2);
+      line-height: 1.45;
+    }
+    .lm-pick__link {
+      display: inline-block;
+      margin-top: 6px;
+      font-size: 0.75rem;
+      color: var(--accent);
+    }
+
+    /* ---- Install action row ---- */
+    .lm-install-row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-top: 22px;
+      padding-top: 22px;
+      border-top: 1px solid var(--bg-3);
+      flex-wrap: wrap;
+    }
+    .lm-install-row__note {
+      font-size: 0.8125rem;
+      color: var(--fg-2);
+      font-style: italic;
+      font-family: 'Fraunces', serif;
+      line-height: 1.4;
+      flex: 1 1 280px;
+    }
+
+    /* ---- Installed variants ---- */
+    .lm-variants { display: grid; gap: 10px; }
+    .lm-variants__empty {
+      font-family: 'Fraunces', serif;
+      font-style: italic;
+      color: var(--fg-2);
+      padding: 18px 0;
+    }
+    .lm-variant {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      grid-template-areas:
+        "head head"
+        "path path"
+        "actions actions";
+      gap: 10px 16px;
+      padding: 16px 18px;
+      border: 1px solid var(--bg-3);
+      background: var(--bg-1);
+      position: relative;
+    }
+    .lm-variant.is-active {
+      border-color: var(--accent);
+      background:
+        linear-gradient(180deg, var(--accent-soft), transparent 60%),
+        var(--bg-1);
+    }
+    .lm-variant.is-active::before {
+      content: "";
+      position: absolute;
+      left: -1px; top: -1px; bottom: -1px;
+      width: 3px;
+      background: var(--accent);
+    }
+    .lm-variant__head {
+      grid-area: head;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px 14px;
+    }
+    .lm-variant__title-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+    .lm-variant__source {
+      font-family: 'Fraunces', serif;
+      font-size: 1.0625rem;
+      font-weight: 500;
+      color: var(--fg-0);
+    }
+    .lm-variant__sep { color: var(--fg-3); }
+    .lm-variant__backend { font-size: 0.875rem; color: var(--fg-1); }
+    .lm-variant__vendor {
+      font-size: 0.6875rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--fg-2);
+      border: 1px solid var(--bg-3);
+      padding: 1px 6px;
+    }
+    .lm-variant__version {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 8px;
+      font-size: 0.8125rem;
+      color: var(--fg-1);
+    }
+    .lm-variant__path { grid-area: path; }
+    .lm-variant__path code {
+      font-size: 0.75rem;
+      color: var(--fg-2);
+      word-break: break-all;
+    }
+    .lm-variant__actions {
+      grid-area: actions;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .lm-update-flag { color: var(--accent); font-weight: 500; }
+    .lm-update-ok   { color: var(--ok); }
+    .lm-update-err  { color: var(--bad); }
+
+    .lm-update-btn { position: relative; }
+    .lm-update-btn .lm-update-btn__busy { display: none; }
+    .lm-update-btn.htmx-request .lm-update-btn__idle { display: none; }
+    .lm-update-btn.htmx-request .lm-update-btn__busy { display: inline; color: var(--warn); }
+
+    .lm-btn--sm { padding: 6px 12px; font-size: 0.8125rem; }
+
+
     /* ---------- hero (loaded model summary) ---------- */
     .lm-hero {
       padding: 6px 0 24px;
@@ -1730,9 +2497,9 @@
         {% if dot_status == 'running' %}
         <div class="lm-meta">local inference, supervised</div>
         {% elif dot_status == 'missing' %}
-        <a href="/ui/setup" class="lm-meta-action">Install llama-server &rarr;</a>
+        <a href="/ui/llm?open=install" class="lm-meta-action">Install llama-server &rarr;</a>
         {% elif not has_models %}
-        <a href="/ui/models" class="lm-meta-action">Pull a model &rarr;</a>
+        <a href="/ui/llm" class="lm-meta-action">Pull a model &rarr;</a>
         {% else %}
         <a href="/ui/launch" class="lm-meta-action">Launch llama-server &rarr;</a>
         {% endif %}
@@ -1743,9 +2510,6 @@
         <span class="lm-nav-eyebrow">Operate</span>
         <a class="lm-nav-link" href="/ui/" {% if active=='dashboard' %}aria-current="page"{% endif %}>Dashboard</a>
         <a class="lm-nav-link" href="/ui/queue" {% if active=='queue' %}aria-current="page"{% endif %}>Queue</a>
-        <a class="lm-nav-link" href="/ui/models" {% if active=='models' %}aria-current="page"{% endif %}>LLM models</a>
-        <a class="lm-nav-link" href="/ui/diffusion-models" {% if active=='diffusion-models' %}aria-current="page"{% endif %}>Diffusion models</a>
-        <a class="lm-nav-link" href="/ui/asr-models" {% if active=='asr-models' %}aria-current="page"{% endif %}>ASR models</a>
         <a class="lm-nav-link" href="/ui/launch" {% if active=='launch' %}aria-current="page"{% endif %}>Launch</a>
         <a class="lm-nav-link" href="/ui/slots" {% if active=='slots' %}aria-current="page"{% endif %}>Slots <span class="lm-beta-pill" aria-label="beta">beta</span></a>
         <a class="lm-nav-link" href="/ui/chat" {% if active=='chat' %}aria-current="page"{% endif %}>Chat</a>
@@ -1754,9 +2518,9 @@
         <span class="lm-nav-eyebrow" style="margin-top: 16px;">Configure</span>
         <a class="lm-nav-link" href="/ui/origins" {% if active=='origins' %}aria-current="page"{% endif %}>Origins</a>
         <a class="lm-nav-link" href="/ui/logs" {% if active=='logs' %}aria-current="page"{% endif %}>Logs</a>
-        <a class="lm-nav-link" href="/ui/setup" {% if active=='setup' %}aria-current="page"{% endif %}>LLM engines</a>
-        <a class="lm-nav-link" href="/ui/setup-diffusion" {% if active=='setup-diffusion' %}aria-current="page"{% endif %}>Diffusion engines</a>
-        <a class="lm-nav-link" href="/ui/setup-asr" {% if active=='setup-asr' %}aria-current="page"{% endif %}>ASR engines</a>
+        <a class="lm-nav-link" href="/ui/llm" {% if active=='llm' %}aria-current="page"{% endif %}>LLM</a>
+        <a class="lm-nav-link" href="/ui/diffusion" {% if active=='diffusion' %}aria-current="page"{% endif %}>Diffusion</a>
+        <a class="lm-nav-link" href="/ui/asr" {% if active=='asr' %}aria-current="page"{% endif %}>ASR</a>
         <a class="lm-nav-link" href="/ui/settings" {% if active=='settings' %}aria-current="page"{% endif %}>Settings</a>
         <a class="lm-nav-link" href="/ui/about" {% if active=='about' %}aria-current="page"{% endif %}>About</a>
       </nav>
@@ -1884,7 +2648,7 @@
           <span class="lm-topbar__sigil" data-state="idle">LLM</span>
           <span class="lm-topbar__empty">
             no language models —
-            <a href="/ui/models">pull one</a>
+            <a href="/ui/llm">pull one</a>
           </span>
           {% endif %}
         </form>
@@ -1964,7 +2728,7 @@
           <span class="lm-topbar__sigil" data-state="idle">Img</span>
           <span class="lm-topbar__empty">
             no image models —
-            <a href="/ui/diffusion-models">pull one</a>
+            <a href="/ui/diffusion">pull one</a>
           </span>
           {% endif %}
         </form>
@@ -2006,25 +2770,77 @@
   {# Shared request-detail modal. Lives outside every polled region so the
      dashboard's 3s refresh can't wipe it while it's open. Rows on the
      dashboard / queue load their fragment into the body via htmx. #}
-  <dialog id="lm-req-detail" class="lm-req-dialog">
-    <div id="lm-req-detail-body"></div>
+  <dialog id="lm-req-detail" class="lm-dialog lm-req-dialog">
+    <div id="lm-req-detail-body" data-lm-dialog-body></div>
+  </dialog>
+
+  {# Shared detail modal. Any tile anywhere can hx-get a fragment into
+     #lm-modal-body and the chrome script below opens the dialog when it
+     lands. Deliberately outside every polled region: a 2s morph poll that
+     owned this node would close the dialog mid-edit. #}
+  <dialog id="lm-modal" class="lm-dialog lm-modal" aria-label="Details">
+    <div id="lm-modal-body" data-lm-dialog-body></div>
+  </dialog>
+
+  {# Destination + free-space confirmation, opened from any [data-preflight]
+     control — including ones inside the modal above, which is why it lives
+     here rather than on the diffusion page. Native dialogs stack, so this
+     opens over the detail modal. #}
+  <dialog id="lm-preflight-dialog" class="lm-dialog lm-preflight-dialog"
+          aria-label="Confirm destination">
+    <div id="lm-preflight-body" data-lm-dialog-body>
+      <p class="lm-preflight__note">Checking destination&hellip;</p>
+    </div>
   </dialog>
   <style>
-    dialog.lm-req-dialog {
+    dialog.lm-modal {
+      width: 920px;
+      max-width: 94vw;
+      max-height: 88vh;
+      display: none;
+    }
+    dialog.lm-modal[open] { display: block; }
+    .lm-modal__head {
+      position: sticky; top: 0; z-index: 2;
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: 14px; padding: 16px 20px;
+      background: var(--bg-0);
+      border-bottom: 1px solid var(--bg-3);
+    }
+    .lm-modal__eyebrow {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.625rem; letter-spacing: 0.16em; text-transform: uppercase;
+      color: var(--fg-2); display: block; margin-bottom: 2px;
+    }
+    .lm-modal__title {
+      font-family: 'Fraunces', 'Iowan Old Style', Charter, Georgia, serif;
+      font-size: 1.375rem; letter-spacing: -0.01em; margin: 0; color: var(--fg-0);
+    }
+    .lm-modal__body { padding: 4px 20px 22px; overflow-y: auto; }
+    /* The engine/model fragments carry the old page's card chrome; inside a
+       modal the outer border and margin are redundant with the dialog. */
+    .lm-modal__body .lm-engine-card {
+      border: 0; background: none; padding: 0; margin-bottom: 0;
+    }
+    /* The card names itself; so does the modal header above it. Keep one. */
+    .lm-modal__body .lm-engine-card > .lm-engine-card__head { display: none; }
+    dialog.lm-dialog {
       border: 1px solid var(--bg-3);
       background: var(--bg-0);
       color: var(--fg-0);
       border-radius: 10px;
       padding: 0;
-      width: 760px;
-      max-width: 92vw;
-      max-height: 84vh;
       overflow: hidden;
       box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
     }
-    dialog.lm-req-dialog::backdrop {
+    dialog.lm-dialog::backdrop {
       background: rgba(0, 0, 0, 0.55);
       backdrop-filter: blur(2px);
+    }
+    dialog.lm-req-dialog {
+      width: 760px;
+      max-width: 92vw;
+      max-height: 84vh;
     }
     .lm-reqd { display: flex; flex-direction: column; max-height: 84vh; }
     .lm-reqd__head {
@@ -2712,36 +3528,154 @@
         toast(d.message || d.value || '', d.kind || 'ok');
       });
 
-      /* Request-detail modal: a clickable request row swaps its fragment
-         into #lm-req-detail-body; open the dialog once it lands.
+      /* Shared dialogs. Anything that swaps a fragment into a
+         [data-lm-dialog-body] opens the dialog around it: request rows into
+         #lm-req-detail-body, engine/model tiles into #lm-modal-body.
 
-         The <dialog> lives in <body>, which hx-boost REPLACES on every
-         navigation — so we must never cache a reference to it (a stale,
+         Every <dialog> lives in <body>, which hx-boost REPLACES on every
+         navigation — so we must never cache a reference to one (a stale,
          detached node throws "Dialog element is not connected" on
-         showModal). Look it up by id each time, and delegate on
+         showModal). Look them up at event time and delegate on
          document(.body) so the handlers survive body swaps. */
       document.body.addEventListener('htmx:afterSwap', function (e) {
         var t = e.detail && e.detail.target;
-        if (!t || t.id !== 'lm-req-detail-body') return;
-        var dlg = document.getElementById('lm-req-detail');
+        if (!t || !t.closest) return;
+        var dlg = t.closest('dialog.lm-dialog');
         if (dlg && dlg.isConnected && typeof dlg.showModal === 'function'
             && !dlg.open) {
           try { dlg.showModal(); } catch (_) { /* not connected yet */ }
         }
       });
-      // Backdrop click (the event target is the dialog box itself) closes it.
+      // Backdrop click (the event target is the dialog box itself) closes it,
+      // as does any [data-lm-dialog-close] control inside a fragment.
       document.addEventListener('click', function (e) {
-        var dlg = document.getElementById('lm-req-detail');
-        if (dlg && e.target === dlg) dlg.close();
+        var el = e.target;
+        if (el.matches && el.matches('dialog.lm-dialog')) { el.close(); return; }
+        var closer = el.closest && el.closest('[data-lm-dialog-close]');
+        if (closer) {
+          var owner = closer.closest('dialog');
+          if (owner) { e.preventDefault(); owner.close(); }
+        }
       });
-      // On close, clear the body so an active-request poll stops and stale
-      // content doesn't linger. ('close' doesn't bubble — capture it.)
+      // On close, clear the body so any poll inside stops and stale content
+      // doesn't linger. ('close' doesn't bubble — capture it.)
       document.addEventListener('close', function (e) {
-        if (e.target && e.target.id === 'lm-req-detail') {
-          var body = document.getElementById('lm-req-detail-body');
-          if (body) body.innerHTML = '';
+        var dlg = e.target;
+        if (!dlg || !dlg.matches || !dlg.matches('dialog.lm-dialog')) return;
+        var body = dlg.querySelector('[data-lm-dialog-body]');
+        if (body) body.innerHTML = '';
+        // A page reached via ?open=… reopened this modal on load. Once the
+        // operator closes it, drop the parameter so a later reload (or a
+        // back/forward) doesn't spring it open again.
+        if (dlg.id === 'lm-modal' && /[?&]open=/.test(location.search)) {
+          try {
+            history.replaceState(null, '', location.pathname);
+          } catch (_) { /* history not available */ }
         }
       }, true);
+
+      /* Backend cards that don't apply to the chosen llama.cpp source are
+         hidden. Delegated and re-run after every swap because this picker
+         now arrives inside the detail modal, long after page load — the
+         original bound its listeners to nodes that did not exist yet. */
+      function lmSyncBackendPicker() {
+        var selected = document.querySelector('#source-picker input[type="radio"]:checked');
+        if (!selected) return;
+        var src = selected.dataset.source;
+        var firstVisible = null;
+        document.querySelectorAll('#backend-picker .lm-pick__opt').forEach(function (opt) {
+          var allowed = opt.dataset.beSources;
+          var ok = allowed === 'all' || allowed.split(',').indexOf(src) !== -1;
+          opt.style.display = ok ? '' : 'none';
+          if (ok && !firstVisible) firstVisible = opt;
+        });
+        // If the previously-checked backend is now hidden, fall back to the
+        // first visible one.
+        var checked = document.querySelector('#backend-picker input:checked');
+        if (checked && checked.closest('.lm-pick__opt').style.display === 'none'
+            && firstVisible) {
+          var input = firstVisible.querySelector('input');
+          if (input) input.checked = true;
+        }
+      }
+      document.addEventListener('change', function (e) {
+        if (e.target.closest && e.target.closest('#source-picker')) {
+          lmSyncBackendPicker();
+        }
+      });
+      document.body.addEventListener('htmx:afterSwap', function () {
+        lmSyncBackendPicker();
+      });
+
+      /* Destination + free-space preflight. Any control carrying
+         data-preflight opens the dialog instead of submitting: the real POST
+         happens from the form the dialog loads, so a multi-GB install never
+         starts before its destination is confirmed. */
+      document.addEventListener('click', function (ev) {
+        var opener = ev.target.closest && ev.target.closest('[data-preflight]');
+        if (!opener) return;
+        ev.preventDefault();
+        var dlg = document.getElementById('lm-preflight-dialog');
+        var body = document.getElementById('lm-preflight-body');
+        if (!dlg || !body) return;
+        var qs = opener.getAttribute('data-preflight');
+        // Pull the repo/subfolder out of the sibling form so the size check
+        // reflects what was actually typed, not just the placeholder.
+        var form = opener.closest('form');
+        var extra = new URLSearchParams();
+        // Options chosen in the card (repo/subfolder, torch build, flash-attn)
+        // live in the outer form. Carry the sizing-relevant ones into the
+        // preflight query, and stash the rest so the dialog's own form can
+        // replay them on submit — otherwise confirming would silently drop
+        // the operator's PyTorch-build choice.
+        var carry = {};
+        if (form) {
+          ['repo', 'subfolder', 'filename'].forEach(function (name) {
+            var field = form.elements[name];
+            if (field && field.value && field.value.trim()) {
+              extra.set(name, field.value.trim());
+            } else if (field && field.placeholder && name === 'repo') {
+              extra.set(name, field.placeholder.trim());
+            }
+          });
+          ['torch_backend', 'diffusers_version'].forEach(function (name) {
+            var field = form.elements[name];
+            if (field && field.value) carry[name] = field.value;
+          });
+          var flash = form.elements['patch_flash_attn'];
+          if (flash && flash.checked) carry['patch_flash_attn'] = 'on';
+        }
+        var url = (opener.getAttribute('data-preflight-url')
+                   || '/ui/diffusion/preflight') + '?' + qs +
+                  (extra.toString() ? '&' + extra.toString() : '');
+        body.innerHTML = '<p class="lm-preflight__note">Checking destination&hellip;</p>';
+        if (!dlg.open) { try { dlg.showModal(); } catch (_) { return; } }
+        fetch(url, { credentials: 'same-origin' })
+          .then(function (r) { return r.text(); })
+          .then(function (html) {
+            body.innerHTML = html;
+            var target = body.querySelector('form');
+            if (target) {
+              Object.keys(carry).forEach(function (k) {
+                var h = document.createElement('input');
+                h.type = 'hidden'; h.name = k; h.value = carry[k];
+                target.appendChild(h);
+              });
+            }
+            if (window.htmx) window.htmx.process(body);
+          })
+          .catch(function (e) {
+            body.innerHTML = '<p class="lm-preflight__alert" data-level="bad">' +
+              'Could not check the destination: ' + e + '</p>';
+          });
+      });
+      // The preflight's own Cancel button.
+      document.addEventListener('click', function (ev) {
+        if (!ev.target.closest || !ev.target.closest('[data-preflight-cancel]')) return;
+        ev.preventDefault();
+        var dlg = document.getElementById('lm-preflight-dialog');
+        if (dlg) dlg.close();
+      });
     })();
 
     } /* end __lmChromeInit guard */

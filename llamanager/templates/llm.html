@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% set active = 'models' %}
+{% set active = 'llm' %}
 {% block title %}LLM models - llamanager{% endblock %}
 {% block content %}
 
@@ -14,6 +14,21 @@
 #}
 
 <style>
+  /* ---- Page-load reveal ---- */
+  .lm-reveal { animation: lm-reveal 480ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+  .lm-reveal-1 { animation-delay: 30ms; }
+  .lm-reveal-2 { animation-delay: 100ms; }
+  .lm-reveal-3 { animation-delay: 180ms; }
+  .lm-reveal-4 { animation-delay: 260ms; }
+  @keyframes lm-reveal {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .lm-reveal { animation: none; }
+  }
+
   /* ====== Models-page composition ====== */
 
   /* --- Heading + stats strip --- */
@@ -453,15 +468,78 @@
 
 {# ---- Heading + at-a-glance stats ---------------------------------- #}
 {% set _total_bytes = text_models | sum(attribute='size') %}
-<header class="lm-models-head">
+<div class="lm-eyebrow">Configure</div>
+<h1 class="lm-page-title">LLM</h1>
+<p class="lm-page-lede">
+  Install and switch text-inference backends (<code>llama.cpp</code>,
+  <code>MLX</code>), and pull the models they run. Image and video live on the
+  <a href="/ui/diffusion" style="color: var(--accent);">Diffusion</a> page.
+</p>
+
+{# Reopen the modal a redirect asked for — validated server-side. #}
+{% if open_url %}
+<div hidden
+     hx-get="{{ open_url }}"
+     hx-trigger="load"
+     hx-target="#lm-modal-body"
+     hx-swap="innerHTML"></div>
+{% endif %}
+
+{# ---------- Engines ---------------------------------------------- #}
+<section class="lm-section" style="margin-top: 32px;">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Engines</span>
+    <span class="lm-section-meta">
+      {% if engine_tiles %}{{ engine_tiles|length }} installed{% else %}none installed{% endif %}
+    </span>
+  </header>
+  <div class="lm-tiles">
+    {% for t in engine_tiles %}
+    <article class="lm-tile {% if t.active %}lm-tile--default{% endif %}"
+             data-variant="{{ t.id }}">
+      <button type="button" class="lm-tile__open"
+              hx-get="/ui/llm/engines"
+              hx-target="#lm-modal-body" hx-swap="innerHTML"
+              aria-label="Open {{ t.label }}">
+        <span class="lm-tile__eyebrow">{{ t.tag }}</span>
+        <span class="lm-tile__title">{{ t.label }}</span>
+      </button>
+      <span class="lm-tile__status" data-state="{{ t.state }}">{{ t.status_text }}</span>
+      {% if t.facts %}<span class="lm-tile__facts">{{ t.facts }}</span>{% endif %}
+      <div class="lm-tile__actions">
+        {% if not t.active and t.source %}
+        <form method="post" action="/ui/setup/switch-variant">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="variant" value="{{ t.id }}">
+          <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Activate</button>
+        </form>
+        {% endif %}
+      </div>
+    </article>
+    {% endfor %}
+    {# Always last: the way to add another engine is itself a tile, so an
+       install is one click from the page rather than a second page. #}
+    <article class="lm-tile" data-variant="install">
+      <button type="button" class="lm-tile__open"
+              hx-get="/ui/llm/install"
+              hx-target="#lm-modal-body" hx-swap="innerHTML"
+              aria-label="Install an engine">
+        <span class="lm-tile__eyebrow">llama.cpp &middot; MLX</span>
+        <span class="lm-tile__title">Install an engine</span>
+      </button>
+      <span class="lm-tile__facts">
+        {% if binary_path %}Another build, or an existing binary.
+        {% else %}None found on PATH or in ~/.llamanager/bin/.{% endif %}
+      </span>
+    </article>
+  </div>
+</section>
+
+<header class="lm-models-head" style="margin-top: 44px;">
   <div>
-    <div class="lm-eyebrow" style="margin-bottom: 4px;">Operate</div>
-    <h1 class="lm-page-title lm-models-head__title">LLM models</h1>
+    <span class="lm-section-marker">Models</span>
     <p class="lm-models-head__lede" style="margin-top: 6px;">
       Pull, organise, and tune <code>llama</code> and <code>mlx</code> models.
-      Diffusion models live on the
-      <a href="/ui/setup-diffusion" style="color: var(--accent);">Diffusion engines</a>
-      page.
     </p>
   </div>
   <div class="lm-models-head__stats">
@@ -774,5 +852,44 @@
   });
 })();
 </script>
+
+{# ---------- Config + restart ---------- #}
+<section class="lm-section lm-reveal lm-reveal-4">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Configuration</span>
+  </header>
+
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 20px;">
+    Server settings — bind address, port, admin keys — live in <code>config.toml</code>. Edit it and restart llamanager for changes to take effect.
+  </p>
+
+  <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px;">
+    <code style="font-size: 0.8125rem; color: var(--fg-1); background: var(--bg-1); border: 1px solid var(--bg-3); padding: 8px 12px; word-break: break-all;">{{ config_file }}</code>
+  </div>
+
+  <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+    <form method="post" action="/ui/setup/open-config">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="lm-btn lm-btn--ghost" style="display: inline-flex; align-items: center; gap: 8px;">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;">
+          <path d="M2 13.5V4a1.5 1.5 0 0 1 1.5-1.5h3.172a1.5 1.5 0 0 1 1.06.44L9.329 4.5H12.5A1.5 1.5 0 0 1 14 6v7.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 13.5Z"/>
+        </svg>
+        {{ open_config_label }}
+      </button>
+    </form>
+
+    {# Restart SIGTERMs the daemon, so opt out of hx-boost (like the Update
+       button does): let the browser do a full page nav and render the
+       "restarting…" response natively instead of htmx trying to swap a
+       partial out of a daemon that's mid-shutdown. #}
+    <form method="post" action="/ui/setup/restart" hx-boost="false">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="lm-btn lm-btn--danger"
+              data-confirm="Restart llamanager? This will briefly disconnect all clients and stop the engine.">
+        Restart llamanager
+      </button>
+    </form>
+  </div>
+</section>
 
 {% endblock %}

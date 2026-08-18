@@ -151,9 +151,8 @@ def test_each_page_lists_only_its_own_downloads(tmp_path, monkeypatch):
     req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
     monkeypatch.setattr(api_ui.templates, "TemplateResponse",
                         lambda *a, **k: SimpleNamespace(headers={}))
-    asyncio.run(api_ui.models_view(req, _=None))
     asyncio.run(api_ui.models_list_partial(req, _=None))
-    assert captured == [("text",), ("text",)]
+    assert captured == [("text",)]
     assert real_ctx is not _spy
 
 
@@ -186,11 +185,11 @@ def test_failed_pulls_render_on_their_own_page(app):
     _insert_failed(app, "h3", "hf://MiniMaxAI/MiniMax-H3", "video")
     client = _admin_client(app)
 
-    models = client.get("/ui/models").text
+    models = client.get("/ui/llm").text
     assert "hf://org/llm-gguf" in models
     assert "MiniMax-H3" not in models
 
-    diffusion = client.get("/ui/setup-diffusion").text
+    diffusion = client.get("/ui/diffusion").text
     assert "hf://MiniMaxAI/MiniMax-H3" in diffusion
     assert "hf://org/llm-gguf" not in diffusion
 

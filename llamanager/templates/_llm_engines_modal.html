@@ -1,0 +1,28 @@
+{# The installed engine variants, with their update / version / remove
+   controls. All of them at once, not just the tile that was clicked: the
+   version and update-check endpoints re-render the whole
+   #installed-variants list and have to land in it. #}
+<div id="lm-modal-content">
+  <header class="lm-modal__head">
+    <div style="min-width: 0;">
+      <span class="lm-modal__eyebrow">Text inference</span>
+      <h2 class="lm-modal__title">Installed engines</h2>
+    </div>
+    <div style="display: flex; gap: 8px; align-items: center;">
+      <button type="button"
+              class="lm-btn lm-btn--ghost lm-btn--sm lm-update-btn"
+              hx-get="/ui/setup/check-updates"
+              hx-target="#installed-variants"
+              hx-swap="outerHTML"
+              hx-indicator="this">
+        <span class="lm-update-btn__idle">Check all for updates</span>
+        <span class="lm-update-btn__busy">Checking&hellip;</span>
+      </button>
+      <button type="button" class="lm-btn lm-btn--ghost lm-btn--xs"
+              data-lm-dialog-close>Close</button>
+    </div>
+  </header>
+  <div class="lm-modal__body">
+    {% include "_installed_variants.html" %}
+  </div>
+</div>

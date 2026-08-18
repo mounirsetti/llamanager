@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 
 # ---------- engine family ----------
 
@@ -728,54 +730,60 @@ def _ui_admin_client(app):
     return client
 
 
-def test_asr_engines_and_models_are_separate_pages(app):
-    """ASR engines (setup) and ASR models live on separate pages, mirroring the
-    LLM engines (/ui/setup) vs LLM models (/ui/models) split."""
+def test_asr_page_carries_engines_and_models_together(app):
+    """One ASR page: engine tiles at the top, the model list below.
+
+    /ui/setup-asr and /ui/asr-models used to split these, so setting an engine
+    up and using it were two pages that each told you to visit the other."""
     with _ui_admin_client(app) as client:
-        eng = client.get("/ui/setup-asr")
-        assert eng.status_code == 200
-        # Engines page: every engine's setup/build card + shared GPU settings.
-        for n in ("engine <code>asr</code>", "engine <code>whispercpp</code>",
-                  "engine <code>sherpa</code>", "Build (Vulkan)",
-                  "whisper-cli binary", "VRAM budget"):
-            assert n in eng.text, f"engines page missing {n!r}"
-        # …but not the models folder (that's a models-page concern).
-        assert "ASR models folder" not in eng.text
+        page = client.get("/ui/asr")
+        assert page.status_code == 200
+        # Engines, as tiles.
+        for eng in ("asr", "whispercpp", "sherpa"):
+            assert f'data-engine="{eng}"' in page.text
+        # Shared GPU settings and the models folder, both on this page now.
+        assert "VRAM budget" in page.text
+        assert "ASR models folder" in page.text
 
-        mod = client.get("/ui/asr-models")
-        assert mod.status_code == 200
-        assert "ASR models folder" in mod.text
-        assert 'href="/ui/setup-asr"' in mod.text        # cross-link
-        # …but no engine install/build/setup controls.
-        for n in ("Build (Vulkan)", "Install dependencies", "Save GPU settings",
-                  "whisper-cli binary"):
-            assert n not in mod.text, f"models page should not contain {n!r}"
+        # The per-engine setup controls live in the modal, one engine at a
+        # time, rather than three cards deep on a second page.
+        card = client.get("/ui/asr/engine/whispercpp")
+        assert card.status_code == 200
+        for n in ("Build (Vulkan)", "whisper-cli binary"):
+            assert n in card.text, f"engine modal missing {n!r}"
+        assert "<html" not in card.text.lower()
 
 
-def test_asr_engine_config_posts_redirect_to_engines_page(app):
+@pytest.mark.parametrize("old", ["/ui/setup-asr", "/ui/asr-models"])
+def test_the_old_asr_pages_redirect_permanently(app, old):
+    with _ui_admin_client(app) as client:
+        r = client.get(old, follow_redirects=False)
+        assert r.status_code == 301
+        assert r.headers["location"] == "/ui/asr"
+
+
+def test_asr_engine_config_posts_reopen_that_engine(app):
     import re
     with _ui_admin_client(app) as client:
         tok = re.search(r'name="csrf_token" value="([^"]+)"',
-                        client.get("/ui/setup-asr").text).group(1)
-        # Engine setup + install redirect to the engines page…
+                        client.get("/ui/asr").text).group(1)
+        # Saving an engine's path returns to that engine's modal…
         r = client.post("/ui/setup/audio/asr",
                         data={"engine": "sherpa", "asr_python": "/x/py",
                               "csrf_token": tok}, follow_redirects=False)
-        assert r.headers["location"] == "/ui/setup-asr"
-        # …but the models folder stays on the models page.
-        tok2 = re.search(r'name="csrf_token" value="([^"]+)"',
-                         client.get("/ui/asr-models").text).group(1)
+        assert r.headers["location"] == "/ui/asr?open=engine:sherpa"
+        # …while a page-level setting just returns to the page.
         r = client.post("/ui/setup/audio/asr-models-dir",
-                        data={"asr_models_dir": "", "csrf_token": tok2},
+                        data={"asr_models_dir": "", "csrf_token": tok},
                         follow_redirects=False)
-        assert r.headers["location"] == "/ui/asr-models"
+        assert r.headers["location"] == "/ui/asr"
 
 
-def test_asr_engines_page_polls_while_install_in_flight(app):
+def test_asr_page_polls_while_install_in_flight(app):
     import time
     with _ui_admin_client(app) as client:
         # Idle → no auto-refresh.
-        idle = client.get("/ui/setup-asr").text
+        idle = client.get("/ui/asr").text
         assert 'hx-trigger="every 2s"' not in idle
 
         # A running build row makes the page live-poll the fragment.
@@ -784,15 +792,21 @@ def test_asr_engines_page_polls_while_install_in_flight(app):
             "progress_pct,started_at) VALUES "
             "('bld_t','whispercpp','cmake','running','Configuring',25,?)",
             (time.time(),))
-        busy = client.get("/ui/setup-asr").text
-        assert 'hx-get="/ui/setup-asr/_partial"' in busy
+        busy = client.get("/ui/asr").text
+        # The engine tiles poll separately from the model list: they are
+        # siblings, because a self-replacing morph target nested inside
+        # another one breaks the inner swap.
+        assert 'hx-get="/ui/asr/_engines"' in busy
         assert 'hx-trigger="every 2s"' in busy
         assert 'hx-disinherit="hx-swap"' in busy   # morph-crash guard
+        # The progress has to be legible from the tile, or the poll refreshes
+        # a region that never shows what it is waiting for.
         assert "Configuring" in busy and "25%" in busy
 
         # The polled fragment is a bare fragment (no full-page <html>).
-        frag = client.get("/ui/setup-asr/_partial").text
+        frag = client.get("/ui/asr/_engines").text
         assert "Configuring" in frag and "<html" not in frag.lower()
+        assert "<html" not in client.get("/ui/asr/_body").text.lower()
 
 
 def test_asr_catalog_integrity():
@@ -927,9 +941,10 @@ def test_vulkan_build_preflight_helpers():
     assert isinstance(_spirv_headers_present(), bool)
 
 
-def test_asr_engines_page_shows_failed_build_log(app):
+def test_asr_engine_modal_shows_failed_build_log(app):
     """A failed native build surfaces its log tail in the UI so the real cmake
-    error is visible without digging in the DB."""
+    error is visible without digging in the DB. It lives in the engine's modal
+    now; the page tile says only that the build failed."""
     import time
     with _ui_admin_client(app) as client:
         log = "\n".join("line %d" % i for i in range(60)) + \
@@ -940,7 +955,8 @@ def test_asr_engines_page_shows_failed_build_log(app):
             "('f_t','whispercpp','cmake','failed','Configuring',"
             "'cmake configure failed (exit 1)',25,?,?,?)",
             (time.time(), time.time(), log))
-        page = client.get("/ui/setup-asr").text
+        assert "Build failed" in client.get("/ui/asr").text
+        page = client.get("/ui/asr/engine/whispercpp").text
         assert "Last build failed: cmake configure failed (exit 1)" in page
         assert "Show build log" in page
         assert "Could not find SPIRV-Headers" in page   # tail rendered

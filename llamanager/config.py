@@ -654,6 +654,12 @@ class Profile:
     # HiDream. Both can be overridden per-request.
     image_editing_scheduler: str = ""
     image_strength: float | None = None
+    # Krea 2 edit knobs (ComfyUI-Krea2Edit). ``image_ref_boost`` multiplies
+    # target->reference attention — the fidelity dial; ``image_grounding_px``
+    # caps the longest side of the reference as the text encoder sees it while
+    # reading the instruction. Ignored by every other engine.
+    image_ref_boost: float | None = None
+    image_grounding_px: int | None = None
     # Video-family (Wan) knobs. ``video_num_frames`` is the clip length in
     # frames (121 ≈ 5s at 24fps); ``video_fps`` is the exported mp4 frame
     # rate. Ignored by text/image/audio engines. Resolution/steps/guidance/
@@ -1154,6 +1160,8 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
         image_lora_scale=_coerce_float(body.get("image_lora_scale")),
         image_editing_scheduler=str(body.get("image_editing_scheduler", "") or ""),
         image_strength=_coerce_float(body.get("image_strength")),
+        image_ref_boost=_coerce_float(body.get("image_ref_boost")),
+        image_grounding_px=_coerce_int(body.get("image_grounding_px")),
         video_num_frames=_coerce_int(body.get("video_num_frames")),
         video_fps=_coerce_int(body.get("video_fps")),
         audio_language=str(body.get("audio_language", "") or ""),
@@ -1596,6 +1604,10 @@ def _profile_to_tomlkit(prof: Profile):
         tbl.add("image_editing_scheduler", prof.image_editing_scheduler)
     if prof.image_strength is not None:
         tbl.add("image_strength", prof.image_strength)
+    if prof.image_ref_boost is not None:
+        tbl.add("image_ref_boost", prof.image_ref_boost)
+    if prof.image_grounding_px is not None:
+        tbl.add("image_grounding_px", prof.image_grounding_px)
     # Video-family (Wan) knobs. Without these a saved video profile silently
     # loses its clip length and frame rate and falls back to the adapter's
     # defaults — which on a consumer card is a 121-frame request the VRAM

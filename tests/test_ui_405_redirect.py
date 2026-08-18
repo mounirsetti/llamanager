@@ -18,6 +18,12 @@ from fastapi.testclient import TestClient
     ("/ui/models/set-default", "/ui/models"),
     ("/ui/launch/server/start", "/ui/launch"),
     ("/ui/settings/mem-guard", "/ui/settings"),
+    # These POST paths sit under a section that no longer owns them: image and
+    # audio engines are configured from their own pages, not /ui/setup.
+    ("/ui/setup/image/z-image", "/ui/diffusion"),
+    ("/ui/setup/audio/asr", "/ui/asr"),
+    ("/ui/diffusion-models/activate", "/ui/diffusion"),
+    ("/ui/asr-models/pull", "/ui/asr"),
 ])
 def test_get_on_post_only_ui_action_redirects(app, path, section):
     client = TestClient(app)

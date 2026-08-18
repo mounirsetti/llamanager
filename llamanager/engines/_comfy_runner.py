@@ -246,7 +246,7 @@ class ComfyServer:
         name = info["name"]
         if info.get("subfolder"):
             name = f"{info['subfolder']}/{name}"
-        log(f"uploaded init image as {name}")
+        log(f"uploaded {path.name} as {name}")
         return name
 
 
@@ -408,6 +408,66 @@ def _spawn_reaper(state: Path, beat: Path, pid: int,
     log(f"warm server will be reaped after {idle_seconds:.0f}s idle")
 
 
+def _safetensors_key_count(path: Path) -> int:
+    """Number of tensors in a .safetensors file, from its header alone.
+
+    The header is a length-prefixed JSON dict at the start of the file, so
+    this costs one small read rather than loading 1.8 GB of weights.
+    """
+    with path.open("rb") as fh:
+        raw = fh.read(8)
+        if len(raw) != 8:
+            raise ValueError(f"{path} is too short to be a safetensors file")
+        header = json.loads(fh.read(int.from_bytes(raw, "little")))
+    return len([k for k in header if k != "__metadata__"])
+
+
+# ComfyUI's two ways of saying "this LoRA key matched nothing in the model".
+# Neither is an error there: it warns and samples on, which is why a LoRA for
+# the wrong architecture produces a normal-looking image and no complaint.
+_LORA_MISS_MARKERS = ("lora key not loaded:", "NOT LOADED")
+
+
+def check_lora_applied(log_file: Path, from_pos: int, lora: Path) -> bool:
+    """Report how much of ``lora`` ComfyUI actually bound. False = none of it.
+
+    Reads only the part of the server log this request appended. A warm
+    server keeps its log inside the process that started it, so there may be
+    nothing to read — that is reported as unchecked, never as success.
+    """
+    try:
+        with log_file.open("r", encoding="utf-8", errors="replace") as fh:
+            fh.seek(from_pos)
+            fresh = fh.read()
+    except OSError:
+        fresh = ""
+    if not fresh.strip():
+        log(f"lora {lora.name}: could not verify (no server log for this "
+            "request — a reused warm server keeps its own). Sampling "
+            "continued.")
+        return True
+    missed = sum(1 for line in fresh.splitlines()
+                 if any(m in line for m in _LORA_MISS_MARKERS))
+    try:
+        total = _safetensors_key_count(lora)
+    except (OSError, ValueError) as e:
+        log(f"lora {lora.name}: {missed} unmatched keys; could not read its "
+            f"header to say how many that is ({e})")
+        return True
+    if missed == 0:
+        log(f"lora {lora.name}: applied, {total} keys, none unmatched")
+        return True
+    if missed >= total:
+        log(f"lora {lora.name}: NONE of its {total} keys matched this model. "
+            "The image was generated as if no LoRA were selected — this is a "
+            "LoRA for a different architecture, or in a key layout ComfyUI "
+            "cannot map onto Krea 2.")
+        return False
+    log(f"lora {lora.name}: {missed} of {total} keys unmatched — it applied "
+        "only partially, so the effect will be weaker than intended")
+    return True
+
+
 def _load_backend():
     """Import ``comfy_backend`` by file path, not as ``llamanager.engines.*``.
 
@@ -439,11 +499,23 @@ def main() -> int:
     p.add_argument("--set-str", action="append", default=[], dest="set_strs",
                    help="workflow token kept verbatim as a string; use this "
                         "for prompts and any caller-supplied text")
-    p.add_argument("--init-image", type=Path, default=None,
-                   help="uploaded and bound to the INIT_IMAGE token")
+    p.add_argument("--image", action="append", default=[], dest="images",
+                   metavar="TOKEN=PATH",
+                   help="upload an image and bind the server-side name to "
+                        "TOKEN, e.g. --image REF_IMAGE=/tmp/a.png. Repeatable: "
+                        "an edit graph takes one image per reference slot.")
+    p.add_argument("--lora-file", type=Path, default=None,
+                   help="the LoRA the graph loads. Given one, the runner "
+                        "checks afterwards how many of its keys ComfyUI "
+                        "actually bound, and fails the request if none did.")
     p.add_argument("--bypass", action="append", default=[],
                    metavar="NODE_ID:INPUT",
                    help="drop a node, rewiring consumers to that input")
+    p.add_argument("--drop-node", action="append", default=[],
+                   dest="drop_nodes", metavar="NODE_ID",
+                   help="delete a node and every link into it. For unused "
+                        "OPTIONAL inputs (an unfilled reference slot); a "
+                        "required one then fails ComfyUI validation by name.")
     p.add_argument("--timeout", type=float, default=3600.0)
     p.add_argument("--comfy-arg", action="append", default=[],
                    help="extra flag passed through to ComfyUI's main.py")
@@ -526,21 +598,40 @@ def main() -> int:
             cb.touch_heartbeat(args.model_path)
         t_ready = time.time()
 
-        if args.init_image is not None:
-            if not args.init_image.is_file():
-                log(f"init image not found: {args.init_image}")
+        for spec in args.images:
+            token, sep, raw = spec.partition("=")
+            if not sep or not token.strip():
+                log(f"malformed --image (want TOKEN=PATH): {spec!r}")
                 return 2
-            values["INIT_IMAGE"] = server.upload_image(args.init_image)
+            path = Path(raw)
+            if not path.is_file():
+                log(f"image not found: {path}")
+                return 2
+            values[token.strip()] = server.upload_image(path)
 
         graph = cb.render_workflow(args.workflow.read_text(), values)
         for spec in args.bypass:
             node_id, _, input_name = spec.partition(":")
             cb.bypass_node(graph, node_id, input_name or "model")
+        for node_id in args.drop_nodes:
+            cb.drop_node(graph, node_id)
 
         t_submit = time.time()
+        try:
+            log_pos = server.log_file.stat().st_size
+        except OSError:
+            log_pos = 0
         hist = run_prompt(server, graph, uuid.uuid4().hex, args.timeout)
         t_done = time.time()
         collect_output(hist, out_dir, args.output)
+
+        if args.lora_file is not None:
+            # After collect_output on purpose: the image is already saved, so
+            # a failure here reports a real result the operator can look at
+            # rather than throwing it away.
+            if not check_lora_applied(server.log_file, log_pos,
+                                      args.lora_file):
+                return 3
 
         # A phase breakdown, because "it took 766 seconds" does not say
         # whether the fix is a faster sampler or a warm server. ComfyUI

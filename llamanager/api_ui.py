@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 from html import escape as html_escape
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -354,7 +354,7 @@ async def require_csrf(request: Request,
             raise HTTPException(status_code=200, headers={"HX-Refresh": "true"})
         raise HTTPException(
             status_code=303,
-            headers={"Location": request.headers.get("referer") or "/ui/setup"},
+            headers={"Location": request.headers.get("referer") or "/ui/llm"},
         )
 
 
@@ -1241,10 +1241,10 @@ def _onboarding_status(request: Request) -> dict[str, Any]:
 
     steps = [
         {"key": "binary", "label": "Install the llama-server binary",
-         "done": binary_ok, "href": "/ui/setup",
-         "hint": "Open Setup to install a build for your GPU."},
+         "done": binary_ok, "href": "/ui/llm?open=install",
+         "hint": "Open LLM to install a build for your GPU."},
         {"key": "model", "label": "Download a model",
-         "done": has_models, "href": "/ui/models",
+         "done": has_models, "href": "/ui/llm",
          "hint": "Pull a GGUF from Hugging Face."},
         {"key": "origin", "label": "Create an API key (origin)",
          "done": has_origin, "href": "/ui/origins",
@@ -1255,7 +1255,7 @@ def _onboarding_status(request: Request) -> dict[str, Any]:
     if autostart is not None:
         steps.append({
             "key": "autostart", "label": "Run at startup (+ tray icon)",
-            "done": bool(autostart), "href": "/ui/setup",
+            "done": bool(autostart), "href": "/ui/settings",
             "hint": "Run `llamanager autostart --mode tray+service`.",
             "optional": True})
 
@@ -1798,15 +1798,6 @@ def _models_ctx(request: Request,
         # profile editor's ctx advice compares KV against real GPU memory.
         gpu_vram_gb=getattr(cfg, "vram_total_gb", None),
         mmproj_options=mmproj_options,
-    )
-
-
-@router.get("/models", response_class=HTMLResponse)
-async def models_view(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    # The LLM page owns text downloads only — diffusion/video pulls are
-    # listed on the diffusion pages instead.
-    return templates.TemplateResponse(
-        request, "models.html", _models_ctx(request, ("text",)),
     )
 
 
@@ -2472,7 +2463,7 @@ async def origins_rotate_ui(request: Request, origin_id: int,
 @router.get("/profiles")
 async def profiles_redirect(request: Request,
                             _: Origin = Depends(require_admin_ui)) -> Response:
-    return RedirectResponse("/ui/models", status_code=301)
+    return RedirectResponse("/ui/llm", status_code=301)
 
 
 # ---------- about ----------
@@ -3648,11 +3639,6 @@ async def logs_partial(request: Request, source: str = "activity",
 
 # ---------- setup ----------
 
-@router.get("/setup", response_class=HTMLResponse)
-async def setup_get(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    return templates.TemplateResponse(request, "setup.html", _setup_ctx(request))
-
-
 def _krea_lora_cache(request: Request) -> dict[str, Any]:
     return getattr(request.app.state, "krea_lora_collection", None) or {
         "items": [],
@@ -3732,6 +3718,51 @@ async def _fetch_krea_lora_collection() -> dict[str, Any]:
     }
 
 
+# The Comfy Krea model's own folder. Every Krea LoRA lands in its loras/
+# subdirectory, because that is the only place ComfyUI is pointed at for this
+# model (see comfy_backend.extra_model_paths_yaml).
+KREA_COMFY_MODEL_ID = "Krea-2-Turbo-Comfy"
+
+
+def _krea_loras_installed(cfg) -> list[dict[str, Any]]:
+    """LoRA files on disk for the Comfy Krea model, annotated with their role.
+
+    The annotation is the engine's own table, not a second copy of it: a file
+    krea_comfy has a recipe for needs reference images and runs a different
+    graph, and that is the single most confusing thing about this folder if
+    the page does not say it.
+    """
+    from .engines import krea_comfy
+
+    d = cfg.models_dir / KREA_COMFY_MODEL_ID / "loras"
+    try:
+        files = sorted((f for f in d.iterdir()
+                        if f.is_file() and f.suffix == ".safetensors"),
+                       key=lambda f: f.name.lower())
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    for f in files:
+        recipe = krea_comfy.LORA_RECIPES.get(f.name)
+        if recipe is None:
+            role, detail = "text-to-image", "no reference image"
+        else:
+            pack = "identity edit" if recipe.graph.endswith("_a") else "reference"
+            span = (f"{recipe.refs_min}"
+                    if recipe.refs_min == recipe.refs_max
+                    else f"{recipe.refs_min}-{recipe.refs_max}")
+            role = "editing"
+            detail = f"{pack}, needs {span} reference image" + (
+                "s" if recipe.refs_max > 1 else "")
+        out.append({
+            "name": f.name,
+            "size_gb": f.stat().st_size / (1024 ** 3),
+            "role": role,
+            "detail": detail,
+        })
+    return out
+
+
 def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
     """Context for the Diffusion engines page (full or partial reload).
 
@@ -3781,14 +3812,10 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
             present[rel] = (cfg.models_dir / rel).is_file()
     ctx["component_present"] = present
     ctx["krea_lora_collection"] = _krea_lora_cache(request)
-    # Basenames already in the Comfy Krea model's loras/ folder, so the list
-    # can say "on disk" instead of offering the same file again.
-    krea_loras_dir = cfg.models_dir / "Krea-2-Turbo-Comfy" / "loras"
-    try:
-        ctx["krea_lora_on_disk"] = {f.name for f in krea_loras_dir.iterdir()
-                                    if f.is_file()}
-    except OSError:
-        ctx["krea_lora_on_disk"] = set()
+    ctx["krea_loras"] = _krea_loras_installed(cfg)
+    # Basenames already on disk, so the collection list can say "on disk"
+    # instead of offering the same file again.
+    ctx["krea_lora_on_disk"] = {l["name"] for l in ctx["krea_loras"]}
     ctx["coex"] = {
         "unload_text_on_arrival": cfg.unload_text_on_arrival,
         "restart_text_after_image": cfg.restart_text_after_image,
@@ -3893,14 +3920,96 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
     return ctx
 
 
-@router.get("/setup-diffusion", response_class=HTMLResponse)
-async def setup_diffusion_get(request: Request,
-                              _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    """Diffusion-engines page: image engine paths, coexistence policy,
-    and the installed diffusion model list."""
+@router.get("/diffusion", response_class=HTMLResponse)
+async def diffusion_page(request: Request, open: str = "",
+                         _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """Engines and models for the image/video families, on one page.
+
+    Replaces /ui/setup-diffusion and /ui/diffusion-models, which described
+    the same seven engines and ten models twice — the first as seven
+    fully-expanded setup cards ten thousand pixels tall, the second as a
+    catalog that could only tell you to go back to the first one.
+    """
     return templates.TemplateResponse(
-        request, "setup_diffusion.html", _setup_diffusion_ctx(request),
+        request, "diffusion.html", _diffusion_page_ctx(request, open),
     )
+
+
+@router.get("/diffusion/_body", response_class=HTMLResponse)
+async def diffusion_body(request: Request,
+                         _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """The page's live region, polled while an install or download runs."""
+    return templates.TemplateResponse(
+        request, "_diffusion_body.html", _diffusion_page_ctx(request),
+    )
+
+
+@router.get("/diffusion/engine/{engine}", response_class=HTMLResponse)
+async def diffusion_engine_modal(request: Request, engine: str,
+                                 _: Origin = Depends(require_admin_ui)
+                                 ) -> HTMLResponse:
+    """One engine's setup card, for the detail modal."""
+    if engine not in _DIFFUSION_ENGINE_TILES:
+        raise HTTPException(status_code=404, detail=f"unknown engine {engine!r}")
+    ctx = _diffusion_page_ctx(request)
+    ctx["engine"] = engine
+    ctx["engine_label"] = _DIFFUSION_ENGINE_LABELS.get(engine, engine)
+    ctx["engine_tag"] = _DIFFUSION_ENGINE_TAGS.get(engine, "")
+    tile = next((t for t in ctx["engine_tiles"] if t["id"] == engine), None)
+    # Poll only while THIS engine is working. A busy neighbour is no reason
+    # to re-render an idle card every two seconds.
+    ctx["engine_busy"] = bool(tile and tile["state"] == "busy") \
+        or ctx["any_download_busy"]
+    return templates.TemplateResponse(
+        request, "_diffusion_engine_modal.html", ctx,
+    )
+
+
+@router.get("/diffusion/model", response_class=HTMLResponse)
+async def diffusion_model_modal(request: Request, id: str = "",
+                                _: Origin = Depends(require_admin_ui)
+                                ) -> HTMLResponse:
+    """One model: description, how to get it, and its profiles.
+
+    ``id`` is a query parameter rather than a path segment because four
+    catalog ids contain a slash (``ideogram-ai/ideogram-4-fp8`` and friends).
+    """
+    ctx = _diffusion_page_ctx(request)
+    model_id = (id or "").strip()
+    row = eng = None
+    for e in ctx["engine_rows"]:
+        for r in e["rows"]:
+            if r["model_id"] == model_id:
+                row, eng = r, e
+                break
+        if row:
+            break
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"unknown model {model_id!r}")
+    cat = row.get("catalog")
+    ctx["row"] = row
+    ctx["eng"] = eng
+    ctx["components"] = bool(cat and getattr(cat, "components", ()))
+    row["components"] = ctx["components"]
+    ctx["model_busy"] = model_id in ctx["downloads_by_model"]
+    # The LoRA manager is Krea's alone: it is the only model whose loras/
+    # folder llamanager curates.
+    ctx["lora_entry"] = cat if model_id == KREA_COMFY_MODEL_ID else None
+    return templates.TemplateResponse(
+        request, "_diffusion_model_modal.html", ctx,
+    )
+
+
+@router.get("/setup-diffusion", response_class=HTMLResponse)
+async def setup_diffusion_get(_: Origin = Depends(require_admin_ui)) -> Response:
+    """Retired: engines and models are one page now."""
+    return RedirectResponse("/ui/diffusion", status_code=301)
+
+
+@router.get("/diffusion-models", response_class=HTMLResponse)
+async def diffusion_models_get(_: Origin = Depends(require_admin_ui)) -> Response:
+    """Retired: engines and models are one page now."""
+    return RedirectResponse("/ui/diffusion", status_code=301)
 
 
 @router.post("/setup/binary-path", response_class=HTMLResponse)
@@ -3911,7 +4020,7 @@ async def setup_set_binary(request: Request,
     binary_path = binary_path.strip()
     cfg.llama_server_binary = binary_path
     patch_config_binary(cfg.config_path, binary_path)
-    return RedirectResponse("/ui/setup", status_code=303)
+    return _llm_redirect("install")
 
 
 @router.post("/setup/image/hidream", response_class=HTMLResponse)
@@ -3927,7 +4036,7 @@ async def setup_hidream(request: Request,
         hidream_python=cfg.hidream_python,
         hidream_repo=cfg.hidream_repo,
     )
-    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+    return _diffusion_redirect("engine:hidream")
 
 
 @router.post("/setup/image/flux2", response_class=HTMLResponse)
@@ -3951,7 +4060,7 @@ async def setup_flux2(request: Request,
         flux2_device_index=idx,
         clear_flux2_device_index=(idx is None),
     )
-    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+    return _diffusion_redirect("engine:flux2")
 
 
 @router.post("/setup/image/z-image", response_class=HTMLResponse)
@@ -3961,7 +4070,7 @@ async def setup_z_image(request: Request,
     cfg = request.app.state.cfg
     cfg.z_image_python = z_image_python.strip()
     update_image_config(cfg.config_path, z_image_python=cfg.z_image_python)
-    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+    return _diffusion_redirect("engine:z_image")
 
 
 @router.post("/setup/image/ideogram4", response_class=HTMLResponse)
@@ -3971,7 +4080,7 @@ async def setup_ideogram4(request: Request,
     cfg = request.app.state.cfg
     cfg.ideogram4_python = ideogram4_python.strip()
     update_image_config(cfg.config_path, ideogram4_python=cfg.ideogram4_python)
-    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+    return _diffusion_redirect("engine:ideogram4")
 
 
 @router.post("/setup/image/wan", response_class=HTMLResponse)
@@ -3981,7 +4090,7 @@ async def setup_wan(request: Request,
     cfg = request.app.state.cfg
     cfg.wan_python = wan_python.strip()
     update_image_config(cfg.config_path, wan_python=cfg.wan_python)
-    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+    return _diffusion_redirect("engine:wan")
 
 
 @router.post("/setup/image/minimax_h3", response_class=HTMLResponse)
@@ -3992,7 +4101,7 @@ async def setup_minimax_h3(request: Request,
     cfg.minimax_h3_python = minimax_h3_python.strip()
     update_image_config(cfg.config_path,
                         minimax_h3_python=cfg.minimax_h3_python)
-    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+    return _diffusion_redirect("engine:minimax_h3")
 
 
 @router.post("/setup/coexistence", response_class=HTMLResponse)
@@ -4011,7 +4120,7 @@ async def setup_coexistence(request: Request,
         restart_text_after_image=cfg.restart_text_after_image,
         allow_concurrent=cfg.allow_concurrent,
     )
-    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+    return _diffusion_redirect()
 
 
 # ---- per-engine install + download ----
@@ -4068,7 +4177,7 @@ async def install_engine_deps(request: Request, engine: str,
         installer.start(engine, options=options)
     except (ValueError, RuntimeError) as e:
         return _error_html(f"install failed: {e}", status_code=400)
-    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+    return _diffusion_redirect(f"engine:{engine}")
 
 
 @router.post("/setup-diffusion/engine/{engine}/install-deps/{install_id}/cancel",
@@ -4078,7 +4187,7 @@ async def cancel_engine_install(request: Request, engine: str,
                                 _: None = Depends(require_csrf)) -> Response:
     installer = request.app.state.engine_installer
     installer.cancel(install_id)
-    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+    return _diffusion_redirect(f"engine:{engine}")
 
 
 @router.post("/setup-diffusion/engine/{engine}/download-model",
@@ -4089,6 +4198,7 @@ async def download_engine_model(request: Request, engine: str,
                                 filename: str = Form(""),
                                 models_dir: str = Form(""),
                                 target_dir: str = Form(""),
+                                open: str = Form(""),
                                 _: None = Depends(require_csrf)) -> Response:
     """Start an HF whole-repo, subfolder, or single-file diffusion download.
 
@@ -4146,7 +4256,14 @@ async def download_engine_model(request: Request, engine: str,
                            bytes_total=size, target_dir=dest, family=fam)
     except Exception as e:
         return _error_html(f"pull failed: {e}", status_code=400)
-    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+    # Reopen whatever this pull was started from. The preflight dialog echoes
+    # the opener's `open` key through as a hidden field; a component pull
+    # otherwise identifies its model by the directory it lands in.
+    open_key = (open or "").strip()
+    if not open_key:
+        root = (target_dir or "").strip().strip("/").split("/")[0]
+        open_key = f"model:{root}" if root else f"engine:{engine}"
+    return _diffusion_redirect(open_key)
 
 
 @router.get("/setup-diffusion/preflight", response_class=HTMLResponse)
@@ -4158,6 +4275,7 @@ async def setup_diffusion_preflight(request: Request,
                                     filename: str = "",
                                     dest: str = "",
                                     target_dir: str = "",
+                                    open: str = "",
                                     _: Origin = Depends(require_admin_ui)
                                     ) -> HTMLResponse:
     """Destination + free-space check, rendered into the confirm dialog.
@@ -4253,24 +4371,16 @@ async def setup_diffusion_preflight(request: Request,
                             "filename": fn, "target_dir": sub_dir},
         }
 
+    # Which modal to reopen once the confirmed POST completes. Echoed only
+    # after the download handler re-validates it, never straight into markup.
+    if open.strip():
+        ctx["passthrough"]["open"] = open.strip()
     ctx["preflight"] = disk_preflight(Path(target), required)
     return templates.TemplateResponse(request, "_preflight.html",
                                       _ctx(request, **ctx))
 
 
-@router.get("/setup-diffusion/_partial", response_class=HTMLResponse)
-async def setup_diffusion_partial(request: Request,
-                                  _: Origin = Depends(require_admin_ui)
-                                  ) -> HTMLResponse:
-    """HTMX-polled fragment so the install/download status updates live
-    on the Diffusion engines page without a full reload."""
-    return templates.TemplateResponse(
-        request, "_setup_diffusion_partial.html",
-        _setup_diffusion_ctx(request),
-    )
-
-
-@router.get("/setup-diffusion/krea-loras", response_class=HTMLResponse)
+@router.get("/diffusion/krea-loras", response_class=HTMLResponse)
 async def setup_diffusion_krea_loras(request: Request,
                                      _: Origin = Depends(require_admin_ui)
                                      ) -> HTMLResponse:
@@ -4283,15 +4393,41 @@ async def setup_diffusion_krea_loras(request: Request,
             "error": str(e),
             "last_checked": time.time(),
         }
-    return templates.TemplateResponse(
-        request, "_setup_diffusion_partial.html",
-        _setup_diffusion_ctx(request),
-    )
+    return await diffusion_model_modal(request, id=KREA_COMFY_MODEL_ID)
 
 
 
 
-@router.get("/setup-diffusion/versions", response_class=HTMLResponse)
+@router.post("/setup-diffusion/krea-lora/delete", response_class=HTMLResponse)
+async def setup_diffusion_delete_krea_lora(
+        request: Request,
+        filename: str = Form(...),
+        _: None = Depends(require_csrf),
+        __: Origin = Depends(require_admin_ui)) -> Response:
+    """Delete one LoRA file from the Comfy Krea model's loras/ folder.
+
+    Downloading a LoRA is one click; until now removing one meant a shell.
+    The name is validated as a single path component, so this can only ever
+    unlink inside that one folder.
+    """
+    cfg = request.app.state.cfg
+    name = (filename or "").strip()
+    _safe_path_components(name)
+    if not name.endswith(".safetensors"):
+        return _error_html("only .safetensors LoRA files can be deleted here",
+                           status_code=400)
+    path = cfg.models_dir / KREA_COMFY_MODEL_ID / "loras" / name
+    if not path.is_file():
+        return _error_html(f"no such LoRA: {name}", status_code=404)
+    try:
+        path.unlink()
+    except OSError as e:
+        return _error_html(f"could not delete {name}: {e}", status_code=400)
+    log.info("deleted krea LoRA %s", path)
+    return _diffusion_redirect(f"model:{KREA_COMFY_MODEL_ID}")
+
+
+@router.get("/diffusion/versions", response_class=HTMLResponse)
 async def setup_diffusion_versions(request: Request,
                                    engine: str = "",
                                    _: Origin = Depends(require_admin_ui)
@@ -4318,10 +4454,9 @@ async def setup_diffusion_versions(request: Request,
             **listing,
         }
         request.app.state.diffusers_versions = cache
-    return templates.TemplateResponse(
-        request, "_setup_diffusion_partial.html",
-        _setup_diffusion_ctx(request),
-    )
+    if engine not in _DIFFUSION_ENGINE_TILES:
+        raise HTTPException(status_code=404, detail=f"unknown engine {engine!r}")
+    return await diffusion_engine_modal(request, engine)
 
 
 def _resolve_variant(source: str, backend: str) -> tuple[str, str]:
@@ -4468,6 +4603,118 @@ def _setup_ctx(request: Request,
     )
 
 
+def _llm_engine_tiles(ctx: dict[str, Any]) -> list[dict[str, Any]]:
+    """One vignette per installed engine variant, plus one to install another.
+
+    The old engines page led with a hero for the active variant and buried
+    the rest below an install picker; which engines exist and which one is
+    live is exactly the thing a tile grid says at a glance.
+    """
+    tiles: list[dict[str, Any]] = []
+    for src in ctx.get("sources") or []:
+        for v in src["backends"]:
+            if not v.get("installed"):
+                continue
+            install = v.get("install") or {}
+            busy = install.get("status") == "running"
+            tiles.append({
+                "id": v["id"],
+                "label": f"{v['source_label']} · {v['backend_label']}",
+                "tag": v.get("backend_vendor") or v["backend_label"],
+                "state": "busy" if busy else ("ready" if v.get("active") else "idle"),
+                "status_text": ("Installing…" if busy else
+                                "Active" if v.get("active") else "Installed"),
+                "facts": " · ".join(
+                    x for x in (v.get("installed_version"), v.get("binary_path"))
+                    if x),
+                "active": bool(v.get("active")),
+                "source": v["source"],
+                "backend": v["backend"],
+            })
+    # An external binary is a real engine state, and the only way to reach its
+    # form used to be a <details> under the hero.
+    if ctx.get("binary_path") and not ctx.get("active_variant_id"):
+        tiles.append({
+            "id": "external", "label": "External binary",
+            "tag": ctx.get("engine", "llama"), "state": "ready",
+            "status_text": "Active", "facts": ctx["binary_path"],
+            "active": True, "source": "", "backend": "",
+        })
+    return tiles
+
+
+def _llm_page_ctx(request: Request, open_key: str = "",
+                  selected_source: str | None = None,
+                  selected_backend: str | None = None) -> dict[str, Any]:
+    """Engines and models for the text family, from one context."""
+    ctx = _models_ctx(request, ("text",))
+    ctx.update(_setup_ctx(request, selected_source, selected_backend))
+    ctx["engine_tiles"] = _llm_engine_tiles(ctx)
+    ctx["active"] = "llm"
+    key = (open_key or "").strip()
+    known = {t["id"] for t in ctx["engine_tiles"]}
+    if key == "install":
+        ctx["open_url"] = "/ui/llm/install"
+    elif key == "engines" or (key.startswith("engine:")
+                              and key.split(":", 1)[1] in known):
+        ctx["open_url"] = "/ui/llm/engines"
+    else:
+        ctx["open_url"] = ""
+    return ctx
+
+
+def _llm_redirect(open_key: str = "") -> RedirectResponse:
+    target = "/ui/llm"
+    if open_key:
+        target += "?open=" + quote(open_key, safe=":")
+    return RedirectResponse(target, status_code=303)
+
+
+@router.get("/llm", response_class=HTMLResponse)
+async def llm_page(request: Request, open: str = "",
+                   _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """Text engines and language models, on one page."""
+    return templates.TemplateResponse(
+        request, "llm.html", _llm_page_ctx(request, open),
+    )
+
+
+@router.get("/llm/engines", response_class=HTMLResponse)
+async def llm_engines_modal(request: Request,
+                            _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """The installed variants with their update / version / remove controls.
+
+    All of them, not just the tile that was clicked: the version and
+    update-check endpoints re-render the whole ``#installed-variants`` list,
+    and that list has to be what they land in.
+    """
+    return templates.TemplateResponse(
+        request, "_llm_engines_modal.html", _llm_page_ctx(request),
+    )
+
+
+@router.get("/llm/install", response_class=HTMLResponse)
+async def llm_install_modal(request: Request, source: str = "", backend: str = "",
+                            _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """The source/backend picker, its progress block, and the manual path."""
+    return templates.TemplateResponse(
+        request, "_llm_install_modal.html",
+        _llm_page_ctx(request, "", source or None, backend or None),
+    )
+
+
+@router.get("/models", response_class=HTMLResponse)
+async def models_page_retired(_: Origin = Depends(require_admin_ui)) -> Response:
+    """Retired: engines and models are one page now."""
+    return RedirectResponse("/ui/llm", status_code=301)
+
+
+@router.get("/setup", response_class=HTMLResponse)
+async def setup_page_retired(_: Origin = Depends(require_admin_ui)) -> Response:
+    """Retired: engines and models are one page now."""
+    return RedirectResponse("/ui/llm", status_code=301)
+
+
 @router.post("/setup/install", response_class=HTMLResponse)
 async def setup_install(request: Request,
                         source: str = Form("llama.cpp"),
@@ -4485,10 +4732,10 @@ async def setup_install(request: Request,
         state.error = None
         state.installed_path = None
         asyncio.create_task(install_variant(state, source, backend, version=pinned))
-    return templates.TemplateResponse(
-        request, "setup.html",
-        _setup_ctx(request, selected_source=source, selected_backend=backend),
-    )
+    # Back to the page with the install modal reopened, where the progress
+    # block self-polls. Returning a whole page body here is what the retired
+    # engines page did; the modal is the thing that has to come back now.
+    return _llm_redirect("install")
 
 
 @router.get("/setup/versions", response_class=HTMLResponse)
@@ -4582,7 +4829,7 @@ async def setup_switch_variant(request: Request,
             cfg.llama_server_binary = str(path)
             cfg.llama_server_engine = engine
             patch_config_binary(cfg.config_path, str(path), engine=engine)
-    return RedirectResponse("/ui/setup", status_code=303)
+    return _llm_redirect("engines")
 
 
 def _set_auto_update_flag(request: Request, engine: str, enabled: bool) -> bool:
@@ -4606,9 +4853,9 @@ async def setup_auto_update_toggle(request: Request,
                                    engine: str = Form(...),
                                    enabled: str = Form(""),
                                    _: None = Depends(require_csrf)) -> Response:
-    """Flip a llama variant's auto-update-when-idle switch (Setup page)."""
+    """Flip a llama variant's auto-update-when-idle switch."""
     _set_auto_update_flag(request, engine, enabled.strip().lower() == "on")
-    return RedirectResponse("/ui/setup", status_code=303)
+    return _llm_redirect("engines")
 
 
 @router.post("/setup-diffusion/auto-update", response_class=HTMLResponse)
@@ -4618,7 +4865,7 @@ async def setup_diffusion_auto_update_toggle(request: Request,
                                              _: None = Depends(require_csrf)) -> Response:
     """Flip a diffusion engine's auto-update-when-idle switch."""
     _set_auto_update_flag(request, engine, enabled.strip().lower() == "on")
-    return RedirectResponse("/ui/setup-diffusion", status_code=303)
+    return _diffusion_redirect(f"engine:{engine}")
 
 
 @router.get("/setup/check-updates", response_class=HTMLResponse)
@@ -4656,7 +4903,7 @@ async def setup_open_config(request: Request,
                             _: None = Depends(require_csrf)) -> Response:
     cfg = request.app.state.cfg
     _open_path(str(cfg.config_path))
-    return RedirectResponse("/ui/setup", status_code=303)
+    return _llm_redirect()
 
 
 @router.get("/setup/_variants", response_class=HTMLResponse)
@@ -4732,14 +4979,14 @@ def _models_redirect(request: Request) -> Response:
     """
     if _wants_htmx(request):
         resp = Response(status_code=204)
-        resp.headers["HX-Redirect"] = "/ui/models"
+        resp.headers["HX-Redirect"] = "/ui/llm"
         return resp
-    return RedirectResponse("/ui/models", status_code=303)
+    return RedirectResponse("/ui/llm", status_code=303)
 
 
 # Pages that render download rows and can therefore be the origin of a
 # cancel/delete. Anything else falls back to the models page.
-_DOWNLOAD_PAGES = ("/ui/models", "/ui/setup-diffusion", "/ui/diffusion-models")
+_DOWNLOAD_PAGES = ("/ui/llm", "/ui/diffusion", "/ui/asr")
 
 
 def _download_action_redirect(request: Request) -> Response:
@@ -4750,11 +4997,22 @@ def _download_action_redirect(request: Request) -> Response:
     pages, and bouncing them to the LLM models page (where the row isn't even
     listed anymore) would look like the action did nothing.
     """
-    from urllib.parse import urlparse
-    target = "/ui/models"
-    referer = urlparse(request.headers.get("referer", "")).path
-    if referer in _DOWNLOAD_PAGES:
-        target = referer
+    # HX-Current-URL, not Referer: the app sets Referrer-Policy: no-referrer,
+    # so the referer-based version of this always fell through to /ui/models —
+    # cancelling a diffusion pull silently teleported the operator to the LLM
+    # page. The query string is kept so an open modal reopens.
+    target = "/ui/llm"
+    current = (request.headers.get("HX-Current-URL")
+               or request.headers.get("referer") or "")
+    if current:
+        try:
+            parsed = urlparse(current)
+        except ValueError:
+            parsed = None
+        if parsed is not None and (not parsed.netloc
+                                   or parsed.netloc == request.url.netloc):
+            if parsed.path in _DOWNLOAD_PAGES:
+                target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
     if _wants_htmx(request):
         resp = Response(status_code=204)
         resp.headers["HX-Redirect"] = target
@@ -5517,8 +5775,63 @@ def _build_image_profile_from_form(name: str, engine_module,
     return Profile(**kwargs)
 
 
-def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
-    """Build the per-engine catalog + installed + profile context.
+# The order engines appear in, on the tiles and everywhere else. This is the
+# curated order the old page's hand-written cards used — verified/recommended
+# first — not ADAPTERS order, which leads with the two least-recommended.
+_DIFFUSION_ENGINE_TILES = ("z_image", "ideogram4", "wan", "minimax_h3",
+                           "comfy", "hidream", "flux2")
+
+# ``comfy`` is the shared backend rather than an adapter: it has no engine id
+# in ADAPTERS, and the two ComfyUI-format models declare their own.
+_DIFFUSION_ENGINE_LABELS = {
+    "hidream": "HiDream-O1-Image",
+    "z_image": "Z-Image (Tongyi-MAI / Z-Anime)",
+    "ideogram4": "Ideogram 4",
+    "wan": "Wan 2.2 (text/image → video)",
+    "minimax_h3": "MiniMax-H3 (video + audio)",
+    "minimax_h3_comfy": "MiniMax-H3 (ComfyUI, video + audio)",
+    "krea_comfy": "Krea 2 Turbo (ComfyUI)",
+    "flux2": "FLUX 2 Dev",
+    "comfy": "ComfyUI shared backend",
+}
+
+_DIFFUSION_ENGINE_TAGS = {
+    "z_image": "diffusers · DiT",
+    "ideogram4": "diffusers · fp8",
+    "wan": "diffusers · video",
+    "minimax_h3": "diffusers · video + audio",
+    "comfy": "GGUF · single-file · image + video",
+    "hidream": "diffusers · two recipes",
+    "flux2": "sd.cpp · GGUF",
+}
+
+# Which ComfyUI-format engines are served by the one ``comfy`` install, so a
+# model on one of them tiles under the backend that actually runs it.
+_COMFY_BACKED = ("minimax_h3_comfy", "krea_comfy")
+
+
+def _diffusion_engine_configured(cfg, eng_id: str) -> bool:
+    """Does this engine have the path(s) it needs set in [image] config?"""
+    return {
+        "hidream": bool(cfg.hidream_python and cfg.hidream_repo),
+        "z_image": bool(cfg.z_image_python),
+        "ideogram4": bool(cfg.ideogram4_python),
+        "wan": bool(cfg.wan_python),
+        "minimax_h3": bool(getattr(cfg, "minimax_h3_python", "")),
+        # The ComfyUI-backed models are configured by installing the one
+        # shared ComfyUI engine, not per model.
+        "minimax_h3_comfy": bool(getattr(cfg, "comfyui_python", "")
+                                 and getattr(cfg, "comfyui_repo", "")),
+        "krea_comfy": bool(getattr(cfg, "comfyui_python", "")
+                           and getattr(cfg, "comfyui_repo", "")),
+        "comfy": bool(getattr(cfg, "comfyui_python", "")
+                      and getattr(cfg, "comfyui_repo", "")),
+        "flux2": bool(cfg.flux2_sd_cli),
+    }.get(eng_id, False)
+
+
+def _diffusion_engine_rows(request: Request) -> list[dict[str, Any]]:
+    """Per-engine catalog + installed + profile rows.
 
     Returns a structure shaped for direct template iteration:
 
@@ -5567,33 +5880,13 @@ def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
     #    - any *extra* on-disk models the catalog doesn't know about
     engines_view: list[dict[str, Any]] = []
     for eng_id, eng_mod in image_engines.ADAPTERS.items():
-        # Configured = engine has the path it needs set in [image] config.
-        configured = {
-            "hidream": bool(cfg.hidream_python and cfg.hidream_repo),
-            "z_image": bool(cfg.z_image_python),
-            "ideogram4": bool(cfg.ideogram4_python),
-            "wan":     bool(cfg.wan_python),
-            "minimax_h3": bool(getattr(cfg, "minimax_h3_python", "")),
-            # The ComfyUI-backed models are configured by installing the one
-            # shared ComfyUI engine, not per model.
-            "minimax_h3_comfy": bool(getattr(cfg, "comfyui_python", "")
-                                     and getattr(cfg, "comfyui_repo", "")),
-            "krea_comfy": bool(getattr(cfg, "comfyui_python", "")
-                               and getattr(cfg, "comfyui_repo", "")),
-            "flux2":   bool(cfg.flux2_sd_cli),
-        }.get(eng_id, False)
-
-        # Pretty label for the engine section heading.
-        label = {
-            "hidream": "HiDream-O1-Image",
-            "z_image": "Z-Image (Tongyi-MAI / Z-Anime)",
-            "ideogram4": "Ideogram 4",
-            "wan":     "Wan 2.2 (text/image → video)",
-            "minimax_h3": "MiniMax-H3 (video + audio)",
-            "minimax_h3_comfy": "MiniMax-H3 (ComfyUI, video + audio)",
-            "krea_comfy": "Krea 2 Turbo (ComfyUI)",
-            "flux2":   "FLUX 2 Dev",
-        }.get(eng_id, eng_id)
+        # Image and video only. Iterating ADAPTERS unfiltered used to render
+        # three empty audio sections (asr / whispercpp / sherpa) on the models
+        # page, each saying it had no catalog entries and nothing on disk.
+        if ENGINE_FAMILY.get(eng_id, "text") not in ("image", "video"):
+            continue
+        configured = _diffusion_engine_configured(cfg, eng_id)
+        label = _DIFFUSION_ENGINE_LABELS.get(eng_id, eng_id)
 
         schema = [_serialize_profile_field(f) for f in eng_mod.profile_schema()]
         default_profiles_dict = image_engines.default_profiles(eng_id)
@@ -5654,26 +5947,7 @@ def _diffusion_models_ctx(request: Request) -> dict[str, Any]:
             "rows": rows,
         })
 
-    ctx = _ctx(
-        request,
-        active="diffusion-models",
-        engines=engines_view,
-        default_image_model=cfg.default_image_model or "",
-        default_image_profile=cfg.default_image_profile or "",
-        setup_diffusion_link="/ui/setup-diffusion",
-    )
-    return ctx
-
-
-@router.get("/diffusion-models", response_class=HTMLResponse)
-async def diffusion_models_view(request: Request,
-                                _: Origin = Depends(require_admin_ui)
-                                ) -> HTMLResponse:
-    """List supported diffusion models, show which are installed, and
-    expose CRUD for per-model profiles."""
-    return templates.TemplateResponse(
-        request, "diffusion_models.html", _diffusion_models_ctx(request),
-    )
+    return engines_view
 
 
 @router.post("/diffusion-models/activate", response_class=HTMLResponse)
@@ -5687,7 +5961,7 @@ async def diffusion_models_activate(request: Request,
         return _error_html("model_id required", status_code=400)
     update_defaults(cfg.config_path, default_image_model=mid)
     _reload_config(request)
-    return RedirectResponse("/ui/diffusion-models", status_code=303)
+    return _diffusion_redirect(f"model:{mid}")
 
 
 def _engine_module_or_400(engine: str):
@@ -5695,6 +5969,216 @@ def _engine_module_or_400(engine: str):
         return image_engines.get(engine)
     except KeyError:
         return None
+
+
+def _diffusion_engine_tile(cfg, eng_id: str, ctx: dict[str, Any],
+                           rows_by_engine: dict[str, list]) -> dict[str, Any]:
+    """One engine's vignette: what state it is in and the single action for it.
+
+    The state used to be recomputed inline in seven near-identical Jinja
+    blocks; doing it once here is what lets the tiles say the same thing in
+    the same words, and lets "how many are ready" be countable.
+    """
+    install = (ctx.get("engine_installs") or {}).get(eng_id)
+    status = (install or {}).get("status") if isinstance(install, dict) else \
+        getattr(install, "status", None)
+    configured = _diffusion_engine_configured(cfg, eng_id)
+
+    state, action, pct = "idle", "install", None
+    if status in ("pending", "running"):
+        state, action = "busy", "cancel"
+        raw = (install or {}).get("percent") if isinstance(install, dict) else \
+            getattr(install, "percent", None)
+        pct = max(0, min(100, int(raw))) if raw is not None else 0
+        msg = (install or {}).get("message") if isinstance(install, dict) else \
+            getattr(install, "message", "")
+        status_text = f"Installing — {pct}%" + (f" · {msg}" if msg else "")
+    elif status == "failed":
+        state, action = "error", "retry"
+        status_text = "Install failed"
+    elif configured:
+        state, action = "ready", None
+        status_text = "Ready"
+    else:
+        status_text = "Not configured"
+
+    # The engines the ComfyUI backend actually serves are separate adapter
+    # ids, so its tile has to count their models rather than its own.
+    own = _COMFY_BACKED if eng_id == "comfy" else (eng_id,)
+    known = sum(len(rows_by_engine.get(e, [])) for e in own)
+    on_disk = sum(1 for e in own for r in rows_by_engine.get(e, [])
+                  if r.get("installed"))
+    facts = f"{known} model{'s' if known != 1 else ''} · {on_disk} on disk" \
+        if known else "no models yet"
+    return {
+        "id": eng_id,
+        "label": _DIFFUSION_ENGINE_LABELS.get(eng_id, eng_id),
+        "tag": _DIFFUSION_ENGINE_TAGS.get(eng_id, ""),
+        "state": state,
+        "status_text": status_text,
+        "pct": pct,
+        "facts": facts,
+        "action": action,
+        "install": install,
+    }
+
+
+def _diffusion_model_tile(row: dict[str, Any], eng: dict[str, Any],
+                          download: dict[str, Any] | None) -> dict[str, Any]:
+    """One model's vignette. ``action`` is the single thing a tile offers.
+
+    A model assembled from several uploaders (the ComfyUI ones) gets no
+    inline Download: there is no single repo to pull, so the honest action is
+    to open it and take the components one at a time.
+    """
+    cat = row.get("catalog")
+    components = bool(cat and getattr(cat, "components", ()))
+    state, pct, action = "idle", None, None
+    if download:
+        total = download.get("bytes_total") or 0
+        done = download.get("bytes_done") or 0
+        pct = int(100 * done / total) if total else 0
+        state, status_text = "busy", f"Downloading — {pct}%"
+    elif row.get("installed"):
+        state = "ready"
+        status_text = "On disk"
+        if row.get("is_active_default"):
+            status_text = "On disk · default"
+        else:
+            action = "set_default"
+    else:
+        status_text = "Not downloaded"
+        if cat and not components:
+            action = "download"
+
+    facts: list[str] = []
+    if row.get("installed") and row.get("size_bytes"):
+        facts.append(f"{row['size_bytes'] / (1024 ** 3):.1f} GB")
+    elif cat and cat.approx_size_gb:
+        facts.append(f"≈ {cat.approx_size_gb} GB")
+    n_profiles = len(row.get("profiles") or [])
+    if row.get("installed"):
+        facts.append(f"{n_profiles} profile{'s' if n_profiles != 1 else ''}")
+        if row.get("default_profile"):
+            facts.append(f"default: {row['default_profile']}")
+    elif components:
+        facts.append(f"{len(cat.components)} components")
+    return {
+        "model_id": row["model_id"],
+        "label": cat.label if cat else row["model_id"],
+        "engine": eng["id"],
+        "engine_label": eng["label"],
+        "installed": row.get("installed", False),
+        "is_active_default": row.get("is_active_default", False),
+        "state": state,
+        "status_text": status_text,
+        "pct": pct,
+        "facts": " · ".join(facts),
+        "action": action,
+        "repo": cat.hf_repo if cat else "",
+        "subfolder": cat.subfolder if cat else "",
+    }
+
+
+def _downloads_by_model(downloads, rows: list[dict[str, Any]]) -> dict[str, dict]:
+    """Index in-flight pulls by the model directory they land in.
+
+    Component pulls carry a ``target_dir`` of ``<model_id>/<subdir>``; a
+    whole-repo pull is matched back to the catalog entry whose repo it names.
+    """
+    by_model: dict[str, dict] = {}
+    repos = {}
+    for eng in rows:
+        for r in eng["rows"]:
+            cat = r.get("catalog")
+            if cat:
+                repos[cat.hf_repo] = r["model_id"]
+    for d in downloads or []:
+        if (d.get("status") if isinstance(d, dict) else
+                getattr(d, "status", "")) not in ("pending", "running"):
+            continue
+        row = d if isinstance(d, dict) else {
+            k: getattr(d, k, None)
+            for k in ("source", "target_dir", "bytes_done", "bytes_total")}
+        target = (row.get("target_dir") or "").strip("/")
+        mid = target.split("/")[0] if target else ""
+        if not mid:
+            src = (row.get("source") or "").removeprefix("hf://").removeprefix("hf:")
+            mid = repos.get(src, "")
+        if mid:
+            by_model.setdefault(mid, row)
+    return by_model
+
+
+def _diffusion_page_ctx(request: Request, open_key: str = "") -> dict[str, Any]:
+    """Everything the merged Diffusion page and both its fragments render from.
+
+    One context for three renders — the page, the engine modal and the model
+    modal — because they show the same facts and would otherwise drift.
+    """
+    cfg = request.app.state.cfg
+    ctx = _setup_diffusion_ctx(request)
+    rows = _diffusion_engine_rows(request)
+    ctx["engine_rows"] = rows
+    rows_by_engine = {eng["id"]: eng["rows"] for eng in rows}
+    ctx["engine_tiles"] = [
+        _diffusion_engine_tile(cfg, eng_id, ctx, rows_by_engine)
+        for eng_id in _DIFFUSION_ENGINE_TILES
+    ]
+    downloads = ctx.get("downloads") or []
+    by_model = _downloads_by_model(downloads, rows)
+    ctx["downloads_by_model"] = by_model
+
+    # Model tiles follow their engine's tile order, so the two grids read in
+    # the same sequence. The ComfyUI-backed engines sort with the backend.
+    def _tile_rank(eng_id: str) -> int:
+        key = "comfy" if eng_id in _COMFY_BACKED else eng_id
+        return _DIFFUSION_ENGINE_TILES.index(key) \
+            if key in _DIFFUSION_ENGINE_TILES else len(_DIFFUSION_ENGINE_TILES)
+
+    tiles: list[dict[str, Any]] = []
+    for eng in sorted(rows, key=lambda e: _tile_rank(e["id"])):
+        for r in eng["rows"]:
+            tiles.append(_diffusion_model_tile(r, eng, by_model.get(r["model_id"])))
+    ctx["model_tiles"] = tiles
+    ctx["any_download_busy"] = bool(by_model) or any(
+        (d.get("status") if isinstance(d, dict) else getattr(d, "status", ""))
+        in ("pending", "running") for d in downloads)
+    ctx["default_image_model"] = cfg.default_image_model or ""
+    ctx["default_image_profile"] = cfg.default_image_profile or ""
+    ctx["active"] = "diffusion"
+    ctx["open_url"] = _diffusion_open_url(ctx, open_key)
+    return ctx
+
+
+def _diffusion_open_url(ctx: dict[str, Any], open_key: str) -> str:
+    """Fragment URL for a validated ``?open=`` key, or "" .
+
+    Validated against the ids this install actually has, and rebuilt from
+    them — the parameter is never echoed back into the page, so a crafted
+    value cannot reach the markup.
+    """
+    key = (open_key or "").strip()
+    kind, _, ident = key.partition(":")
+    if kind == "engine" and ident in _DIFFUSION_ENGINE_TILES:
+        return f"/ui/diffusion/engine/{ident}"
+    if kind == "model":
+        known = {t["model_id"] for t in ctx.get("model_tiles", [])}
+        if ident in known:
+            return "/ui/diffusion/model?id=" + quote(ident, safe="")
+    return ""
+
+
+def _diffusion_redirect(open_key: str = "") -> RedirectResponse:
+    """Back to the Diffusion page, reopening the modal that was acted on.
+
+    Without the ``open`` hint every save would dump the operator at the top
+    of the page with the thing they were editing closed.
+    """
+    target = "/ui/diffusion"
+    if open_key:
+        target += "?open=" + quote(open_key, safe=":")
+    return RedirectResponse(target, status_code=303)
 
 
 def _models_page_for(request: Request, model_id: str, engine: str = "") -> str:
@@ -5705,8 +6189,10 @@ def _models_page_for(request: Request, model_id: str, engine: str = "") -> str:
     Diffusion models) based on the model's engine family."""
     eng = engine or detect_engine_for_id(model_id, request.app.state.cfg.models_dir)
     if ENGINE_FAMILY.get(eng, "text") == "audio":
-        return "/ui/asr-models"
-    return "/ui/diffusion-models"
+        return "/ui/asr"
+    # Back to the model's own modal: a profile edit that dumped the operator
+    # at the top of the page would hide the thing they just saved.
+    return "/ui/diffusion?open=" + quote(f"model:{model_id}", safe=":")
 
 
 @router.post("/diffusion-models/profiles/create", response_class=HTMLResponse)
@@ -5984,7 +6470,10 @@ def _asr_models_ctx(request: Request) -> dict[str, Any]:
     reuses the shared /ui/diffusion-models/profiles/* endpoints, which
     redirect back here via ``_models_page_for``."""
     cfg = request.app.state.cfg
+    installer = request.app.state.engine_installer
+    any_install_busy = False
     from .audio_runner import scan_asr_models
+    from .engine_installer import ENGINE_PLANS
     from . import asr_catalog
     jobs = request.app.state.asr_model_jobs
 
@@ -6003,6 +6492,15 @@ def _asr_models_ctx(request: Request) -> dict[str, Any]:
         if ENGINE_FAMILY.get(eng_id, "text") != "audio":
             continue
         fields = _asr_engine_setup_fields(cfg, eng_id, eng_mod)
+        # Install/build state, so the page can show engines and models
+        # together instead of sending the operator to a second page for it.
+        active = installer.active_for_engine(eng_id)
+        if active:
+            any_install_busy = True
+        else:
+            recent = installer.list_for_engine(eng_id, limit=1)
+            active = recent[0] if recent else None
+        plan = ENGINE_PLANS.get(eng_id)
         schema = [_serialize_profile_field(f) for f in eng_mod.profile_schema()]
         default_profiles_dict = image_engines.default_profiles(eng_id)
         default_profiles_view = [
@@ -6054,39 +6552,149 @@ def _asr_models_ctx(request: Request) -> dict[str, Any]:
             })
 
         engines_view.append({
-            "id": eng_id, **fields,
+            "id": eng_id, **fields, "install": active,
+            "plan": {"packages": plan.packages, "notes": plan.notes}
+                    if plan else None,
             "schema": schema, "default_profiles": default_profiles_view,
             "rows": rows, "catalog": catalog_rows,
         })
 
     return _ctx(
-        request, active="asr-models", engines=engines_view,
+        request, active="asr", engines=engines_view,
         asr_models_dir=str(cfg.asr_models_dir),
         asr_models_dir_is_default=(cfg.asr_models_dir_override is None),
         asr_defaults=_asr_defaults_view(cfg),
         asr_languages=asr_catalog.languages(),
         asr_jobs_busy=bool(jobs.active_jobs()),
+        asr_install_busy=any_install_busy,
         _installed_ids=list(installed_ids),
     )
 
 
-@router.get("/asr-models", response_class=HTMLResponse)
-async def asr_models_view(request: Request,
-                          _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    """List installed speech-to-text models and manage their profiles. Engine
-    install/setup lives on the separate ASR engines page (`/ui/setup-asr`)."""
+# The audio engines, in the order their tiles appear.
+_ASR_ENGINE_TILES = ("asr", "whispercpp", "sherpa")
+
+_ASR_ENGINE_TAGS = {
+    "asr": "transformers · Whisper",
+    "whispercpp": "whisper.cpp · Vulkan",
+    "sherpa": "sherpa-onnx · streaming",
+}
+
+
+def _asr_engine_tile(eng: dict[str, Any]) -> dict[str, Any]:
+    """One audio engine's vignette. Same shape as the diffusion tiles."""
+    install = eng.get("install")
+    status = (install or {}).get("status") if isinstance(install, dict) else \
+        getattr(install, "status", None)
+    binary = eng.get("setup_kind") == "binary"
+    state, action, pct = "idle", "install", None
+    if status in ("pending", "running"):
+        state, action = "busy", "cancel"
+        raw = (install or {}).get("progress_pct") if isinstance(install, dict) \
+            else getattr(install, "progress_pct", None)
+        pct = max(0, min(100, int(raw or 0)))
+        msg = (install or {}).get("message") if isinstance(install, dict) else \
+            getattr(install, "message", "")
+        verb = "Building" if binary else "Installing"
+        status_text = f"{verb} — {pct}%" + (f" · {msg}" if msg else "")
+    elif status == "failed":
+        state, action = "error", "retry"
+        status_text = "Build failed" if binary else "Install failed"
+    elif eng.get("configured"):
+        state, action = "ready", None
+        status_text = "Ready"
+    else:
+        status_text = "Not configured"
+
+    n = len(eng.get("rows") or [])
+    return {
+        "id": eng["id"],
+        "label": eng.get("label", eng["id"]),
+        "tag": _ASR_ENGINE_TAGS.get(eng["id"], ""),
+        "state": state,
+        "status_text": status_text,
+        "pct": pct,
+        "facts": f"{n} model{'s' if n != 1 else ''} on disk",
+        "action": action,
+        "install": install,
+        "binary": binary,
+    }
+
+
+def _asr_page_ctx(request: Request, open_key: str = "") -> dict[str, Any]:
+    """Engines and models for the audio family, from one context."""
+    ctx = _asr_models_ctx(request)
+    ctx["engine_tiles"] = [
+        _asr_engine_tile(eng)
+        for eng_id in _ASR_ENGINE_TILES
+        for eng in ctx["engines"] if eng["id"] == eng_id
+    ]
+    key = (open_key or "").strip()
+    kind, _, ident = key.partition(":")
+    ctx["open_url"] = (f"/ui/asr/engine/{ident}"
+                       if kind == "engine" and ident in _ASR_ENGINE_TILES
+                       else "")
+    return ctx
+
+
+def _asr_redirect(open_key: str = "") -> RedirectResponse:
+    target = "/ui/asr"
+    if open_key:
+        target += "?open=" + quote(open_key, safe=":")
+    return RedirectResponse(target, status_code=303)
+
+
+@router.get("/asr", response_class=HTMLResponse)
+async def asr_page(request: Request, open: str = "",
+                   _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """Audio engines and speech-to-text models, on one page."""
     return templates.TemplateResponse(
-        request, "asr_models.html", _asr_models_ctx(request),
+        request, "asr.html", _asr_page_ctx(request, open),
     )
 
 
-@router.get("/asr-models/_partial", response_class=HTMLResponse)
+@router.get("/asr/engine/{engine}", response_class=HTMLResponse)
+async def asr_engine_modal(request: Request, engine: str,
+                           _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """One audio engine's install/build + path setup, for the detail modal."""
+    if engine not in _ASR_ENGINE_TILES:
+        raise HTTPException(status_code=404, detail=f"unknown engine {engine!r}")
+    ctx = _asr_page_ctx(request)
+    eng = next((e for e in ctx["engines"] if e["id"] == engine), None)
+    if eng is None:
+        raise HTTPException(status_code=404, detail=f"unknown engine {engine!r}")
+    tile = next((t for t in ctx["engine_tiles"] if t["id"] == engine), None)
+    ctx["eng"] = eng
+    ctx["engine"] = engine
+    ctx["engine_tile"] = tile
+    ctx["engine_busy"] = bool(tile and tile["state"] == "busy")
+    return templates.TemplateResponse(
+        request, "_asr_engine_modal.html", ctx,
+    )
+
+
+@router.get("/asr-models", response_class=HTMLResponse)
+async def asr_models_view(_: Origin = Depends(require_admin_ui)) -> Response:
+    """Retired: engines and models are one page now."""
+    return RedirectResponse("/ui/asr", status_code=301)
+
+
+@router.get("/asr/_engines", response_class=HTMLResponse)
+async def asr_engines_partial(request: Request,
+                              _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    """The engine tiles alone, polled while an install or build runs."""
+    return templates.TemplateResponse(
+        request, "_asr_engines_partial.html", _asr_page_ctx(request),
+    )
+
+
+@router.get("/asr/_body", response_class=HTMLResponse)
 async def asr_models_partial(request: Request,
                              _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    """HTMX-polled fragment so catalog download / conversion progress updates
-    live on the ASR models page without a full reload."""
+    """HTMX-polled fragment so install, download and conversion progress
+    updates live on the ASR page without a full reload."""
     return templates.TemplateResponse(
-        request, "_asr_models_partial.html", _asr_models_ctx(request),
+        request, "_asr_models_partial.html", _asr_page_ctx(request),
     )
 
 
@@ -6106,7 +6714,7 @@ async def asr_models_pull(request: Request,
             repo=repo, file=file, subfolder=subfolder, name=name)
     except (AsrJobError, ValueError) as e:
         return _error_html(f"download failed: {e}", status_code=400)
-    return RedirectResponse("/ui/asr-models", status_code=303)
+    return _asr_redirect()
 
 
 @router.post("/asr-models/convert", response_class=HTMLResponse)
@@ -6124,36 +6732,20 @@ async def asr_models_convert(request: Request,
                            quantize=(quantize or "none").strip())
     except (AsrJobError, ValueError) as e:
         return _error_html(f"convert failed: {e}", status_code=400)
-    return RedirectResponse("/ui/asr-models", status_code=303)
+    return _asr_redirect()
 
 
 @router.post("/asr-models/jobs/{job_id}/cancel", response_class=HTMLResponse)
 async def asr_models_cancel_job(request: Request, job_id: str,
                                 _: None = Depends(require_csrf)) -> Response:
     request.app.state.asr_model_jobs.cancel(job_id)
-    return RedirectResponse("/ui/asr-models", status_code=303)
+    return _asr_redirect()
 
 
 @router.get("/setup-asr", response_class=HTMLResponse)
-async def setup_asr_view(request: Request,
-                         _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    """ASR *engines* page: install/build each engine, point it at its
-    interpreter/binary, and set the shared GPU budget / coexistence — the
-    audio-family analogue of the LLM engines (`/ui/setup`) and Diffusion
-    engines (`/ui/setup-diffusion`) pages."""
-    return templates.TemplateResponse(
-        request, "setup_asr.html", _setup_asr_ctx(request),
-    )
-
-
-@router.get("/setup-asr/_partial", response_class=HTMLResponse)
-async def setup_asr_partial(request: Request,
-                            _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
-    """HTMX-polled fragment so ASR engine install/build progress updates live
-    on the ASR engines page without a full reload."""
-    return templates.TemplateResponse(
-        request, "_setup_asr_partial.html", _setup_asr_ctx(request),
-    )
+async def setup_asr_view(_: Origin = Depends(require_admin_ui)) -> Response:
+    """Retired: engines and models are one page now."""
+    return RedirectResponse("/ui/asr", status_code=301)
 
 
 @router.post("/asr-models/install-deps", response_class=HTMLResponse)
@@ -6181,7 +6773,7 @@ async def asr_install_deps(request: Request,
             installer.start(eng, options=options)
     except (ValueError, RuntimeError) as e:
         return _error_html(f"install failed: {e}", status_code=400)
-    return RedirectResponse("/ui/setup-asr", status_code=303)
+    return _asr_redirect(f"engine:{eng}")
 
 
 @router.post("/asr-models/install-deps/{install_id}/cancel",
@@ -6189,7 +6781,7 @@ async def asr_install_deps(request: Request,
 async def asr_cancel_install(request: Request, install_id: str,
                              _: None = Depends(require_csrf)) -> Response:
     request.app.state.engine_installer.cancel(install_id)
-    return RedirectResponse("/ui/setup-asr", status_code=303)
+    return _asr_redirect()
 
 
 @router.post("/setup/audio/asr", response_class=HTMLResponse)
@@ -6211,7 +6803,7 @@ async def setup_asr(request: Request, asr_python: str = Form(""),
     else:
         cfg.asr_python = val
         update_image_config(cfg.config_path, asr_python=val)
-    return RedirectResponse("/ui/setup-asr", status_code=303)
+    return _asr_redirect(f"engine:{eng}")
 
 
 @router.post("/setup/audio/asr-defaults", response_class=HTMLResponse)
@@ -6253,7 +6845,7 @@ async def setup_asr_defaults(request: Request,
         cfg.asr_idle_timeout_s = idle
     if interval is not None:
         cfg.asr_decode_interval_s = interval
-    return RedirectResponse("/ui/setup-asr", status_code=303)
+    return _asr_redirect()
 
 
 @router.post("/setup/audio/asr-models-dir", response_class=HTMLResponse)
@@ -6271,7 +6863,7 @@ async def setup_asr_models_dir(request: Request, asr_models_dir: str = Form(""),
     else:
         cfg.asr_models_dir_override = None
         update_image_config(cfg.config_path, asr_models_dir="")
-    return RedirectResponse("/ui/asr-models", status_code=303)
+    return _asr_redirect()
 
 
 # ============================================================ #

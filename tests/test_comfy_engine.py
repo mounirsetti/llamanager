@@ -217,7 +217,7 @@ def _call_download(tmp_path, **form):
     spy = _SpyRegistry()
     app = SimpleNamespace(state=SimpleNamespace(registry=spy, cfg=cfg))
     kwargs = {"repo": "", "subfolder": "", "filename": "",
-              "models_dir": "", "target_dir": "", **form}
+              "models_dir": "", "target_dir": "", "open": "", **form}
     engine = kwargs.pop("engine", "minimax_h3_comfy")
     resp = asyncio.run(api_ui.download_engine_model(
         _Req(app), engine=engine, _=None, **kwargs))
@@ -461,10 +461,10 @@ def _complete_model(tmp_path):
 
 
 def _argv_tokens(argv):
-    """Collect the --set KEY=VALUE pairs out of a built argv."""
+    """Collect the --set / --set-str KEY=VALUE pairs out of a built argv."""
     out = {}
     for i, a in enumerate(argv):
-        if a == "--set" and "=" in argv[i + 1]:
+        if a in ("--set", "--set-str") and "=" in argv[i + 1]:
             k, _, v = argv[i + 1].partition("=")
             out[k] = v
     return out
@@ -493,7 +493,7 @@ def test_build_command_passes_the_turbo_profile_through(tmp_path, cfg):
     assert tok["FPS"] == "24.0"
     assert tok["LORA"] == m.TURBO_LORA_FILE
     assert "--bypass" not in argv, "the LoRA should be wired in, not dropped"
-    assert "--init-image" in argv
+    assert any(a.startswith("INIT_IMAGE=") for a in argv)
 
 
 def test_build_command_drops_the_lora_node_for_the_full_profile(tmp_path, cfg):
@@ -515,6 +515,50 @@ def test_build_command_drops_the_lora_node_for_the_full_profile(tmp_path, cfg):
     assert _argv_tokens(argv)["STEPS"] == "50"
     assert "--bypass" in argv
     assert argv[argv.index("--bypass") + 1] == "2:model"
+
+
+def test_build_command_runs_the_baked_turbo_without_a_lora(tmp_path, cfg):
+    """The turbo bake carries the distill, so the LoRA node is dropped."""
+    from llamanager.engines import minimax_h3_comfy as m
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    model = _complete_model(tmp_path)
+    (model / "diffusion_models" / m.TURBO_UNET_FILE).write_bytes(b"x")
+    img = tmp_path / "frame.png"
+    img.write_bytes(b"x")
+
+    prof = Profile(name="h3-turbo-baked-8step",
+                   **m.default_profiles()["h3-turbo-baked-8step"])
+    argv, _ = m.build_command(cfg, model, prof,
+                              _image_request("a hotel atrium", [img]),
+                              tmp_path / "out.mp4")
+
+    tok = _argv_tokens(argv)
+    assert tok["UNET"] == m.TURBO_UNET_FILE
+    assert tok["STEPS"] == "8"
+    assert "--bypass" in argv
+    assert argv[argv.index("--bypass") + 1] == "2:model"
+
+
+def test_build_command_refuses_the_turbo_bake_with_a_lora(tmp_path, cfg):
+    """Stacking the distill on weights that already carry it halves quality
+    silently, so the combination is refused by name."""
+    from llamanager.engines import minimax_h3_comfy as m
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    model = _complete_model(tmp_path)
+    (model / "diffusion_models" / m.TURBO_UNET_FILE).write_bytes(b"x")
+    img = tmp_path / "frame.png"
+    img.write_bytes(b"x")
+
+    prof = Profile(name="p", image_model_type="Q4_K_M-Turbo", image_steps=8,
+                   image_lora_weights=m.TURBO_LORA_FILE)
+    with pytest.raises(RuntimeError, match="already has the Turbo distill"):
+        m.build_command(cfg, model, prof,
+                        _image_request("a hotel atrium", [img]),
+                        tmp_path / "out.mp4")
 
 
 def test_build_command_snaps_an_odd_frame_count(tmp_path, cfg):
@@ -626,17 +670,299 @@ def test_krea_build_command_selects_the_quant(tmp_path, cfg):
     assert "--bypass" in argv
 
 
-def test_krea_rejects_reference_images(tmp_path, cfg):
-    """img2img stays on the diffusers engine; say so instead of ignoring it."""
+def _krea_model(tmp_path, *loras):
+    """A complete Krea 2 Comfy model dir, plus any LoRA files named."""
+    from llamanager.engines import krea_comfy as k
+    root = tmp_path / "Krea-2-Turbo-Comfy"
+    for sub in ("diffusion_models", "text_encoders", "vae", "loras"):
+        (root / sub).mkdir(parents=True, exist_ok=True)
+    for _quant, (fname, _gb) in k.QUANT_FILES.items():
+        (root / "diffusion_models" / fname).write_bytes(b"x")
+    (root / "text_encoders" / k.CLIP_FILE).write_bytes(b"x")
+    (root / "vae" / k.VAE_FILE).write_bytes(b"x")
+    for lora in loras:
+        (root / "loras" / lora).write_bytes(b"x")
+    return root
+
+
+def test_krea_refuses_to_edit_without_an_edit_lora(tmp_path, cfg):
+    """Reference images alone do nothing: stock Krea 2 has no path to read
+    them. Naming the LoRAs that would work beats a silently ignored input."""
     from llamanager.engines import krea_comfy as k
     from llamanager.config import Profile
 
     _fake_comfy_install(cfg, tmp_path)
+    root = _krea_model(tmp_path)
     img = tmp_path / "ref.png"
     img.write_bytes(b"x")
-    with pytest.raises(RuntimeError, match="text-to-image"):
-        k.build_command(cfg, tmp_path, Profile(name="p"),
+    with pytest.raises(RuntimeError, match="edit LoRA"):
+        k.build_command(cfg, root, Profile(name="p"),
                         _image_request("x", [img]), tmp_path / "o.png")
+
+
+def test_krea_refuses_to_edit_with_an_unknown_lora(tmp_path, cfg):
+    """The two node packs place the reference differently and a LoRA in the
+    wrong one still renders — wrongly. So an unknown LoRA plus a reference is
+    an error, never a guess."""
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    root = _krea_model(tmp_path, "somebody_elses_lora.safetensors")
+    img = tmp_path / "ref.png"
+    img.write_bytes(b"x")
+    prof = Profile(name="p",
+                   image_lora_weights="somebody_elses_lora.safetensors")
+    with pytest.raises(RuntimeError, match="no safe guess"):
+        k.build_command(cfg, root, prof, _image_request("x", [img]),
+                        tmp_path / "o.png")
+    # ...but the same LoRA is fine for plain text-to-image.
+    argv, _ = k.build_command(cfg, root, prof, _image_request("x", []),
+                              tmp_path / "o.png")
+    assert "krea2_t2i_gguf.json" in " ".join(argv)
+
+
+def test_krea_edit_lora_requires_its_reference(tmp_path, cfg):
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    lora = "krea2_identity_edit_v1_2.safetensors"
+    root = _krea_model(tmp_path, lora)
+    with pytest.raises(RuntimeError, match="at least 1 reference"):
+        k.build_command(cfg, root, Profile(name="p", image_lora_weights=lora),
+                        _image_request("x", []), tmp_path / "o.png")
+
+
+def test_krea_identity_edit_selects_pack_a_and_its_geometry(tmp_path, cfg):
+    """The LoRA picks the graph, the reference slots AND the fit mode — the
+    operator never chooses geometry the weights already determine."""
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    lora = "krea2_identity_edit_v1_2.safetensors"
+    root = _krea_model(tmp_path, lora)
+    img = tmp_path / "ref.png"
+    img.write_bytes(b"x")
+    prof = Profile(name="p", **k.default_profiles()["kreac-edit"])
+    argv, _ = k.build_command(cfg, root, prof, _image_request("x", [img]),
+                              tmp_path / "o.png")
+    joined = " ".join(argv)
+    assert "krea2_edit_a_gguf.json" in joined
+    assert f"REF_IMAGE={img}" in argv
+    tok = _argv_tokens(argv)
+    assert tok["FIT_MODE"] == "fit"          # v1.2 geometry, not v1.1's crop
+    assert tok["REF_BOOST"] == "4.0"
+    # The unused second slot is dropped, not left dangling: its LoadImage has
+    # no upstream to bypass to, and its VAEEncode would have no pixels.
+    assert argv.count("--drop-node") == 2
+    assert "12" in argv and "14" in argv
+
+
+def test_krea_legacy_identity_edit_keeps_the_crop_geometry(tmp_path, cfg):
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    lora = "krea2_identity_edit_v1_1_r64.safetensors"
+    root = _krea_model(tmp_path, lora)
+    img = tmp_path / "ref.png"
+    img.write_bytes(b"x")
+    argv, _ = k.build_command(cfg, root,
+                              Profile(name="p", image_lora_weights=lora),
+                              _image_request("x", [img]), tmp_path / "o.png")
+    assert _argv_tokens(argv)["FIT_MODE"] == "crop (legacy)"
+
+
+def test_krea_style_reference_selects_pack_b(tmp_path, cfg):
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    lora = "krea2_style_reference.safetensors"
+    root = _krea_model(tmp_path, lora)
+    imgs = []
+    for n in ("a", "b"):
+        img = tmp_path / f"{n}.png"
+        img.write_bytes(b"x")
+        imgs.append(img)
+    argv, _ = k.build_command(cfg, root,
+                              Profile(name="p", image_lora_weights=lora),
+                              _image_request("x", imgs), tmp_path / "o.png")
+    joined = " ".join(argv)
+    assert "krea2_edit_b_gguf.json" in joined
+    assert f"REF_IMAGE={imgs[0]}" in argv and f"REF_IMAGE_B={imgs[1]}" in argv
+    # Only the third slot is unused.
+    assert argv.count("--drop-node") == 1
+
+
+def test_krea_pose_lora_takes_exactly_one_reference(tmp_path, cfg):
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    lora = "krea2_turbo_openpose_controlnet.safetensors"
+    root = _krea_model(tmp_path, lora)
+    imgs = []
+    for n in ("a", "b"):
+        img = tmp_path / f"{n}.png"
+        img.write_bytes(b"x")
+        imgs.append(img)
+    with pytest.raises(RuntimeError, match="at most 1 reference"):
+        k.build_command(cfg, root, Profile(name="p", image_lora_weights=lora),
+                        _image_request("x", imgs), tmp_path / "o.png")
+
+
+def test_krea_edit_reports_a_missing_lora_file(tmp_path, cfg):
+    """The edit LoRA is load-bearing, so a missing file is a missing model
+    component — not a warning followed by an unpatched sample."""
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    lora = "krea2_identity_edit_v1_2.safetensors"
+    root = _krea_model(tmp_path)          # no LoRA on disk
+    img = tmp_path / "ref.png"
+    img.write_bytes(b"x")
+    with pytest.raises(RuntimeError, match=f"loras/{lora}"):
+        k.build_command(cfg, root, Profile(name="p", image_lora_weights=lora),
+                        _image_request("x", [img]), tmp_path / "o.png")
+
+
+def _graph_from_argv(argv):
+    """Render + prune exactly the way the runner does, from a built argv.
+
+    This is the only test that closes the loop between the adapter and the
+    frozen templates: the node ids it drops live in the adapter, the nodes
+    live in the JSON, and nothing else would notice them drifting apart.
+    """
+    from llamanager.engines import comfy_backend as cb
+    values, images, drops, workflow = {}, {}, [], None
+    for i, a in enumerate(argv):
+        if a in ("--set", "--set-str") and "=" in argv[i + 1]:
+            k, _, v = argv[i + 1].partition("=")
+            if a == "--set":
+                import json as _json
+                try:
+                    v = _json.loads(v)
+                except ValueError:
+                    pass
+            values[k] = v
+        elif a == "--image":
+            k, _, v = argv[i + 1].partition("=")
+            values[k] = Path(v).name        # the runner substitutes the
+            images[k] = v                   # server-side upload name here
+        elif a == "--drop-node":
+            drops.append(argv[i + 1])
+        elif a == "--workflow":
+            workflow = Path(argv[i + 1])
+    graph = cb.render_workflow(workflow.read_text(), values)
+    for node_id in drops:
+        cb.drop_node(graph, node_id)
+    return graph, images
+
+
+def _assert_links_resolve(graph):
+    for node_id, node in graph.items():
+        for name, value in node.get("inputs", {}).items():
+            if isinstance(value, list) and len(value) == 2:
+                assert str(value[0]) in graph, (
+                    f"node {node_id}.{name} links to missing node {value[0]}")
+
+
+def test_krea_edit_graph_is_coherent_with_one_reference(tmp_path, cfg):
+    """Pack A, single reference: the second slot's nodes are gone and nothing
+    still points at them, while the first reference reaches all three places
+    it has to — the latent, the model patch, and the grounded encode."""
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    lora = "krea2_identity_edit_v1_2.safetensors"
+    root = _krea_model(tmp_path, lora)
+    img = tmp_path / "ref.png"
+    img.write_bytes(b"x")
+    argv, _ = k.build_command(
+        cfg, root, Profile(name="p", **k.default_profiles()["kreac-edit"]),
+        _image_request("recolour the car", [img]), tmp_path / "o.png")
+
+    graph, images = _graph_from_argv(argv)
+    _assert_links_resolve(graph)
+    assert "12" not in graph and "14" not in graph
+    patch = graph["10"]["inputs"]
+    assert "source_latent_b" not in patch and "source_image_b" not in patch
+    # The load-bearing wiring, which a renumbered template would silently lose.
+    assert patch["source_latent"] == ["13", 0]
+    assert patch["target_latent"] == ["7", 0]     # pre-encode, not mid-sample
+    assert patch["vae"] == ["4", 0]
+    assert graph["5"]["inputs"]["image"] == ["11", 0]
+    assert graph["8"]["inputs"]["model"] == ["10", 0]
+    assert graph["11"]["inputs"]["image"] == img.name
+    assert set(images) == {"REF_IMAGE"}
+
+
+def test_krea_edit_graph_is_coherent_with_two_references(tmp_path, cfg):
+    """Both slots filled: nothing is dropped and both reach the patch node."""
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    lora = "krea2_identity_edit_v1_2.safetensors"
+    root = _krea_model(tmp_path, lora)
+    imgs = []
+    for n in ("scene", "person"):
+        f = tmp_path / f"{n}.png"
+        f.write_bytes(b"x")
+        imgs.append(f)
+    argv, _ = k.build_command(
+        cfg, root, Profile(name="p", image_lora_weights=lora),
+        _image_request("place them at the table", imgs), tmp_path / "o.png")
+
+    graph, images = _graph_from_argv(argv)
+    _assert_links_resolve(graph)
+    assert "--drop-node" not in argv
+    patch = graph["10"]["inputs"]
+    assert patch["source_latent"] == ["13", 0]
+    assert patch["source_latent_b"] == ["14", 0]
+    assert set(images) == {"REF_IMAGE", "REF_IMAGE_B"}
+
+
+def test_krea_pack_b_graph_prunes_the_slots_it_does_not_use(tmp_path, cfg):
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    lora = "krea2_style_reference.safetensors"
+    root = _krea_model(tmp_path, lora)
+    img = tmp_path / "style.png"
+    img.write_bytes(b"x")
+    argv, _ = k.build_command(cfg, root,
+                              Profile(name="p", image_lora_weights=lora),
+                              _image_request("a lighthouse", [img]),
+                              tmp_path / "o.png")
+    graph, _images = _graph_from_argv(argv)
+    _assert_links_resolve(graph)
+    assert "12" not in graph and "13" not in graph
+    enc = graph["5"]["inputs"]
+    assert enc["image1"] == ["11", 0]
+    assert "image2" not in enc and "image3" not in enc
+    # The VAE on the ENCODE node is what makes reference latents at all.
+    assert enc["vae"] == ["4", 0]
+    assert graph["10"]["class_type"] == "Krea2OstrisEditModelPatch"
+    assert graph["10"]["inputs"]["kv_cache"] is False
+
+
+def test_krea_rejects_an_unknown_quant(tmp_path, cfg):
+    """Substituting the default would run weights nobody asked for."""
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    root = _krea_model(tmp_path)
+    with pytest.raises(RuntimeError, match="Q9_K"):
+        k.build_command(cfg, root, Profile(name="p", image_model_type="Q9_K"),
+                        _image_request("x", []), tmp_path / "o.png")
 
 
 _KREA_VALUES = {
@@ -653,8 +979,14 @@ def test_every_comfy_workflow_template_is_valid_json_and_fully_tokenised():
     which stopped parsing, must fail here rather than at request time."""
     import json
     from llamanager.engines import comfy_backend as cb
+    edit_a = {**_KREA_VALUES, "REF_IMAGE": "a.png", "REF_IMAGE_B": "b.png",
+              "REF_BOOST": 4.0, "GROUNDING_PX": 768, "FIT_MODE": "fit"}
+    edit_b = {**_KREA_VALUES, "REF_IMAGE": "a.png", "REF_IMAGE_B": "b.png",
+              "REF_IMAGE_C": "c.png"}
     known = {"minimax_h3_i2v_gguf": _WORKFLOW_VALUES, "krea2_t2i_gguf": _KREA_VALUES,
-             "krea2_t2i_gguf_te": _KREA_VALUES}
+             "krea2_t2i_gguf_te": _KREA_VALUES,
+             "krea2_edit_a_gguf": edit_a, "krea2_edit_a_gguf_te": edit_a,
+             "krea2_edit_b_gguf": edit_b, "krea2_edit_b_gguf_te": edit_b}
     templates = sorted(cb.workflow_path("x").parent.glob("*.json"))
     assert templates, "no workflow templates found"
     for path in templates:
@@ -690,6 +1022,29 @@ def _runner_module():
     return mod
 
 
+def test_dropping_a_node_removes_the_links_into_it():
+    """An unfilled reference slot: the LoadImage has no upstream to bypass
+    to, so it goes, and the optional input it fed goes with it."""
+    from llamanager.engines import comfy_backend as cb
+    graph = {
+        "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+        "2": {"class_type": "LoadImage", "inputs": {"image": "b.png"}},
+        "3": {"class_type": "Encode",
+              "inputs": {"image": ["1", 0], "image_b": ["2", 0], "px": 768}},
+    }
+    cb.drop_node(graph, "2")
+    assert "2" not in graph
+    assert graph["3"]["inputs"] == {"image": ["1", 0], "px": 768}
+
+
+def test_dropping_a_node_that_is_not_there_is_an_error():
+    """Silence would mean a template renumbering quietly stopped pruning the
+    slot, leaving a LoadImage pointed at an image nobody uploaded."""
+    from llamanager.engines import comfy_backend as cb
+    with pytest.raises(KeyError):
+        cb.drop_node({"1": {"class_type": "X", "inputs": {}}}, "9")
+
+
 def test_runner_loads_the_backend_without_the_llamanager_package():
     """The runner runs under a different interpreter than the daemon, so it
     loads comfy_backend by file path. If that ever became a package import it
@@ -697,6 +1052,88 @@ def test_runner_loads_the_backend_without_the_llamanager_package():
     runner = _runner_module()
     cb = runner._load_backend()
     assert hasattr(cb, "render_workflow") and hasattr(cb, "bypass_node")
+
+
+def _fake_lora(path: Path, n_keys: int) -> Path:
+    """A .safetensors file with a real header and no tensor data.
+
+    Enough for the key count, which is all the check reads — and it reads it
+    from the header precisely so it never has to load the weights.
+    """
+    import json as _json
+    import struct
+    header = {f"lora_unet_block{i}.lora_down.weight":
+              {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]}
+              for i in range(n_keys)}
+    blob = _json.dumps(header).encode()
+    path.write_bytes(struct.pack("<Q", len(blob)) + blob + b"\x00\x00")
+    return path
+
+
+def test_lora_check_fails_when_no_key_matched(tmp_path):
+    """The exact failure this exists for: ComfyUI warns per unmatched key and
+    samples on, so a LoRA for another architecture produces a perfectly
+    normal image and nothing says the LoRA did nothing."""
+    runner = _runner_module()
+    lora = _fake_lora(tmp_path / "wrong_arch.safetensors", 3)
+    server_log = tmp_path / "comfyui.log"
+    server_log.write_text(
+        "prompt executed\n"
+        + "".join(f"lora key not loaded: lora_unet_block{i}.lora_down.weight\n"
+                  for i in range(3)))
+    assert runner.check_lora_applied(server_log, 0, lora) is False
+
+
+def test_lora_check_passes_a_clean_load(tmp_path):
+    runner = _runner_module()
+    lora = _fake_lora(tmp_path / "good.safetensors", 3)
+    server_log = tmp_path / "comfyui.log"
+    server_log.write_text("loaded model\nprompt executed\n")
+    assert runner.check_lora_applied(server_log, 0, lora) is True
+
+
+def test_lora_check_tolerates_a_partial_load(tmp_path):
+    """Some unmatched keys is normal (a LoRA can carry text-encoder keys the
+    model-only loader has no home for). Only ALL of them is a no-op."""
+    runner = _runner_module()
+    lora = _fake_lora(tmp_path / "partial.safetensors", 4)
+    server_log = tmp_path / "comfyui.log"
+    server_log.write_text("lora key not loaded: a\nNOT LOADED b\n")
+    assert runner.check_lora_applied(server_log, 0, lora) is True
+
+
+def test_lora_check_reads_only_this_request_from_a_shared_log(tmp_path):
+    """A warm server appends; yesterday's failures are not today's."""
+    runner = _runner_module()
+    lora = _fake_lora(tmp_path / "l.safetensors", 2)
+    server_log = tmp_path / "comfyui.log"
+    stale = "lora key not loaded: a\nlora key not loaded: b\n"
+    server_log.write_text(stale + "prompt executed cleanly\n")
+    assert runner.check_lora_applied(server_log, len(stale), lora) is True
+
+
+def test_lora_check_does_not_claim_success_without_a_log(tmp_path):
+    """A reused warm server keeps its log in the process that started it.
+    Unverifiable must read as unverified, not as verified."""
+    runner = _runner_module()
+    lora = _fake_lora(tmp_path / "l.safetensors", 2)
+    assert runner.check_lora_applied(tmp_path / "absent.log", 0, lora) is True
+
+
+def test_runner_declares_the_flags_the_engines_emit():
+    """The adapters and the runner are different processes on different
+    interpreters, so a flag one side emits and the other never learned about
+    fails at request time. Ask the runner itself what it accepts."""
+    import subprocess
+    import sys
+    from llamanager.engines import comfy_backend as cb
+    path = Path(cb.__file__).with_name("_comfy_runner.py")
+    out = subprocess.run([sys.executable, str(path), "--help"],
+                         capture_output=True, text=True, timeout=60).stdout
+    for flag in ("--image", "--drop-node", "--set-str", "--bypass",
+                 "--keep-warm", "--lora-file"):
+        assert flag in out, f"runner does not accept {flag}"
+    assert "--init-image" not in out       # replaced by the generic --image
 
 
 def test_runner_parses_typed_set_pairs():
@@ -887,13 +1324,17 @@ def test_krea_prefers_the_gguf_encoder_when_the_pair_is_present(tmp_path):
     te = tmp_path / "text_encoders"
     te.mkdir()
     (te / k.CLIP_SAFETENSORS).write_bytes(b"x")
-    assert k.resolve_text_encoder(tmp_path) == (k.CLIP_SAFETENSORS, "krea2_t2i_gguf")
+    assert k.resolve_text_encoder(tmp_path) == (k.CLIP_SAFETENSORS, "_gguf")
 
-    (te / k.CLIP_GGUF).write_bytes(b"x")          # GGUF alone: not enough
-    assert k.resolve_text_encoder(tmp_path)[0] == k.CLIP_SAFETENSORS
+    # GGUF alone is not enough — and it must SAY so. Quietly serving the
+    # safetensors instead would turn a 22-second request into a 12-minute one
+    # with nothing in the log to explain it.
+    (te / k.CLIP_GGUF).write_bytes(b"x")
+    with pytest.raises(RuntimeError, match=k.CLIP_GGUF_MMPROJ):
+        k.resolve_text_encoder(tmp_path)
 
     (te / k.CLIP_GGUF_MMPROJ).write_bytes(b"x")   # the pair: fast path
-    assert k.resolve_text_encoder(tmp_path) == (k.CLIP_GGUF, "krea2_t2i_gguf_te")
+    assert k.resolve_text_encoder(tmp_path) == (k.CLIP_GGUF, "_gguf_te")
 
 
 def test_gguf_te_workflow_uses_the_gguf_clip_loader_with_krea2_type():

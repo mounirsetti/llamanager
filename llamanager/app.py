@@ -434,6 +434,18 @@ def create_app(config_path: Path | None = None,
         """
         p = request.url.path
         if request.method == "GET" and p.startswith("/ui/"):
+            # Some POST-only actions live under a section that no longer owns
+            # them: the per-engine setup posts are all under /ui/setup/, but
+            # image and audio engines are configured from their own pages now.
+            # Without these the family-root rule would land an image-engine
+            # POST on the LLM page.
+            for prefix, page in (("/ui/setup/image/", "/ui/diffusion"),
+                                 ("/ui/setup/audio/", "/ui/asr"),
+                                 ("/ui/setup-diffusion/", "/ui/diffusion"),
+                                 ("/ui/diffusion-models/", "/ui/diffusion"),
+                                 ("/ui/asr-models/", "/ui/asr")):
+                if p.startswith(prefix):
+                    return RedirectResponse(page, status_code=303)
             parts = [s for s in p.split("/") if s]   # e.g. ['ui','models','load']
             section = "/ui/" + parts[1] if len(parts) > 1 else "/ui/"
             return RedirectResponse(section, status_code=303)

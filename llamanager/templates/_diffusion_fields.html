@@ -1,6 +1,6 @@
 {# Schema-driven diffusion-profile field renderer.
 
-   Used by both /ui/diffusion-models (profile editor) and /ui/images
+   Used by both /ui/diffusion (profile editor) and /ui/images
    (per-request override composer). The macros read the per-engine
    ProfileField list and emit the right input per kind ("text", "int",
    "float", "select"). Keep this file the single source of truth for
@@ -92,7 +92,7 @@
     {% if f.options_dir and not f.options_free and not (dir_options or {}).get(f.key) %}
     <span class="lm-dm-field__help">
       No files in <code>{{ f.options_dir }}/</code> for this model. Download one
-      from <a href="/ui/setup-diffusion">Diffusion engines</a>, or drop a
+      from <a href="/ui/diffusion">Diffusion engines</a>, or drop a
       <code>.safetensors</code> into the model's <code>{{ f.options_dir }}/</code> folder.
     </span>
     {% elif f.help %}<span class="lm-dm-field__help">{{ f.help }}</span>{% endif %}

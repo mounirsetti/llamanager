@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% set active = 'diffusion' %}
+{% block title %}Diffusion - llamanager{% endblock %}
+{% block content %}
+
+<div class="lm-eyebrow">Configure</div>
+<h1 class="lm-page-title">Diffusion</h1>
+<p class="lm-page-lede">
+  Install image and video engines, download their models and LoRAs, and tune
+  how text and image share the GPU.
+</p>
+
+{# Reopen the modal a redirect asked for. The server validated ?open= against
+   the ids it knows and produced this URL, so nothing user-supplied is
+   reflected. hx-trigger="load" fires on a full page load and on an hx-boost
+   body swap alike, which is exactly the two ways an operator arrives back
+   here after saving something. #}
+{% if open_url %}
+<div hidden
+     hx-get="{{ open_url }}"
+     hx-trigger="load"
+     hx-target="#lm-modal-body"
+     hx-swap="innerHTML"></div>
+{% endif %}
+
+{% include "_diffusion_body.html" %}
+
+{% endblock %}

@@ -1,6 +1,6 @@
 {% extends "base.html" %}
-{% set active = 'asr-models' %}
-{% block title %}ASR models - llamanager{% endblock %}
+{% set active = 'asr' %}
+{% block title %}ASR - llamanager{% endblock %}
 {% block content %}
 
 <style>
@@ -68,17 +68,30 @@
 {% endmacro %}
 
 
-<header class="lm-section-head" style="margin-bottom: 16px;">
-  <span class="lm-section-marker">ASR models</span>
-  <span class="lm-section-meta">speech-to-text (Whisper) models and their profiles</span>
-</header>
-
-<p style="font-size: 0.875rem; color: var(--fg-1); max-width: 80ch; margin-bottom: 24px;">
-  This page lists speech-to-text models found under
-  <code>{{ asr_models_dir }}</code>{% if not asr_models_dir_is_default %} (a dedicated ASR folder){% endif %}, grouped by the engine that serves them (detected from the model on disk). Transcribe
-  with <code>POST /v1/audio/transcriptions</code> (OpenAI-compatible multipart upload).
-  Install or configure engines on the <a href="/ui/setup-asr">ASR engines</a> page.
+<div class="lm-eyebrow">Configure</div>
+<h1 class="lm-page-title">ASR</h1>
+<p class="lm-page-lede">
+  Install speech-to-text engines and manage the models they serve — which
+  engine serves a model is detected from the model on disk. Transcribe with
+  <code>POST /v1/audio/transcriptions</code>.
 </p>
+
+{# Reopen the modal a redirect asked for — validated server-side against the
+   engine ids this install has, never echoed from the query. #}
+{% if open_url %}
+<div hidden
+     hx-get="{{ open_url }}"
+     hx-trigger="load"
+     hx-target="#lm-modal-body"
+     hx-swap="innerHTML"></div>
+{% endif %}
+
+{% include "_asr_engines_partial.html" %}
+
+<header class="lm-section-head" style="margin: 40px 0 16px;">
+  <span class="lm-section-marker">Models</span>
+  <span class="lm-section-meta">scanned from <code>{{ asr_models_dir }}</code></span>
+</header>
 
 {# ---- ASR models folder (where models are scanned from) ---- #}
 <div class="lm-asr-engine-card" style="margin-bottom: 24px;">
@@ -257,8 +270,8 @@
    hx-disinherit stops boosted forms inside from inheriting the morph swap (the
    htmx-morph-body-swapError guard). #}
 <div id="asr-models-body"
-     {% if asr_jobs_busy %}
-     hx-get="/ui/asr-models/_partial"
+     {% if asr_jobs_busy or asr_install_busy %}
+     hx-get="/ui/asr/_body"
      hx-trigger="every 2s"
      hx-swap="morph"
      {% endif %}
@@ -276,5 +289,52 @@
     });
   }
 </script>
+
+{# ---- Shared service settings: GPU budget & coexistence ---- #}
+<section class="lm-dm-engine">
+  <div class="lm-dm-engine__head">
+    <span class="lm-dm-engine__title">GPU budget &amp; coexistence
+      <span class="lm-dm-engine__meta">· applies to whichever engine is warm</span>
+    </span>
+  </div>
+  <div class="lm-asr-engine-card">
+    <p style="font-size: 0.8125rem; color: var(--fg-2); margin: 0 0 8px;">
+      ASR runs a warm worker serving concurrent transcriptions.
+      {% if asr_defaults %}Current budget allows <strong>≈ {{ asr_defaults.max_concurrent }}</strong> concurrent task(s).{% endif %}
+    </p>
+    <form method="post" action="/ui/setup/audio/asr-defaults" class="lm-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8125rem; margin: 4px 0;">
+        <input type="checkbox" name="asr_vram_budget_auto" value="on"
+               {% if asr_defaults and asr_defaults.budget_auto %}checked{% endif %}>
+        <span>Auto VRAM budget — size ASR concurrency to the card minus a system reserve
+          {% if asr_defaults %}(now ≈ <strong>{{ asr_defaults.budget_effective_gb }} GB</strong> → up to <strong>{{ asr_defaults.max_concurrent }}</strong> concurrent){% endif %}. Adapts to whatever's loaded (LLM or diffusion).</span>
+      </label>
+      <div class="lm-dm-field">
+        <label class="lm-dm-field__label">Fixed VRAM budget (GB) — used only when Auto is off</label>
+        <input class="lm-input lm-input--mono" type="number" step="0.5" min="0"
+               name="asr_vram_budget_gb" value="{{ asr_defaults.vram_budget_gb if asr_defaults }}">
+        <span class="lm-dm-field__help">Manual cap on ASR VRAM. 0 = uncapped. Ignored while Auto is on.</span>
+      </div>
+      <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8125rem; margin: 8px 0;">
+        <input type="checkbox" name="asr_coexist" value="on" {% if asr_defaults and asr_defaults.coexist %}checked{% endif %}>
+        <span>Run alongside the LLM (coexist). Off = unload the LLM for each transcription.</span>
+      </label>
+      <div class="lm-dm-field">
+        <label class="lm-dm-field__label">Worker idle timeout (s)</label>
+        <input class="lm-input lm-input--mono" type="number" min="0"
+               name="asr_idle_timeout_s" value="{{ asr_defaults.idle_timeout_s if asr_defaults }}">
+        <span class="lm-dm-field__help">Stop the warm worker after this many idle seconds to reclaim VRAM. 0 = never.</span>
+      </div>
+      <div class="lm-dm-field">
+        <label class="lm-dm-field__label">Streaming decode interval (s)</label>
+        <input class="lm-input lm-input--mono" type="number" step="0.05" min="0.05"
+               name="asr_decode_interval_s" value="{{ asr_defaults.decode_interval_s if asr_defaults }}">
+        <span class="lm-dm-field__help">Live-streaming partial cadence (WebSocket mode). Env <code>ASR_DECODE_INTERVAL_S</code> overrides.</span>
+      </div>
+      <button type="submit" class="lm-btn lm-btn--ghost lm-btn--sm">Save GPU settings</button>
+    </form>
+  </div>
+</section>
 
 {% endblock %}

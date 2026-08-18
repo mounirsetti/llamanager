@@ -144,19 +144,20 @@ def _write_meta(p: Path, data: dict[str, Any]) -> None:
     mp.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def _decode_files_json(raw: str) -> tuple[list[str], str, bool]:
+def _decode_files_json(raw: str) -> tuple[list[str], str, bool, str]:
     """Read a downloads.files_json column in either the legacy (list of
     filenames) or new (object with ``files`` / ``subfolder`` /
-    ``whole_repo``) format. Returns ``(files, subfolder, whole_repo)``.
+    ``whole_repo`` / ``target_dir``) format. Returns
+    ``(files, subfolder, whole_repo, target_dir)``.
     Safe against malformed JSON — returns sensible empty defaults."""
     if not raw:
-        return [], "", False
+        return [], "", False, ""
     try:
         decoded = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
-        return [], "", False
+        return [], "", False, ""
     if isinstance(decoded, list):
-        return [str(x) for x in decoded if isinstance(x, str)], "", False
+        return [str(x) for x in decoded if isinstance(x, str)], "", False, ""
     if isinstance(decoded, dict):
         files = decoded.get("files") or []
         if not isinstance(files, list):
@@ -165,8 +166,9 @@ def _decode_files_json(raw: str) -> tuple[list[str], str, bool]:
             [str(x) for x in files if isinstance(x, str)],
             str(decoded.get("subfolder") or ""),
             bool(decoded.get("whole_repo")),
+            str(decoded.get("target_dir") or ""),
         )
-    return [], "", False
+    return [], "", False, ""
 
 
 def _free_bytes(path: Path) -> int:
@@ -524,7 +526,7 @@ class Registry:
         self.cancel_pull(download_id)
         # Clean up partial files in _direct/
         files_json = row["files_json"] if "files_json" in row.keys() else "[]"
-        files, _subfolder, _whole = _decode_files_json(files_json)
+        files, _subfolder, _whole, _target = _decode_files_json(files_json)
         direct_dir = self.models_dir / "_direct"
         # Try to infer filename from source or files list
         source = row["source"] if "source" in row.keys() else ""
@@ -580,7 +582,8 @@ class Registry:
         row = self.db.query_one("SELECT * FROM downloads WHERE id=?", (download_id,))
         if not row:
             return None
-        files, subfolder, whole_repo = _decode_files_json(row["files_json"])
+        files, subfolder, whole_repo, target_dir = _decode_files_json(
+            row["files_json"])
         return {
             "id": row["id"],
             "source": row["source"],
@@ -595,6 +598,10 @@ class Registry:
             "error": row["error"],
             # 'text' | 'image' | 'video' — which page owns this row.
             "family": (row["family"] if "family" in row.keys() else None) or "text",
+            # Where the files land, relative to the models dir. It was always
+            # recorded and never read back out, which left the UI unable to
+            # say WHICH model a component pull belongs to.
+            "target_dir": target_dir,
         }
 
     def list_downloads(self) -> list[dict[str, Any]]:

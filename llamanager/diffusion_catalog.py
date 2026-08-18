@@ -186,6 +186,15 @@ CATALOG: list[CatalogEntry] = [
             ("realrebelai/MiniMax-H3_GGUFs", "MiniMax-H3-FL2VA-Q3_K_M.gguf",
              "diffusion_models", 14.51,
              "Transformer, 3-bit. Optional: more headroom, less detail."),
+            ("ChrisColeTech/minimax-h3-turbo-GGUF",
+             "split/diffusion_models/minimax_h3_fl2va_turbo_Q4_K_M.gguf",
+             "diffusion_models", 10.61,
+             "Transformer, 4-bit, with the 8-step Turbo distill fused in and "
+             "the adaln projection stored against a curve basis. Same "
+             "sampling speed as the Q4_K_M above, but it loads in 16 s "
+             "instead of 76 s and holds 11.2 GB instead of 19.4 GB. Needs "
+             "the LoRA field cleared and 8 steps. Optional alternative to "
+             "the Q4_K_M transformer, not an addition."),
             ("realrebelai/MiniMax-H3_GGUFs",
              "qwen3vl-32B-MiniMax-H3-Q4_K_M.gguf", "text_encoders", 13.58,
              "Qwen3-VL 32B conditioner, 4-bit."),
@@ -247,6 +256,40 @@ CATALOG: list[CatalogEntry] = [
              "VAE."),
             ("Comfy-Org/Krea-2", "loras/krea2_darkbrush.safetensors",
              "loras", 0.44, "Optional style LoRA (dark brush)."),
+            # Edit LoRAs. Each one selects its own inference graph (see
+            # krea_comfy.LORA_RECIPES): the two community node packs place
+            # and condition the reference differently, so the adapter is what
+            # says which pack a request runs through.
+            ("conradlocke/krea2-identity-edit",
+             "krea2_identity_edit_v1_2.safetensors", "loras", 1.83,
+             "Instruction editing with identity preservation: restage a "
+             "person, recolour, insert or restyle, from 1-2 reference "
+             "images. Krea 2 Community Licence (commercial use under $1M "
+             "revenue). Needs a reference image to run."),
+            ("conradlocke/krea2-identity-edit",
+             "krea2_identity_edit_v1_2_r64.safetensors", "loras", 0.46,
+             "The same edit LoRA at rank 64 — a quarter of the size for "
+             "minimal quality loss. Take this one OR the full-rank file "
+             "above, not both."),
+            ("ostris/krea2_turbo_style_reference",
+             "krea2_style_reference.safetensors", "loras", 0.46,
+             "Style transfer from up to 3 reference images: the references "
+             "supply the look, the prompt the content. Krea 2 Community "
+             "Licence. Needs a reference image to run."),
+            ("thedeoxen/Krea-2-pose-controlnet",
+             "krea2_turbo_openpose_controlnet.safetensors", "loras", 0.23,
+             "Pose control (Apache-2.0). Despite the name it is a LoRA, not "
+             "a ControlNet: feed it a DWPose/OpenPose skeleton on black as "
+             "the reference image and the prompt does the rest. llamanager "
+             "does not extract skeletons — supply one."),
+            ("gokaygokay/Krea-2-Realism-LoRA",
+             "krea2_realism_lora.safetensors", "loras", 0.47,
+             "Photorealism style LoRA for plain text-to-image. No reference "
+             "image, no extra nodes."),
+            ("RudySen/Krea2-realism-V2", "Krea2-realism-V2.safetensors",
+             "loras", 1.56,
+             "A second photorealism LoRA (MIT), heavier than the one above "
+             "and prompt-hungry: it wants 4-5 descriptive sentences."),
         ),
     ),
     CatalogEntry(

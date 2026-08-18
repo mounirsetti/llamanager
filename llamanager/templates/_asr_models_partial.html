@@ -37,7 +37,9 @@
       <span class="lm-dm-engine__meta">· engine <code>{{ eng.id }}</code></span>
     </span>
     <span class="lm-dm-engine__meta">
-      {% if eng.configured %}<span class="lm-dm-pill lm-dm-pill--ok">configured</span>{% else %}<a href="/ui/setup-asr">not configured — set up →</a>{% endif %}
+      {% if eng.configured %}<span class="lm-dm-pill lm-dm-pill--ok">configured</span>{% else %}<button type="button" class="lm-btn lm-btn--ghost lm-btn--xs"
+             hx-get="/ui/asr/engine/{{ eng.id }}"
+             hx-target="#lm-modal-body" hx-swap="innerHTML">not configured — set up →</button>{% endif %}
     </span>
   </div>
 
@@ -98,8 +100,7 @@
 
     {% if not eng.configured %}
     <p style="font-size: 0.8125rem; color: var(--fg-2);">
-      The engine isn't configured yet — transcription requests will fail until
-      it's set up on the <a href="/ui/setup-asr">ASR engines</a> page.
+      The engine isn't configured, so transcription requests will fail.
     </p>
     {% endif %}
 

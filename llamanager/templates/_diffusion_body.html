@@ -1,0 +1,232 @@
+{# The Diffusion page's live region: status, engine tiles, model tiles, and
+   the two whole-page sections (failed pulls, GPU sharing).
+
+   The root carries its own id so a morph poll matches it by id rather than
+   hoping idiomorph pairs an id'd wrapper with an un-id'd fragment root, and
+   so the polling attributes themselves disappear the moment nothing is busy.
+   hx-disinherit is load-bearing: without it a boosted form submit inside
+   would inherit hx-swap="morph" while hx-boost targets <body>, and morphing
+   <body> nulls document.body mid-swap. #}
+{% from "_diffusion_engine_cards.html" import install_progress, download_progress with context %}
+<div id="diffusion-body"
+     {% if any_install_busy or any_download_busy %}
+     hx-get="/ui/diffusion/_body"
+     hx-trigger="every 2s"
+     hx-swap="morph"
+     {% endif %}
+     hx-disinherit="hx-swap">
+
+  {# ---------- Where things stand ---------------------------------- #}
+  <div class="lm-tiles" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); margin-bottom: 28px;">
+    <div class="lm-tile">
+      <span class="lm-tile__eyebrow">Models directory</span>
+      <span class="lm-tile__facts"><code>{{ models_dir }}</code></span>
+    </div>
+    <div class="lm-tile">
+      <span class="lm-tile__eyebrow">GPU</span>
+      <span class="lm-tile__facts">
+        {% if gpu.kind == 'amd' %}AMD{% if gpu.rocm_arch %} · {{ gpu.rocm_arch }}{% endif %}
+        {% elif gpu.kind == 'nvidia' %}NVIDIA · CUDA
+        {% elif gpu.kind == 'apple' %}Apple · Metal
+        {% else %}CPU only{% endif %}
+        {% if gpu.kind == 'amd' and gpu.needs_render_group and not gpu.render_group_ok %}
+        <span style="color: var(--bad);">· not in the render group</span>
+        {% endif %}
+      </span>
+    </div>
+    <div class="lm-tile">
+      <span class="lm-tile__eyebrow">Default image model</span>
+      <span class="lm-tile__facts">
+        {% if default_image_model %}<code>{{ default_image_model }}</code>{% if default_image_profile %} · {{ default_image_profile }}{% endif %}
+        {% else %}<span style="color: var(--fg-3);">none set</span>{% endif %}
+      </span>
+    </div>
+  </div>
+
+  {# In-flight work, at the top. It used to be findable only by scrolling to
+     whichever of seven cards owned it. #}
+  {% if any_install_busy or any_download_busy %}
+  <section class="lm-section" style="margin-top: 0;">
+    <header class="lm-section-head">
+      <span class="lm-section-marker">In flight</span>
+      <span class="lm-section-meta">installs and downloads</span>
+    </header>
+    {% for eng_id, install in engine_installs.items() %}
+      {% if install and install.status in ('pending', 'running') %}
+        {{ install_progress(eng_id, install) }}
+      {% endif %}
+    {% endfor %}
+    {{ download_progress() }}
+  </section>
+  {% endif %}
+
+  {# ---------- Engines --------------------------------------------- #}
+  <section class="lm-section" {% if not (any_install_busy or any_download_busy) %}style="margin-top: 0;"{% endif %}>
+    <header class="lm-section-head">
+      <span class="lm-section-marker">Engines</span>
+      <span class="lm-section-meta">{{ engine_tiles|selectattr('state', 'equalto', 'ready')|list|length }} of {{ engine_tiles|length }} ready</span>
+    </header>
+    <div class="lm-tiles">
+      {% for t in engine_tiles %}
+      <article class="lm-tile" data-engine="{{ t.id }}">
+        <button type="button" class="lm-tile__open"
+                hx-get="/ui/diffusion/engine/{{ t.id }}"
+                hx-target="#lm-modal-body" hx-swap="innerHTML"
+                aria-label="Open {{ t.label }} setup">
+          <span class="lm-tile__eyebrow">{{ t.tag }}</span>
+          <span class="lm-tile__title">{{ t.label }}</span>
+        </button>
+        <span class="lm-tile__status" data-state="{{ t.state }}">{{ t.status_text }}</span>
+        {% if t.pct is not none %}
+        <span class="lm-tile__bar"><span style="width: {{ t.pct }}%;"></span></span>
+        {% endif %}
+        {% if t.facts %}<span class="lm-tile__facts">{{ t.facts }}</span>{% endif %}
+        <div class="lm-tile__actions">
+          {% if t.action == 'cancel' and t.install %}
+          <form method="post"
+                action="/ui/diffusion/engine/{{ t.id }}/install-deps/{{ t.install.id }}/cancel">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Cancel install</button>
+          </form>
+          {% elif t.action in ('install', 'retry') %}
+          {# A bare button, not a form submit: data-preflight opens the
+             destination + free-space dialog, and the real POST is made by the
+             form that dialog loads. #}
+          <button type="button" class="lm-btn lm-btn--primary lm-btn--xs"
+                  data-preflight="engine={{ t.id }}&kind=deps&open=engine:{{ t.id }}">
+            {{ 'Retry install' if t.action == 'retry' else 'Install dependencies' }}
+          </button>
+          {% endif %}
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+
+  {# ---------- Models ---------------------------------------------- #}
+  <section class="lm-section">
+    <header class="lm-section-head">
+      <span class="lm-section-marker">Models</span>
+      <span class="lm-section-meta">{{ model_tiles|selectattr('installed')|list|length }} of {{ model_tiles|length }} on disk</span>
+    </header>
+    <div class="lm-tiles">
+      {% for m in model_tiles %}
+      <article class="lm-tile {% if m.is_active_default %}lm-tile--default{% endif %}"
+               data-model="{{ m.model_id }}">
+        <button type="button" class="lm-tile__open"
+                hx-get="/ui/diffusion/model?id={{ m.model_id|urlencode }}"
+                hx-target="#lm-modal-body" hx-swap="innerHTML"
+                aria-label="Open {{ m.label }}">
+          <span class="lm-tile__eyebrow">{{ m.engine_label }}</span>
+          <span class="lm-tile__title">{{ m.label }}</span>
+        </button>
+        <span class="lm-tile__status" data-state="{{ m.state }}">{{ m.status_text }}</span>
+        {% if m.pct is not none %}
+        <span class="lm-tile__bar"><span style="width: {{ m.pct }}%;"></span></span>
+        {% endif %}
+        {% if m.facts %}<span class="lm-tile__facts">{{ m.facts }}</span>{% endif %}
+        <div class="lm-tile__actions">
+          {% if m.action == 'download' %}
+          <button type="button" class="lm-btn lm-btn--primary lm-btn--xs"
+                  data-preflight="engine={{ m.engine }}&kind=model&repo={{ m.repo|urlencode }}{% if m.subfolder %}&subfolder={{ m.subfolder|urlencode }}{% endif %}&target_dir={{ m.model_id|urlencode }}&open=model:{{ m.model_id|urlencode }}">
+            Download
+          </button>
+          {% elif m.action == 'set_default' %}
+          <form method="post" action="/ui/diffusion-models/activate">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="model_id" value="{{ m.model_id }}">
+            <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Set as default</button>
+          </form>
+          {% endif %}
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+
+{# ---------- Failed / cancelled model downloads --------------------
+   ``downloads`` on this page is scoped to the image/video families (see
+   _setup_diffusion_ctx), so these are diffusion pulls only. They used to
+   land in the LLM list on /ui/models, where a MiniMax-H3 component pull
+   read as a language model. #}
+{% set failed_downloads = downloads | selectattr('status', 'in', ['failed', 'cancelled']) | list %}
+{% if failed_downloads %}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Failed downloads</span>
+    <span class="lm-section-meta">{{ failed_downloads|length }} model pull{{ 's' if failed_downloads|length != 1 }} that didn't finish</span>
+  </header>
+  <table class="lm-table">
+    <tbody>
+    {% for d in failed_downloads %}
+    <tr>
+      <td data-label="Model">
+        <code style="color: var(--fg-2);">{{ d.source }}</code>
+        <span class="lm-pill lm-pill--crashed" style="margin-left: 8px;">{{ d.status }}</span>
+      </td>
+      <td data-label="">
+        {% if d.error %}<span style="font-size: 0.8125rem; color: var(--bad);">{{ d.error[:80] }}{% if d.error|length > 80 %}&hellip;{% endif %}</span>{% endif %}
+      </td>
+      <td class="actions" data-label="">
+        <form method="post" action="/ui/downloads/{{ d.id }}/delete"
+              data-confirm="Remove this entry and clean up any partial files?"
+              style="display: inline;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Remove</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+
+{# ---------- Coexistence policy ----------------------------------- #}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Coexistence</span>
+    <span class="lm-section-meta">how text and image share the GPU</span>
+  </header>
+
+  <p style="font-size: 0.875rem; color: var(--fg-1); max-width: 72ch; margin-bottom: 16px;">
+    A single GPU usually can't hold both a large LLM and a diffusion model at once.
+    These switches govern what happens when an image request arrives while an LLM is loaded.
+  </p>
+
+  <div class="lm-engine-card" style="margin-bottom: 0;">
+    <form class="lm-form" method="post" action="/ui/setup/coexistence">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; font-size: 0.875rem;">
+        <input type="checkbox" name="unload_text_on_arrival" {% if coex.unload_text_on_arrival %}checked{% endif %}>
+        <span>
+          <strong>Unload text engine when image task arrives</strong>
+          <span style="display: block; color: var(--fg-2); font-size: 0.8125rem;">
+            Default. Single-slot dashboard invariant. Image task gets the GPU; the text engine pauses.
+          </span>
+        </span>
+      </label>
+      <label style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; font-size: 0.875rem;">
+        <input type="checkbox" name="restart_text_after_image" {% if coex.restart_text_after_image %}checked{% endif %}>
+        <span>
+          <strong>Restart text engine after image completes</strong>
+          <span style="display: block; color: var(--fg-2); font-size: 0.8125rem;">
+            Re-launches the text engine from its prior spec. Disable to stay in image-only mode after a generation.
+          </span>
+        </span>
+      </label>
+      <label style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 14px; font-size: 0.875rem;">
+        <input type="checkbox" name="allow_concurrent" {% if coex.allow_concurrent %}checked{% endif %}>
+        <span>
+          <strong>Allow concurrent text + image</strong>
+          <span style="display: block; color: var(--accent); font-size: 0.8125rem;">
+            ⚠ Risks VRAM OOM. Only enable on cards with ≥ 48 GB VRAM or when you know both fit.
+          </span>
+        </span>
+      </label>
+      <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Save policy</button>
+    </form>
+  </div>
+</section>
+</div>

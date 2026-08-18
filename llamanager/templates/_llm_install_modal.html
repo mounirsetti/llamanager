@@ -1,0 +1,122 @@
+{# Install an inference engine: hardware readout, source/backend picker,
+   progress. The picker and its progress block keep their own ids
+   (#install-form, #install-progress, #install-submit) because
+   /ui/setup/install and /ui/setup/_install_progress swap into them — the
+   progress block self-polls, so it works the same inside the modal. #}
+<div id="lm-modal-content">
+  <header class="lm-modal__head">
+    <div style="min-width: 0;">
+      <span class="lm-modal__eyebrow">Text inference</span>
+      <h2 class="lm-modal__title">Install an engine</h2>
+    </div>
+    <button type="button" class="lm-btn lm-btn--ghost lm-btn--xs"
+            data-lm-dialog-close>Close</button>
+  </header>
+  <div class="lm-modal__body">
+
+  {% if suggested_backend or suggested_source %}
+  <div class="lm-dossier">
+    <span class="lm-dossier__label">Detected hardware</span>
+    <span class="lm-dossier__pick">
+      {% if platform_tag == 'macos' and machine|lower in ['arm64', 'aarch64'] %}
+        Apple Silicon — MLX or Metal recommended
+      {% elif suggested_backend == 'cuda' %}
+        NVIDIA — CUDA recommended
+      {% elif suggested_backend == 'hip' %}
+        AMD — HIP recommended
+      {% elif suggested_backend == 'vulkan' %}
+        Vulkan available — works across NVIDIA, AMD, Intel
+      {% else %}
+        No GPU detected — CPU build is the safe choice
+      {% endif %}
+    </span>
+  </div>
+  {% endif %}
+
+  <form method="post" action="/ui/setup/install" style="margin-top: 22px;" id="install-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <fieldset class="lm-pick lm-pick--sources" id="source-picker">
+      <legend>Source</legend>
+      {% for src in sources %}
+      <label class="lm-pick__opt">
+        <input type="radio" name="source" value="{{ src.id }}"
+               data-source="{{ src.id }}"
+               {% if src.id == selected_source %}checked{% endif %}>
+        <span class="lm-pick__card">
+          <span class="lm-pick__title-row">
+            <span class="lm-pick__title">{{ src.label }}</span>
+            {% if src.id == suggested_source %}<span class="lm-pick__chip lm-pick__chip--suggested">suggested</span>{% endif %}
+          </span>
+          <span class="lm-pick__desc">{{ src.description }}</span>
+          <a class="lm-pick__link" href="{{ src.url }}" onclick="event.stopPropagation()">GitHub &nearr;</a>
+        </span>
+      </label>
+      {% endfor %}
+    </fieldset>
+
+    <fieldset class="lm-pick lm-pick--backends" id="backend-picker" style="margin-top: 22px;">
+      <legend>Backend</legend>
+      {% for be_id, be in backends.items() %}
+        {% if platform_tag in be.platforms %}
+        {% set allowed = be.get('sources') %}
+        <label class="lm-pick__opt"
+               data-be-sources="{{ (allowed | join(',')) if allowed else 'all' }}">
+          <input type="radio" name="backend" value="{{ be_id }}"
+                 {% if be_id == selected_backend %}checked{% endif %}>
+          <span class="lm-pick__card">
+            <span class="lm-pick__title-row">
+              <span class="lm-pick__title">{{ be.label }}{% if be.vendor %} <span style="color: var(--fg-3); font-weight: 400;">/ {{ be.vendor }}</span>{% endif %}</span>
+              {% if be_id == suggested_backend %}<span class="lm-pick__chip lm-pick__chip--suggested">suggested</span>{% endif %}
+            </span>
+            <span class="lm-pick__desc">{{ be.description }}</span>
+          </span>
+        </label>
+        {% endif %}
+      {% endfor %}
+    </fieldset>
+
+    <div class="lm-install-row">
+      <button type="submit" id="install-submit" class="lm-btn lm-btn--primary"
+              {% if install.status == 'running' %}disabled{% endif %}>
+        {% if install.status == 'running' %}Installing&hellip;{% else %}Install &rarr;{% endif %}
+      </button>
+    </div>
+  </form>
+
+  {% include "_install_progress.html" %}
+
+    <div class="lm-engine-section">
+      <div class="lm-engine-section__head">
+        <span>Already have a binary?</span>
+      </div>
+
+<details style="margin-top: 12px;">
+  <summary style="cursor: pointer; font-size: 0.8125rem; color: var(--fg-2); user-select: none; padding: 4px 0;">Set binary path manually</summary>
+  <form class="lm-form" method="post" action="/ui/setup/binary-path" style="margin-top: 10px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-field">
+      <label class="lm-field-label" for="binary-path-input">Binary path</label>
+      <div style="display: flex; gap: 8px; align-items: flex-end; max-width: 480px;">
+        <input id="binary-path-input"
+               class="lm-input lm-input--mono"
+               type="text"
+               name="binary_path"
+               value="{{ configured_binary }}"
+               placeholder="llama-server or /usr/local/bin/llama-server"
+               style="flex: 1; min-width: 0;">
+        <button type="button"
+                class="lm-btn lm-btn--ghost lm-btn--xs"
+                hx-get="/ui/fs/browse?kind=file&target=binary-path-input"
+                data-fs-prefill="binary-path-input"
+                hx-target="[data-fs-host='binary-path-input']"
+                hx-swap="innerHTML">Browse…</button>
+      </div>
+      <div class="lm-fs-host" data-fs-host="binary-path-input"></div>
+    </div>
+    <button type="submit" class="lm-btn lm-btn--primary">Save</button>
+  </form>
+</details>
+    </div>
+  </div>
+</div>

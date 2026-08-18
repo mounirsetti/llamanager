@@ -56,14 +56,14 @@ def test_models_page_has_kv_and_mmproj_controls(app):
 
 def test_profile_save_navigates_not_swaps(app):
     """A boosted (htmx) profile save must respond with HX-Redirect — a real
-    navigation back to the models page — NOT a 303 that htmx would follow and
+    navigation back to the LLM page — NOT a 303 that htmx would follow and
     swap into <body>. The boosted whole-page body swap of the models page was
     persistently fragile ('UI breaks on save'); a navigation sidesteps it.
     Non-htmx posts still get a 303 so plain form submits work. Regression
     guard for the recurring save breakage."""
     _seed_model(app)
     with _admin_client(app) as client:
-        tok = _csrf(client.get("/ui/models").text)
+        tok = _csrf(client.get("/ui/llm").text)
         data = {"csrf_token": tok, "model_id": "test/model.gguf",
                 "new_name": "test", "ctx_size": "4096",
                 "ram_spill_policy": "default", "args_json": "{}"}
@@ -71,13 +71,13 @@ def test_profile_save_navigates_not_swaps(app):
         r = client.post("/ui/models/profiles/test/update", data=data,
                         headers={"HX-Request": "true"}, follow_redirects=False)
         assert r.status_code == 204
-        assert r.headers.get("HX-Redirect") == "/ui/models"
+        assert r.headers.get("HX-Redirect") == "/ui/llm"
         assert r.content == b""
         # plain request → standard 303
         r2 = client.post("/ui/models/profiles/test/update", data=data,
                          follow_redirects=False)
         assert r2.status_code == 303
-        assert r2.headers["location"] == "/ui/models"
+        assert r2.headers["location"] == "/ui/llm"
 
 
 def test_models_cards_disinherits_swap(app):

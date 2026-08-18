@@ -156,11 +156,17 @@ class EnginePackages:
     # like sherpa-onnx (onnxruntime) — the installer then skips the CPU
     # torch-index step and the torch import verification.
     needs_torch: bool = True
-    # Git repos to clone before pip runs, as (url, dest-name) pairs. The dest
-    # is relative to the venv root's parent, so sources land next to the venvs
-    # on the big disk rather than in the data dir. Used by engines that are a
-    # program rather than a library (ComfyUI and its custom nodes).
-    repos: tuple[tuple[str, str], ...] = ()
+    # Git repos to clone before pip runs, as (url, dest-name) or
+    # (url, dest-name, commit) tuples. The dest is relative to the venv root's
+    # parent, so sources land next to the venvs on the big disk rather than in
+    # the data dir. Used by engines that are a program rather than a library
+    # (ComfyUI and its custom nodes).
+    #
+    # A third element pins the checkout to that commit and stops it tracking
+    # the branch. Custom-node packs that reach into ComfyUI internals get one:
+    # they break when either side moves, and an unpinned pull turns a working
+    # install into a broken one at the next unrelated re-install.
+    repos: tuple[tuple[str, ...], ...] = ()
     # Requirement files to install after ``packages``, relative to the first
     # cloned repo. Kept separate from ``packages`` because the file only
     # exists once the clone step has run.
@@ -220,7 +226,9 @@ _COMFY_SMOKE = (
     "import execution, nodes; "
     "asyncio.run(nodes.init_extra_nodes(init_api_nodes=False)); "
     "m = nodes.NODE_CLASS_MAPPINGS; "
-    "missing = [n for n in ('UnetLoaderGGUF', 'CLIPLoaderGGUF') "
+    "missing = [n for n in ('UnetLoaderGGUF', 'CLIPLoaderGGUF', "
+    "'Krea2EditModelPatch', 'Krea2EditGroundedEncode', "
+    "'TextEncodeKrea2OstrisEdit', 'Krea2OstrisEditModelPatch') "
     "if n not in m]; "
     "print('comfy ok:', len(m), 'nodes'); "
     "sys.exit('missing GGUF nodes: %s' % missing if missing else 0)"
@@ -391,6 +399,23 @@ ENGINE_PLANS: dict[str, EnginePackages] = {
             # kernels, which is what makes it work on ROCm.
             ("https://github.com/city96/ComfyUI-GGUF",
              "comfyui/custom_nodes/ComfyUI-GGUF"),
+            # Krea 2 editing. Two packs, because Krea 2's community edit
+            # LoRAs were trained against one or the other and their reference
+            # geometry differs — a LoRA in the wrong pack still renders,
+            # wrongly. Both are dependency-free and their node names do not
+            # collide, so they coexist; krea_comfy picks the graph from the
+            # LoRA the profile names.
+            #
+            # Both are PINNED. They wrap ComfyUI internals (the Krea 2
+            # SingleStreamDiT forward, flux RoPE helpers, the reference-latent
+            # path), which is precisely the code that moves between ComfyUI
+            # releases — lbouaraba's changelog already records one such break.
+            ("https://github.com/lbouaraba/comfyui-krea2edit",
+             "comfyui/custom_nodes/comfyui-krea2edit",
+             "86f886dac23013d88996e3a2e99093ba44d322fb"),
+            ("https://github.com/ostris/ComfyUI-Krea2-Ostris-Edit",
+             "comfyui/custom_nodes/ComfyUI-Krea2-Ostris-Edit",
+             "7756566160c4a1b24bb1bd9f0ff3ced1a83d7547"),
         ),
         requirements=("requirements.txt",),
         amd_extra_wheels=("torchaudio",),
@@ -420,7 +445,9 @@ ENGINE_PLANS: dict[str, EnginePackages] = {
             "VRAM between requests. Installing this engine enables the "
             "MiniMax-H3 (video+audio) and Krea 2 Turbo ComfyUI model "
             "variants, which run from pre-quantised GGUF weights sized for a "
-            "32 GB card."
+            "32 GB card. It also installs both Krea 2 edit node packs, which "
+            "turn Krea 2 into an instruction editor once one of the edit "
+            "LoRAs is downloaded."
         ),
     ),
     "asr": EnginePackages(
@@ -1106,11 +1133,27 @@ class EngineInstaller:
                     raise RuntimeError(
                         "'git' not found on PATH — it is needed to fetch "
                         f"{base.label}'s source.")
-                for i, (url, dest_rel) in enumerate(base.repos):
+                for i, spec in enumerate(base.repos):
+                    url, dest_rel, *rest = spec
+                    pin = rest[0] if rest else ""
                     dest = src_root / dest_rel
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     pct = 3 + int(2 * (i + 1) / len(base.repos))
-                    if (dest / ".git").is_dir():
+                    if (dest / ".git").is_dir() and pin:
+                        set_progress(pct, f"Pinning {dest_rel} to {pin[:8]}")
+                        rc = await self._run_subprocess(
+                            ["git", "-C", str(dest), "fetch", "--depth", "1",
+                             "origin", pin], cancel, emit)
+                        if rc == 0:
+                            rc = await self._run_subprocess(
+                                ["git", "-C", str(dest), "checkout",
+                                 "--detach", "FETCH_HEAD"], cancel, emit)
+                        if rc != 0:
+                            raise RuntimeError(
+                                f"could not pin {dest_rel} to {pin} (exit "
+                                f"{rc}) — the checkout may be at an untested "
+                                "revision")
+                    elif (dest / ".git").is_dir():
                         set_progress(pct, f"Updating {dest_rel}")
                         rc = await self._run_subprocess(
                             ["git", "-C", str(dest), "pull", "--ff-only"],
@@ -1121,6 +1164,28 @@ class EngineInstaller:
                             # works and the operator can reset it by hand.
                             emit(f"[warn] could not fast-forward {dest_rel}; "
                                  "keeping the existing checkout")
+                    elif pin:
+                        # Fetch just the pinned commit rather than the branch
+                        # tip, which a --depth 1 clone would not contain.
+                        # Spelled out with init+fetch instead of
+                        # `clone --revision` so it works on older git too.
+                        set_progress(pct, f"Cloning {url} at {pin[:8]}")
+                        dest.mkdir(parents=True, exist_ok=True)
+                        steps = (
+                            ["git", "-C", str(dest), "init", "-q"],
+                            ["git", "-C", str(dest), "remote", "add", "origin",
+                             url],
+                            ["git", "-C", str(dest), "fetch", "--depth", "1",
+                             "origin", pin],
+                            ["git", "-C", str(dest), "checkout", "--detach",
+                             "FETCH_HEAD"],
+                        )
+                        for step in steps:
+                            rc = await self._run_subprocess(step, cancel, emit)
+                            if rc != 0:
+                                raise RuntimeError(
+                                    f"fetching {url} at {pin} failed "
+                                    f"(exit {rc})")
                     else:
                         set_progress(pct, f"Cloning {url} into {dest}")
                         rc = await self._run_subprocess(

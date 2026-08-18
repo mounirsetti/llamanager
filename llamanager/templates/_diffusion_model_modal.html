@@ -1,0 +1,385 @@
+{# One diffusion model: what it is, how to get it, and (once it is on disk)
+   its profiles. Rendered into the shared detail modal from a model tile.
+
+   Everything here used to be split across two pages — the catalog row and
+   profile editor on /ui/diffusion-models, the component downloads and the
+   LoRA manager inside the ComfyUI card on /ui/diffusion — even though
+   all of it describes one directory under models/. #}
+{% from "_diffusion_fields.html" import schema_fields %}
+{% from "_diffusion_engine_cards.html" import component_downloads, model_download_form, download_progress with context %}
+
+{% macro profile_summary(profile) %}
+{% set parts = [] %}
+{% for k, v in profile.fields.items() %}
+  {% if v %}{% set _ = parts.append(k + '=' + v) %}{% endif %}
+{% endfor %}
+{% if parts %}{{ parts|join(' · ') }}{% else %}(no overrides set){% endif %}
+{% endmacro %}
+
+{% macro krea_lora_manager(entry) %}
+{# Everything in <canonical_id>/loras/, which is the ONLY place krea_comfy
+   looks for a LoRA — ComfyUI loads it by filename from the model's own
+   folder. Three ways in: the curated rows in Components above, the live Krea
+   collection below, and the by-hand form for anything else on the Hub. #}
+<div class="lm-engine-section__head">
+  <span>Installed LoRAs</span>
+  <span class="lm-engine-section__meta">
+    {{ krea_loras|length }} in {{ entry.canonical_id }}/loras/
+  </span>
+</div>
+<p class="lm-engine-section__note">
+  Selected per profile. An <em>editing</em> LoRA also changes the graph the
+  engine runs and requires reference images; a mismatch fails the request
+  rather than sampling without it.
+</p>
+{% if krea_loras %}
+<div style="display: grid; gap: 6px; margin-bottom: 16px;">
+  {% for lora in krea_loras %}
+  <div style="display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px;
+              align-items: center; padding: 8px 10px;
+              border: 1px solid var(--bg-3); background: var(--bg-2);">
+    <div style="min-width: 0;">
+      <code style="font-size: 0.75rem; display: block; overflow-wrap: anywhere;">{{ lora.name }}</code>
+      <span style="font-size: 0.6875rem; color: var(--fg-2);">{{ lora.detail }}</span>
+    </div>
+    <span class="lm-engine-card__tag" style="white-space: nowrap;">{{ lora.role }}</span>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, monospace;
+                 font-size: 0.75rem; color: var(--fg-2); white-space: nowrap;">
+      {{ '%.2f'|format(lora.size_gb) }} GB
+    </span>
+    <form method="post" action="/ui/diffusion/krea-lora/delete"
+          style="margin: 0;"
+          data-confirm="Delete {{ lora.name }}? Any profile naming it keeps the name and will fail at request time until you pick another.">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="filename" value="{{ lora.name }}">
+      <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Delete</button>
+    </form>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="lm-engine-section__note" style="margin-bottom: 16px;">
+  None installed.
+</p>
+{% endif %}
+
+<div class="lm-engine-section__head">
+  <span>Add a LoRA from Hugging Face</span>
+  <span class="lm-engine-section__meta">any repo</span>
+</div>
+<p class="lm-engine-section__note">
+  Repo plus the exact filename inside it; the file lands in
+  <code>{{ entry.canonical_id }}/loras/</code>. An unrecognised LoRA runs as a
+  plain text-to-image style LoRA — the edit node packs each need their own
+  graph, which is not guessed from a filename.
+</p>
+<form method="post"
+      action="/ui/diffusion/engine/krea_comfy/download-model"
+      style="display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end;
+             margin-bottom: 16px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="target_dir" value="{{ entry.canonical_id }}/loras">
+  <label style="display: grid; gap: 4px; flex: 1 1 220px;">
+    <span style="font-size: 0.6875rem; color: var(--fg-2);">Repo</span>
+    <input type="text" name="repo" required placeholder="ostris/krea2_turbo_style_reference"
+           class="lm-input" style="width: 100%;">
+  </label>
+  <label style="display: grid; gap: 4px; flex: 1 1 220px;">
+    <span style="font-size: 0.6875rem; color: var(--fg-2);">File in repo</span>
+    <input type="text" name="filename" required placeholder="krea2_style_reference.safetensors"
+           class="lm-input" style="width: 100%;">
+  </label>
+  <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Download</button>
+</form>
+
+<div class="lm-engine-section__head">
+  <span>Krea's own collection</span>
+  <span class="lm-engine-section__meta">live Hugging Face collection</span>
+</div>
+<p class="lm-engine-section__note">
+  Refresh pulls the current contents of
+  <code>huggingface.co/collections/krea/krea-2-loras</code> — Krea's official
+  style LoRAs. The community edit LoRAs are not in it; those are in
+  Components above.
+</p>
+<div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;">
+  <button type="button" class="lm-btn lm-btn--ghost lm-btn--sm"
+          hx-get="/ui/diffusion/krea-loras"
+          hx-target="#lm-modal-content" hx-swap="morph">
+    Refresh Krea LoRAs
+  </button>
+  {% if krea_lora_collection.last_checked %}
+  <span style="font-size: 0.75rem; color: var(--fg-2);">
+    Last checked {{ krea_lora_collection.last_checked | localdt }}
+    {% if krea_lora_collection['items'] %} · {{ krea_lora_collection['items']|length }} found{% endif %}
+  </span>
+  {% endif %}
+</div>
+{% if krea_lora_collection.error %}
+<p class="lm-engine-section__note" style="color: var(--danger);">
+  Could not refresh Krea LoRAs: {{ krea_lora_collection.error }}
+</p>
+{% endif %}
+{% if krea_lora_collection['items'] %}
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; margin-bottom: 16px;">
+  {% for lora in krea_lora_collection['items'] %}
+  <div style="display: grid; grid-template-columns: 48px 1fr auto; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid var(--bg-3); background: var(--bg-2);">
+    {% if lora.preview %}
+    <img src="{{ lora.preview }}" alt="" loading="lazy"
+         style="width: 48px; height: 48px; object-fit: cover; border-radius: 4px;">
+    {% else %}
+    <div style="width: 48px; height: 48px; border: 1px solid var(--bg-3); background: var(--bg-1);"></div>
+    {% endif %}
+    <div style="min-width: 0;">
+      <code style="font-size: 0.75rem; display: block; overflow-wrap: anywhere;">{{ lora.repo }}</code>
+      <span style="font-size: 0.6875rem; color: var(--fg-2);">
+        {{ lora.filename or 'safetensors file not detected' }}
+        {% if lora.size_gb %} · {{ '%.2f GB' % lora.size_gb }}{% endif %}
+      </span>
+    </div>
+    {% if lora.filename and (lora.filename.split('/')|last) in krea_lora_on_disk %}
+    <span class="lm-engine-card__tag" style="white-space: nowrap;">on disk</span>
+    {% elif lora.filename %}
+    <button type="button" class="lm-btn lm-btn--ghost lm-btn--xs"
+            data-preflight="engine=krea_comfy&kind=model&repo={{ lora.repo|urlencode }}&filename={{ lora.filename|urlencode }}&target_dir={{ (entry.canonical_id ~ '/loras')|urlencode }}">
+      Download
+    </button>
+    {% else %}
+    <span style="font-size: 0.6875rem; color: var(--fg-2); white-space: nowrap;">no file</span>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="lm-engine-section__note" style="margin-bottom: 16px;">
+  Click refresh to list the current Krea 2 LoRA collection.
+</p>
+{% endif %}
+{% endmacro %}
+
+{# Self-polling root: while this model has a download in flight the fragment
+   refreshes itself in place. morph keeps open <details> and half-typed form
+   values; hx-disinherit stops the forms inside from inheriting the morph swap
+   (a boosted submit targets <body>, and morphing <body> crashes htmx). #}
+<div id="lm-modal-content"
+     {% if model_busy %}
+     hx-get="/ui/diffusion/model?id={{ row.model_id|urlencode }}"
+     hx-trigger="every 2s"
+     hx-swap="morph"
+     {% endif %}
+     hx-disinherit="hx-swap">
+  <header class="lm-modal__head">
+    <div style="min-width: 0;">
+      <span class="lm-modal__eyebrow">{{ eng.label }}</span>
+      <h2 class="lm-modal__title">{{ row.catalog.label if row.catalog else row.model_id }}</h2>
+    </div>
+    <button type="button" class="lm-btn lm-btn--ghost lm-btn--xs"
+            data-lm-dialog-close>Close</button>
+  </header>
+
+  <div class="lm-modal__body">
+    <div class="lm-engine-card">
+      <div class="lm-engine-card__status" data-state="{{ 'ready' if row.installed else 'idle' }}">
+        {% if row.installed %}
+          On disk{% if row.size_bytes %} — {{ '%.1f GB' % (row.size_bytes / (1024**3)) }}{% endif %}
+          under <code style="margin-left: 4px;">{{ row.model_id }}</code>
+        {% else %}
+          Not downloaded{% if row.catalog and row.catalog.approx_size_gb %} — about {{ row.catalog.approx_size_gb }} GB{% endif %}
+        {% endif %}
+      </div>
+
+      {% if row.catalog %}
+      <p class="lm-engine-section__note">
+        {{ row.catalog.description }}
+        {% if row.catalog.homepage %}
+        <a href="{{ row.catalog.homepage }}" target="_blank" rel="noopener"
+           style="color: var(--fg-2);">model card &rarr;</a>
+        {% endif %}
+      </p>
+      {% endif %}
+
+      {% if not eng.configured %}
+      <p class="lm-engine-section__note" style="color: var(--warn);">
+        The <code>{{ eng.id }}</code> engine is not configured, so generation
+        will fail even once these weights are on disk.
+      </p>
+      {% endif %}
+
+      {# ---- Getting the weights ---- #}
+      {% if row.components %}
+        {{ component_downloads(eng.id, row.catalog) }}
+      {% elif row.catalog and not row.installed %}
+      <div class="lm-engine-section">
+        <div class="lm-engine-section__head">
+          <span>Download</span>
+          <span class="lm-engine-section__meta">from Hugging Face</span>
+        </div>
+        {{ model_download_form(eng.id, row.catalog.hf_repo, row.catalog.subfolder,
+                               'Pulled into ' ~ row.model_id ~ '/ under the models directory.') }}
+      </div>
+      {% endif %}
+      {{ download_progress() }}
+
+      {% if row.installed %}
+      <div class="lm-engine-section">
+        <div class="lm-engine-section__head">
+          <span>Use</span>
+          {% if row.is_active_default %}
+          <span class="lm-engine-section__meta">this is the default image model</span>
+          {% endif %}
+        </div>
+        {# ---- Activate ---- #}
+        {% if not row.is_active_default %}
+        <form method="post" action="/ui/diffusion-models/activate" style="display: inline;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="model_id" value="{{ row.model_id }}">
+          <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">Set as default image model</button>
+        </form>
+        {% endif %}
+
+        {# ---- Per-model default-profile picker ---- #}
+        <form method="post" action="/ui/diffusion-models/profiles/set-model-default"
+              class="lm-form" style="display: inline-block; margin-left: 6px;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="model_id" value="{{ row.model_id }}">
+          <label class="lm-dm-engine__meta">Default profile:</label>
+          <select class="lm-input lm-input--mono" name="profile_name" onchange="this.form.submit()">
+            <option value="" {% if not row.default_profile %}selected{% endif %}>— none —</option>
+            {% for p in row.profiles %}
+            <option value="{{ p.name }}" {% if row.default_profile == p.name %}selected{% endif %}>{{ p.name }}</option>
+            {% endfor %}
+          </select>
+          <noscript><button type="submit" class="lm-btn lm-btn--xs">Save</button></noscript>
+        </form>
+
+        {# ---- Existing profiles ---- #}
+        <div class="lm-dm-section">
+          <div class="lm-dm-section__head">
+            <span>Profiles</span>
+            <span class="lm-dm-engine__meta">{{ row.profiles|length }} saved</span>
+          </div>
+
+          {% if row.profiles %}
+            {% for prof in row.profiles %}
+            <details class="lm-dm-profile {% if row.default_profile == prof.name %}is-default{% endif %}">
+              <summary>
+                <strong class="lm-dm-profile__name">{{ prof.name }}</strong>
+                {% if row.default_profile == prof.name %}
+                <span class="lm-dm-pill lm-dm-pill--accent">default</span>
+                {% endif %}
+                <span class="lm-dm-profile__summary">{{ profile_summary(prof) }}</span>
+              </summary>
+              <div class="lm-dm-profile__body">
+                <form method="post"
+                      action="/ui/diffusion-models/profiles/{{ prof.name }}/update"
+                      class="lm-form">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="model_id" value="{{ row.model_id }}">
+                  <input type="hidden" name="engine" value="{{ eng.id }}">
+
+                  <div class="lm-dm-field">
+                    <label class="lm-dm-field__label">Profile name</label>
+                    <input class="lm-input lm-input--mono" type="text"
+                           name="new_name" value="{{ prof.name }}"
+                           pattern="[a-z0-9._-]+" required>
+                    <span class="lm-dm-field__help">Lowercase letters, digits, hyphens, dots, underscores.</span>
+                  </div>
+
+                  {{ schema_fields(eng.schema, prof, dir_options=row.dir_options, uid=row.model_id ~ "-" ~ prof.name) }}
+
+                  <div class="lm-dm-actions">
+                    <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Save changes</button>
+                  </div>
+                </form>
+
+                <div class="lm-dm-actions" style="margin-top: 12px;">
+                  {# Clone #}
+                  <form method="post" action="/ui/diffusion-models/profiles/{{ prof.name }}/clone">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="model_id" value="{{ row.model_id }}">
+                    <input class="lm-input lm-input--mono" type="text" name="new_name"
+                           placeholder="new-profile-name"
+                           pattern="[a-z0-9._-]+" required
+                           style="display: inline-block; width: 220px;">
+                    <button type="submit" class="lm-btn lm-btn--ghost lm-btn--xs">Clone</button>
+                  </form>
+
+                  {# Delete #}
+                  <form method="post" action="/ui/diffusion-models/profiles/{{ prof.name }}/delete">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="model_id" value="{{ row.model_id }}">
+                    <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs"
+                            data-confirm="Delete profile '{{ prof.name }}' from {{ row.model_id }}? This cannot be undone.">Delete</button>
+                  </form>
+                </div>
+              </div>
+            </details>
+            {% endfor %}
+          {% elif eng.default_profiles %}
+            {# Show built-in defaults read-only with a Materialize button. #}
+            <div class="lm-dm-default-block">
+              <p style="font-size: 0.8125rem; color: var(--fg-2); margin: 0 0 8px;">
+                No saved profiles. The <code>{{ eng.id }}</code> engine ships
+                {{ eng.default_profiles|length }} built-in default{% if eng.default_profiles|length != 1 %}s{% endif %}:
+              </p>
+              <ul style="margin: 0 0 10px; font-size: 0.8125rem;">
+                {% for d in eng.default_profiles %}
+                <li>
+                  <strong>{{ d.name }}</strong>:
+                  {% set parts = [] %}
+                  {% for k, v in d.fields.items() %}{% set _ = parts.append(k + '=' + v|string) %}{% endfor %}
+                  <span class="lm-dm-profile__summary">{{ parts|join(' · ') }}</span>
+                </li>
+                {% endfor %}
+              </ul>
+              <form method="post" action="/ui/diffusion-models/profiles/materialize-defaults">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="model_id" value="{{ row.model_id }}">
+                <input type="hidden" name="engine" value="{{ eng.id }}">
+                <button type="submit" class="lm-btn lm-btn--ghost lm-btn--sm"
+                        data-confirm="Write the {{ eng.default_profiles|length }} built-in default profile(s) to config.toml so they become editable?">
+                  Materialize defaults as editable
+                </button>
+              </form>
+            </div>
+          {% else %}
+            <p class="lm-dm-empty">No profiles saved and the engine has no built-in defaults to materialize.</p>
+          {% endif %}
+
+          {# ---- Add a new profile ---- #}
+          <details style="margin-top: 10px;">
+            <summary class="lm-dm-section__head" style="cursor: pointer;">
+              <span>+ Add profile</span>
+            </summary>
+            <div style="border: 1px dashed var(--bg-3); padding: 12px; margin-top: 4px;">
+              <form method="post" action="/ui/diffusion-models/profiles/create" class="lm-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="model_id" value="{{ row.model_id }}">
+                <input type="hidden" name="engine" value="{{ eng.id }}">
+                <div class="lm-dm-field">
+                  <label class="lm-dm-field__label">Profile name</label>
+                  <input class="lm-input lm-input--mono" type="text" name="name"
+                         pattern="[a-z0-9._-]+" required
+                         placeholder="e.g. hd-portrait">
+                </div>
+                {{ schema_fields(eng.schema, dir_options=row.dir_options, uid=row.model_id ~ "-new") }}
+                <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8125rem; margin: 6px 0;">
+                  <input type="checkbox" name="make_default" value="on">
+                  <span>Make this the default profile for {{ row.model_id }}</span>
+                </label>
+                <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Create profile</button>
+              </form>
+            </div>
+          </details>
+        </div>
+      </div>
+      {% endif %}
+
+      {% if lora_entry %}
+      <div class="lm-engine-section">
+        {{ krea_lora_manager(lora_entry) }}
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>

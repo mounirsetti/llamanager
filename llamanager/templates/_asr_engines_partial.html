@@ -1,0 +1,55 @@
+{# Audio engine tiles. Its own polled fragment, a SIBLING of the models body
+   rather than a parent or child of it: an install's progress has to move
+   without a reload, and a self-replacing morph target nested inside another
+   self-replacing morph target breaks the inner swap. #}
+<div id="asr-engines-body"
+     {% if asr_install_busy %}
+     hx-get="/ui/asr/_engines"
+     hx-trigger="every 2s"
+     hx-swap="morph"
+     {% endif %}
+     hx-disinherit="hx-swap">
+{# ---------- Engines ---------------------------------------------- #}
+<section class="lm-section" style="margin-top: 24px;">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Engines</span>
+    <span class="lm-section-meta">{{ engine_tiles|selectattr('state', 'equalto', 'ready')|list|length }} of {{ engine_tiles|length }} ready</span>
+  </header>
+  <div class="lm-tiles">
+    {% for t in engine_tiles %}
+    <article class="lm-tile" data-engine="{{ t.id }}">
+      <button type="button" class="lm-tile__open"
+              hx-get="/ui/asr/engine/{{ t.id }}"
+              hx-target="#lm-modal-body" hx-swap="innerHTML"
+              aria-label="Open {{ t.label }} setup">
+        <span class="lm-tile__eyebrow">{{ t.tag }}</span>
+        <span class="lm-tile__title">{{ t.label }}</span>
+      </button>
+      <span class="lm-tile__status" data-state="{{ t.state }}">{{ t.status_text }}</span>
+      {% if t.pct is not none %}
+      <span class="lm-tile__bar"><span style="width: {{ t.pct }}%;"></span></span>
+      {% endif %}
+      <span class="lm-tile__facts">{{ t.facts }}</span>
+      <div class="lm-tile__actions">
+        {% if t.action == 'cancel' and t.install %}
+        <form method="post" action="/ui/asr-models/install-deps/{{ t.install.id }}/cancel">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="lm-btn lm-btn--danger lm-btn--xs">Cancel</button>
+        </form>
+        {% elif t.action in ('install', 'retry') %}
+        {# A plain POST, not a preflight: an ASR install picks no destination. #}
+        <form method="post" action="/ui/asr-models/install-deps">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="engine" value="{{ t.id }}">
+          <button type="submit" class="lm-btn lm-btn--primary lm-btn--xs">
+            {% if t.binary %}{{ 'Retry build' if t.action == 'retry' else 'Build (Vulkan)' }}
+            {% else %}{{ 'Retry install' if t.action == 'retry' else 'Install dependencies' }}{% endif %}
+          </button>
+        </form>
+        {% endif %}
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+</div>
