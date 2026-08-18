@@ -20,6 +20,13 @@ sound; the workflow decodes it twice, through the video VAE and the audio
 VAE, and muxes the two into a single mp4. A silent clip from this engine
 means the audio branch did not run.
 
+TWO HEADS, ONE MODEL DIRECTORY. FL2VA animates one opening frame; REF2VA
+takes up to nine reference images the prompt addresses as ``<Picture 1>``..
+and carries their subjects and scenes into the clip. They share the text
+encoder and both VAEs and differ only in the transformer, so the profile's
+transformer quant is what selects the head — and with it the graph, the
+conditioning node and the reference arity.
+
 MODEL CONSTRAINTS (fixed by the architecture, not preferences): 24 fps;
 frame counts snap to 17n+5; width and height must be multiples of 32; the
 native canvas is 768p.
@@ -60,6 +67,14 @@ UNET_FILE = "MiniMax-H3-FL2VA-Q4_K_M.gguf"
 # Same per-step cost, 8.3 GB less resident: measured 2026-08-18 on gfx1201,
 # 37 s/step against 39 s/step, transformer load 16 s against 76 s.
 TURBO_UNET_FILE = "minimax_h3_fl2va_turbo_Q4_K_M.gguf"
+# REF2VA: a different head on the same architecture. FL2VA animates one
+# opening frame; REF2VA carries subjects and scenes across from up to nine
+# reference images the prompt addresses as <Picture 1>..<Picture 9>. Its
+# distill is 4-step, not 8.
+REF2VA_UNET_FILE = "minimax_h3_ref2va_turbo_Q4_K_M.gguf"
+# How many reference images REF2VA accepts, and therefore how many slots the
+# ref2v graph carries.
+MAX_REF_IMAGES = 9
 CLIP_FILE = "qwen3vl-32B-MiniMax-H3-Q4_K_M.gguf"
 VIDEO_VAE_FILE = "minimax_h3_video_vae_fp16.safetensors"
 AUDIO_VAE_FILE = "minimax_h3_audio_vae_fp32.safetensors"
@@ -71,12 +86,24 @@ QUANT_FILES: dict[str, tuple[str, float]] = {
     "Q4_K_M": (UNET_FILE, 18.50),
     "Q3_K_M": ("MiniMax-H3-FL2VA-Q3_K_M.gguf", 14.51),
     "Q4_K_M-Turbo": (TURBO_UNET_FILE, 10.61),
+    "Q4_K_M-Ref-Turbo": (REF2VA_UNET_FILE, 10.61),
 }
 
 # Transformers that already carry the distill. Loading a Turbo LoRA on top of
 # one of these applies the distill twice, which is a silent quality loss, so
 # the combination is refused rather than quietly corrected.
-BAKED_DISTILL_UNETS = frozenset({TURBO_UNET_FILE})
+BAKED_DISTILL_UNETS = frozenset({TURBO_UNET_FILE, REF2VA_UNET_FILE})
+
+# Transformers that take reference images rather than an opening frame. The
+# choice of transformer is what selects the graph: they are two models with
+# two different conditioning nodes, not two modes of one.
+REF2VA_UNETS = frozenset({REF2VA_UNET_FILE})
+
+# Reference sizing, as MiniMaxH3ReferenceToVideo names it.
+REF_DETAIL_CHOICES = ("match", "max")
+
+# Node id of the ref2v graph's first LoadImage; the nine slots run from here.
+_REF_NODE_BASE = 20
 
 SIZE_BUCKETS = [
     "1344x768", "768x1344",     # native canvas, landscape / portrait
@@ -166,6 +193,25 @@ def _unet_for(profile: Profile, req: ImageRequest) -> str:
         + ", ".join(sorted(QUANT_FILES)))
 
 
+def _ref_detail(profile: Profile) -> str:
+    """Reference sizing for REF2VA, from the profile.
+
+    Not defaulted: "match" and "max" differ by several times the sampling
+    cost, because reference tokens ride through every step. A profile that
+    picks the REF2VA transformer has to say which it wants.
+    """
+    value = (profile.image_ref_detail or "").strip().lower()
+    if value not in REF_DETAIL_CHOICES:
+        raise RuntimeError(
+            "MiniMax-H3 REF2VA needs a 'Reference detail' on this profile: "
+            + " | ".join(REF_DETAIL_CHOICES)
+            + " ('match' sizes each reference to the generation's pixel "
+              "area; 'max' uses a 2048px short edge for identity fidelity "
+              "and is several times slower)."
+            + (f" Got {profile.image_ref_detail!r}." if value else ""))
+    return value
+
+
 def build_command(
     cfg: Config,
     model_path: Path,
@@ -191,20 +237,30 @@ def build_command(
     if not runner.exists():
         raise RuntimeError(f"comfy runner missing: {runner}")
 
-    if not req.ref_images:
-        raise RuntimeError(
-            "MiniMax-H3 (ComfyUI) is an image-to-video model: supply one "
-            "reference image to use as the opening frame.")
-    if len(req.ref_images) != 1:
-        raise RuntimeError(
-            "MiniMax-H3 image-to-video accepts exactly one reference image; "
-            f"got {len(req.ref_images)}")
-
     width, height = _resolved_size(profile, req)
     steps = _resolved_steps(profile, req)
     length = snap_length(profile.video_num_frames or _DEFAULT_LENGTH)
     seed = req.seed if req.seed is not None else profile.image_seed
     unet = _unet_for(profile, req)
+    ref2va = unet in REF2VA_UNETS
+
+    if not req.ref_images:
+        raise RuntimeError(
+            "MiniMax-H3 (ComfyUI) is an image-to-video model: supply "
+            + (f"one to {MAX_REF_IMAGES} reference images the prompt can "
+               "address as <Picture 1>..<Picture N>." if ref2va else
+               "one reference image to use as the opening frame."))
+    if ref2va and len(req.ref_images) > MAX_REF_IMAGES:
+        raise RuntimeError(
+            f"MiniMax-H3 REF2VA accepts at most {MAX_REF_IMAGES} reference "
+            f"images; got {len(req.ref_images)}")
+    if not ref2va and len(req.ref_images) != 1:
+        raise RuntimeError(
+            "MiniMax-H3 image-to-video accepts exactly one reference image "
+            f"(the opening frame); got {len(req.ref_images)}. For several "
+            "references, pick a REF2VA transformer quant — "
+            + ", ".join(sorted(q for q, (f, _g) in QUANT_FILES.items()
+                               if f in REF2VA_UNETS)) + ".")
 
     # Fail before starting a server if a component is missing: "vae/... not
     # found" is a far better message than ComfyUI's combo-validation error.
@@ -238,14 +294,14 @@ def build_command(
                     lora_name, model_path / "loras")
         use_lora = False
 
-    workflow = cb.workflow_path("minimax_h3_i2v_gguf")
+    workflow = cb.workflow_path(
+        "minimax_h3_ref2v_gguf" if ref2va else "minimax_h3_i2v_gguf")
     argv: list[str] = [
         str(python), "-u", str(runner),
         "--comfy-repo", str(repo),
         "--model-path", str(model_path),
         "--workflow", str(workflow),
         "--output", str(out_path),
-        "--image", f"INIT_IMAGE={req.ref_images[0]}",
         "--set", f"UNET={unet}",
         "--set", f"CLIP={CLIP_FILE}",
         "--set", f"VIDEO_VAE={VIDEO_VAE_FILE}",
@@ -262,16 +318,30 @@ def build_command(
         "--set", f"SCHEDULER={_DEFAULT_SCHEDULER}",
         "--set", f"SEED={int(seed) if seed is not None else 0}",
     ]
-    if use_lora:
-        strength = (profile.image_lora_scale
-                    if profile.image_lora_scale is not None else 1.0)
-        argv += ["--set", f"LORA={lora_name}",
-                 "--set", f"LORA_STRENGTH={float(strength)}"]
+
+    if ref2va:
+        # The ref2v graph carries no LoRA node — the distill is in the
+        # weights, and BAKED_DISTILL_UNETS refused any LoRA above.
+        argv += ["--set-str", f"REF_DETAIL={_ref_detail(profile)}"]
+        for i, ref in enumerate(req.ref_images, start=1):
+            argv += ["--image", f"REF{i}={ref}"]
+        # Every slot the request did not fill leaves the graph: an unfilled
+        # LoadImage would fail validation on a missing file.
+        for i in range(len(req.ref_images) + 1, MAX_REF_IMAGES + 1):
+            argv += ["--set-str", f"REF{i}=",
+                     "--drop-node", str(_REF_NODE_BASE + i - 1)]
     else:
-        # The LoRA node is dropped from the graph rather than zeroed: a
-        # zero-strength LoRA would still read 1.8 GB off disk and load it.
-        argv += ["--set", "LORA=", "--set", "LORA_STRENGTH=0.0",
-                 "--bypass", "2:model"]
+        argv += ["--image", f"INIT_IMAGE={req.ref_images[0]}"]
+        if use_lora:
+            strength = (profile.image_lora_scale
+                        if profile.image_lora_scale is not None else 1.0)
+            argv += ["--set", f"LORA={lora_name}",
+                     "--set", f"LORA_STRENGTH={float(strength)}"]
+        else:
+            # The LoRA node is dropped from the graph rather than zeroed: a
+            # zero-strength LoRA would still read 1.8 GB off disk and load it.
+            argv += ["--set", "LORA=", "--set", "LORA_STRENGTH=0.0",
+                     "--bypass", "2:model"]
 
     keep_warm = int(getattr(cfg, "comfy_keep_warm_s", 0) or 0)
     if keep_warm > 0:
@@ -357,7 +427,19 @@ def profile_schema() -> list[ProfileField]:
                  "card. Q3_K_M (14.5 GB) trades detail for headroom. "
                  "Q4_K_M-Turbo (10.6 GB) has the 8-step distill fused in, so "
                  "it needs the LoRA field cleared and 8 steps; it loads in a "
-                 "sixth of the time and leaves 8 GB more VRAM free.",
+                 "sixth of the time and leaves 8 GB more VRAM free. "
+                 "Q4_K_M-Ref-Turbo (10.6 GB) is the REF2VA head: up to nine "
+                 "reference images instead of an opening frame, 4-step "
+                 "distill, LoRA field cleared.",
+        ),
+        ProfileField(
+            key="image_ref_detail", label="Reference detail", kind="select",
+            default="match", options=list(REF_DETAIL_CHOICES),
+            help="REF2VA only. 'match' sizes each reference to the "
+                 "generation's pixel area; 'max' encodes it at a 2048px "
+                 "short edge for the best identity fidelity and is several "
+                 "times slower, because reference tokens ride through every "
+                 "sampling step.",
         ),
         ProfileField(
             key="image_lora_weights", label="Turbo LoRA", kind="text",
@@ -383,14 +465,22 @@ def profile_schema() -> list[ProfileField]:
 
 
 def capabilities() -> dict[str, Any]:
-    """One reference image is required; the output is an mp4 with audio."""
+    """Reference images are required; the output is an mp4 with audio.
+
+    The ceiling is REF2VA's nine, because capabilities are per engine and
+    both heads live here. Which head runs is the profile's transformer quant,
+    and an FL2VA profile handed several images says so by name.
+    """
     return {
         "output_ext": "mp4",
-        "ref_images_max": 1,
+        "ref_images_max": MAX_REF_IMAGES,
         "ref_images_required": True,
-        "ref_label": "Opening frame (image→video)",
-        "ref_help": "One image to animate as the first frame of the clip. "
-                    "The clip is generated with a matching soundtrack.",
+        "ref_label": "Reference images (image→video)",
+        "ref_help": "One image to animate as the opening frame. With a "
+                    f"REF2VA transformer quant, up to {MAX_REF_IMAGES} "
+                    "references the prompt addresses as <Picture 1>, "
+                    "<Picture 2>… instead. Either way the clip is generated "
+                    "with a matching soundtrack.",
     }
 
 
@@ -404,6 +494,9 @@ def default_profiles() -> dict[str, dict[str, Any]]:
     ``h3-turbo-baked-8step`` runs the community turbo bake, which carries the
     8-step distill in its weights. Same sampling cost per step, but it loads
     in a sixth of the time and holds 8.3 GB less VRAM.
+
+    ``h3-ref2va-4step`` switches heads entirely: up to nine reference images
+    the prompt addresses as ``<Picture 1>``.. instead of one opening frame.
 
     ``h3-full-50step`` drops the LoRA. It is the reference quality bar and is
     roughly an order of magnitude slower; keep it for final renders.
@@ -444,6 +537,16 @@ def default_profiles() -> dict[str, dict[str, Any]]:
             "image_model_type": "Q4_K_M-Turbo",
             # Fused into the transformer — a LoRA here would double it.
             "image_lora_weights": "",
+        },
+        "h3-ref2va-4step": {
+            "image_size": "1152x640",
+            "image_steps": 4,
+            "video_num_frames": _DEFAULT_LENGTH,
+            "video_fps": FPS,
+            "image_model_type": "Q4_K_M-Ref-Turbo",
+            # Fused into the transformer — a LoRA here would double it.
+            "image_lora_weights": "",
+            "image_ref_detail": "match",
         },
         "h3-full-50step": {
             "image_size": _DEFAULT_SIZE,

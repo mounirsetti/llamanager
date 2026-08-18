@@ -435,6 +435,12 @@ ENGINE_PLANS: dict[str, EnginePackages] = {
             # image. See the patch header for the mapping it adds.
             ("comfyui/custom_nodes/ComfyUI-GGUF",
              "comfyui-gguf-qwen3vl-mmproj.patch"),
+            # The MiniMax-H3 turbo quants declare general.architecture="ltx2"
+            # (their converter's doing, not a real LTX-2 model), which the
+            # loader's allowlist rejects outright. Nothing else reads the
+            # string, so this widens the allowlist and nothing more.
+            ("comfyui/custom_nodes/ComfyUI-GGUF",
+             "comfyui-gguf-ltx2-arch.patch"),
         ),
         space_mb=9500,
         notes=(

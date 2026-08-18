@@ -1,0 +1,18 @@
+diff --git a/loader.py b/loader.py
+--- a/loader.py
++++ b/loader.py
+@@ -9,7 +9,13 @@
+ from .ops import GGMLTensor
+ from .dequant import is_quantized, dequantize_tensor
+ 
+-IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image"}
++# "ltx2" is not a model this loader has ever supported: it is the value the
++# community MiniMax-H3 turbo quants (ChrisColeTech/minimax-h3-turbo-GGUF)
++# carry in general.architecture, because they were converted with the LTX-2
++# script. The string is read for this allowlist and nothing else - tensor
++# shapes come from the file's own dims - so accepting it loads those files
++# correctly. Without it the load dies with "Unexpected architecture type".
++IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image", "ltx2"}
+ TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}
+ VIS_TYPE_LIST = {"clip-vision", "mmproj"}
+ 

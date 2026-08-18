@@ -561,6 +561,136 @@ def test_build_command_refuses_the_turbo_bake_with_a_lora(tmp_path, cfg):
                         tmp_path / "out.mp4")
 
 
+def _ref2va_model(tmp_path):
+    """A model directory that also holds the REF2VA transformer."""
+    from llamanager.engines import minimax_h3_comfy as m
+    root = _complete_model(tmp_path)
+    (root / "diffusion_models" / m.REF2VA_UNET_FILE).write_bytes(b"x")
+    return root
+
+
+def test_ref2va_profile_routes_to_the_reference_graph(tmp_path, cfg):
+    """The transformer quant picks the head, and with it the workflow."""
+    from llamanager.engines import minimax_h3_comfy as m
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    model = _ref2va_model(tmp_path)
+    refs = []
+    for n in ("a", "b", "c"):
+        p = tmp_path / f"{n}.png"
+        p.write_bytes(b"x")
+        refs.append(p)
+
+    prof = Profile(name="h3-ref2va-4step",
+                   **m.default_profiles()["h3-ref2va-4step"])
+    argv, _ = m.build_command(cfg, model, prof,
+                              _image_request("<Picture 1> at dusk", refs),
+                              tmp_path / "out.mp4")
+
+    assert "minimax_h3_ref2v_gguf.json" in " ".join(argv)
+    tok = _argv_tokens(argv)
+    assert tok["UNET"] == m.REF2VA_UNET_FILE
+    assert tok["REF_DETAIL"] == "match"
+    images = [argv[i + 1].split("=", 1)[0]
+              for i, a in enumerate(argv) if a == "--image"]
+    assert images == ["REF1", "REF2", "REF3"]
+    # The six unfilled slots leave the graph, LoadImage nodes 23..28.
+    dropped = [argv[i + 1] for i, a in enumerate(argv) if a == "--drop-node"]
+    assert dropped == ["23", "24", "25", "26", "27", "28"]
+    # No LoRA node exists in that graph, so nothing may try to bypass one.
+    assert "--bypass" not in argv
+    assert not any(a.startswith("INIT_IMAGE=") for a in argv)
+
+
+def test_ref2va_accepts_the_full_nine_references(tmp_path, cfg):
+    from llamanager.engines import minimax_h3_comfy as m
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    model = _ref2va_model(tmp_path)
+    refs = []
+    for n in range(m.MAX_REF_IMAGES):
+        p = tmp_path / f"r{n}.png"
+        p.write_bytes(b"x")
+        refs.append(p)
+
+    prof = Profile(name="p", image_model_type="Q4_K_M-Ref-Turbo",
+                   image_steps=4, image_lora_weights="",
+                   image_ref_detail="max")
+    argv, _ = m.build_command(cfg, model, prof,
+                              _image_request("x", refs), tmp_path / "o.mp4")
+
+    assert "--drop-node" not in argv
+    assert _argv_tokens(argv)["REF_DETAIL"] == "max"
+
+
+def test_ref2va_refuses_a_tenth_reference(tmp_path, cfg):
+    from llamanager.engines import minimax_h3_comfy as m
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    model = _ref2va_model(tmp_path)
+    refs = []
+    for n in range(m.MAX_REF_IMAGES + 1):
+        p = tmp_path / f"r{n}.png"
+        p.write_bytes(b"x")
+        refs.append(p)
+
+    prof = Profile(name="p", **m.default_profiles()["h3-ref2va-4step"])
+    with pytest.raises(RuntimeError, match="at most 9"):
+        m.build_command(cfg, model, prof, _image_request("x", refs),
+                        tmp_path / "o.mp4")
+
+
+def test_ref2va_needs_an_explicit_reference_detail(tmp_path, cfg):
+    """'match' and 'max' differ by several times the sampling cost, so the
+    profile has to say which — no quiet default."""
+    from llamanager.engines import minimax_h3_comfy as m
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    model = _ref2va_model(tmp_path)
+    img = tmp_path / "a.png"
+    img.write_bytes(b"x")
+
+    prof = Profile(name="p", image_model_type="Q4_K_M-Ref-Turbo",
+                   image_steps=4, image_lora_weights="")
+    with pytest.raises(RuntimeError, match="Reference detail"):
+        m.build_command(cfg, model, prof, _image_request("x", [img]),
+                        tmp_path / "o.mp4")
+
+
+def test_fl2va_with_several_references_names_the_ref2va_quant(tmp_path, cfg):
+    """The opening-frame head takes exactly one image; the error says which
+    quant to pick instead of just refusing."""
+    from llamanager.engines import minimax_h3_comfy as m
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    model = _ref2va_model(tmp_path)
+    refs = []
+    for n in ("a", "b"):
+        p = tmp_path / f"{n}.png"
+        p.write_bytes(b"x")
+        refs.append(p)
+
+    prof = Profile(name="h3-turbo-4step",
+                   **m.default_profiles()["h3-turbo-4step"])
+    with pytest.raises(RuntimeError, match="Q4_K_M-Ref-Turbo"):
+        m.build_command(cfg, model, prof, _image_request("x", refs),
+                        tmp_path / "o.mp4")
+
+
+def test_capabilities_advertise_the_reference_ceiling(tmp_path):
+    """api_v1 rejects extra references off this number before queueing."""
+    from llamanager.engines import minimax_h3_comfy as m
+    caps = m.capabilities()
+    assert caps["ref_images_max"] == m.MAX_REF_IMAGES == 9
+    assert caps["ref_images_required"] is True
+    assert caps["output_ext"] == "mp4"
+
+
 def test_build_command_snaps_an_odd_frame_count(tmp_path, cfg):
     from llamanager.engines import minimax_h3_comfy as m
     from llamanager.config import Profile
@@ -983,7 +1113,12 @@ def test_every_comfy_workflow_template_is_valid_json_and_fully_tokenised():
               "REF_BOOST": 4.0, "GROUNDING_PX": 768, "FIT_MODE": "fit"}
     edit_b = {**_KREA_VALUES, "REF_IMAGE": "a.png", "REF_IMAGE_B": "b.png",
               "REF_IMAGE_C": "c.png"}
-    known = {"minimax_h3_i2v_gguf": _WORKFLOW_VALUES, "krea2_t2i_gguf": _KREA_VALUES,
+    ref2v = {**{k: v for k, v in _WORKFLOW_VALUES.items()
+                if k not in ("INIT_IMAGE", "LORA", "LORA_STRENGTH")},
+             "REF_DETAIL": "match",
+             **{f"REF{i}": f"r{i}.png" for i in range(1, 10)}}
+    known = {"minimax_h3_i2v_gguf": _WORKFLOW_VALUES,
+             "minimax_h3_ref2v_gguf": ref2v, "krea2_t2i_gguf": _KREA_VALUES,
              "krea2_t2i_gguf_te": _KREA_VALUES,
              "krea2_edit_a_gguf": edit_a, "krea2_edit_a_gguf_te": edit_a,
              "krea2_edit_b_gguf": edit_b, "krea2_edit_b_gguf_te": edit_b}
@@ -1347,19 +1482,29 @@ def test_gguf_te_workflow_uses_the_gguf_clip_loader_with_krea2_type():
     assert g["3"]["inputs"]["type"] == "krea2"
 
 
-def test_comfy_plan_carries_the_qwen3vl_mmproj_patch():
-    """A fresh install must get the fast encoder path automatically."""
+def test_comfy_plan_carries_its_gguf_loader_patches():
+    """A fresh install must get the fast encoder path and the turbo quants.
+
+    Each patch is checked for a marker only it can carry, so a truncated or
+    swapped file fails here rather than at request time.
+    """
     from llamanager.engine_installer import ENGINE_PLANS
     from pathlib import Path
     plan = ENGINE_PLANS["comfy"]
-    assert plan.patches, "comfy plan should apply the ComfyUI-GGUF patch"
-    for dest, name in plan.patches:
+    markers = {
+        "comfyui-gguf-qwen3vl-mmproj.patch": ("QWEN3VL_VISION_SD_MAP",
+                                              "deepstack_merger_list"),
+        "comfyui-gguf-ltx2-arch.patch": ("IMG_ARCH_LIST", '"ltx2"'),
+    }
+    names = [name for _dest, name in plan.patches]
+    assert set(names) == set(markers), names
+    for _dest, name in plan.patches:
         patch = (Path(__file__).parent.parent / "llamanager" / "engines"
                  / "comfy_patches" / name)
         assert patch.is_file(), f"missing patch file {name}"
         text = patch.read_text()
-        assert "QWEN3VL_VISION_SD_MAP" in text
-        assert "deepstack_merger_list" in text
+        for marker in markers[name]:
+            assert marker in text, f"{name} is missing {marker}"
 
 
 # ------------------------------------------------------- the LoRA picker

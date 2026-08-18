@@ -195,6 +195,15 @@ CATALOG: list[CatalogEntry] = [
              "instead of 76 s and holds 11.2 GB instead of 19.4 GB. Needs "
              "the LoRA field cleared and 8 steps. Optional alternative to "
              "the Q4_K_M transformer, not an addition."),
+            ("ChrisColeTech/minimax-h3-turbo-GGUF",
+             "split/diffusion_models/minimax_h3_ref2va_turbo_Q4_K_M.gguf",
+             "diffusion_models", 10.61,
+             "REF2VA transformer, 4-bit, 4-step distill fused in. The other "
+             "head of the same model: instead of animating one opening "
+             "frame it takes up to nine reference images, which the prompt "
+             "addresses as <Picture 1>, <Picture 2>… Shares the encoder and "
+             "both VAEs with the transformers above; pick it with the "
+             "h3-ref2va-4step profile."),
             ("realrebelai/MiniMax-H3_GGUFs",
              "qwen3vl-32B-MiniMax-H3-Q4_K_M.gguf", "text_encoders", 13.58,
              "Qwen3-VL 32B conditioner, 4-bit."),
