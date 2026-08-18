@@ -1047,7 +1047,15 @@
       });
       box.appendChild(row);
     }
+    // Each open takes a ticket. The media is fetched as a blob (bearer auth
+    // can't ride on a plain src), so two quick clicks leave two fetches in
+    // flight and the SLOWER one would otherwise land last and paint over the
+    // newer item — click a big clip, then a small one, and the big one wins.
+    // Every async continuation below checks its ticket is still the current
+    // one before touching the panel.
+    let lbGen = 0;
     function openLightbox(item) {
+      const gen = ++lbGen;
       const sc = item.sidecar || {};
       const isVideo = item.kind === "video" || (item.name || "").toLowerCase().endsWith(".mp4");
       const wrap = lbImg.parentElement;
@@ -1062,11 +1070,13 @@
           wrap.appendChild(lbVid);
         }
         lbVid.hidden = false; lbVid.removeAttribute("src");
-        authObjectUrl(item).then(url => { lbVid.src = url; }).catch(e => showError("Could not load the clip: " + e.message));
+        authObjectUrl(item).then(url => { if (gen === lbGen) lbVid.src = url; })
+          .catch(e => { if (gen === lbGen) showError("Could not load the clip: " + e.message); });
       } else {
         lbImg.hidden = false; lbImg.src = "";
         if (lbVid) { lbVid.pause(); lbVid.hidden = true; lbVid.removeAttribute("src"); }
-        authObjectUrl(item).then(url => { lbImg.src = url; }).catch(e => showError("Could not load the image: " + e.message));
+        authObjectUrl(item).then(url => { if (gen === lbGen) lbImg.src = url; })
+          .catch(e => { if (gen === lbGen) showError("Could not load the image: " + e.message); });
       }
       lbMeta.innerHTML = "";
       const rows = [
@@ -1088,6 +1098,7 @@
       const mkBtn = (label, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = "lm-btn lm-btn--ghost lm-btn--xs"; b.textContent = label; b.addEventListener("click", fn); lbActions.appendChild(b); };
       // Download: reuse the already-fetched blob URL.
       authObjectUrl(item).then(url => {
+        if (gen !== lbGen) return;   // a later click owns the panel now
         const dl = document.createElement("a"); dl.className = "lm-btn lm-btn--ghost lm-btn--xs"; dl.textContent = "Download";
         dl.href = url; dl.download = item.name || "video.mp4"; lbActions.insertBefore(dl, lbActions.firstChild);
       }).catch(() => {});
@@ -1105,6 +1116,7 @@
       lightbox.hidden = false;
     }
     function closeLightbox() {
+      lbGen++;            // a fetch still in flight no longer owns the panel
       lightbox.hidden = true; lbImg.src = "";
       const v = lbImg.parentElement.querySelector("video");
       if (v) { v.pause(); v.removeAttribute("src"); }

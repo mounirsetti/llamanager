@@ -82,3 +82,25 @@ def test_missing_file_is_404_not_500(app):
 def test_names_in_use_stay_valid(name):
     """Names this deployment already relies on must keep working."""
     assert validate_origin_name(name) == name
+
+
+# --------------------------------------------------- lightbox staleness guard
+
+def test_public_lightboxes_guard_against_a_stale_fetch():
+    """The public pages fetch media as a blob (a bearer key can't ride on a
+    plain src), so two opens leave two fetches racing and the slower one used
+    to land last — painting clip A into a panel captioned clip B.
+
+    The behaviour is browser-only; tests/playwright_gallery_race.py drives it
+    for real. This is the tripwire that catches the guard being deleted.
+    """
+    from pathlib import Path
+    tpl = Path(__file__).parent.parent / "llamanager" / "templates"
+    for name in ("videos_public.html", "images_public.html"):
+        src = (tpl / name).read_text()
+        assert "let lbGen = 0;" in src, f"{name}: no generation counter"
+        assert "const gen = ++lbGen;" in src, f"{name}: open does not take a ticket"
+        # Every async continuation that writes to the panel must check it.
+        assert src.count("gen === lbGen") >= 2, f"{name}: an unguarded write"
+        assert "gen !== lbGen" in src, f"{name}: download link is unguarded"
+        assert "lbGen++;" in src, f"{name}: close does not invalidate in-flight"

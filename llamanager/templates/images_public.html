@@ -949,9 +949,19 @@
       });
       box.appendChild(row);
     }
+    // Each open takes a ticket. The media is fetched as a blob (bearer auth
+    // can't ride on a plain src), so two quick clicks leave two fetches in
+    // flight and the SLOWER one would otherwise land last and paint over the
+    // newer item — click a big clip, then a small one, and the big one wins.
+    // Every async continuation below checks its ticket is still the current
+    // one before touching the panel.
+    let lbGen = 0;
     function openLightbox(item) {
+      const gen = ++lbGen;
       const sc = item.sidecar || {};
-      lbImg.src = ""; authObjectUrl(item).then(url => { lbImg.src = url; }).catch(e => showError("Could not load the image: " + e.message));
+      lbImg.src = "";
+      authObjectUrl(item).then(url => { if (gen === lbGen) lbImg.src = url; })
+        .catch(e => { if (gen === lbGen) showError("Could not load the image: " + e.message); });
       lbMeta.innerHTML = "";
       const rows = [
         ["Model", sc.model_id || sc.model || ""], ["Profile", sc.profile || ""], ["Engine", sc.engine || ""],
@@ -972,6 +982,7 @@
       const mkBtn = (label, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = "lm-btn lm-btn--ghost lm-btn--xs"; b.textContent = label; b.addEventListener("click", fn); lbActions.appendChild(b); };
       // Download: reuse the already-fetched blob URL.
       authObjectUrl(item).then(url => {
+        if (gen !== lbGen) return;   // a later click owns the panel now
         const dl = document.createElement("a"); dl.className = "lm-btn lm-btn--ghost lm-btn--xs"; dl.textContent = "Download";
         dl.href = url; dl.download = item.name || "image.png"; lbActions.insertBefore(dl, lbActions.firstChild);
       }).catch(() => {});
@@ -988,7 +999,10 @@
       });
       lightbox.hidden = false;
     }
-    function closeLightbox() { lightbox.hidden = true; lbImg.src = ""; }
+    function closeLightbox() {
+      lbGen++;            // a fetch still in flight no longer owns the panel
+      lightbox.hidden = true; lbImg.src = "";
+    }
     $("gen-lb-close").addEventListener("click", closeLightbox);
     lightbox.addEventListener("click", (e) => { if (e.target === lightbox) closeLightbox(); });
     document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeLightbox(); closePops(); } });
