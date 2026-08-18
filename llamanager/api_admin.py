@@ -46,6 +46,41 @@ async def admin_origin(request: Request) -> Origin:
 
 # ---------- status ----------
 
+def _active_downloads(app: Any) -> int:
+    """Model pulls in flight. Counted from the registry's own listing so it
+    agrees with what the download pages show."""
+    reg = getattr(app.state, "registry", None)
+    if reg is None:
+        return 0
+    try:
+        return sum(1 for d in reg.list_downloads()
+                   if (d.get("status") or "") in ("pending", "running"))
+    except Exception:  # noqa: BLE001 — status must never fail on a side count
+        return 0
+
+
+def _active_installs(app: Any) -> int:
+    """Engine installs/builds in flight, plus ASR model jobs (download or
+    GGML conversion), which die the same way on a restart."""
+    n = 0
+    inst = getattr(app.state, "engine_installer", None)
+    if inst is not None:
+        try:
+            rows = inst.db.query(
+                "SELECT id FROM engine_installs "
+                "WHERE status IN ('pending', 'running')")
+            n += len(rows)
+        except Exception:  # noqa: BLE001
+            pass
+    jobs = getattr(app.state, "asr_model_jobs", None)
+    if jobs is not None:
+        try:
+            n += len(jobs.active_jobs())
+        except Exception:  # noqa: BLE001
+            pass
+    return n
+
+
 @router.get("/status")
 async def status(request: Request, _: Origin = Depends(admin_origin)) -> JSONResponse:
     sm: ServerManager = request.app.state.sm
@@ -58,6 +93,12 @@ async def status(request: Request, _: Origin = Depends(admin_origin)) -> JSONRes
         "in_flight_count": len(snap["in_flight"]),
         "paused": snap["paused"],
         "accepting_requests": is_accepting(request.app),
+        # Long-running work that a restart would destroy rather than pause:
+        # an HF pull resumes from byte 0 and an engine install leaves a
+        # half-built venv. A graceful stop waits for these too, so it has to
+        # be able to see them.
+        "active_downloads": _active_downloads(request.app),
+        "active_installs": _active_installs(request.app),
     })
     return JSONResponse(base)
 
@@ -223,6 +264,18 @@ async def intake_pause(request: Request,
     """Stop taking requests. In-flight work finishes; the queued backlog is
     dropped; new requests get 503 until intake is resumed."""
     return JSONResponse(set_accepting(request.app, False))
+
+
+@router.post("/intake/drain")
+async def intake_drain(request: Request,
+                       _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Stop taking NEW requests but keep the queued backlog running.
+
+    The difference from pause is the backlog: pausing cancels it, draining
+    lets it finish. This is the mode a graceful stop or restart runs in while
+    it waits for the queue to empty — cancelling the queue there would
+    destroy exactly the work the wait exists to protect."""
+    return JSONResponse(set_accepting(request.app, False, drop_queued=False))
 
 
 @router.post("/intake/resume")

@@ -60,12 +60,18 @@ def require_open(app: Any) -> None:
     )
 
 
-def set_accepting(app: Any, accepting: bool) -> dict[str, Any]:
+def set_accepting(app: Any, accepting: bool, *,
+                  drop_queued: bool = True) -> dict[str, Any]:
     """Flip the switch: persist it, apply it live, and drop the backlog.
 
     Closing the door cancels everything still queued (in-flight work is left
     to finish — no client sees a mid-stream abort). Returns a summary dict
     suitable as an API/CLI response.
+
+    ``drop_queued=False`` closes the door but KEEPS the backlog, which is the
+    difference between pausing and draining. A graceful stop needs the second
+    one: it is waiting for exactly that backlog to finish, so cancelling it
+    would destroy the work the wait exists to protect.
     """
     from .config import load_config, update_queue_settings
 
@@ -85,7 +91,7 @@ def set_accepting(app: Any, accepting: bool) -> dict[str, Any]:
     app.state.cfg = fresh
 
     dropped = 0
-    if not accepting and was:
+    if not accepting and was and drop_queued:
         qm = getattr(app.state, "queue", None)
         if qm is not None:
             dropped = qm.cancel_pending()

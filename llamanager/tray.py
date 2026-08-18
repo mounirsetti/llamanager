@@ -167,6 +167,11 @@ class TrayApp:
         # makes the AppIndicator redraw, which looks like flickering.
         self._last_sig: tuple | None = None
         self._last_ok: bool | None = None
+        # Armed graceful action: "stop" | "restart" | None. The poller checks
+        # the drain condition on every tick and fires when it is met, so the
+        # wait survives the menu being closed and reopened.
+        self._graceful: str | None = None
+        self._graceful_since: float = 0.0
         # Build a client once; admin key may be missing — degrade to a
         # reachability-only tray in that case rather than refusing to start.
         try:
@@ -212,6 +217,8 @@ class TrayApp:
             # Included so the menu rebuilds when the switch is flipped
             # elsewhere (top bar, CLI) — not only when the tray flips it.
             st.get("accepting_requests"),
+            st.get("active_downloads"), st.get("active_installs"),
+            self._graceful,
             models, _autorun_label(), snap["last_error"][:60],
         )
 
@@ -231,6 +238,8 @@ class TrayApp:
                 err = err or str(e)
         self.state.update(daemon=dstate, status=status, models=models,
                           last_error=err)
+        if self._graceful:
+            self._graceful_tick(dstate, status)
 
     def _refresh_icon_image(self) -> None:
         snap = self.state.snapshot()
@@ -265,6 +274,98 @@ class TrayApp:
                 self._icon.notify(msg, "llamanager")
         except Exception:
             pass
+
+    # ---- graceful stop / restart --------------------------------------
+    #
+    # "Graceful" here means: stop taking NEW work, let everything already
+    # accepted finish, and only then bounce the service. It is not a
+    # suspend-and-resume — the queue is an in-memory heap of live HTTP
+    # requests, so a queued request cannot outlive the process that is
+    # holding its connection open. Finishing the backlog BEFORE the restart
+    # is therefore the only way not to lose it, which is what this does.
+    #
+    # Draining uses /admin/intake/drain rather than the pause switch: pausing
+    # cancels the backlog, and cancelling the queue we are waiting for would
+    # defeat the entire point.
+
+    @staticmethod
+    def _waiting_on(status: dict[str, Any]) -> list[str]:
+        """What still has to finish before a graceful action can fire.
+
+        Downloads and engine installs are counted alongside requests because
+        a restart does not pause them: an HF pull resumes from byte 0 and an
+        install leaves a half-built venv behind.
+        """
+        bits: list[str] = []
+        running = int(status.get("in_flight_count") or 0)
+        queued = int(status.get("queue_depth") or 0)
+        dls = int(status.get("active_downloads") or 0)
+        ins = int(status.get("active_installs") or 0)
+        if running:
+            bits.append(f"{running} running")
+        if queued:
+            bits.append(f"{queued} queued")
+        if dls:
+            bits.append(f"{dls} download{'s' if dls != 1 else ''}")
+        if ins:
+            bits.append(f"{ins} install{'s' if ins != 1 else ''}")
+        return bits
+
+    def _act_graceful(self, action: str):
+        """Arm (or cancel) a graceful stop/restart."""
+        def run(*_: Any) -> None:
+            if self._graceful:
+                self._cancel_graceful()
+                return
+            if self._client is None:
+                self._notify("No admin key configured")
+                return
+            if not self._safe_admin(lambda c: c.intake_drain(), "Drain"):
+                return
+            self._graceful = action
+            self._graceful_since = time.time()
+            status = self.state.snapshot()["status"]
+            waiting = self._waiting_on(status)
+            self._notify(
+                f"Graceful {action}: not taking new requests; waiting for "
+                + (", ".join(waiting) if waiting else "nothing")
+                + ". Queued work still runs.")
+            # Nothing outstanding? Then this tick is the one that fires.
+            self._graceful_tick(self.state.snapshot()["daemon"], status)
+        return run
+
+    def _cancel_graceful(self) -> None:
+        action, self._graceful = self._graceful, None
+        self._safe_admin(lambda c: c.intake_resume(), "Resume intake")
+        self._notify(f"Graceful {action} cancelled — taking requests again")
+
+    def _graceful_tick(self, dstate, status: dict[str, Any]) -> None:
+        """One check of the drain condition; fires the action when it is met."""
+        if not dstate.reachable:
+            # It went away on its own (crash, or someone else stopped it).
+            # A restart still has a job to do; a stop is already done.
+            action, self._graceful = self._graceful, None
+            if action == "restart":
+                ok, msg = service_ctl.start_daemon(self.cfg)
+                self._notify(f"Graceful restart: service was down, started it — {msg}")
+            else:
+                self._notify("Graceful stop: service already stopped")
+            return
+        if self._waiting_on(status):
+            return                      # still busy; try again next tick
+
+        action, self._graceful = self._graceful, None
+        # Re-open intake BEFORE bouncing, so the daemon that comes back is
+        # taking requests. The switch is persisted, so leaving it closed here
+        # would silently start a shut daemon next time.
+        self._safe_admin(lambda c: c.intake_resume(), "Resume intake")
+        if action == "restart":
+            ok, msg = service_ctl.restart_daemon(self.cfg)
+            self._notify(f"Graceful restart: {msg}")
+        else:
+            ok, msg = service_ctl.stop_daemon(self.cfg)
+            self._notify(f"Graceful stop: {msg}")
+        self._poll_once()
 
     # daemon (OS service) controls
     def _act_daemon_start(self, *_: Any) -> None:
@@ -405,12 +506,35 @@ class TrayApp:
                       if up else (snap["last_error"][:60] or "not reachable"))
 
         # Service submenu ("service" reads friendlier than "daemon").
+        #
+        # Plain Stop/Restart bounce the service now, killing whatever is
+        # mid-generation. The graceful pair close the door, let the backlog
+        # finish, and only then bounce — so the label has to say what is
+        # still holding them up, or an operator watching a long queue has no
+        # way to tell waiting from hung.
+        waiting = self._waiting_on(st) if up else []
+        if self._graceful:
+            held = ", ".join(waiting) if waiting else "finishing up"
+            graceful_items = [
+                Item(f"Cancel graceful {self._graceful} (waiting: {held})",
+                     self._act_graceful(self._graceful)),
+            ]
+        else:
+            suffix = f" (waiting: {', '.join(waiting)})" if waiting else ""
+            graceful_items = [
+                Item(f"Graceful stop{suffix}", self._act_graceful("stop"),
+                     enabled=up),
+                Item(f"Graceful restart{suffix}", self._act_graceful("restart"),
+                     enabled=up),
+            ]
         service_menu = Menu(
             Item(lambda i: f"Status: {'running' if up else 'stopped'}",
                  None, enabled=False),
             Item("Start", self._act_daemon_start, enabled=not up),
             Item("Stop", self._act_daemon_stop, enabled=up),
             Item("Restart", self._act_daemon_restart, enabled=up),
+            Menu.SEPARATOR,
+            *graceful_items,
         )
 
         # Autorun-at-startup submenu. Radio over the three meaningful states;

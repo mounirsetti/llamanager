@@ -57,6 +57,8 @@ def tray(cfg, monkeypatch):
     app._web_url = "http://127.0.0.1:7200/ui/"
     app._last_sig = None
     app._last_ok = None
+    app._graceful = None
+    app._graceful_since = 0.0
     app._client = FakeClient()
     app.notes: list[str] = []
     monkeypatch.setattr(app, "_notify", lambda m: app.notes.append(m))

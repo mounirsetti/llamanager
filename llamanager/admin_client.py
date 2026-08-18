@@ -271,6 +271,10 @@ class AdminClient:
     def intake_pause(self) -> dict[str, Any]:
         return self._post("/admin/intake/pause")
 
+    def intake_drain(self) -> dict[str, Any]:
+        """Close the door but keep the backlog — see /admin/intake/drain."""
+        return self._post("/admin/intake/drain")
+
     def intake_resume(self) -> dict[str, Any]:
         return self._post("/admin/intake/resume")
 
