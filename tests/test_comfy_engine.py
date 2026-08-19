@@ -1550,3 +1550,86 @@ def test_a_lora_folder_does_not_become_a_model(tmp_path):
 
     assert [m.model_id for m in _registry(tmp_path).list()] == [
         "Krea-2-Turbo-Comfy"]
+
+
+# ------------------------------------------------- the warm-server heartbeat
+
+
+class _StubBackend:
+    """Just the one call _Heartbeat makes, with a record of when."""
+
+    def __init__(self):
+        self.touches = []
+
+    def touch_heartbeat(self, model_path):
+        import time
+        self.touches.append(time.time())
+
+
+def test_heartbeat_keeps_touching_while_the_work_runs():
+    """One touch before submitting only covers requests shorter than the
+    idle window; generating is activity and has to say so."""
+    import time
+    from llamanager.engines._comfy_runner import _Heartbeat
+    from pathlib import Path
+
+    cb = _StubBackend()
+    with _Heartbeat(Path("/nonexistent"), cb, period=0.02):
+        time.sleep(0.25)
+    # Entry, several refreshes, and a final one on the way out.
+    assert len(cb.touches) >= 4, cb.touches
+
+
+def test_a_prompt_outlasting_the_idle_window_is_not_reaped(tmp_path):
+    """The bug this covers: a 448 s first LoRA step went quiet, its own
+    reaper SIGTERMed the server mid-generation, and the runner then waited
+    on a dead port until its hour-long timeout."""
+    import subprocess
+    import sys
+    import threading
+    import time
+    from llamanager.engines._comfy_reaper import reap
+    from llamanager.engines._comfy_runner import _Heartbeat
+
+    beat = tmp_path / "warm.beat"
+    state = tmp_path / "warm.json"
+    state.write_text("{}")
+    beat.write_text(str(time.time()))
+
+    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                              start_new_session=True)
+    try:
+        cb = type("CB", (), {"touch_heartbeat": staticmethod(
+            lambda _p: beat.write_text(str(time.time())))})()
+        done = threading.Event()
+        watcher = threading.Thread(
+            target=lambda: (reap(victim.pid, beat, idle=0.3, state=state,
+                                 poll=0.05), done.set()), daemon=True)
+        watcher.start()
+
+        # While work is in flight the server must survive its idle window
+        # several times over.
+        with _Heartbeat(tmp_path, cb, period=0.05):
+            time.sleep(1.5)
+            assert victim.poll() is None, "reaped mid-generation"
+
+        # Once the work ends, the idle window applies again and it is reaped.
+        done.wait(timeout=10)
+        victim.wait(timeout=10)
+        assert victim.poll() is not None, "warm server outlived its idle window"
+    finally:
+        if victim.poll() is None:
+            victim.kill()
+            victim.wait(timeout=5)
+
+
+def test_the_runner_only_heartbeats_when_it_is_keeping_a_server_warm():
+    """A one-shot run has no warm state to touch; doing it anyway would
+    create a heartbeat file for a server nobody recorded."""
+    import inspect
+    import re
+    from llamanager.engines import _comfy_runner
+
+    src = inspect.getsource(_comfy_runner.main)
+    guarded = re.search(r"if args\.keep_warm:\s*\n\s*with _Heartbeat\(", src)
+    assert guarded, "run_prompt should heartbeat only under keep-warm"

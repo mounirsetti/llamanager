@@ -391,6 +391,45 @@ def parse_set(pairs: list[str], *, as_text: bool = False) -> dict[str, object]:
     return out
 
 
+class _Heartbeat:
+    """Keeps the warm server's heartbeat fresh while a prompt is running.
+
+    The reaper measures idleness from the heartbeat file's age and nothing
+    else, so a single touch before submitting only covers requests shorter
+    than the idle window. A longer one — the first LoRA request on a GGUF
+    transformer, measured at 448 s, or any video clip — went quiet, was
+    SIGTERMed mid-generation by its own reaper, and left the runner waiting
+    on a dead server until its hour-long timeout.
+
+    Generating IS activity. This says so for as long as it lasts.
+    """
+
+    def __init__(self, model_path: Path, cb, period: float = 10.0) -> None:
+        self._model_path = model_path
+        self._cb = cb
+        self._period = period
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "_Heartbeat":
+        self._cb.touch_heartbeat(self._model_path)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._period):
+            self._cb.touch_heartbeat(self._model_path)
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self._period)
+        # One last touch: the idle window should start when the work ended,
+        # not up to `period` seconds before it.
+        self._cb.touch_heartbeat(self._model_path)
+
+
 def _spawn_reaper(state: Path, beat: Path, pid: int,
                   idle_seconds: float) -> None:
     """Start the detached process that will eventually stop the warm server.
@@ -621,7 +660,12 @@ def main() -> int:
             log_pos = server.log_file.stat().st_size
         except OSError:
             log_pos = 0
-        hist = run_prompt(server, graph, uuid.uuid4().hex, args.timeout)
+        if args.keep_warm:
+            with _Heartbeat(args.model_path, cb):
+                hist = run_prompt(server, graph, uuid.uuid4().hex,
+                                  args.timeout)
+        else:
+            hist = run_prompt(server, graph, uuid.uuid4().hex, args.timeout)
         t_done = time.time()
         collect_output(hist, out_dir, args.output)
 
