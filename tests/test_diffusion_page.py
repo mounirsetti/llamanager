@@ -211,3 +211,37 @@ def test_materialize_adds_only_what_is_missing(app):
         "MiniMax-H3-Comfy").profiles
     assert "h3-ref2va-4step" in saved
     assert saved["h3-turbo-4step"].image_steps == 99, "edited profile clobbered"
+
+
+def test_keep_warm_is_settable_from_the_coexistence_form(app):
+    """The warm-server window belongs to the coexistence form: it is the same
+    trade, since a warm server holds its VRAM for the whole window."""
+    from llamanager.config import load_config
+    client = _admin(app)
+    page = client.get("/ui/diffusion").text
+    assert 'name="comfy_keep_warm_s"' in page
+
+    m = re.search(r'name="csrf_token" value="([^"]+)"', page)
+    r = client.post("/ui/setup/coexistence",
+                    data={"csrf_token": m.group(1),
+                          "unload_text_on_arrival": "on",
+                          "comfy_keep_warm_s": "300"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert load_config(app.state.cfg.config_path).comfy_keep_warm_s == 300
+    assert 'value="300"' in client.get("/ui/diffusion").text
+
+
+@pytest.mark.parametrize("bad", ["-1", "5000", "soon"])
+def test_a_bad_keep_warm_is_refused_not_coerced(app, bad):
+    """Silently clamping would leave a server holding the card for a window
+    nobody asked for."""
+    from llamanager.config import load_config
+    client = _admin(app)
+    m = re.search(r'name="csrf_token" value="([^"]+)"',
+                  client.get("/ui/diffusion").text)
+    r = client.post("/ui/setup/coexistence",
+                    data={"csrf_token": m.group(1), "comfy_keep_warm_s": bad},
+                    follow_redirects=False)
+    assert r.status_code == 400
+    assert load_config(app.state.cfg.config_path).comfy_keep_warm_s == 0

@@ -225,6 +225,23 @@
           </span>
         </span>
       </label>
+      <label style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 14px; font-size: 0.875rem;">
+        <input type="number" name="comfy_keep_warm_s" min="0" max="3600" step="30"
+               value="{{ coex.comfy_keep_warm_s }}"
+               style="width: 7ch; flex: 0 0 auto;">
+        <span>
+          <strong>Keep the ComfyUI server warm (seconds idle)</strong>
+          <span style="display: block; color: var(--fg-2); font-size: 0.8125rem;">
+            0 = off, a fresh server per request. Above 0, the server stays up
+            between requests with its weights — and any LoRA patches — still
+            loaded, then shuts down after this many idle seconds. A Krea 2
+            LoRA request measured 498 s cold and 24 s warm, because patching
+            a LoRA onto quantised weights is paid once per server. It holds
+            its VRAM for the whole window, so the text engine cannot have the
+            card back until it expires.
+          </span>
+        </span>
+      </label>
       <button type="submit" class="lm-btn lm-btn--primary lm-btn--sm">Save policy</button>
     </form>
   </div>

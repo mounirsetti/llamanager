@@ -3820,6 +3820,7 @@ def _setup_diffusion_ctx(request: Request) -> dict[str, Any]:
         "unload_text_on_arrival": cfg.unload_text_on_arrival,
         "restart_text_after_image": cfg.restart_text_after_image,
         "allow_concurrent": cfg.allow_concurrent,
+        "comfy_keep_warm_s": int(getattr(cfg, "comfy_keep_warm_s", 0) or 0),
     }
 
     # Surface detected GPU so the engine cards can render the right
@@ -4109,6 +4110,7 @@ async def setup_coexistence(request: Request,
                             unload_text_on_arrival: str = Form(""),
                             restart_text_after_image: str = Form(""),
                             allow_concurrent: str = Form(""),
+                            comfy_keep_warm_s: str = Form(""),
                             _: None = Depends(require_csrf)) -> Response:
     cfg = request.app.state.cfg
     cfg.unload_text_on_arrival = bool(unload_text_on_arrival)
@@ -4120,6 +4122,21 @@ async def setup_coexistence(request: Request,
         restart_text_after_image=cfg.restart_text_after_image,
         allow_concurrent=cfg.allow_concurrent,
     )
+    # Warm-server window. It belongs to this form because it is the same
+    # trade: the server holds its VRAM for the whole window, so the text
+    # engine cannot have the card back until it expires.
+    raw = comfy_keep_warm_s.strip()
+    if raw:
+        try:
+            seconds = int(float(raw))
+        except ValueError:
+            return _error_html("keep-warm must be a whole number of seconds",
+                               status_code=400)
+        if not 0 <= seconds <= 3600:
+            return _error_html("keep-warm must be between 0 and 3600 seconds",
+                               status_code=400)
+        cfg.comfy_keep_warm_s = seconds
+        update_image_config(cfg.config_path, comfy_keep_warm_s=seconds)
     return _diffusion_redirect()
 
 
