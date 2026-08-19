@@ -1524,6 +1524,10 @@ def test_lora_field_offers_the_files_in_the_models_loras_folder(tmp_path):
     schema = [_serialize_profile_field(f) for f in krea_comfy.profile_schema()]
     lora = next(f for f in schema if f["key"] == "image_lora_weights")
     assert lora["options_dir"] == "loras"
+    # The transformer override is a picker over the model's transformers, so
+    # a baked LoRA is chosen from the files present rather than typed.
+    unet = next(f for f in schema if f["key"] == "image_unet_file")
+    assert unet["options_dir"] == "diffusion_models"
 
     cfg = Config()
     cfg.models_dir_override = tmp_path
@@ -1532,14 +1536,16 @@ def test_lora_field_offers_the_files_in_the_models_loras_folder(tmp_path):
     # No loras/ folder yet — an explicit empty list, which the UI renders as
     # "no loras installed" instead of an input inviting a guess.
     assert _dir_options(cfg, "Krea-2-Turbo-Comfy", schema) == {
-        "image_lora_weights": []}
+        "image_lora_weights": [],
+        "image_unet_file": ["krea2_turbo-Q6_K.gguf"]}
 
     (d / "loras").mkdir()
     (d / "loras" / "krea2_darkbrush.safetensors").write_bytes(b"w")
     (d / "loras" / "notes.txt").write_text("not a lora")
 
     assert _dir_options(cfg, "Krea-2-Turbo-Comfy", schema) == {
-        "image_lora_weights": ["krea2_darkbrush.safetensors"]}
+        "image_lora_weights": ["krea2_darkbrush.safetensors"],
+        "image_unet_file": ["krea2_turbo-Q6_K.gguf"]}
 
 
 def test_a_lora_folder_does_not_become_a_model(tmp_path):
@@ -1633,3 +1639,91 @@ def test_the_runner_only_heartbeats_when_it_is_keeping_a_server_warm():
     src = inspect.getsource(_comfy_runner.main)
     guarded = re.search(r"if args\.keep_warm:\s*\n\s*with _Heartbeat\(", src)
     assert guarded, "run_prompt should heartbeat only under keep-warm"
+
+
+# ------------------------------------------------------- baking a LoRA in
+
+
+def test_bake_quantises_only_the_big_two_dimensional_weights():
+    """Norms, biases and scales stay full precision — quantising them costs
+    accuracy for no space, and Q8_0 needs rows divisible by its block."""
+    from llamanager.engines._lora_bake import should_quantise
+
+    assert should_quantise((6144, 6144))
+    assert should_quantise((384, 1536))
+    assert not should_quantise((6144,)), "1-D norm"
+    assert not should_quantise((128,)), "1-D scale"
+    assert not should_quantise((16, 16)), "too small to be worth it"
+    assert not should_quantise((1536, 100)), "row not divisible by the block"
+    assert not should_quantise((2, 4, 320, 320)), "not 2-D"
+
+
+def test_bake_maps_lora_names_to_the_weights_they_patch():
+    """ComfyUI names a patch diffusion_model.<key-without-.weight>; deriving
+    the map from the state dict keeps this file-to-file, with no model built
+    on a device first."""
+    from llamanager.engines._lora_bake import lora_key_map
+
+    keys = ["blocks.0.attn.wk.weight", "blocks.0.attn.wk.bias",
+            "blocks.0.prenorm.scale"]
+    assert lora_key_map(keys) == {
+        "diffusion_model.blocks.0.attn.wk": "blocks.0.attn.wk.weight"}
+
+
+def test_bake_states_its_strength_and_arch_rather_than_defaulting():
+    """Both are baked irreversibly into the file: a wrong arch will not load
+    at all, and a silent strength would be undiscoverable afterwards."""
+    import inspect
+    from llamanager.engines import _lora_bake
+
+    src = inspect.getsource(_lora_bake.main)
+    for flag in ('"--strength", type=float, required=True',
+                 '"--arch", required=True'):
+        assert flag in src, flag
+
+
+def test_a_baked_transformer_file_overrides_the_quant(tmp_path, cfg):
+    """A baked LoRA is a file the quant list cannot name, and baking is the
+    difference between a 498 s request and a 45 s one."""
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    root = _krea_model(tmp_path)
+    baked = "krea2_turbo-realism-v2-Q8_0.gguf"
+    (root / "diffusion_models" / baked).write_bytes(b"x")
+
+    prof = Profile(name="p", image_model_type="Q6_K", image_unet_file=baked)
+    argv, _ = k.build_command(cfg, root, prof, _image_request("x", []),
+                              tmp_path / "o.png")
+
+    assert _argv_tokens(argv)["UNET"] == baked
+    # No LoRA node: the merge is in the weights, so nothing is patched.
+    assert _argv_tokens(argv)["LORA"] == ""
+
+
+def test_a_missing_baked_transformer_is_named_not_swapped(tmp_path, cfg):
+    """Falling back to the quant would silently render without the LoRA the
+    operator baked in, and the image would look plausible."""
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    root = _krea_model(tmp_path)
+
+    prof = Profile(name="p", image_unet_file="not-here-Q8_0.gguf")
+    with pytest.raises(RuntimeError, match="not-here-Q8_0.gguf"):
+        k.build_command(cfg, root, prof, _image_request("x", []),
+                        tmp_path / "o.png")
+
+
+def test_the_quant_still_applies_when_no_file_is_named(tmp_path, cfg):
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    root = _krea_model(tmp_path)
+    prof = Profile(name="p", image_model_type="Q8_0", image_unet_file="")
+    argv, _ = k.build_command(cfg, root, prof, _image_request("x", []),
+                              tmp_path / "o.png")
+    assert _argv_tokens(argv)["UNET"] == k.QUANT_FILES["Q8_0"][0]

@@ -266,7 +266,15 @@ def _unet_for(profile: Profile, req: ImageRequest) -> str:
     An unrecognised quant raises: substituting the default would run weights
     the operator did not ask for and report success, and a typo in a saved
     profile is exactly how that happens.
+
+    ``image_unet_file`` overrides the quant entirely, because a baked LoRA
+    (engines/_lora_bake.py) is a file this list cannot name. Baking is what
+    makes a LoRA affordable: patched at request time the realism LoKr costs
+    498 s, baked into Q8_0 it costs 45 s.
     """
+    override = (profile.image_unet_file or "").strip()
+    if override:
+        return override
     quant = pick_model_type(req, profile).upper()
     if not quant:
         quant = DEFAULT_QUANT
@@ -450,6 +458,14 @@ def profile_schema() -> list[ProfileField]:
             default=DEFAULT_QUANT, options=list(QUANT_FILES),
             help="Q6_K (9.9 GB) keeps the whole pipeline resident on a 32 GB "
                  "card. Q8_0 is closer to bf16; Q4_K_M frees the most memory.",
+        ),
+        ProfileField(
+            key="image_unet_file", label="Transformer file", kind="text",
+            default="", options_dir="diffusion_models",
+            help="Overrides the quant above. Its purpose is a baked LoRA — "
+                 "engines/_lora_bake.py merges a LoRA into the weights and "
+                 "writes a GGUF, which turns a 498 s patched request into a "
+                 "45 s one. Leave blank to use the quant.",
         ),
         ProfileField(
             key="image_guidance", label="CFG", kind="float",

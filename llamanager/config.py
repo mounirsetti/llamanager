@@ -660,6 +660,11 @@ class Profile:
     # reading the instruction. Ignored by every other engine.
     image_ref_boost: float | None = None
     image_grounding_px: int | None = None
+    # A transformer file to run instead of the profile's quant, by name in
+    # the model's diffusion_models/ folder. Its reason for existing is baked
+    # LoRAs (engines/_lora_bake.py): the merge writes a file the quant list
+    # cannot name, and patching that LoRA at request time costs 450 s.
+    image_unet_file: str = ""
     # MiniMax-H3 REF2VA knob: how large each reference image is encoded.
     # "match" scales it (down only) to the generation's pixel area; "max"
     # uses the reference pipeline's 2048px short edge for the best identity
@@ -1169,6 +1174,7 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
         image_ref_boost=_coerce_float(body.get("image_ref_boost")),
         image_grounding_px=_coerce_int(body.get("image_grounding_px")),
         image_ref_detail=str(body.get("image_ref_detail", "") or ""),
+        image_unet_file=str(body.get("image_unet_file", "") or ""),
         video_num_frames=_coerce_int(body.get("video_num_frames")),
         video_fps=_coerce_int(body.get("video_fps")),
         audio_language=str(body.get("audio_language", "") or ""),
@@ -1617,6 +1623,8 @@ def _profile_to_tomlkit(prof: Profile):
         tbl.add("image_grounding_px", prof.image_grounding_px)
     if prof.image_ref_detail:
         tbl.add("image_ref_detail", prof.image_ref_detail)
+    if prof.image_unet_file:
+        tbl.add("image_unet_file", prof.image_unet_file)
     # Video-family (Wan) knobs. Without these a saved video profile silently
     # loses its clip length and frame rate and falls back to the adapter's
     # defaults — which on a consumer card is a 121-frame request the VRAM
