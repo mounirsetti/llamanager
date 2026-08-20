@@ -1727,3 +1727,56 @@ def test_the_quant_still_applies_when_no_file_is_named(tmp_path, cfg):
     argv, _ = k.build_command(cfg, root, prof, _image_request("x", []),
                               tmp_path / "o.png")
     assert _argv_tokens(argv)["UNET"] == k.QUANT_FILES["Q8_0"][0]
+
+
+def test_warm_servers_ignores_records_whose_process_is_gone(tmp_path, monkeypatch):
+    """A stale state file would send a request at a closed port, or worse,
+    at whatever recycled that pid."""
+    import json
+    from llamanager.engines import comfy_backend as cb
+
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    (tmp_path / "llamanager-comfy-warm-dead.json").write_text(
+        json.dumps({"pid": 2 ** 22, "port": 1234}))
+    assert cb.warm_servers() == []
+
+
+def test_warm_servers_reports_a_live_one(tmp_path, monkeypatch):
+    import json
+    import os
+    from llamanager.engines import comfy_backend as cb
+
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    (tmp_path / "llamanager-comfy-warm-live.json").write_text(
+        json.dumps({"pid": os.getpid(), "port": 4321}))
+    found = cb.warm_servers()
+    assert [f["port"] for f in found] == [4321]
+
+
+def test_stopping_warm_servers_clears_dead_records(tmp_path, monkeypatch):
+    """Whatever is gone must leave no state behind, or the next request
+    tries to adopt it."""
+    import json
+    from llamanager.engines import comfy_backend as cb
+
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    state = tmp_path / "llamanager-comfy-warm-dead.json"
+    state.write_text(json.dumps({"pid": 2 ** 22, "port": 1234}))
+    cb.heartbeat_path(state).write_text("0")
+
+    assert cb.stop_warm_servers(grace_seconds=0.1) == []
+    assert not state.exists()
+    assert not cb.heartbeat_path(state).exists()
+
+
+def test_the_text_engine_restart_stops_warm_servers_first(tmp_path):
+    """Two resident models do not fit on a 32 GB card: keep-warm must not
+    cost the operator an LLM that will not start."""
+    import inspect
+    from llamanager import server_manager
+
+    src = inspect.getsource(server_manager.ServerManager.yield_to_image)
+    stop = src.find("stop_warm_servers")
+    start = src.find("await self.start(saved_spec)", src.find("finally:"))
+    assert stop != -1, "warm servers are never stopped"
+    assert stop < start, "warm server must yield before the LLM starts"

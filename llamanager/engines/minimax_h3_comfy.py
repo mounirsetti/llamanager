@@ -495,6 +495,13 @@ def default_profiles() -> dict[str, dict[str, Any]]:
     8-step distill in its weights. Same sampling cost per step, but it loads
     in a sixth of the time and holds 8.3 GB less VRAM.
 
+    ``h3-turbo-baked-fast`` is the same bake at 1152x640 and 4 steps — 214 s
+    against 613 s, because sampling scales with pixels x frames x steps and
+    dominates everything else. Its one cost is the soundtrack: the bake is an
+    8-step distill, and at 4 steps the audio branch comes out quiet (-31 dB
+    mean against -15 dB at 8), so pick the 8-step profile when the sound
+    matters as much as the picture.
+
     ``h3-ref2va-4step`` switches heads entirely: up to nine reference images
     the prompt addresses as ``<Picture 1>``.. instead of one opening frame.
 
@@ -536,6 +543,17 @@ def default_profiles() -> dict[str, dict[str, Any]]:
             "video_fps": FPS,
             "image_model_type": "Q4_K_M-Turbo",
             # Fused into the transformer — a LoRA here would double it.
+            "image_lora_weights": "",
+        },
+        "h3-turbo-baked-fast": {
+            # The cheapest recipe that still looks like H3: 214 s against
+            # 613 s for the same model at its native canvas and 8 steps.
+            # Sampling dominates, and it scales with pixels x frames x steps.
+            "image_size": "1152x640",
+            "image_steps": 4,
+            "video_num_frames": _DEFAULT_LENGTH,
+            "video_fps": FPS,
+            "image_model_type": "Q4_K_M-Turbo",
             "image_lora_weights": "",
         },
         "h3-ref2va-4step": {

@@ -1164,6 +1164,22 @@ class ServerManager:
             yield
         finally:
             if self.cfg.restart_text_after_image:
+                # A warm ComfyUI server outlives the request that started it
+                # and keeps its weights resident — 16 GB for Krea 2, 11 GB
+                # for MiniMax-H3. The text engine is about to want the card,
+                # and two resident models do not fit on 32 GB, so the warm
+                # server yields here. Without this, comfy_keep_warm_s is a
+                # trap: it buys a faster second image at the cost of an LLM
+                # that will not start.
+                try:
+                    from .engines import comfy_backend as _cb
+                    stopped = _cb.stop_warm_servers()
+                    if stopped:
+                        self.db.log_event("comfy_warm_server_yielded", {
+                            "pids": stopped, "reason": "text engine restart",
+                        })
+                except Exception:  # noqa: BLE001 — never block the restart
+                    log.exception("failed to stop warm ComfyUI servers")
                 try:
                     await self.start(saved_spec)
                     self.db.log_event("text_yield_to_image_restored", {

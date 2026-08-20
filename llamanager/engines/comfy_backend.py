@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import time
 import urllib.error
 import urllib.request
@@ -259,3 +260,77 @@ def touch_heartbeat(model_dir: Path) -> None:
         heartbeat_path(server_state_path(model_dir)).write_text(str(time.time()))
     except OSError:
         pass
+
+
+def warm_servers() -> list[dict[str, Any]]:
+    """Every live warm ComfyUI server on this machine.
+
+    Each entry is the recorded state plus the ``state`` path it came from.
+    Records whose process is gone are skipped rather than reported, so a
+    caller never acts on a server that has already exited.
+    """
+    root = Path(os.environ.get("TMPDIR", "/tmp"))
+    out: list[dict[str, Any]] = []
+    for state in sorted(root.glob("llamanager-comfy-warm-*.json")):
+        try:
+            info = json.loads(state.read_text())
+            pid = int(info["pid"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            continue
+        info["state"] = str(state)
+        out.append(info)
+    return out
+
+
+def stop_warm_servers(grace_seconds: float = 20.0) -> list[int]:
+    """Stop every warm server and return the pids that were signalled.
+
+    A warm server holds its weights — 16 GB for Krea 2, 11 GB for
+    MiniMax-H3 — so it has to go before anything else claims the card. The
+    text engine restarting after an image task is exactly that moment: two
+    resident models do not fit on a 32 GB card, and the LLM would fail to
+    start or spill to host RAM.
+
+    SIGTERM to the process GROUP, because ComfyUI spawns helpers that would
+    otherwise keep the GPU. SIGKILL only after the grace period: killing a
+    process that holds a KFD context has leaked GPU memory on this hardware.
+    """
+    stopped: list[int] = []
+    for info in warm_servers():
+        pid = int(info["pid"])
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            stopped.append(pid)
+        except OSError:
+            continue
+    deadline = time.time() + grace_seconds
+    for pid in stopped:
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.5)
+        else:
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except OSError:
+                pass
+    # Clear the records of servers that are now gone, so a later request
+    # does not try to adopt one. Survivors keep theirs.
+    for state in Path(os.environ.get("TMPDIR", "/tmp")).glob(
+            "llamanager-comfy-warm-*.json"):
+        try:
+            info = json.loads(state.read_text())
+            os.kill(int(info["pid"]), 0)
+        except (OSError, ValueError, KeyError, TypeError):
+            for p in (heartbeat_path(state), state):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+    return stopped
