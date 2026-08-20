@@ -843,3 +843,119 @@ def test_favicon_keeps_a_clear_pixel_between_the_wordmark_and_the_dot():
     gap_px = (cx - r - ink_end) / units_per_px_at_16
     assert gap_px >= 1.0, f"only {gap_px:.2f}px between the m and the dot at 16px"
     assert (2 * r) / units_per_px_at_16 >= 2.0, "dot renders smaller than 2px at 16px"
+
+
+# ---- per-request profile-field overrides (the composer's own controls) ----
+
+def test_overrides_land_on_a_copy_of_the_profile():
+    """The composer renders one control per profile field but the API only
+    ever read a hand-picked few, so the LoRA picker was collected, sent and
+    dropped — generating without the LoRA the operator chose."""
+    from llamanager.api_v1 import _profile_with_overrides
+    from llamanager.config import Profile
+
+    base = Profile(name="kreac-best", image_steps=8,
+                   image_lora_weights="old.safetensors")
+    out = _profile_with_overrides(
+        base, "krea_comfy",
+        {"image_lora_weights": "Krea2-realism-V2.safetensors"})
+
+    assert out.image_lora_weights == "Krea2-realism-V2.safetensors"
+    assert out.image_steps == 8, "untouched fields must survive"
+    assert base.image_lora_weights == "old.safetensors", "must not mutate"
+
+
+def test_overrides_coerce_to_the_field_kind():
+    from llamanager.api_v1 import _profile_with_overrides
+    from llamanager.config import Profile
+
+    out = _profile_with_overrides(
+        Profile(name="p"), "krea_comfy",
+        {"image_steps": "12", "image_lora_scale": "0.8"})
+    assert out.image_steps == 12 and isinstance(out.image_steps, int)
+    assert out.image_lora_scale == 0.8
+
+
+def test_overrides_work_without_a_saved_profile():
+    """Choosing controls without saving a profile is the common case."""
+    from llamanager.api_v1 import _profile_with_overrides
+
+    out = _profile_with_overrides(None, "krea_comfy", {"image_steps": 4})
+    assert out is not None and out.image_steps == 4
+
+
+def test_an_unknown_override_is_a_400_not_a_shrug():
+    """Silently ignoring a knob the caller set is the bug being removed."""
+    import pytest
+    from fastapi import HTTPException
+    from llamanager.api_v1 import _profile_with_overrides
+    from llamanager.config import Profile
+
+    with pytest.raises(HTTPException) as ei:
+        _profile_with_overrides(Profile(name="p"), "krea_comfy",
+                                {"image_lora_wieght": "x"})
+    assert ei.value.status_code == 400
+    assert "image_lora_wieght" in str(ei.value.detail)
+
+
+def test_an_uncoercible_override_is_a_400():
+    import pytest
+    from fastapi import HTTPException
+    from llamanager.api_v1 import _profile_with_overrides
+    from llamanager.config import Profile
+
+    with pytest.raises(HTTPException) as ei:
+        _profile_with_overrides(Profile(name="p"), "krea_comfy",
+                                {"image_steps": "eight"})
+    assert ei.value.status_code == 400
+    assert "image_steps" in str(ei.value.detail)
+
+
+def test_blank_overrides_leave_the_profile_alone():
+    """An untouched control sends "" — that means inherit, not clear."""
+    from llamanager.api_v1 import _profile_with_overrides
+    from llamanager.config import Profile
+
+    base = Profile(name="p", image_lora_weights="keep.safetensors")
+    out = _profile_with_overrides(base, "krea_comfy",
+                                  {"image_lora_weights": ""})
+    assert out.image_lora_weights == "keep.safetensors"
+
+
+def test_both_generation_endpoints_apply_overrides():
+    import inspect
+    from llamanager import api_v1
+
+    for fn in (api_v1.images_generations, api_v1.videos_generations):
+        src = inspect.getsource(fn)
+        assert "_profile_with_overrides" in src, fn.__name__
+        assert 'body.get("overrides")' in src, fn.__name__
+
+
+def test_a_schema_key_profile_cannot_carry_is_named_not_a_500():
+    """An adapter declaring a field config.Profile has no slot for is a
+    mismatch to report, not a TypeError inside dataclasses.replace."""
+    import pytest
+    from fastapi import HTTPException
+    from llamanager.api_v1 import _profile_with_overrides
+    from llamanager.config import Profile
+
+    class _Field:
+        key, kind = "image_not_a_real_field", "text"
+
+    class _Adapter:
+        @staticmethod
+        def profile_schema():
+            return [_Field()]
+
+    import llamanager.engines as engines
+    real = engines.get
+    engines.get = lambda name: _Adapter if name == "fake" else real(name)
+    try:
+        with pytest.raises(HTTPException) as ei:
+            _profile_with_overrides(Profile(name="p"), "fake",
+                                    {"image_not_a_real_field": "x"})
+    finally:
+        engines.get = real
+    assert ei.value.status_code == 400
+    assert "image_not_a_real_field" in str(ei.value.detail)

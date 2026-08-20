@@ -250,24 +250,29 @@ def profile_schema() -> list[ProfileField]:
             key="image_guidance", label="Guidance scale", kind="float",
             default=_DEFAULT_GUIDANCE,
             help="5.0 per the upstream recommendation.",
+            advanced=True,
         ),
         ProfileField(
             key="image_seed", label="Seed", kind="int",
             default=None, help="Leave blank for a fresh seed each run.",
+            advanced=True,
         ),
         ProfileField(
             key="image_editing_scheduler", label="VAE device", kind="select",
             default="auto", options=["auto", "cuda", "cpu", "mps"],
             help="Advanced: decode on CPU/cuda/mps. Auto keeps ROCm VAE decode on CPU for stability.",
+            advanced=True,
         ),
         ProfileField(
             key="image_negative_prompt", label="Negative prompt", kind="text",
             default="", help="Optional negative prompt forwarded to the pipeline.",
+            advanced=True,
         ),
         ProfileField(
             key="image_model_type", label="Torch dtype", kind="select",
             default="", options=["", "bfloat16", "float16", "float32"],
             help="Advanced override. Blank auto-selects bfloat16 on CUDA, float16 on MPS, float32 on CPU.",
+            advanced=True,
         ),
     ]
 

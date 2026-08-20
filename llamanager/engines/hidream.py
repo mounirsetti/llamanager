@@ -301,6 +301,7 @@ def profile_schema() -> list[ProfileField]:
             key="image_model_type", label="Recipe", kind="select",
             default="dev", options=["dev", "full"],
             help="dev: 28 steps · full: 50 steps + cfg.",
+            advanced=True,
         ),
         ProfileField(
             key="image_size", label="Resolution", kind="select",
@@ -314,10 +315,12 @@ def profile_schema() -> list[ProfileField]:
         ProfileField(
             key="image_guidance", label="Guidance scale", kind="float",
             default=None, help="Only effective with the full recipe.",
+            advanced=True,
         ),
         ProfileField(
             key="image_seed", label="Seed", kind="int",
             default=None, help="Leave blank for a fresh seed each run.",
+            advanced=True,
         ),
     ]
 

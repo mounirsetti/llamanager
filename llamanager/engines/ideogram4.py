@@ -154,6 +154,7 @@ def profile_schema() -> list[ProfileField]:
             key="image_model_type", label="Quantization", kind="select",
             default=_DEFAULT_QUANT, options=QUANTIZATIONS,
             help="Use fp8 on AMD/R9700. nf4 is CUDA-oriented per Ideogram.",
+            advanced=True,
         ),
         ProfileField(
             key="image_size", label="Resolution", kind="select",
@@ -164,10 +165,12 @@ def profile_schema() -> list[ProfileField]:
             key="image_editing_scheduler", label="Sampler preset", kind="select",
             default=_DEFAULT_PRESET, options=PRESETS,
             help="Quality preset bundles steps, CFG schedule, mu, and std.",
+            advanced=True,
         ),
         ProfileField(
             key="image_seed", label="Seed", kind="int",
             default=0, help="Leave blank for the runner default.",
+            advanced=True,
         ),
     ]
 

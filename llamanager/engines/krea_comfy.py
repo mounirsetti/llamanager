@@ -458,6 +458,7 @@ def profile_schema() -> list[ProfileField]:
             default=DEFAULT_QUANT, options=list(QUANT_FILES),
             help="Q6_K (9.9 GB) keeps the whole pipeline resident on a 32 GB "
                  "card. Q8_0 is closer to bf16; Q4_K_M frees the most memory.",
+            advanced=True,
         ),
         ProfileField(
             key="image_unet_file", label="Transformer file", kind="text",
@@ -466,12 +467,14 @@ def profile_schema() -> list[ProfileField]:
                  "engines/_lora_bake.py merges a LoRA into the weights and "
                  "writes a GGUF, which turns a 498 s patched request into a "
                  "45 s one. Leave blank to use the quant.",
+            advanced=True,
         ),
         ProfileField(
             key="image_guidance", label="CFG", kind="float",
             default=_DEFAULT_CFG,
             help="Leave at 1.0 — Krea 2 Turbo is guidance-distilled, so "
                  "raising this degrades the image rather than sharpening it.",
+            advanced=True,
         ),
         ProfileField(
             key="image_lora_weights", label="LoRA", kind="text",
@@ -493,6 +496,7 @@ def profile_schema() -> list[ProfileField]:
                  "the reference: 1.0 is off, 4.0 is the reference workflow's "
                  "setting, above ~10 it over-copies and removals stop "
                  "working.",
+            advanced=True,
         ),
         ProfileField(
             key="image_grounding_px", label="Grounding size", kind="int",
@@ -501,16 +505,19 @@ def profile_schema() -> list[ProfileField]:
                  "reference while reading the instruction: 384-768 is the "
                  "trained range, 1024 favours face likeness, 512 helps a "
                  "stubborn scene change.",
+            advanced=True,
         ),
         ProfileField(
             key="image_editing_scheduler", label="Sampler", kind="select",
             default=_DEFAULT_SAMPLER,
             options=["euler", "res_multistep", "dpmpp_2m", "euler_ancestral"],
             help="euler is what the reference workflow uses.",
+            advanced=True,
         ),
         ProfileField(
             key="image_seed", label="Seed", kind="int",
             default=None, help="Leave blank for a fresh seed each run.",
+            advanced=True,
         ),
     ]
 

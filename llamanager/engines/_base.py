@@ -129,3 +129,10 @@ class ProfileField:
     # suggestions in ``options`` (e.g. known LoRA repos) are offered
     # alongside the local files rather than replacing them.
     options_free: bool = False
+    # Does this knob belong behind "Advanced"? The composer shows the few
+    # controls a generation actually turns on — model, profile, steps,
+    # resolution, LoRA — and folds the rest away. Marking a field advanced is
+    # the engine's call because only the engine knows which of its knobs are
+    # everyday choices and which are recipe internals (quant, sampler,
+    # scheduler, grounding size, reference-encoding detail).
+    advanced: bool = False

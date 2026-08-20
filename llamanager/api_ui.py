@@ -5711,6 +5711,7 @@ def _serialize_profile_field(field) -> dict[str, Any]:
         "help": field.help,
         "options_dir": getattr(field, "options_dir", "") or "",
         "options_free": bool(getattr(field, "options_free", False)),
+        "advanced": bool(getattr(field, "advanced", False)),
     }
 
 

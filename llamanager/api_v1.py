@@ -1242,6 +1242,71 @@ async def audio_stream(websocket: WebSocket) -> None:
             await websocket.close()
 
 
+def _profile_with_overrides(profile: "Profile | None", engine: str,
+                            overrides: dict[str, Any] | None) -> "Profile | None":
+    """A copy of ``profile`` carrying per-request profile-field overrides.
+
+    The composer renders one control per engine profile field, but the API
+    only ever accepted a hand-picked few (size, steps, guidance, model_type,
+    editing_scheduler). Everything else it rendered — the LoRA picker most
+    visibly — was collected by the page, sent, and dropped on the floor, so
+    choosing a LoRA without saving a profile silently generated without it.
+    That is the same failure the ``model_type`` note on ImageRequest records
+    having fixed once already; this fixes the class rather than one more
+    instance of it.
+
+    Keys are validated against the engine's own ``profile_schema()`` and
+    coerced to that field's kind. An unknown key or an uncoercible value is
+    a 400 rather than a shrug: silently ignoring a knob the caller set is
+    exactly the behaviour being removed.
+    """
+    if not overrides:
+        return profile
+    from . import engines as _engines
+    try:
+        schema = {f.key: f for f in _engines.get(engine).profile_schema()}
+    except (KeyError, AttributeError):
+        schema = {}
+    unknown = sorted(k for k in overrides if k not in schema)
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"unknown override(s) for engine {engine!r}: "
+                    + ", ".join(unknown)
+                    + ". Known fields: " + ", ".join(sorted(schema))),
+        )
+    values: dict[str, Any] = {}
+    for key, raw in overrides.items():
+        if raw is None or raw == "":
+            continue                      # "leave it to the profile"
+        kind = getattr(schema[key], "kind", "text")
+        try:
+            if kind == "int":
+                values[key] = int(raw)
+            elif kind == "float":
+                values[key] = float(raw)
+            else:
+                values[key] = str(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail=f"override {key!r} expects {kind}, got {raw!r}")
+    if not values:
+        return profile
+    import dataclasses
+    # A schema key an engine declares but Profile has no field for would
+    # make replace() raise TypeError, i.e. a 500 for what is really a
+    # mismatch between the adapter and the config model. Name it instead.
+    known = {f.name for f in dataclasses.fields(Profile)}
+    stray = sorted(k for k in values if k not in known)
+    if stray:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"engine {engine!r} declares profile field(s) that "
+                    "config.Profile does not carry: " + ", ".join(stray)))
+    return dataclasses.replace(profile or Profile(name="(overrides)"), **values)
+
+
 @router.post("/images/generations")
 async def images_generations(request: Request) -> Response:
     """Generate one or more images.
@@ -1508,6 +1573,14 @@ async def images_generations(request: Request) -> Response:
                 detail=f"unknown profile {profile_required!r} for model {model_required!r}",
             )
 
+    # Per-request profile-field overrides (the composer's own controls).
+    try:
+        profile_obj = _profile_with_overrides(
+            profile_obj, engine, body.get("overrides"))
+    except HTTPException:
+        qm.cancel(qr.request_id)
+        raise
+
     if streaming:
         return await _images_stream(qm, qr, runner, request, image_req,
                                      model_required, engine, profile_obj,
@@ -1693,6 +1766,13 @@ async def videos_generations(request: Request) -> Response:
         if fps_override is not None:
             overrides["video_fps"] = fps_override
         profile_obj = dataclasses.replace(base_profile, **overrides)
+
+    try:
+        profile_obj = _profile_with_overrides(
+            profile_obj, engine, body.get("overrides"))
+    except HTTPException:
+        qm.cancel(qr.request_id)
+        raise
 
     if streaming:
         return await _images_stream(qm, qr, runner, request, image_req,

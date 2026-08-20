@@ -1,0 +1,105 @@
+{# Folds the composer's advanced controls behind a disclosure.
+
+   The settings pane grew one control per engine profile field, so a model
+   with eleven knobs presented eleven boxes with equal weight — the four that
+   decide a generation (resolution, steps, LoRA, clip length) buried among
+   quant, sampler, scheduler, grounding size and reference-encoding detail.
+
+   Which is which is the engine's call, carried on each field as ``advanced``
+   (see engines/_base.ProfileField). This partial only rearranges what the
+   page already rendered: it watches #lm-img-overrides and moves the advanced
+   fields into a <details> after each rebuild. Doing it by observation rather
+   than inside each page's renderOverrides() keeps one implementation for the
+   four pages (admin/public x image/video), which had already drifted.
+
+   Requires: LM_IMAGES_CFG.enginesSchema, an #lm-img-model select, and the
+   #lm-img-overrides container the page rebuilds on model/profile change.
+#}
+<style>
+  .lm-adv { grid-column: 1 / -1; margin-top: 2px; }
+  .lm-adv > summary {
+    cursor: pointer; list-style: none; user-select: none;
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 0.75rem; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--fg-2); padding: 6px 0;
+  }
+  .lm-adv > summary::-webkit-details-marker { display: none; }
+  .lm-adv > summary::before {
+    content: "▸"; font-size: 0.7rem; transition: transform 0.15s ease;
+  }
+  .lm-adv[open] > summary::before { transform: rotate(90deg); }
+  .lm-adv > summary:hover { color: var(--fg-1); }
+  .lm-adv__count {
+    font-size: 0.6875rem; color: var(--fg-2); text-transform: none;
+    letter-spacing: 0;
+  }
+  .lm-adv__body {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px;
+    padding: 10px 0 2px; border-top: 1px solid var(--bg-3);
+  }
+  @media (max-width: 900px) { .lm-adv__body { grid-template-columns: 1fr; } }
+</style>
+<script>
+(function () {
+  const OPEN_KEY = "lm.composer.advancedOpen";
+  const overrides = document.getElementById("lm-img-overrides");
+  const modelSel = document.getElementById("lm-img-model");
+  if (!overrides || !modelSel || !window.LM_IMAGES_CFG) return;
+
+  function advancedKeys() {
+    const cfg = window.LM_IMAGES_CFG;
+    const models = cfg.imageModels || [];
+    const m = models.find(x => x.model_id === modelSel.value);
+    const schema = (cfg.enginesSchema || {})[m ? m.engine : ""] || [];
+    return new Set(schema.filter(f => f.advanced).map(f => f.key));
+  }
+
+  function fieldKey(wrap) {
+    const el = wrap.querySelector("input[name], select[name]");
+    return el ? el.name : "";
+  }
+
+  let regrouping = false;
+  function regroup() {
+    if (regrouping) return;                 // our own DOM writes re-enter
+    const keys = advancedKeys();
+    if (!keys.size) return;
+    const fields = Array.from(overrides.children)
+      .filter(el => el.classList.contains("lm-img-field"));
+    const advanced = fields.filter(el => keys.has(fieldKey(el)));
+    if (!advanced.length) return;
+
+    regrouping = true;
+    try {
+      const details = document.createElement("details");
+      details.className = "lm-adv";
+      // Remembered per browser, not per model: an operator who works in the
+      // advanced knobs wants them open on the next model too.
+      try { details.open = localStorage.getItem(OPEN_KEY) === "1"; } catch {}
+      details.addEventListener("toggle", () => {
+        try { localStorage.setItem(OPEN_KEY, details.open ? "1" : "0"); } catch {}
+      });
+      const summary = document.createElement("summary");
+      summary.textContent = "Advanced";
+      const count = document.createElement("span");
+      count.className = "lm-adv__count";
+      count.textContent = `(${advanced.length})`;
+      summary.appendChild(count);
+      const body = document.createElement("div");
+      body.className = "lm-adv__body";
+      advanced.forEach(el => body.appendChild(el));   // moves, not copies
+      details.appendChild(summary);
+      details.appendChild(body);
+      overrides.appendChild(details);
+    } finally {
+      regrouping = false;
+    }
+  }
+
+  // The page rebuilds #lm-img-overrides wholesale on model/profile change,
+  // and does it from several call sites; observing the container catches
+  // every one of them without touching that code.
+  new MutationObserver(regroup).observe(overrides, {childList: true});
+  regroup();
+})();
+</script>

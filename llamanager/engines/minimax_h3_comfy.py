@@ -431,6 +431,7 @@ def profile_schema() -> list[ProfileField]:
                  "Q4_K_M-Ref-Turbo (10.6 GB) is the REF2VA head: up to nine "
                  "reference images instead of an opening frame, 4-step "
                  "distill, LoRA field cleared.",
+            advanced=True,
         ),
         ProfileField(
             key="image_ref_detail", label="Reference detail", kind="select",
@@ -440,6 +441,7 @@ def profile_schema() -> list[ProfileField]:
                  "short edge for the best identity fidelity and is several "
                  "times slower, because reference tokens ride through every "
                  "sampling step.",
+            advanced=True,
         ),
         ProfileField(
             key="image_lora_weights", label="Turbo LoRA", kind="text",
@@ -456,10 +458,12 @@ def profile_schema() -> list[ProfileField]:
             default=_DEFAULT_SAMPLER,
             options=["res_multistep", "euler", "euler_ancestral", "dpmpp_2m"],
             help="res_multistep is what the reference workflow uses.",
+            advanced=True,
         ),
         ProfileField(
             key="image_seed", label="Seed", kind="int",
             default=None, help="Leave blank for a fresh seed each run.",
+            advanced=True,
         ),
     ]
 

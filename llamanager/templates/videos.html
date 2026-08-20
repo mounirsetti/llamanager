@@ -435,6 +435,7 @@
       {# Settings popover #}
       <div class="gen-pop" id="gen-settings" hidden>
         {% include "_video_composer.html" %}
+          {% include "_composer_advanced.html" %}
       </div>
 
       {# Prompt history popover #}
@@ -1192,6 +1193,9 @@
     if (profileSel.value) body.profile = profileSel.value;
     if (seedEl.value !== "") body.seed = parseInt(seedEl.value, 10);
     const o = collectOverrides();
+    // Everything the composer rendered, not just the handful the API
+    // used to hand-map: the LoRA picker was collected and dropped.
+    if (Object.keys(o).length) body.overrides = o;
     if (o.image_size) body.size = o.image_size;
     if (o.image_steps != null) body.steps = o.image_steps;
     if (o.image_guidance != null) body.guidance = o.image_guidance;

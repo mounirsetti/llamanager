@@ -225,10 +225,12 @@ def profile_schema() -> list[ProfileField]:
             key="image_guidance", label="CFG scale", kind="float",
             default=_DEFAULT_CFG,
             help="FLUX 2 is flow-matching; values above 1.0 typically degrade output.",
+            advanced=True,
         ),
         ProfileField(
             key="image_seed", label="Seed", kind="int",
             default=None, help="Leave blank for a fresh seed each run.",
+            advanced=True,
         ),
     ]
 
