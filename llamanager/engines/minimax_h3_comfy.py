@@ -105,6 +105,15 @@ REF_DETAIL_CHOICES = ("match", "max")
 # Node id of the ref2v graph's first LoadImage; the nine slots run from here.
 _REF_NODE_BASE = 20
 
+# The soundtrack branch, in both graphs: the audio VAE loader and the decode
+# that feeds CreateVideo. Dropping them yields a silent mp4 — CreateVideo's
+# audio input is optional, and drop_node removes the consumer's key with the
+# node. Sampling costs the same either way: H3 samples one latent carrying
+# picture and sound together, so this saves the decode and mux (~2 s), not
+# the generation.
+_AUDIO_NODES = ("14", "5")
+AUDIO_CHOICES = ("on", "off")
+
 SIZE_BUCKETS = [
     "1344x768", "768x1344",     # native canvas, landscape / portrait
     "1152x640", "640x1152",
@@ -191,6 +200,24 @@ def _unet_for(profile: Profile, req: ImageRequest) -> str:
     raise RuntimeError(
         f"unknown MiniMax-H3 transformer quant {quant!r} — pick one of "
         + ", ".join(sorted(QUANT_FILES)))
+
+
+def _audio_on(profile: Profile) -> bool:
+    """Does this clip carry its soundtrack?
+
+    Unset means on, which is what the model does and what every profile
+    before this field expected. "off" is an explicit choice to skip the
+    audio VAE decode and mux.
+    """
+    value = (profile.video_audio or "").strip().lower()
+    if value in ("", "on"):
+        return True
+    if value == "off":
+        return False
+    raise RuntimeError(
+        f"video_audio must be one of {' | '.join(AUDIO_CHOICES)} "
+        f"(or blank for the model's default, which is on); got "
+        f"{profile.video_audio!r}")
 
 
 def _ref_detail(profile: Profile) -> str:
@@ -343,6 +370,13 @@ def build_command(
             argv += ["--set", "LORA=", "--set", "LORA_STRENGTH=0.0",
                      "--bypass", "2:model"]
 
+    if not _audio_on(profile):
+        # A silent clip is a deliberate choice here, never a symptom: this
+        # engine exists for the synchronised soundtrack, so the only way to
+        # get a silent mp4 out of it is to ask.
+        for node in _AUDIO_NODES:
+            argv += ["--drop-node", node]
+
     keep_warm = int(getattr(cfg, "comfy_keep_warm_s", 0) or 0)
     if keep_warm > 0:
         argv += ["--keep-warm", str(keep_warm)]
@@ -442,6 +476,13 @@ def profile_schema() -> list[ProfileField]:
                  "times slower, because reference tokens ride through every "
                  "sampling step.",
             advanced=True,
+        ),
+        ProfileField(
+            key="video_audio", label="Soundtrack", kind="select",
+            default="on", options=list(AUDIO_CHOICES),
+            help="H3 generates picture and sound from one latent, so 'off' "
+                 "does not make sampling cheaper — it skips the audio decode "
+                 "and mux, for clips going under other audio anyway.",
         ),
         ProfileField(
             key="image_lora_weights", label="Turbo LoRA", kind="text",

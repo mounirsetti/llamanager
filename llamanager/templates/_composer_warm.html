@@ -1,0 +1,115 @@
+{# Warm-server badge and prewarm control for the composer.
+
+   A ComfyUI model is cold or warm, and the difference is the whole wait:
+   278 s against 170 s for a MiniMax-H3 clip, 498 s against 24 s for a Krea 2
+   request carrying a LoRA (the patch is applied once per server, not once
+   per request). That state was invisible, so the same request looked
+   randomly fast or slow.
+
+   Warm also costs something — the server holds 11-16 GB until its window
+   expires — which is why "Release" sits next to "Prewarm" rather than being
+   left to the reaper.
+
+   Admin only: the routes are behind require_admin_ui, so the public pages
+   include this partial without the buttons (they still show the badge, which
+   explains their own wait). Requires #lm-img-model and LM_IMAGES_CFG.
+#}
+<style>
+  .lm-warm { grid-column: 1 / -1; display: flex; align-items: center;
+             gap: 8px; flex-wrap: wrap; padding: 2px 0 6px; }
+  .lm-warm__dot { width: 7px; height: 7px; border-radius: 50%;
+                  background: var(--fg-2); flex: 0 0 auto; }
+  .lm-warm[data-state="warm"] .lm-warm__dot { background: var(--ok, #3fb950); }
+  .lm-warm[data-state="busy"] .lm-warm__dot { background: var(--accent);
+                                              animation: lm-warm-pulse 1s infinite; }
+  @keyframes lm-warm-pulse { 50% { opacity: 0.3; } }
+  .lm-warm__text { font-size: 0.75rem; color: var(--fg-2); }
+  .lm-warm__spacer { flex: 1 1 auto; }
+</style>
+<div class="lm-warm" id="lm-warm" data-state="cold" hidden>
+  <span class="lm-warm__dot"></span>
+  <span class="lm-warm__text" id="lm-warm-text">cold</span>
+  <span class="lm-warm__spacer"></span>
+  {% if warm_controls %}
+  <button type="button" id="lm-warm-prewarm"
+          class="lm-btn lm-btn--ghost lm-btn--xs">Prewarm</button>
+  <button type="button" id="lm-warm-release"
+          class="lm-btn lm-btn--ghost lm-btn--xs" hidden>Release</button>
+  {% endif %}
+</div>
+<script>
+(function () {
+  const box = document.getElementById("lm-warm");
+  const text = document.getElementById("lm-warm-text");
+  const modelSel = document.getElementById("lm-img-model");
+  if (!box || !modelSel) return;
+  const prewarmBtn = document.getElementById("lm-warm-prewarm");
+  const releaseBtn = document.getElementById("lm-warm-release");
+  const csrf = document.querySelector('input[name="csrf_token"]');
+
+  let timer = null;
+
+  function setState(state, label) {
+    box.hidden = false;
+    box.dataset.state = state;
+    text.textContent = label;
+    if (releaseBtn) releaseBtn.hidden = state !== "warm";
+    if (prewarmBtn) prewarmBtn.disabled = state === "warm" || state === "busy";
+  }
+
+  async function refresh() {
+    const model = modelSel.value;
+    if (!model) { box.hidden = true; return; }
+    let body;
+    try {
+      const r = await fetch(`/ui/comfy/warm?model=${encodeURIComponent(model)}`,
+                            {credentials: "same-origin"});
+      if (!r.ok) { box.hidden = true; return; }   // not a comfy model, or public
+      body = await r.json();
+    } catch { box.hidden = true; return; }
+
+    if (body.warm) {
+      const mins = body.keep_warm_s ? ` · idles out after ${Math.round(body.keep_warm_s / 60)} min` : "";
+      setState("warm", `warm — weights loaded${mins}`);
+    } else if (!body.can_prewarm) {
+      // Say why rather than presenting a button that cannot work.
+      setState("cold", "cold — set a keep-warm window to prewarm");
+    } else {
+      setState("cold", "cold — first request pays the model load");
+    }
+  }
+
+  if (prewarmBtn) prewarmBtn.addEventListener("click", async () => {
+    setState("busy", "loading weights…");
+    const fd = new FormData();
+    fd.append("model", modelSel.value);
+    if (csrf) fd.append("csrf_token", csrf.value);
+    try {
+      const r = await fetch("/ui/comfy/prewarm",
+                            {method: "POST", body: fd, credentials: "same-origin"});
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setState("cold", d.detail || "prewarm failed");
+        return;
+      }
+    } catch { setState("cold", "prewarm failed"); return; }
+    // The weights take as long as they take; the poll below notices.
+    setTimeout(refresh, 3000);
+  });
+
+  if (releaseBtn) releaseBtn.addEventListener("click", async () => {
+    const fd = new FormData();
+    if (csrf) fd.append("csrf_token", csrf.value);
+    try {
+      await fetch("/ui/comfy/unwarm",
+                  {method: "POST", body: fd, credentials: "same-origin"});
+    } catch {}
+    refresh();
+  });
+
+  modelSel.addEventListener("change", refresh);
+  refresh();
+  timer = setInterval(refresh, 10000);
+  window.addEventListener("beforeunload", () => timer && clearInterval(timer));
+})();
+</script>

@@ -1,0 +1,137 @@
+{# Keeps a running generation visible across a page close.
+
+   A generation is a queued job on the server, not a property of the browser
+   connection that started it. Close the tab during a four-minute clip and
+   the GPU keeps working, but the page came back looking idle — no progress,
+   no indication anything was happening, and the result appearing in the
+   gallery minutes later with no explanation.
+
+   The admin images page grew its own reattach for exactly this. The other
+   three (admin video, public image, public video) had none, so this partial
+   gives them a smaller version of the same idea: on load, ask the server
+   what it is doing; if something is running, show it and poll until it
+   finishes, then refresh so the result appears.
+
+   A page that already reattaches on its own sets window.LM_HAS_REATTACH
+   before including this, and it stands down.
+
+   Optional hook: window.LM_ON_JOB_DONE() is called when the watched job
+   ends. Without one the page reloads, which is enough to surface the result
+   in every gallery here.
+#}
+<style>
+  .lm-reattach {
+    position: sticky; top: 0; z-index: 30;
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; margin-bottom: 8px;
+    border: 1px solid var(--accent); border-radius: 4px;
+    background: var(--bg-2); font-size: 0.8125rem; color: var(--fg-1);
+  }
+  .lm-reattach__dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    animation: lm-reattach-pulse 1s infinite; flex: 0 0 auto;
+  }
+  @keyframes lm-reattach-pulse { 50% { opacity: 0.25; } }
+  .lm-reattach__bar {
+    flex: 1 1 auto; height: 4px; background: var(--bg-3); border-radius: 2px;
+    overflow: hidden; min-width: 60px;
+  }
+  .lm-reattach__fill {
+    height: 100%; width: 0; background: var(--accent);
+    transition: width 0.3s ease;
+  }
+</style>
+<div class="lm-reattach" id="lm-reattach" hidden>
+  <span class="lm-reattach__dot"></span>
+  <span id="lm-reattach-text">picking up a generation already running…</span>
+  <span class="lm-reattach__bar"><span class="lm-reattach__fill" id="lm-reattach-fill"></span></span>
+  <span id="lm-reattach-elapsed" class="lm-mono"></span>
+</div>
+<script>
+(function () {
+  if (window.LM_HAS_REATTACH) return;         // page brings its own
+  const box = document.getElementById("lm-reattach");
+  if (!box || !window.LM_IMAGES_CFG) return;
+  const text = document.getElementById("lm-reattach-text");
+  const fill = document.getElementById("lm-reattach-fill");
+  const elapsed = document.getElementById("lm-reattach-elapsed");
+  const cfg = window.LM_IMAGES_CFG;
+  const statusUrl = cfg.statusUrl || "/v1/images/status";
+
+  let poll = null, ticker = null, startedAt = null, watching = false;
+
+  function fmt(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  }
+
+  async function status() {
+    const headers = cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : {};
+    const r = await fetch(statusUrl, {headers, credentials: "same-origin"});
+    if (!r.ok) throw new Error(String(r.status));
+    return r.json();
+  }
+
+  function show(st) {
+    box.hidden = false;
+    const step = st.step, total = st.total_steps;
+    if (step != null && total) {
+      text.textContent = `generation in progress — step ${step}/${total}`;
+      fill.style.width = `${Math.round((step / total) * 100)}%`;
+    } else {
+      // Loading weights: real, slow, and the phase people assume has hung.
+      text.textContent = "generation in progress — loading the model";
+      fill.style.width = "8%";
+    }
+    if (st.started_at && !startedAt) startedAt = st.started_at * 1000;
+    if (!ticker) {
+      ticker = setInterval(() => {
+        if (startedAt) elapsed.textContent = fmt(Date.now() - startedAt);
+      }, 500);
+    }
+  }
+
+  function done() {
+    if (poll) { clearInterval(poll); poll = null; }
+    if (ticker) { clearInterval(ticker); ticker = null; }
+    box.hidden = true;
+    if (typeof window.LM_ON_JOB_DONE === "function") {
+      try { window.LM_ON_JOB_DONE(); return; } catch {}
+    }
+    window.location.reload();
+  }
+
+  function watch() {
+    if (poll) return;
+    watching = true;
+    poll = setInterval(async () => {
+      let st;
+      try { st = await status(); }
+      catch { return; }                       // transient — keep the banner
+      if (st.busy || st.status === "generating") { show(st); return; }
+      done();
+    }, 1500);
+  }
+
+  (async function start() {
+    let st;
+    try { st = await status(); } catch { return; }
+    // Only adopt work that is already running. A page that just submitted
+    // its own request has its own progress UI, and this would double it.
+    if ((st.busy || st.status === "generating") && !window.LM_SUBMITTING) {
+      show(st);
+      watch();
+    }
+  })();
+
+  // Whatever this page uses to start a generation, the banner takes over
+  // once the page is hidden — that is the case this exists for.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && !watching) {
+      status().then(st => {
+        if (st.busy || st.status === "generating") { show(st); watch(); }
+      }).catch(() => {});
+    }
+  });
+})();
+</script>

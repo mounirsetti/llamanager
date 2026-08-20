@@ -665,6 +665,12 @@ class Profile:
     # LoRAs (engines/_lora_bake.py): the merge writes a file the quant list
     # cannot name, and patching that LoRA at request time costs 450 s.
     image_unet_file: str = ""
+    # MiniMax-H3: does the clip carry its soundtrack? H3 samples one latent
+    # holding both picture and sound, so "off" does not make sampling
+    # cheaper — it skips the audio VAE decode and mux, which is what you
+    # want when the clip is going under other audio anyway. "" means the
+    # model's own behaviour, which is sound on.
+    video_audio: str = ""
     # MiniMax-H3 REF2VA knob: how large each reference image is encoded.
     # "match" scales it (down only) to the generation's pixel area; "max"
     # uses the reference pipeline's 2048px short edge for the best identity
@@ -1174,6 +1180,7 @@ def _parse_profile(name: str, body: dict[str, Any]) -> Profile:
         image_ref_boost=_coerce_float(body.get("image_ref_boost")),
         image_grounding_px=_coerce_int(body.get("image_grounding_px")),
         image_ref_detail=str(body.get("image_ref_detail", "") or ""),
+        video_audio=str(body.get("video_audio", "") or ""),
         image_unet_file=str(body.get("image_unet_file", "") or ""),
         video_num_frames=_coerce_int(body.get("video_num_frames")),
         video_fps=_coerce_int(body.get("video_fps")),
@@ -1625,6 +1632,8 @@ def _profile_to_tomlkit(prof: Profile):
         tbl.add("image_ref_detail", prof.image_ref_detail)
     if prof.image_unet_file:
         tbl.add("image_unet_file", prof.image_unet_file)
+    if prof.video_audio:
+        tbl.add("video_audio", prof.video_audio)
     # Video-family (Wan) knobs. Without these a saved video profile silently
     # loses its clip length and frame rate and falls back to the adapter's
     # defaults — which on a consumer card is a 121-frame request the VRAM

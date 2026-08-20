@@ -546,7 +546,9 @@
       {# Settings popover #}
       <div class="gen-pop" id="gen-settings" hidden>
         {% include "_image_composer.html" %}
+          {% with warm_controls = True %}{% include "_composer_warm.html" %}{% endwith %}
           {% include "_composer_advanced.html" %}
+          {% include "_composer_reattach.html" %}
       </div>
 
       {# Prompt history popover #}
@@ -631,6 +633,10 @@
     fileUrlPrefix: "/ui/images/file/",
     generationsUrl: "/v1/images/generations"
   };
+  // This page has its own reattach — live cards rebuilt from the server's
+  // status, then the finished image resolved into them. The shared banner
+  // in _composer_reattach.html stands down rather than double-reporting.
+  window.LM_HAS_REATTACH = true;
 </script>
 
 <script>

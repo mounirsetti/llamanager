@@ -3532,6 +3532,158 @@ async def images_gallery(request: Request,
     return _JSONResponse(payload)
 
 
+async def _spawn_prewarm(request: Request, model_id: str,
+                         profile_name: str) -> int:
+    """Run one minimal generation so the weights are resident, and detach.
+
+    Built through the engine's own ``build_command`` rather than a bespoke
+    graph: a prewarm that loaded a different set of files than the real
+    request would be worse than none, because the page would report warm and
+    the next generation would still pay the load.
+    """
+    import asyncio
+    import tempfile
+    from . import engines as _engines
+    from .config import Profile, detect_engine_for_id
+    from .engines._base import ImageRequest
+
+    cfg = request.app.state.cfg
+    model_dir = cfg.models_dir / model_id
+    if not model_dir.is_dir():
+        raise ValueError(f"unknown model {model_id!r}")
+    engine = detect_engine_for_id(model_id, cfg.models_dir)
+    try:
+        adapter = _engines.get(engine)
+    except KeyError:
+        raise ValueError(f"unknown engine for {model_id!r}")
+    if not str(engine).endswith("_comfy"):
+        raise ValueError(f"{engine} has no warm server to fill")
+
+    profile = None
+    if profile_name:
+        profile = cfg.get_profile(model_id, profile_name)
+        if profile is None:
+            raise ValueError(f"unknown profile {profile_name!r}")
+    if profile is None:
+        defaults = adapter.default_profiles()
+        first = next(iter(defaults.values()), {})
+        profile = Profile(name="(prewarm)", **first)
+
+    # The cheapest request this engine will accept: its smallest canvas, one
+    # step, and — for video — the shortest clip its decoder allows.
+    buckets = list(getattr(adapter, "SIZE_BUCKETS", []) or [])
+    smallest = min(
+        buckets,
+        key=lambda s: int(s.split("x")[0]) * int(s.split("x")[1]),
+    ) if buckets else ""
+    fields: dict[str, Any] = {"image_steps": 1}
+    if smallest:
+        fields["image_size"] = smallest
+    if getattr(profile, "video_num_frames", None) is not None:
+        fields["video_num_frames"] = 5      # the 17n+5 floor
+    import dataclasses
+    profile = dataclasses.replace(profile, **fields)
+
+    caps = _engines.capabilities(engine)
+    refs: list[Path] = []
+    if caps.get("ref_images_required"):
+        # An image-to-video engine cannot run without one; a 64x64 grey PNG
+        # is enough to make the loaders do their work.
+        from PIL import Image as _Image
+        tmp = Path(tempfile.mkdtemp(prefix="llamanager-prewarm-"))
+        ref = tmp / "prewarm.png"
+        _Image.new("RGB", (64, 64), (128, 128, 128)).save(ref)
+        refs = [ref]
+
+    out = Path(tempfile.mkdtemp(prefix="llamanager-prewarm-")) / (
+        "prewarm." + (caps.get("output_ext") or "png"))
+    req = ImageRequest(prompt="warmup", width=0, height=0, steps=1, seed=1,
+                       n=1, ref_images=refs)
+    argv, env = adapter.build_command(cfg, model_dir, profile, req, out)
+
+    proc = await asyncio.create_subprocess_exec(
+        *argv, stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL, env={**os.environ, **env},
+        start_new_session=True)
+    log.info("prewarm: %s (%s) pid=%s", model_id, engine, proc.pid)
+    return proc.pid
+
+
+@router.get("/comfy/warm")
+async def comfy_warm_status(request: Request, model: str = "",
+                            _: Origin = Depends(require_admin_ui)) -> Response:
+    """Is a warm ComfyUI server holding this model's weights?
+
+    Warm means the next request skips what dominates a cold one: 37 s of
+    text encoder plus 16 s of transformer for MiniMax-H3, and the 448 s LoRA
+    patch for a Krea 2 request that carries one. The page shows it because
+    the difference is visible to whoever is waiting — 278 s against 170 s for
+    an H3 clip, 498 s against 24 s for a patched Krea image.
+    """
+    from fastapi.responses import JSONResponse as _JSONResponse
+    from .engines import comfy_backend as cb
+    cfg = request.app.state.cfg
+    mid = (model or "").strip()
+    if not mid:
+        return _JSONResponse({"detail": "model is required"}, status_code=400)
+    model_dir = cfg.models_dir / mid
+    info = cb.read_live_server(model_dir) if model_dir.is_dir() else None
+    window = int(getattr(cfg, "comfy_keep_warm_s", 0) or 0)
+    return _JSONResponse({
+        "model": mid,
+        "warm": bool(info),
+        "since": (info or {}).get("started"),
+        "port": (info or {}).get("port"),
+        "keep_warm_s": window,
+        # Without a window a prewarmed server is reaped straight away, so the
+        # page can say that instead of offering a button that does nothing.
+        "can_prewarm": window > 0,
+    })
+
+
+@router.post("/comfy/prewarm")
+async def comfy_prewarm(request: Request, model: str = Form(...),
+                        profile: str = Form(""),
+                        _: None = Depends(require_csrf)) -> Response:
+    """Load a model's weights now, so the next real request does not.
+
+    It runs one deliberately tiny generation — the smallest canvas the engine
+    offers, one step — because ComfyUI loads weights when a prompt needs
+    them, not when the server starts. Starting a bare server would prewarm
+    nothing that matters.
+    """
+    from fastapi.responses import JSONResponse as _JSONResponse
+    cfg = request.app.state.cfg
+    mid = (model or "").strip()
+    window = int(getattr(cfg, "comfy_keep_warm_s", 0) or 0)
+    if window <= 0:
+        return _JSONResponse(
+            {"detail": "set a keep-warm window first (Diffusion page → "
+                       "Coexistence); with 0 the prewarmed server is reaped "
+                       "before it can serve anything"},
+            status_code=400)
+    runner = getattr(request.app.state, "image_runner", None)
+    if runner is not None and runner.is_busy:
+        return _JSONResponse(
+            {"detail": "a generation is already running; it will leave the "
+                       "server warm on its own"}, status_code=409)
+    try:
+        started = await _spawn_prewarm(request, mid, profile.strip())
+    except ValueError as e:
+        return _JSONResponse({"detail": str(e)}, status_code=400)
+    return _JSONResponse({"ok": True, "model": mid, "pid": started})
+
+
+@router.post("/comfy/unwarm")
+async def comfy_unwarm(request: Request,
+                       _: None = Depends(require_csrf)) -> Response:
+    """Give the card back. A warm server holds 11-16 GB until it expires."""
+    from fastapi.responses import JSONResponse as _JSONResponse
+    from .engines import comfy_backend as cb
+    stopped = cb.stop_warm_servers()
+    return _JSONResponse({"ok": True, "stopped": stopped})
+
+
 @router.get("/images/status")
 async def images_status(request: Request,
                         _: Origin = Depends(require_admin_ui)) -> Response:

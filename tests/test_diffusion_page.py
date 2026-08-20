@@ -245,3 +245,96 @@ def test_a_bad_keep_warm_is_refused_not_coerced(app, bad):
                     follow_redirects=False)
     assert r.status_code == 400
     assert load_config(app.state.cfg.config_path).comfy_keep_warm_s == 0
+
+
+# ------------------------------------------------------- warm / prewarm
+
+
+def test_warm_status_reports_cold_for_a_model_with_no_server(app):
+    _install_h3(app)
+    r = _admin(app).get("/ui/comfy/warm", params={"model": "MiniMax-H3-Comfy"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["warm"] is False
+    assert body["model"] == "MiniMax-H3-Comfy"
+
+
+def test_warm_status_needs_a_model(app):
+    assert _admin(app).get("/ui/comfy/warm").status_code == 400
+
+
+def test_prewarm_refuses_without_a_keep_warm_window(app):
+    """With a window of 0 the prewarmed server is reaped immediately, so the
+    button would report success and change nothing."""
+    _install_h3(app)
+    client = _admin(app)
+    m = re.search(r'name="csrf_token" value="([^"]+)"',
+                  client.get("/ui/diffusion").text)
+    r = client.post("/ui/comfy/prewarm",
+                    data={"csrf_token": m.group(1),
+                          "model": "MiniMax-H3-Comfy"})
+    assert r.status_code == 400
+    assert "keep-warm" in r.json()["detail"]
+
+
+def test_unwarm_gives_the_card_back(app):
+    client = _admin(app)
+    m = re.search(r'name="csrf_token" value="([^"]+)"',
+                  client.get("/ui/diffusion").text)
+    r = client.post("/ui/comfy/unwarm", data={"csrf_token": m.group(1)})
+    assert r.status_code == 200 and r.json()["ok"] is True
+
+
+def test_warm_status_says_whether_prewarming_can_work(app):
+    """can_prewarm is the window, not the server: the page uses it to
+    explain why the button is disabled instead of just disabling it."""
+    from llamanager.config import load_config, update_image_config
+    _install_h3(app)
+    client = _admin(app)
+    assert client.get("/ui/comfy/warm",
+                      params={"model": "MiniMax-H3-Comfy"}
+                      ).json()["can_prewarm"] is False
+
+    update_image_config(app.state.cfg.config_path, comfy_keep_warm_s=300)
+    app.state.cfg = load_config(app.state.cfg.config_path)
+    body = client.get("/ui/comfy/warm",
+                      params={"model": "MiniMax-H3-Comfy"}).json()
+    assert body["can_prewarm"] is True and body["keep_warm_s"] == 300
+
+
+# ------------------------------------------------- reattaching to a job
+
+
+def test_every_generation_page_can_recover_a_running_job(app):
+    """A generation belongs to the queue, not to the browser connection that
+    started it: closing the tab during a four-minute clip used to leave the
+    page looking idle while the GPU worked."""
+    client = _admin(app)
+    for url in ("/ui/images", "/ui/videos"):
+        html = client.get(url).text
+        assert "statusUrl" in html, url
+        # Either the page's own reattach, or the shared banner.
+        assert ("LM_HAS_REATTACH" in html) or ("lm-reattach" in html), url
+
+
+def test_the_shared_banner_stands_down_where_a_page_has_its_own(app):
+    html = _admin(app).get("/ui/images").text
+    assert "window.LM_HAS_REATTACH = true" in html
+    assert "lm-reattach" in html, "banner still included, just inert"
+
+
+def test_public_status_needs_a_bearer(app):
+    from fastapi.testclient import TestClient
+    assert TestClient(app).get("/v1/images/status").status_code == 401
+
+
+def test_public_status_reports_idle_for_an_authorised_caller(app):
+    from fastapi.testclient import TestClient
+    am = app.state.auth
+    am.ensure_bootstrap()
+    _, key = am.create_origin(name="public-page")
+    r = TestClient(app).get("/v1/images/status",
+                            headers={"Authorization": f"Bearer {key}"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["busy"] is False and "queued" in body

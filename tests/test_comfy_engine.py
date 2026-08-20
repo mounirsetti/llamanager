@@ -1780,3 +1780,83 @@ def test_the_text_engine_restart_stops_warm_servers_first(tmp_path):
     start = src.find("await self.start(saved_spec)", src.find("finally:"))
     assert stop != -1, "warm servers are never stopped"
     assert stop < start, "warm server must yield before the LLM starts"
+
+
+# ------------------------------------------------------- the soundtrack
+
+
+def test_audio_is_on_unless_a_profile_turns_it_off(tmp_path, cfg):
+    """This engine exists for the synchronised soundtrack, so silence has to
+    be asked for — never inherited from a blank field."""
+    from llamanager.engines import minimax_h3_comfy as m
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    model = _complete_model(tmp_path)
+    img = tmp_path / "frame.png"
+    img.write_bytes(b"x")
+
+    for value in ("", "on"):
+        prof = Profile(name="p", video_audio=value)
+        argv, _ = m.build_command(cfg, model, prof,
+                                  _image_request("x", [img]),
+                                  tmp_path / "o.mp4")
+        assert "--drop-node" not in argv, f"audio dropped for {value!r}"
+
+
+def test_turning_the_soundtrack_off_drops_the_audio_branch(tmp_path, cfg):
+    from llamanager.engines import minimax_h3_comfy as m
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    model = _complete_model(tmp_path)
+    img = tmp_path / "frame.png"
+    img.write_bytes(b"x")
+
+    prof = Profile(name="p", video_audio="off")
+    argv, _ = m.build_command(cfg, model, prof, _image_request("x", [img]),
+                              tmp_path / "o.mp4")
+    dropped = [argv[i + 1] for i, a in enumerate(argv) if a == "--drop-node"]
+    assert dropped == list(m._AUDIO_NODES)
+
+
+def test_dropping_the_audio_branch_leaves_a_coherent_graph(tmp_path):
+    """CreateVideo's audio input must go with the nodes behind it, or the
+    graph references a node that is no longer there."""
+    import json
+    from llamanager.engines import comfy_backend as cb
+    from llamanager.engines import minimax_h3_comfy as m
+
+    for stem in ("minimax_h3_i2v_gguf", "minimax_h3_ref2v_gguf"):
+        raw = cb.workflow_path(stem).read_text()
+        values = dict(_WORKFLOW_VALUES)
+        if stem.endswith("ref2v_gguf"):
+            values = {k: v for k, v in values.items()
+                      if k not in ("INIT_IMAGE", "LORA", "LORA_STRENGTH")}
+            values["REF_DETAIL"] = "match"
+            values.update({f"REF{i}": f"r{i}.png" for i in range(1, 10)})
+        graph = cb.render_workflow(raw, values)
+        for node in m._AUDIO_NODES:
+            cb.drop_node(graph, node)
+
+        assert "audio" not in graph["15"]["inputs"], stem
+        ids = set(graph)
+        for nid, node in graph.items():
+            for value in node.get("inputs", {}).values():
+                if isinstance(value, list) and len(value) == 2:
+                    assert str(value[0]) in ids, f"{stem}:{nid} dangles"
+
+
+def test_an_unknown_soundtrack_value_is_refused(tmp_path, cfg):
+    from llamanager.engines import minimax_h3_comfy as m
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    model = _complete_model(tmp_path)
+    img = tmp_path / "frame.png"
+    img.write_bytes(b"x")
+
+    prof = Profile(name="p", video_audio="mute")
+    with pytest.raises(RuntimeError, match="video_audio"):
+        m.build_command(cfg, model, prof, _image_request("x", [img]),
+                        tmp_path / "o.mp4")

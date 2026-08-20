@@ -1307,6 +1307,35 @@ def _profile_with_overrides(profile: "Profile | None", engine: str,
     return dataclasses.replace(profile or Profile(name="(overrides)"), **values)
 
 
+@router.get("/images/status")
+async def images_status(request: Request) -> Response:
+    """Progress of the generation currently on the GPU, for any caller.
+
+    /ui/images/status answers the same question but is admin-only, so the
+    public pages could not reattach to their own job: close the tab during a
+    four-minute clip and the work continued invisibly, with the page looking
+    idle on return. A generation belongs to the queue, not to the connection
+    that started it.
+    """
+    from fastapi.responses import JSONResponse as _JSONResponse
+    await _origin_from_request(request)          # bearer, same as generation
+    runner = getattr(request.app.state, "image_runner", None)
+    if runner is None:
+        return _JSONResponse({"status": "idle", "queued": 0, "busy": False})
+    payload = dict(runner.status())
+    payload["busy"] = bool(runner.is_busy)
+    qm = getattr(request.app.state, "queue", None)
+    queued = 0
+    if qm is not None:
+        try:
+            queued = sum(1 for r in qm.snapshot().get("pending", [])
+                         if r.get("task_type") in ("image", "video"))
+        except Exception:  # noqa: BLE001 — status must never 500
+            queued = 0
+    payload["queued"] = queued
+    return _JSONResponse(payload)
+
+
 @router.post("/images/generations")
 async def images_generations(request: Request) -> Response:
     """Generate one or more images.
