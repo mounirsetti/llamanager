@@ -83,6 +83,11 @@
     setState("busy", "loading weights…");
     const fd = new FormData();
     fd.append("model", modelSel.value);
+    // The profile decides which weights load — quant, baked-LoRA transformer,
+    // REF2VA head. Prewarming the engine's first default instead would report
+    // warm and leave the next request loading a different file anyway.
+    const profileSel = document.getElementById("lm-img-profile");
+    if (profileSel && profileSel.value) fd.append("profile", profileSel.value);
     if (csrf) fd.append("csrf_token", csrf.value);
     try {
       const r = await fetch("/ui/comfy/prewarm",

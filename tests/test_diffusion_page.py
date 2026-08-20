@@ -338,3 +338,33 @@ def test_public_status_reports_idle_for_an_authorised_caller(app):
     assert r.status_code == 200
     body = r.json()
     assert body["busy"] is False and "queued" in body
+
+
+def test_prewarm_loads_the_profile_the_page_has_selected(app):
+    """Measured: prewarming the engine's first default while the request used
+    a different profile gave 35.8 s, where prewarming the selected one gave
+    15.5 s — the profile picks the transformer, so warming the wrong one
+    reports warm and still pays the load."""
+    import inspect
+    from llamanager import api_ui
+    from pathlib import Path
+
+    src = inspect.getsource(api_ui._spawn_prewarm)
+    assert "cfg.get_profile(model_id, profile_name)" in src
+    # And the button has to send it, or the parameter is decorative.
+    partial = (Path(api_ui.__file__).parent / "templates"
+               / "_composer_warm.html").read_text()
+    assert 'getElementById("lm-img-profile")' in partial
+    assert 'fd.append("profile"' in partial
+
+
+def test_prewarm_prefers_the_models_own_default_over_the_engines(app):
+    """With no profile named, the model's configured default is closer to
+    what the next request will use than the engine's first built-in."""
+    import inspect
+    from llamanager import api_ui
+
+    src = inspect.getsource(api_ui._spawn_prewarm)
+    own = src.find("default_profile")
+    engine_default = src.find("adapter.default_profiles()")
+    assert own != -1 and own < engine_default

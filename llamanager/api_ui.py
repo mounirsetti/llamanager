@@ -3565,9 +3565,18 @@ async def _spawn_prewarm(request: Request, model_id: str,
         if profile is None:
             raise ValueError(f"unknown profile {profile_name!r}")
     if profile is None:
-        defaults = adapter.default_profiles()
-        first = next(iter(defaults.values()), {})
-        profile = Profile(name="(prewarm)", **first)
+        # No profile named: the model's own default, then the engine's first
+        # built-in. Which one matters — the profile picks the transformer
+        # (quant, baked-LoRA file, REF2VA head), so prewarming the wrong one
+        # loads 13 GB the next request will not use and still reports warm.
+        model_cfg = cfg.get_model(model_id) if hasattr(cfg, "get_model") else None
+        named = getattr(model_cfg, "default_profile", "") if model_cfg else ""
+        if named:
+            profile = cfg.get_profile(model_id, named)
+        if profile is None:
+            defaults = adapter.default_profiles()
+            first = next(iter(defaults.values()), {})
+            profile = Profile(name="(prewarm)", **first)
 
     # The cheapest request this engine will accept: its smallest canvas, one
     # step, and — for video — the shortest clip its decoder allows.
