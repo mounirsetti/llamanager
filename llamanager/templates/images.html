@@ -1601,9 +1601,6 @@
 
   /** Pull the newest gallery entries and drop them into the placeholders
    *  (or, when nothing is in flight, onto the head of the feed). */
-  // Exposed so the shared refresh button re-fetches the feed
-  // instead of reloading the page and losing scroll position.
-  window.LM_REFRESH_FEED = () => refreshFront();
   async function refreshFront({resolve = false} = {}) {
     try {
       const _kq = cfg.mediaKind ? `&kind=${cfg.mediaKind}` : "";

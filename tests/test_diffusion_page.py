@@ -411,12 +411,27 @@ def test_the_banner_is_not_buried_in_the_settings_popover(page):
     assert banner < popover, f"{page}: banner is inside the settings popover"
 
 
-@pytest.mark.parametrize("page", ["images.html", "videos.html",
-                                  "images_public.html", "videos_public.html"])
-def test_every_page_exposes_its_feed_refresh(page):
-    """The refresh button re-fetches rather than reloading, which keeps
-    scroll position and avoids re-downloading every thumbnail."""
-    assert "window.LM_REFRESH_FEED" in _partial(page), page
+def test_the_reload_button_is_for_pages_with_no_menu():
+    """The admin pages reach a refresh from the rail footer in base.html; the
+    public pages have no menu at all, so the button is theirs. It navigates
+    to the canonical GET URL rather than reloading, for the same reason the
+    rail's does: reload repeats however the page was reached."""
+    js = _partial("_composer_mobile.html")
+    assert 'querySelector(".gen-topbar__actions")' in js
+    assert ".gen-feedhead" not in js, "would put a second button on admin pages"
+    assert "window.location.assign(window.location.pathname)" in js
+    # Comments may discuss reload(); no line may call it.
+    code = "\n".join(l for l in js.splitlines()
+                     if not l.lstrip().startswith("//"))
+    assert "location.reload()" not in code
+
+
+def test_the_admin_pages_still_have_their_menu_refresh():
+    """Removing the injected button must not leave admin with no way back."""
+    from pathlib import Path
+    from llamanager import api_ui
+    base = (Path(api_ui.__file__).parent / "templates" / "base.html").read_text()
+    assert "Reload page and refresh status" in base
 
 
 def test_nothing_out_votes_the_hidden_attribute():

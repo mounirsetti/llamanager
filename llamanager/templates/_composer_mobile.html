@@ -7,8 +7,13 @@
    third row. The feed got what was left.
 
    This partial is CSS-only except for two small behaviours: shortening the
-   placeholder on narrow screens, and adding the refresh button — done here
-   rather than in four page templates that had already drifted apart.
+   placeholder on narrow screens, and adding a page-reload button to the
+   public pages — done here rather than in four page templates that had
+   already drifted apart.
+
+   The reload button is public-only on purpose: the admin pages reach one
+   from the rail footer in base.html, and a second copy in the feed would
+   just be clutter. The public pages have no menu at all.
 #}
 <style>
   /* One row of controls, then prompt + Generate. ~100 px instead of ~200. */
@@ -92,11 +97,6 @@
   @media (max-width: 760px) and (pointer: coarse) {
     .gen-refresh { width: 36px; height: 36px; }
   }
-  .gen-refresh--float {
-    position: absolute; right: 10px; top: 6px; z-index: 5;
-    background: var(--bg-1);
-  }
-
   /* The hidden attribute means "not rendered", and every component rule
      here that sets a display was quietly outranking it: `Load older` was
      painted on an empty feed, the attach button appeared for engines that
@@ -129,48 +129,28 @@
       window.addEventListener("resize", apply);
     }
 
-    // --- refresh button, next to the theme switcher.
-    // The public pages carry their own top bar; the admin ones use the
-    // shared chrome and have a feed header instead. Either will do.
-    const actions = document.querySelector(".gen-topbar__actions")
-                 || document.querySelector(".gen-feedhead")
-                 || document.querySelector(".gen-feed");
+    // --- page refresh, for the pages that have no menu to reach one from.
+    // The admin pages get theirs from the rail footer in base.html; only the
+    // public pages, which carry their own minimal top bar and no menu at
+    // all, need one here.
+    const actions = document.querySelector(".gen-topbar__actions");
     if (actions && !document.getElementById("gen-refresh")) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.id = "gen-refresh";
       btn.className = "gen-refresh";
-      btn.title = "Refresh the feed";
-      btn.setAttribute("aria-label", "Refresh the feed");
+      btn.title = "Reload the page";
+      btn.setAttribute("aria-label", "Reload the page");
       btn.textContent = "⟳";
-      btn.addEventListener("click", async () => {
+      btn.addEventListener("click", () => {
         btn.dataset.spinning = "1";
-        try {
-          // Re-fetch rather than reload where the page exposes a way to:
-          // a reload loses scroll position and re-downloads every thumbnail.
-          if (typeof window.LM_REFRESH_FEED === "function") {
-            await window.LM_REFRESH_FEED();
-          } else {
-            window.location.reload();
-            return;
-          }
-        } catch {
-          window.location.reload();
-          return;
-        } finally {
-          setTimeout(() => { delete btn.dataset.spinning; }, 400);
-        }
+        // The canonical GET URL, not location.reload(): reload repeats
+        // however the page was reached, and drops nothing that a fresh load
+        // would not rebuild anyway. Same reasoning as the admin rail's
+        // refresh in base.html.
+        window.location.assign(window.location.pathname);
       });
-      if (actions.classList.contains("gen-topbar__actions")) {
-        actions.insertBefore(btn, actions.firstChild);
-      } else if (actions.classList.contains("gen-feedhead")) {
-        actions.appendChild(btn);            // trailing, after the labels
-      } else {
-        // No header at all (the admin video feed): float it in the corner
-        // rather than pushing the grid down.
-        btn.classList.add("gen-refresh--float");
-        actions.insertBefore(btn, actions.firstChild);
-      }
+      actions.insertBefore(btn, actions.firstChild);
     }
   }
 

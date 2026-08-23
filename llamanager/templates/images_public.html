@@ -1110,9 +1110,6 @@
         showError(msg);
       } else { stage.phase = "saving"; renderStage(); refreshFront(); }
     }
-    // Exposed so the shared refresh button re-fetches the feed
-    // instead of reloading the page and losing scroll position.
-    window.LM_REFRESH_FEED = () => refreshFront();
     async function refreshFront() {
       try {
         const _kq = cfg.mediaKind ? `&kind=${cfg.mediaKind}` : "";
