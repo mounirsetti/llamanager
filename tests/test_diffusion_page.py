@@ -417,3 +417,22 @@ def test_every_page_exposes_its_feed_refresh(page):
     """The refresh button re-fetches rather than reloading, which keeps
     scroll position and avoids re-downloading every thumbnail."""
     assert "window.LM_REFRESH_FEED" in _partial(page), page
+
+
+def test_nothing_out_votes_the_hidden_attribute():
+    """Component display rules were quietly beating it: `Load older` painted
+    on an empty feed, the attach button showed for engines that take no
+    reference image, and the progress banner announced a job nobody started.
+    One rule covers the class rather than each instance."""
+    css = _partial("_composer_mobile.html")
+    assert "[hidden] { display: none !important; }" in css
+
+
+def test_an_empty_feed_leaves_masonry_so_its_message_has_room():
+    """The empty message is one 4px masonry row, so the grid collapsed to
+    4px, its text overflowed, and whatever followed the grid painted on top
+    of it."""
+    css = _partial("_composer_mobile.html")
+    assert ".gen-grid:has(> .gen-empty:not([hidden]))" in css
+    assert "display: block" in css.split(
+        ".gen-grid:has(> .gen-empty:not([hidden]))")[1][:80]

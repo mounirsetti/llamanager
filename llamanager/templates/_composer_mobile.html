@@ -96,6 +96,21 @@
     position: absolute; right: 10px; top: 6px; z-index: 5;
     background: var(--bg-1);
   }
+
+  /* The hidden attribute means "not rendered", and every component rule
+     here that sets a display was quietly outranking it: `Load older` was
+     painted on an empty feed, the attach button appeared for engines that
+     take no reference image, and the progress banner announced a job nobody
+     started. Nothing should out-vote hidden, so nothing does. */
+  [hidden] { display: none !important; }
+
+  /* An empty feed lays its message out as one 4px masonry row, so the grid
+     collapses to 4px and the text overflows it — anything after the grid
+     (the Load older button) then paints on top of the message. Take the
+     grid out of masonry while it is showing that message. */
+  .gen-grid:has(> .gen-empty:not([hidden])) {
+    display: block;
+  }
 </style>
 <script>
 (function () {
