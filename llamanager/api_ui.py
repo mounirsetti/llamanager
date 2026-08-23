@@ -3148,8 +3148,8 @@ def _build_image_page_context(cfg, reg) -> dict[str, Any]:
             # under some other profile: Krea 2 offers reference slots only
             # with an edit LoRA, and the composer used the engine-wide answer
             # to show an attach button that generation then refused.
-            "caps": (image_engines.profile_capabilities(eng, p)
-                     if eng else {}),
+            "caps": (image_engines.profile_capabilities(
+                         eng, p, cfg.models_dir / mid) if eng else {}),
         })
 
     # Preselect the operator's configured default image model/profile so the
@@ -3231,8 +3231,8 @@ def _build_video_page_context(cfg, reg) -> dict[str, Any]:
             # under some other profile: Krea 2 offers reference slots only
             # with an edit LoRA, and the composer used the engine-wide answer
             # to show an attach button that generation then refused.
-            "caps": (image_engines.profile_capabilities(eng, p)
-                     if eng else {}),
+            "caps": (image_engines.profile_capabilities(
+                         eng, p, cfg.models_dir / mid) if eng else {}),
         })
 
     default_model = cfg.default_image_model or ""

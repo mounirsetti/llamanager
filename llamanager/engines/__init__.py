@@ -67,7 +67,7 @@ def capabilities(engine: str) -> dict:
     return caps
 
 
-def profile_capabilities(engine: str, profile) -> dict:
+def profile_capabilities(engine: str, profile, model_dir=None) -> dict:
     """``capabilities(engine)`` refined by what this profile can actually do.
 
     Some engines answer differently per profile: Krea 2 can take up to three
@@ -83,7 +83,10 @@ def profile_capabilities(engine: str, profile) -> dict:
     fn = getattr(mod, "profile_capabilities", None) if mod else None
     if fn and profile is not None:
         try:
-            caps.update(fn(profile) or {})
+            # The directory matters for answers that depend on which files
+            # are installed (Krea 2 editing needs an encoder its
+            # text-to-image path does not).
+            caps.update(fn(profile, model_dir) or {})
         except Exception:  # noqa: BLE001 — a bad adapter shouldn't break the page
             pass
     return caps

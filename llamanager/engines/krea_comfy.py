@@ -61,7 +61,8 @@ CLIP_SAFETENSORS = "qwen3vl_4b_fp8_scaled.safetensors"
 CLIP_FILE = CLIP_SAFETENSORS   # kept for callers/tests that reference the name
 
 
-def resolve_text_encoder(model_dir: Path) -> tuple[str, str]:
+def resolve_text_encoder(model_dir: Path,
+                         *, for_edit: bool = False) -> tuple[str, str]:
     """(filename, template suffix) for the encoder present in ``model_dir``.
 
     The suffix picks the loader half of a workflow pair: ``_gguf_te`` builds
@@ -74,8 +75,29 @@ def resolve_text_encoder(model_dir: Path) -> tuple[str, str]:
     Having the GGUF but not the mmproj therefore raises: silently serving the
     safetensors instead would turn a 22-second request into a 12-minute one
     and report nothing.
+
+    ``for_edit`` picks the safetensors instead, because the GGUF's vision
+    tower does not survive the trip. llama.cpp's mmproj and ComfyUI's
+    Qwen3-VL disagree about the deepstack mergers — ComfyUI builds one
+    expecting 3072 input features (three concatenated vision layers) and the
+    mapped weights give it 1024 — so the first image through the encoder dies
+    with a shape mismatch. Text-to-image never touches that path, which is
+    why only editing broke. Measured 2026-08-23: identical edit request,
+    GGUF encoder crashes, safetensors encoder produces the edit (512 LoRA
+    keys bound) in 1591 s cold.
     """
     te = model_dir / "text_encoders"
+    if for_edit:
+        if (te / CLIP_SAFETENSORS).is_file():
+            return CLIP_SAFETENSORS, "_gguf"
+        raise RuntimeError(
+            f"Krea 2 editing needs text_encoders/{CLIP_SAFETENSORS}. The "
+            f"GGUF encoder ({CLIP_GGUF}) is faster for text-to-image and is "
+            "used there, but its vision tower cannot read a reference image "
+            "on this ComfyUI build — llama.cpp's mmproj and ComfyUI's "
+            "Qwen3-VL disagree about the deepstack mergers, and the request "
+            "dies with a shape mismatch. Download it from Comfy-Org/Krea-2 "
+            "(text_encoders/), or use a text-to-image profile.")
     if (te / CLIP_GGUF).is_file():
         if not (te / CLIP_GGUF_MMPROJ).is_file():
             raise RuntimeError(
@@ -346,7 +368,10 @@ def build_command(
     _g = pick_guidance(req, profile)
     cfg_scale = _g if _g is not None else _DEFAULT_CFG
 
-    clip_file, te_suffix = resolve_text_encoder(model_path)
+    # An edit runs an image through the encoder, which the GGUF's
+    # vision tower cannot do here; text-to-image keeps the fast one.
+    clip_file, te_suffix = resolve_text_encoder(
+        model_path, for_edit=recipe is not None)
     graph = (recipe.graph if recipe is not None else "krea2_t2i") + te_suffix
     required = {"diffusion_models": unet, "text_encoders": clip_file,
                 "vae": VAE_FILE}
@@ -541,7 +566,8 @@ def capabilities() -> dict[str, Any]:
     }
 
 
-def profile_capabilities(profile: Profile) -> dict[str, Any]:
+def profile_capabilities(profile: Profile,
+                         model_dir: Path | None = None) -> dict[str, Any]:
     """Capabilities once the profile is known — for Krea 2 the LoRA decides.
 
     ``capabilities()`` has to answer for the engine, so it reports the most
@@ -555,6 +581,19 @@ def profile_capabilities(profile: Profile) -> dict[str, Any]:
     """
     lora = (getattr(profile, "image_lora_weights", "") or "").strip()
     recipe = LORA_RECIPES.get(lora)
+    editable = (model_dir is None
+                or (Path(model_dir) / "text_encoders"
+                    / CLIP_SAFETENSORS).is_file())
+    if recipe is not None and not editable:
+        # Offering slots the request would refuse is what put an attach
+        # button on a profile that could not use it.
+        return {
+            "ref_images_max": 0,
+            "ref_images_min": 0,
+            "ref_note": (f"editing needs text_encoders/{CLIP_SAFETENSORS}, "
+                         "which is not installed — the GGUF encoder cannot "
+                         "read a reference image on this build"),
+        }
     if recipe is None:
         return {
             "ref_images_max": 0,

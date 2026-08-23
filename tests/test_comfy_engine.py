@@ -1915,3 +1915,75 @@ def test_the_refusal_names_profiles_not_a_wall_of_filenames():
     assert "kreac-edit" in msg and "kreac-style-ref" in msg
     assert ".safetensors" not in msg
     assert len(msg) < 400, "too long for the error box on a phone"
+
+
+# ------------------------------------------- the encoder an edit can use
+
+
+def test_editing_selects_the_encoder_whose_vision_tower_works(tmp_path, cfg):
+    """The GGUF encoder is 700 s faster and is right for text-to-image, but
+    its vision tower cannot read a reference image on this ComfyUI build:
+    llama.cpp's mmproj and ComfyUI's Qwen3-VL disagree about the deepstack
+    mergers. Measured 2026-08-23 — same request, GGUF crashes with a shape
+    mismatch, safetensors produces the edit."""
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    root = _krea_model(tmp_path, "krea2_identity_edit_v1_2.safetensors")
+    (root / "text_encoders" / k.CLIP_GGUF).write_bytes(b"x")
+    (root / "text_encoders" / k.CLIP_GGUF_MMPROJ).write_bytes(b"x")
+    img = tmp_path / "ref.png"
+    img.write_bytes(b"x")
+
+    plain, _ = k.build_command(
+        cfg, root, Profile(name="p"), _image_request("x", []),
+        tmp_path / "a.png")
+    assert _argv_tokens(plain)["CLIP"] == k.CLIP_GGUF, "t2i keeps the fast one"
+
+    edit, _ = k.build_command(
+        cfg, root,
+        Profile(name="e", image_lora_weights="krea2_identity_edit_v1_2.safetensors"),
+        _image_request("x", [img]), tmp_path / "b.png")
+    assert _argv_tokens(edit)["CLIP"] == k.CLIP_SAFETENSORS
+
+
+def test_editing_without_that_encoder_says_which_file_is_missing(tmp_path, cfg):
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    root = _krea_model(tmp_path, "krea2_identity_edit_v1_2.safetensors")
+    (root / "text_encoders" / k.CLIP_SAFETENSORS).unlink()
+    (root / "text_encoders" / k.CLIP_GGUF).write_bytes(b"x")
+    (root / "text_encoders" / k.CLIP_GGUF_MMPROJ).write_bytes(b"x")
+    img = tmp_path / "ref.png"
+    img.write_bytes(b"x")
+
+    with pytest.raises(RuntimeError, match=k.CLIP_SAFETENSORS):
+        k.build_command(
+            cfg, root,
+            Profile(name="e",
+                    image_lora_weights="krea2_identity_edit_v1_2.safetensors"),
+            _image_request("x", [img]), tmp_path / "b.png")
+
+
+def test_an_edit_profile_offers_no_slots_without_that_encoder(tmp_path):
+    """The composer must not present an attach button for an edit the
+    machine cannot run — that is what put one on kreac-best."""
+    from llamanager import engines
+    from llamanager.config import Profile
+
+    root = tmp_path / "Krea-2-Turbo-Comfy"
+    (root / "text_encoders").mkdir(parents=True)
+    prof = Profile(name="e",
+                   image_lora_weights="krea2_identity_edit_v1_2.safetensors")
+
+    caps = engines.profile_capabilities("krea_comfy", prof, root)
+    assert caps["ref_images_max"] == 0
+    assert "qwen3vl_4b_fp8_scaled.safetensors" in caps["ref_note"]
+
+    from llamanager.engines import krea_comfy as k
+    (root / "text_encoders" / k.CLIP_SAFETENSORS).write_bytes(b"x")
+    assert engines.profile_capabilities(
+        "krea_comfy", prof, root)["ref_images_max"] == 2
