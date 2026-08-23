@@ -190,10 +190,15 @@ def resolve_recipe(lora_name: str, n_refs: int) -> EditRecipe | None:
     known = ", ".join(sorted(LORA_RECIPES))
     if not lora_name:
         if n_refs:
+            # Named by what they do, not by eleven filenames: this reaches a
+            # phone screen, where the file list filled it and said nothing
+            # about which one to pick.
             raise RuntimeError(
-                "Krea 2 editing needs an edit LoRA — reference images alone "
-                "do nothing, because stock Krea 2 has no path to read them. "
-                f"Set a profile LoRA to one of: {known}")
+                "This profile generates from the prompt alone — reference "
+                "images do nothing without an edit LoRA, because stock "
+                "Krea 2 has no path to read them. Switch to a profile that "
+                "has one: identity editing (kreac-edit), style transfer "
+                "(kreac-style-ref) or pose control (kreac-pose).")
         return None
     recipe = LORA_RECIPES.get(lora_name)
     if recipe is None:
@@ -533,6 +538,35 @@ def capabilities() -> dict[str, Any]:
     return {
         "output_ext": "png",
         "ref_images_max": max(r.refs_max for r in LORA_RECIPES.values()),
+    }
+
+
+def profile_capabilities(profile: Profile) -> dict[str, Any]:
+    """Capabilities once the profile is known — for Krea 2 the LoRA decides.
+
+    ``capabilities()`` has to answer for the engine, so it reports the most
+    permissive edit LoRA's three slots. That let the composer offer an attach
+    button on a plain text-to-image profile, and the operator only found out
+    at generation time, from a refusal listing eleven filenames.
+
+    The refusal is right — a reference with no edit LoRA does nothing,
+    because stock Krea 2 has no path to read one — but it belongs before the
+    request, as a control that is simply not there.
+    """
+    lora = (getattr(profile, "image_lora_weights", "") or "").strip()
+    recipe = LORA_RECIPES.get(lora)
+    if recipe is None:
+        return {
+            "ref_images_max": 0,
+            "ref_images_min": 0,
+            "ref_note": ("this profile has no edit LoRA, so it generates "
+                         "from the prompt alone"),
+        }
+    return {
+        "ref_images_max": recipe.refs_max,
+        "ref_images_min": recipe.refs_min,
+        "ref_images_required": recipe.refs_min > 0,
+        "ref_note": recipe.note or "",
     }
 
 

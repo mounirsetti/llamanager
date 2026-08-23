@@ -104,6 +104,14 @@
      started. Nothing should out-vote hidden, so nothing does. */
   [hidden] { display: none !important; }
 
+  /* One long error must not eat the screen. The Krea 2 refusal used to list
+     eleven filenames, 291px of an 844px phone, which pushed the settings
+     popover's top to -100px — off-screen, and it scrolls internally, so the
+     Model and Profile controls could not be reached at all. */
+  .gen-error {
+    max-height: 25dvh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  }
+
   /* An empty feed lays its message out as one 4px masonry row, so the grid
      collapses to 4px and the text overflows it — anything after the grid
      (the Load older button) then paints on top of the message. Take the
@@ -127,6 +135,35 @@
       };
       apply();
       window.addEventListener("resize", apply);
+    }
+
+    // --- keep the popovers inside the viewport.
+    // They open upwards from the dock, so anything that makes the dock
+    // taller — an error, a row of reference thumbnails — pushes their top
+    // off-screen. A fixed max-height cannot know that; this measures it.
+    const dock = document.querySelector(".gen-dock");
+    const pops = [document.getElementById("gen-settings"),
+                  document.getElementById("gen-history")].filter(Boolean);
+    if (dock && pops.length) {
+      const sizePops = () => {
+        const room = Math.round(dock.getBoundingClientRect().top) - 12;
+        pops.forEach(pop => {
+          if (pop.hidden) return;
+          // Never below a usable height: if the dock really is that tall the
+          // popover scrolls, but its top stays on screen where the first
+          // controls are.
+          pop.style.maxHeight = Math.max(180, room) + "px";
+        });
+      };
+      pops.forEach(pop => new MutationObserver(sizePops).observe(
+        pop, {attributes: true, attributeFilter: ["hidden"]}));
+      window.addEventListener("resize", sizePops);
+      // The error box grows after a failed request, while a popover may
+      // already be open.
+      const err = document.getElementById("lm-img-error");
+      if (err) new MutationObserver(sizePops).observe(
+        err, {attributes: true, childList: true, characterData: true,
+              subtree: true});
     }
 
     // --- page refresh, for the pages that have no menu to reach one from.

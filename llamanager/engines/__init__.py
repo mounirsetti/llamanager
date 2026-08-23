@@ -67,6 +67,28 @@ def capabilities(engine: str) -> dict:
     return caps
 
 
+def profile_capabilities(engine: str, profile) -> dict:
+    """``capabilities(engine)`` refined by what this profile can actually do.
+
+    Some engines answer differently per profile: Krea 2 can take up to three
+    reference images with one edit LoRA, two with another, and none at all on
+    a plain text-to-image profile. The engine-level map has to promise the
+    most permissive answer, which is how the composer came to offer an attach
+    button that generation then refused.
+
+    Adapters without the hook get their engine map unchanged.
+    """
+    caps = capabilities(engine)
+    mod = ADAPTERS.get(engine)
+    fn = getattr(mod, "profile_capabilities", None) if mod else None
+    if fn and profile is not None:
+        try:
+            caps.update(fn(profile) or {})
+        except Exception:  # noqa: BLE001 — a bad adapter shouldn't break the page
+            pass
+    return caps
+
+
 def default_profiles(engine: str, model_dir=None) -> dict:
     """Built-in starting profiles for ``engine``, checkpoint-aware.
 

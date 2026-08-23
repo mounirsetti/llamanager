@@ -3144,6 +3144,12 @@ def _build_image_page_context(cfg, reg) -> dict[str, Any]:
                 fields[s["key"]] = str(v)
         profiles_with_fields.append({
             "name": p.name, "model": mid, "fields": fields,
+            # What this profile can actually take, not what the engine could
+            # under some other profile: Krea 2 offers reference slots only
+            # with an edit LoRA, and the composer used the engine-wide answer
+            # to show an attach button that generation then refused.
+            "caps": (image_engines.profile_capabilities(eng, p)
+                     if eng else {}),
         })
 
     # Preselect the operator's configured default image model/profile so the
@@ -3221,6 +3227,12 @@ def _build_video_page_context(cfg, reg) -> dict[str, Any]:
                 fields[s["key"]] = str(v)
         profiles_with_fields.append({
             "name": p.name, "model": mid, "fields": fields,
+            # What this profile can actually take, not what the engine could
+            # under some other profile: Krea 2 offers reference slots only
+            # with an edit LoRA, and the composer used the engine-wide answer
+            # to show an attach button that generation then refused.
+            "caps": (image_engines.profile_capabilities(eng, p)
+                     if eng else {}),
         })
 
     default_model = cfg.default_image_model or ""

@@ -785,7 +785,10 @@
       });
     }
     modelSel.addEventListener("change", () => { updateModelBtn(); populateProfileDropdown(); renderOverrides(); applyCaps(); });
-    profileSel.addEventListener("change", renderOverrides);
+    profileSel.addEventListener("change", () => {
+      renderOverrides();
+      applyCaps();   // the profile decides the reference slots
+    });
     if (seedDice) seedDice.addEventListener("click", () => { seedEl.value = String(Math.floor(Math.random() * 4294967295)); });
 
     // ---- Popovers ----
@@ -816,7 +819,15 @@
     }
 
     // ---- Reference images ----
-    function caps() { return (cfg.enginesCaps && cfg.enginesCaps[currentEngine()]) || {ref_images_max: 0}; }
+    function caps() {
+      // The selected profile's own capabilities where it has them: on Krea 2
+      // the LoRA decides whether reference images do anything at all, so the
+      // engine-wide answer offered an attach button that generation refused.
+      const p = (cfg.profiles || []).find(
+        x => x.name === profileSel.value && x.model === modelSel.value);
+      if (p && p.caps && Object.keys(p.caps).length) return p.caps;
+      return (cfg.enginesCaps && cfg.enginesCaps[currentEngine()]) || {ref_images_max: 0};
+    }
     function applyCaps() {
       const c = caps(); const max = c.ref_images_max || 0;
       attachBtn.hidden = max < 1;

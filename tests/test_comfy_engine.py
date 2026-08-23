@@ -1860,3 +1860,58 @@ def test_an_unknown_soundtrack_value_is_refused(tmp_path, cfg):
     with pytest.raises(RuntimeError, match="video_audio"):
         m.build_command(cfg, model, prof, _image_request("x", [img]),
                         tmp_path / "o.mp4")
+
+
+# ------------------------------------- capabilities, once the profile is known
+
+
+def test_a_plain_profile_offers_no_reference_slots():
+    """The engine map has to promise the most permissive LoRA's three slots,
+    which is how the composer came to show an attach button on a
+    text-to-image profile and only refuse at generation time."""
+    from llamanager import engines
+    from llamanager.config import Profile
+
+    caps = engines.profile_capabilities(
+        "krea_comfy", Profile(name="kreac-best"))
+    assert caps["ref_images_max"] == 0
+    assert "no edit LoRA" in caps["ref_note"]
+
+
+@pytest.mark.parametrize("lora,expected", [
+    ("krea2_identity_edit_v1_2.safetensors", 2),
+    ("krea2_style_reference.safetensors", 3),
+    ("krea2_turbo_openpose_controlnet.safetensors", 1),
+])
+def test_each_edit_lora_reports_its_own_slot_count(lora, expected):
+    from llamanager import engines
+    from llamanager.config import Profile
+
+    caps = engines.profile_capabilities(
+        "krea_comfy", Profile(name="p", image_lora_weights=lora))
+    assert caps["ref_images_max"] == expected
+    assert caps["ref_images_required"] is True
+
+
+def test_engines_without_the_hook_keep_their_engine_capabilities():
+    from llamanager import engines
+    from llamanager.config import Profile
+
+    plain = engines.capabilities("minimax_h3_comfy")
+    with_profile = engines.profile_capabilities(
+        "minimax_h3_comfy", Profile(name="p"))
+    assert with_profile["ref_images_max"] == plain["ref_images_max"]
+
+
+def test_the_refusal_names_profiles_not_a_wall_of_filenames():
+    """It reaches a phone screen: eleven filenames filled it and said nothing
+    about which to pick."""
+    import pytest as _pytest
+    from llamanager.engines import krea_comfy as k
+
+    with _pytest.raises(RuntimeError) as ei:
+        k.resolve_recipe("", n_refs=1)
+    msg = str(ei.value)
+    assert "kreac-edit" in msg and "kreac-style-ref" in msg
+    assert ".safetensors" not in msg
+    assert len(msg) < 400, "too long for the error box on a phone"

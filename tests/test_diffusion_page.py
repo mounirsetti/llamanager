@@ -451,3 +451,19 @@ def test_an_empty_feed_leaves_masonry_so_its_message_has_room():
     assert ".gen-grid:has(> .gen-empty:not([hidden]))" in css
     assert "display: block" in css.split(
         ".gen-grid:has(> .gen-empty:not([hidden]))")[1][:80]
+
+
+def test_a_long_error_cannot_swallow_the_settings_pane():
+    """The popovers open upwards from the dock, so a tall error pushes their
+    top off-screen — measured at -100px on a 390x844 phone, which put the
+    Model and Profile controls out of reach because the popover scrolls
+    internally. Two guards: cap the error, and size the popover to the room
+    that is actually left."""
+    css = _partial("_composer_mobile.html")
+    assert ".gen-error {" in css and "max-height: 25dvh" in css
+    assert "overflow-y: auto" in css.split(".gen-error {")[1][:120]
+
+    js = css  # same partial
+    assert "dock.getBoundingClientRect().top" in js
+    assert 'attributeFilter: ["hidden"]' in js, "must resize when opened"
+    assert "Math.max(180" in js, "never shrink below a usable height"
