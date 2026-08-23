@@ -40,6 +40,9 @@
     height: 100%; width: 0; background: var(--accent);
     transition: width 0.3s ease;
   }
+  /* `display: flex` above outranks the hidden attribute, so without this the
+     banner sits there permanently announcing a job nobody started. */
+  .lm-reattach[hidden] { display: none; }
 </style>
 <div class="lm-reattach" id="lm-reattach" hidden>
   <span class="lm-reattach__dot"></span>
@@ -49,18 +52,23 @@
 </div>
 <script>
 (function () {
-  if (window.LM_HAS_REATTACH) return;         // page brings its own
-  const box = document.getElementById("lm-reattach");
-  if (!box || !window.LM_IMAGES_CFG) return;
-  const text = document.getElementById("lm-reattach-text");
-  const fill = document.getElementById("lm-reattach-fill");
-  const elapsed = document.getElementById("lm-reattach-elapsed");
-  const cfg = window.LM_IMAGES_CFG;
-  const statusUrl = cfg.statusUrl || "/v1/images/status";
+  // This partial is included in the markup ABOVE the page's inline
+  // `window.LM_IMAGES_CFG = {...}` script, so at parse time that config does
+  // not exist yet and an early return here left the feature silently dead.
+  // Wait for the document to finish, by which point the inline script has run.
+  function boot() {
+    if (window.LM_HAS_REATTACH) return;       // page brings its own
+    const box = document.getElementById("lm-reattach");
+    if (!box || !window.LM_IMAGES_CFG) return;
+    const text = document.getElementById("lm-reattach-text");
+    const fill = document.getElementById("lm-reattach-fill");
+    const elapsed = document.getElementById("lm-reattach-elapsed");
+    const cfg = window.LM_IMAGES_CFG;
+    const statusUrl = cfg.statusUrl || "/v1/images/status";
 
-  let poll = null, ticker = null, startedAt = null, watching = false;
+    let poll = null, ticker = null, startedAt = null, watching = false;
 
-  function fmt(ms) {
+    function fmt(ms) {
     const s = Math.max(0, Math.floor(ms / 1000));
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
   }
@@ -133,5 +141,12 @@
       }).catch(() => {});
     }
   });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
+  }
 })();
 </script>

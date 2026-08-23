@@ -368,3 +368,52 @@ def test_prewarm_prefers_the_models_own_default_over_the_engines(app):
     own = src.find("default_profile")
     engine_default = src.find("adapter.default_profiles()")
     assert own != -1 and own < engine_default
+
+
+# ------------------------------------------------- composer partials
+
+
+def _partial(name):
+    from pathlib import Path
+    from llamanager import api_ui
+    return (Path(api_ui.__file__).parent / "templates" / name).read_text()
+
+
+def test_the_progress_banner_is_hidden_until_there_is_a_job():
+    """`display: flex` outranks the hidden attribute, so without an explicit
+    rule the banner sat on every page announcing a job nobody started."""
+    css = _partial("_composer_reattach.html")
+    assert ".lm-reattach[hidden] { display: none; }" in css
+
+
+@pytest.mark.parametrize("name", ["_composer_advanced.html",
+                                  "_composer_warm.html",
+                                  "_composer_reattach.html",
+                                  "_composer_mobile.html"])
+def test_partials_wait_for_the_page_config(name):
+    """They are included above the page's inline LM_IMAGES_CFG assignment, so
+    reading it at parse time found nothing and every one of them returned
+    early — the advanced fold never ran on any page."""
+    js = _partial(name)
+    assert "DOMContentLoaded" in js, name
+    assert "function boot()" in js, name
+
+
+@pytest.mark.parametrize("page", ["images.html", "videos.html",
+                                  "images_public.html", "videos_public.html"])
+def test_the_banner_is_not_buried_in_the_settings_popover(page):
+    """It first shipped inside #gen-settings, which is hidden: a progress
+    banner nobody could see unless they opened the settings drawer."""
+    html = _partial(page)
+    banner = html.find('{% include "_composer_reattach.html" %}')
+    popover = html.find('id="gen-settings"')
+    assert banner != -1, page
+    assert banner < popover, f"{page}: banner is inside the settings popover"
+
+
+@pytest.mark.parametrize("page", ["images.html", "videos.html",
+                                  "images_public.html", "videos_public.html"])
+def test_every_page_exposes_its_feed_refresh(page):
+    """The refresh button re-fetches rather than reloading, which keeps
+    scroll position and avoids re-downloading every thumbnail."""
+    assert "window.LM_REFRESH_FEED" in _partial(page), page

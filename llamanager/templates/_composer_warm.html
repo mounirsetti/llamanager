@@ -39,17 +39,22 @@
 </div>
 <script>
 (function () {
-  const box = document.getElementById("lm-warm");
-  const text = document.getElementById("lm-warm-text");
-  const modelSel = document.getElementById("lm-img-model");
-  if (!box || !modelSel) return;
-  const prewarmBtn = document.getElementById("lm-warm-prewarm");
-  const releaseBtn = document.getElementById("lm-warm-release");
-  const csrf = document.querySelector('input[name="csrf_token"]');
+  // This partial is included in the markup ABOVE the page's inline
+  // `window.LM_IMAGES_CFG = {...}` script, so at parse time that config does
+  // not exist yet and an early return here left the feature silently dead.
+  // Wait for the document to finish, by which point the inline script has run.
+  function boot() {
+    const box = document.getElementById("lm-warm");
+    const text = document.getElementById("lm-warm-text");
+    const modelSel = document.getElementById("lm-img-model");
+    if (!box || !modelSel) return;
+    const prewarmBtn = document.getElementById("lm-warm-prewarm");
+    const releaseBtn = document.getElementById("lm-warm-release");
+    const csrf = document.querySelector('input[name="csrf_token"]');
 
-  let timer = null;
+    let timer = null;
 
-  function setState(state, label) {
+    function setState(state, label) {
     box.hidden = false;
     box.dataset.state = state;
     text.textContent = label;
@@ -116,5 +121,12 @@
   refresh();
   timer = setInterval(refresh, 10000);
   window.addEventListener("beforeunload", () => timer && clearInterval(timer));
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
+  }
 })();
 </script>

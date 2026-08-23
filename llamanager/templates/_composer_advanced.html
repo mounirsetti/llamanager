@@ -41,12 +41,17 @@
 </style>
 <script>
 (function () {
-  const OPEN_KEY = "lm.composer.advancedOpen";
-  const overrides = document.getElementById("lm-img-overrides");
-  const modelSel = document.getElementById("lm-img-model");
-  if (!overrides || !modelSel || !window.LM_IMAGES_CFG) return;
+  // This partial is included in the markup ABOVE the page's inline
+  // `window.LM_IMAGES_CFG = {...}` script, so at parse time that config does
+  // not exist yet and an early return here left the feature silently dead.
+  // Wait for the document to finish, by which point the inline script has run.
+  function boot() {
+    const OPEN_KEY = "lm.composer.advancedOpen";
+    const overrides = document.getElementById("lm-img-overrides");
+    const modelSel = document.getElementById("lm-img-model");
+    if (!overrides || !modelSel || !window.LM_IMAGES_CFG) return;
 
-  function advancedKeys() {
+    function advancedKeys() {
     const cfg = window.LM_IMAGES_CFG;
     const models = cfg.imageModels || [];
     const m = models.find(x => x.model_id === modelSel.value);
@@ -101,5 +106,12 @@
   // every one of them without touching that code.
   new MutationObserver(regroup).observe(overrides, {childList: true});
   regroup();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
+  }
 })();
 </script>

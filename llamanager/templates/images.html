@@ -522,6 +522,8 @@
 
     {# ---- Feed ---- #}
     <div class="gen-feed" id="gen-feed">
+      {% include "_composer_reattach.html" %}
+      {% include "_composer_mobile.html" %}
       <div class="gen-feedhead">
         <span class="gen-feedhead__label">Newest first</span>
         <span>New results land at the top ↑</span>
@@ -548,7 +550,6 @@
         {% include "_image_composer.html" %}
           {% with warm_controls = True %}{% include "_composer_warm.html" %}{% endwith %}
           {% include "_composer_advanced.html" %}
-          {% include "_composer_reattach.html" %}
       </div>
 
       {# Prompt history popover #}
@@ -1600,6 +1601,9 @@
 
   /** Pull the newest gallery entries and drop them into the placeholders
    *  (or, when nothing is in flight, onto the head of the feed). */
+  // Exposed so the shared refresh button re-fetches the feed
+  // instead of reloading the page and losing scroll position.
+  window.LM_REFRESH_FEED = () => refreshFront();
   async function refreshFront({resolve = false} = {}) {
     try {
       const _kq = cfg.mediaKind ? `&kind=${cfg.mediaKind}` : "";
