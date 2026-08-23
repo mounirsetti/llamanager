@@ -2,7 +2,7 @@ diff --git a/loader.py b/loader.py
 index 7cefb11..6cfb66b 100644
 --- a/loader.py
 +++ b/loader.py
-@@ -219,6 +219,33 @@ CLIP_VISION_SD_MAP = {
+@@ -219,6 +219,40 @@ CLIP_VISION_SD_MAP = {
      "ln2.": "norm2.",
  }
  
@@ -16,6 +16,13 @@ index 7cefb11..6cfb66b 100644
 +    "ffn_up": "mlp.linear_fc1",
 +    "ffn_down": "mlp.linear_fc2",
 +    "attn_out.": "attn.proj.",
++    # Fused QKV. The split-tensor branch rebuilds attn.qkv from
++    # attn_q/attn_k/attn_v when a mmproj ships them separately; the
++    # Qwen3-VL mmproj ships one fused attn_qkv, which nothing renamed,
++    # so all 24 vision blocks arrived as attn_qkv.weight and ComfyUI
++    # reported visual.blocks.N.attn.qkv.weight missing. The tower then
++    # ran on unloaded weights and died on the first image.
++    "attn_qkv.": "attn.qkv.",
 +    "ln1.": "norm1.",
 +    "ln2.": "norm2.",
 +}

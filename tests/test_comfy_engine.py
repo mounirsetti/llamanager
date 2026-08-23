@@ -1920,12 +1920,14 @@ def test_the_refusal_names_profiles_not_a_wall_of_filenames():
 # ------------------------------------------- the encoder an edit can use
 
 
-def test_editing_selects_the_encoder_whose_vision_tower_works(tmp_path, cfg):
-    """The GGUF encoder is 700 s faster and is right for text-to-image, but
-    its vision tower cannot read a reference image on this ComfyUI build:
-    llama.cpp's mmproj and ComfyUI's Qwen3-VL disagree about the deepstack
-    mergers. Measured 2026-08-23 — same request, GGUF crashes with a shape
-    mismatch, safetensors produces the edit."""
+def test_editing_uses_the_same_fast_encoder_as_text_to_image(tmp_path, cfg):
+    """It could not until the mmproj patch learned to rename the fused
+    attn_qkv: all 24 vision blocks arrived as attn_qkv.weight, ComfyUI
+    reported visual.blocks.N.attn.qkv.weight missing, and the tower ran on
+    unloaded weights and died on the first image. Only editing feeds an
+    image through the encoder, which is why text-to-image never noticed.
+    Measured 2026-08-23: 856 s here against 1591 s on the safetensors
+    encoder, the difference being the encoder build."""
     from llamanager.engines import krea_comfy as k
     from llamanager.config import Profile
 
@@ -1936,54 +1938,24 @@ def test_editing_selects_the_encoder_whose_vision_tower_works(tmp_path, cfg):
     img = tmp_path / "ref.png"
     img.write_bytes(b"x")
 
-    plain, _ = k.build_command(
-        cfg, root, Profile(name="p"), _image_request("x", []),
-        tmp_path / "a.png")
-    assert _argv_tokens(plain)["CLIP"] == k.CLIP_GGUF, "t2i keeps the fast one"
-
-    edit, _ = k.build_command(
-        cfg, root,
-        Profile(name="e", image_lora_weights="krea2_identity_edit_v1_2.safetensors"),
-        _image_request("x", [img]), tmp_path / "b.png")
-    assert _argv_tokens(edit)["CLIP"] == k.CLIP_SAFETENSORS
+    for profile, refs in ((Profile(name="p"), []),
+                          (Profile(name="e", image_lora_weights=
+                                   "krea2_identity_edit_v1_2.safetensors"),
+                           [img])):
+        argv, _ = k.build_command(cfg, root, profile,
+                                  _image_request("x", refs),
+                                  tmp_path / "o.png")
+        assert _argv_tokens(argv)["CLIP"] == k.CLIP_GGUF
 
 
-def test_editing_without_that_encoder_says_which_file_is_missing(tmp_path, cfg):
-    from llamanager.engines import krea_comfy as k
-    from llamanager.config import Profile
+def test_the_mmproj_patch_renames_the_fused_qkv():
+    """The rename is the fix, and it lives in a patch file that a reinstall
+    reapplies — so it is asserted here rather than left to the checkout."""
+    from pathlib import Path
+    from llamanager import engine_installer
 
-    _fake_comfy_install(cfg, tmp_path)
-    root = _krea_model(tmp_path, "krea2_identity_edit_v1_2.safetensors")
-    (root / "text_encoders" / k.CLIP_SAFETENSORS).unlink()
-    (root / "text_encoders" / k.CLIP_GGUF).write_bytes(b"x")
-    (root / "text_encoders" / k.CLIP_GGUF_MMPROJ).write_bytes(b"x")
-    img = tmp_path / "ref.png"
-    img.write_bytes(b"x")
-
-    with pytest.raises(RuntimeError, match=k.CLIP_SAFETENSORS):
-        k.build_command(
-            cfg, root,
-            Profile(name="e",
-                    image_lora_weights="krea2_identity_edit_v1_2.safetensors"),
-            _image_request("x", [img]), tmp_path / "b.png")
-
-
-def test_an_edit_profile_offers_no_slots_without_that_encoder(tmp_path):
-    """The composer must not present an attach button for an edit the
-    machine cannot run — that is what put one on kreac-best."""
-    from llamanager import engines
-    from llamanager.config import Profile
-
-    root = tmp_path / "Krea-2-Turbo-Comfy"
-    (root / "text_encoders").mkdir(parents=True)
-    prof = Profile(name="e",
-                   image_lora_weights="krea2_identity_edit_v1_2.safetensors")
-
-    caps = engines.profile_capabilities("krea_comfy", prof, root)
-    assert caps["ref_images_max"] == 0
-    assert "qwen3vl_4b_fp8_scaled.safetensors" in caps["ref_note"]
-
-    from llamanager.engines import krea_comfy as k
-    (root / "text_encoders" / k.CLIP_SAFETENSORS).write_bytes(b"x")
-    assert engines.profile_capabilities(
-        "krea_comfy", prof, root)["ref_images_max"] == 2
+    patch = (Path(engine_installer.__file__).parent / "engines"
+             / "comfy_patches" / "comfyui-gguf-qwen3vl-mmproj.patch")
+    text = patch.read_text()
+    assert '"attn_qkv.": "attn.qkv.",' in text
+    assert '"attn_out.": "attn.proj.",' in text, "the split-path rename too"
