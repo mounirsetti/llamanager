@@ -1,4 +1,5 @@
-{# Phone ergonomics for the four generation pages, plus a refresh button.
+{# Shared behaviour for the four generation pages: phone ergonomics, the
+   page-reload button, and locking the feed while a popover is open.
 
    Measured on a 390x844 viewport before this: the prompt dock alone claimed
    ~200 px, a quarter of the screen, because the model button takes a full
@@ -91,6 +92,14 @@
     background: var(--bg-1); color: var(--fg-1); cursor: pointer;
     font-size: 0.95rem; line-height: 1;
   }
+  /* While a popover is open the page behind it must hold still. The
+     scroller is .gen-feed (the shell is a fixed 100dvh column), so locking
+     the body alone would do nothing — a scroll gesture over the sheet, or a
+     flick that started on it, otherwise ran the feed underneath and moved
+     what the operator was reading. */
+  body.lm-pop-open .gen-feed { overflow: hidden; }
+  body.lm-pop-open { overflow: hidden; touch-action: none; }
+
   .gen-refresh:hover { border-color: var(--accent); color: var(--accent); }
   .gen-refresh[data-spinning="1"] { animation: gen-refresh-spin 0.8s linear infinite; }
   @keyframes gen-refresh-spin { to { transform: rotate(360deg); } }
@@ -135,6 +144,19 @@
       };
       apply();
       window.addEventListener("resize", apply);
+    }
+
+    // --- hold the page still while a popover is open.
+    const popEls = [document.getElementById("gen-settings"),
+                    document.getElementById("gen-history")].filter(Boolean);
+    if (popEls.length) {
+      const syncLock = () => {
+        const open = popEls.some(el => !el.hidden);
+        document.body.classList.toggle("lm-pop-open", open);
+      };
+      popEls.forEach(el => new MutationObserver(syncLock).observe(
+        el, {attributes: true, attributeFilter: ["hidden"]}));
+      syncLock();
     }
 
     // --- keep the popovers inside the viewport.

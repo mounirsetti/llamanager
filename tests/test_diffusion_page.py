@@ -389,7 +389,7 @@ def test_the_progress_banner_is_hidden_until_there_is_a_job():
 @pytest.mark.parametrize("name", ["_composer_advanced.html",
                                   "_composer_warm.html",
                                   "_composer_reattach.html",
-                                  "_composer_mobile.html"])
+                                  "_composer_page.html"])
 def test_partials_wait_for_the_page_config(name):
     """They are included above the page's inline LM_IMAGES_CFG assignment, so
     reading it at parse time found nothing and every one of them returned
@@ -416,7 +416,7 @@ def test_the_reload_button_is_for_pages_with_no_menu():
     public pages have no menu at all, so the button is theirs. It navigates
     to the canonical GET URL rather than reloading, for the same reason the
     rail's does: reload repeats however the page was reached."""
-    js = _partial("_composer_mobile.html")
+    js = _partial("_composer_page.html")
     assert 'querySelector(".gen-topbar__actions")' in js
     assert ".gen-feedhead" not in js, "would put a second button on admin pages"
     assert "window.location.assign(window.location.pathname)" in js
@@ -439,7 +439,7 @@ def test_nothing_out_votes_the_hidden_attribute():
     on an empty feed, the attach button showed for engines that take no
     reference image, and the progress banner announced a job nobody started.
     One rule covers the class rather than each instance."""
-    css = _partial("_composer_mobile.html")
+    css = _partial("_composer_page.html")
     assert "[hidden] { display: none !important; }" in css
 
 
@@ -447,7 +447,7 @@ def test_an_empty_feed_leaves_masonry_so_its_message_has_room():
     """The empty message is one 4px masonry row, so the grid collapsed to
     4px, its text overflowed, and whatever followed the grid painted on top
     of it."""
-    css = _partial("_composer_mobile.html")
+    css = _partial("_composer_page.html")
     assert ".gen-grid:has(> .gen-empty:not([hidden]))" in css
     assert "display: block" in css.split(
         ".gen-grid:has(> .gen-empty:not([hidden]))")[1][:80]
@@ -459,7 +459,7 @@ def test_a_long_error_cannot_swallow_the_settings_pane():
     Model and Profile controls out of reach because the popover scrolls
     internally. Two guards: cap the error, and size the popover to the room
     that is actually left."""
-    css = _partial("_composer_mobile.html")
+    css = _partial("_composer_page.html")
     assert ".gen-error {" in css and "max-height: 25dvh" in css
     assert "overflow-y: auto" in css.split(".gen-error {")[1][:120]
 
@@ -467,3 +467,17 @@ def test_a_long_error_cannot_swallow_the_settings_pane():
     assert "dock.getBoundingClientRect().top" in js
     assert 'attributeFilter: ["hidden"]' in js, "must resize when opened"
     assert "Math.max(180" in js, "never shrink below a usable height"
+
+
+def test_the_feed_holds_still_while_a_popover_is_open():
+    """A scroll gesture over the open sheet — or a flick that began on it —
+    otherwise ran the feed underneath and moved what was being read. The
+    scroller is .gen-feed, not the body: the shell is a fixed 100dvh column,
+    so locking the body alone would do nothing."""
+    css = _partial("_composer_page.html")
+    assert "body.lm-pop-open .gen-feed { overflow: hidden; }" in css
+    assert "body.lm-pop-open { overflow: hidden;" in css
+    # And the class has to follow both popovers, not just the settings one.
+    assert 'getElementById("gen-settings")' in css
+    assert 'getElementById("gen-history")' in css
+    assert 'classList.toggle("lm-pop-open"' in css
