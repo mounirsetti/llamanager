@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from urllib.parse import quote
 from typing import Any
 
 import httpx
@@ -465,7 +466,8 @@ class AdminClient:
     def setup_coexistence(self, *,
                           unload_text_on_arrival: bool | None = None,
                           restart_text_after_image: bool | None = None,
-                          allow_concurrent: bool | None = None) -> dict[str, Any]:
+                          allow_concurrent: bool | None = None,
+                          comfy_keep_warm_s: int | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {}
         if unload_text_on_arrival is not None:
             body["unload_text_on_arrival"] = unload_text_on_arrival
@@ -473,7 +475,21 @@ class AdminClient:
             body["restart_text_after_image"] = restart_text_after_image
         if allow_concurrent is not None:
             body["allow_concurrent"] = allow_concurrent
+        if comfy_keep_warm_s is not None:
+            body["comfy_keep_warm_s"] = comfy_keep_warm_s
         return self._post("/admin/setup/coexistence", body)
+
+    # ---- warm ComfyUI servers ------------------------------------------
+
+    def comfy_warm_status(self, model_id: str) -> dict[str, Any]:
+        return self._get(f"/admin/comfy/warm?model={quote(model_id)}")
+
+    def comfy_prewarm(self, model_id: str, profile: str = "") -> dict[str, Any]:
+        return self._post("/admin/comfy/prewarm",
+                          {"model_id": model_id, "profile": profile})
+
+    def comfy_unwarm(self) -> dict[str, Any]:
+        return self._post("/admin/comfy/unwarm", {})
 
     def setup_default_args(self, engine: str,
                            args: dict[str, Any]) -> dict[str, Any]:

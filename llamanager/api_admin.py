@@ -1742,6 +1742,9 @@ class CoexistenceBody(BaseModel):
     unload_text_on_arrival: bool | None = None
     restart_text_after_image: bool | None = None
     allow_concurrent: bool | None = None
+    # Warm-server window, seconds. Same trade as the rest of this form: a
+    # warm ComfyUI server holds 11-16 GB until the window expires.
+    comfy_keep_warm_s: int | None = None
 
 
 @router.post("/setup/coexistence")
@@ -1762,12 +1765,83 @@ async def setup_coexistence_admin(request: Request,
         restart_text_after_image=cfg.restart_text_after_image,
         allow_concurrent=cfg.allow_concurrent,
     )
+    if body.comfy_keep_warm_s is not None:
+        from .config import update_image_config
+        if not 0 <= body.comfy_keep_warm_s <= 3600:
+            raise HTTPException(
+                status_code=400,
+                detail="comfy_keep_warm_s must be between 0 and 3600 seconds")
+        cfg.comfy_keep_warm_s = int(body.comfy_keep_warm_s)
+        update_image_config(cfg.config_path,
+                            comfy_keep_warm_s=cfg.comfy_keep_warm_s)
     return JSONResponse({
         "ok": True,
         "unload_text_on_arrival": cfg.unload_text_on_arrival,
         "restart_text_after_image": cfg.restart_text_after_image,
         "allow_concurrent": cfg.allow_concurrent,
+        "comfy_keep_warm_s": int(getattr(cfg, "comfy_keep_warm_s", 0) or 0),
     })
+
+
+class PrewarmBody(BaseModel):
+    model_id: str
+    profile: str = ""
+
+
+@router.get("/comfy/warm")
+async def comfy_warm_admin(request: Request, model: str = "",
+                           _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Bearer-auth twin of the UI's warm-status route, for the CLI."""
+    from .engines import comfy_backend as cb
+    cfg = request.app.state.cfg
+    mid = (model or "").strip()
+    if not mid:
+        raise HTTPException(status_code=400, detail="model is required")
+    model_dir = cfg.models_dir / mid
+    info = cb.read_live_server(model_dir) if model_dir.is_dir() else None
+    window = int(getattr(cfg, "comfy_keep_warm_s", 0) or 0)
+    return JSONResponse({
+        "model": mid,
+        "warm": bool(info),
+        "since": (info or {}).get("started"),
+        "port": (info or {}).get("port"),
+        "keep_warm_s": window,
+        "can_prewarm": window > 0,
+    })
+
+
+@router.post("/comfy/prewarm")
+async def comfy_prewarm_admin(request: Request, body: PrewarmBody,
+                              _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Load a model's weights now, so the next real request does not."""
+    from .api_ui import _spawn_prewarm
+    cfg = request.app.state.cfg
+    window = int(getattr(cfg, "comfy_keep_warm_s", 0) or 0)
+    if window <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=("set a keep-warm window first (setup coexistence "
+                    "--comfy-keep-warm-s N); with 0 the prewarmed server is "
+                    "reaped before it can serve anything"))
+    runner = getattr(request.app.state, "image_runner", None)
+    if runner is not None and runner.is_busy:
+        raise HTTPException(
+            status_code=409,
+            detail=("a generation is already running; it will leave the "
+                    "server warm on its own"))
+    try:
+        pid = await _spawn_prewarm(cfg, body.model_id.strip(),
+                                   body.profile.strip())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse({"ok": True, "model": body.model_id, "pid": pid})
+
+
+@router.post("/comfy/unwarm")
+async def comfy_unwarm_admin(_: Origin = Depends(admin_origin)) -> JSONResponse:
+    """Give the card back: stop every warm ComfyUI server."""
+    from .engines import comfy_backend as cb
+    return JSONResponse({"ok": True, "stopped": cb.stop_warm_servers()})
 
 
 class DefaultArgsBody(BaseModel):

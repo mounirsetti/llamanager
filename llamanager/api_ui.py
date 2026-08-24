@@ -3558,7 +3558,7 @@ async def images_gallery(request: Request,
     return _JSONResponse(payload)
 
 
-async def _spawn_prewarm(request: Request, model_id: str,
+async def _spawn_prewarm(cfg, model_id: str,
                          profile_name: str) -> int:
     """Run one minimal generation so the weights are resident, and detach.
 
@@ -3573,7 +3573,6 @@ async def _spawn_prewarm(request: Request, model_id: str,
     from .config import Profile, detect_engine_for_id
     from .engines._base import ImageRequest
 
-    cfg = request.app.state.cfg
     model_dir = cfg.models_dir / model_id
     if not model_dir.is_dir():
         raise ValueError(f"unknown model {model_id!r}")
@@ -3703,7 +3702,8 @@ async def comfy_prewarm(request: Request, model: str = Form(...),
             {"detail": "a generation is already running; it will leave the "
                        "server warm on its own"}, status_code=409)
     try:
-        started = await _spawn_prewarm(request, mid, profile.strip())
+        started = await _spawn_prewarm(request.app.state.cfg, mid,
+                                       profile.strip())
     except ValueError as e:
         return _JSONResponse({"detail": str(e)}, status_code=400)
     return _JSONResponse({"ok": True, "model": mid, "pid": started})

@@ -1599,7 +1599,24 @@ def cmd_setup_coexistence(args):
         unload_text_on_arrival=_on_off_or_none(args.unload_text_on_arrival),
         restart_text_after_image=_on_off_or_none(args.restart_text_after_image),
         allow_concurrent=_on_off_or_none(args.allow_concurrent),
+        comfy_keep_warm_s=args.comfy_keep_warm_s,
     ))
+
+
+def cmd_comfy_warm_status(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.comfy_warm_status(args.model_id))
+
+
+def cmd_comfy_prewarm(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.comfy_prewarm(args.model_id,
+                                              profile=args.profile))
+
+
+def cmd_comfy_unwarm(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.comfy_unwarm())
 
 
 def cmd_setup_default_args(args):
@@ -1980,6 +1997,25 @@ def main(argv: list[str] | None = None) -> int:
     _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_activate)
 
     # diffusion profiles (nested under diffusion to keep verbs short)
+    wp = dfp.add_parser("warm",
+                        help="warm ComfyUI servers: status, prewarm, release"
+                        ).add_subparsers(dest="warm_cmd", required=True)
+    sp = wp.add_parser("status", help="is a warm server holding this model?")
+    sp.add_argument("model_id")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_comfy_warm_status)
+    sp = wp.add_parser("prewarm",
+                       help="load the weights now so the next request "
+                            "does not (needs a keep-warm window > 0)")
+    sp.add_argument("model_id")
+    sp.add_argument("--profile", default="",
+                    help="warm this profile's weights — the profile picks "
+                         "the transformer, so warming the wrong one still "
+                         "pays the load on the real request")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_comfy_prewarm)
+    sp = wp.add_parser("release",
+                       help="stop every warm server and give the VRAM back")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_comfy_unwarm)
+
     pfp = dfp.add_parser("profiles", help="manage per-model diffusion profiles"
                          ).add_subparsers(dest="profiles_cmd", required=True)
 
@@ -2333,6 +2369,12 @@ def main(argv: list[str] | None = None) -> int:
                     default=None, dest="restart_text_after_image")
     sp.add_argument("--allow-concurrent", choices=["on", "off"],
                     default=None, dest="allow_concurrent")
+    sp.add_argument("--comfy-keep-warm-s", type=int, default=None,
+                    dest="comfy_keep_warm_s", metavar="SECONDS",
+                    help="keep the ComfyUI server warm for N idle seconds "
+                         "(0 = off). A warm server skips the model load — "
+                         "and any LoRA patch — on the next request, at the "
+                         "cost of holding 11-16 GB of VRAM until it expires.")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_setup_coexistence)
 
     sp = setup.add_parser("default-args",

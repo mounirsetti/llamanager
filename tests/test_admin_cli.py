@@ -205,3 +205,61 @@ def test_cli_kv_arg_rejects_bad_input():
     from llamanager.cli import _parse_kv_args
     with pytest.raises(SystemExit):
         _parse_kv_args(["nokey"])
+
+
+# ------------------------------------------------------- warm ComfyUI servers
+
+
+def test_admin_coexistence_accepts_the_keep_warm_window(app):
+    from fastapi.testclient import TestClient
+    from llamanager.config import load_config
+    am = app.state.auth
+    key = am.rotate_key(am.get_origin_by_name("bootstrap").id)
+    client = TestClient(app)
+    r = client.post("/admin/setup/coexistence",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={"comfy_keep_warm_s": 300})
+    assert r.status_code == 200
+    assert r.json()["comfy_keep_warm_s"] == 300
+    assert load_config(app.state.cfg.config_path).comfy_keep_warm_s == 300
+
+
+def test_admin_coexistence_refuses_an_out_of_range_window(app):
+    from fastapi.testclient import TestClient
+    am = app.state.auth
+    key = am.rotate_key(am.get_origin_by_name("bootstrap").id)
+    r = TestClient(app).post("/admin/setup/coexistence",
+                             headers={"Authorization": f"Bearer {key}"},
+                             json={"comfy_keep_warm_s": 5000})
+    assert r.status_code == 400
+
+
+def test_admin_warm_routes_exist_for_the_cli(app):
+    """The /ui twins are cookie-auth; the CLI speaks bearer, so it needs
+    these. Prewarm with no window must refuse, naming the CLI flag."""
+    from fastapi.testclient import TestClient
+    am = app.state.auth
+    key = am.rotate_key(am.get_origin_by_name("bootstrap").id)
+    client = TestClient(app)
+    h = {"Authorization": f"Bearer {key}"}
+
+    r = client.get("/admin/comfy/warm", params={"model": "Nope"}, headers=h)
+    assert r.status_code == 200 and r.json()["warm"] is False
+
+    r = client.post("/admin/comfy/prewarm", headers=h,
+                    json={"model_id": "Nope"})
+    assert r.status_code == 400
+    assert "--comfy-keep-warm-s" in r.json()["detail"]
+
+    r = client.post("/admin/comfy/unwarm", headers=h)
+    assert r.status_code == 200 and r.json()["ok"] is True
+
+
+def test_the_cli_exposes_the_warm_group():
+    import llamanager.cli as cli
+    parser = cli.build_parser() if hasattr(cli, "build_parser") else None
+    import inspect
+    src = inspect.getsource(cli)
+    for needle in ('add_parser("warm"', '"prewarm"', '"release"',
+                   "--comfy-keep-warm-s"):
+        assert needle in src, needle
