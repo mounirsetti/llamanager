@@ -1013,8 +1013,8 @@ def test_arity_guard_refuses_a_ref_on_a_profile_that_cannot_read_one():
     from llamanager.config import Profile
 
     with pytest.raises(HTTPException) as ei:
-        _arity(model="Krea-2-Turbo-Comfy", profile=Profile(name="p"), n=1)
-    assert "at most 0" in str(ei.value.detail)
+        _arity(model="Krea-2-Turbo-Comfy", profile=Profile(name="p"), n=2)
+    assert "at most 1" in str(ei.value.detail)
 
 
 def test_arity_guard_accepts_what_the_profile_accepts():

@@ -815,9 +815,10 @@ def _krea_model(tmp_path, *loras):
     return root
 
 
-def test_krea_refuses_to_edit_without_an_edit_lora(tmp_path, cfg):
-    """Reference images alone do nothing: stock Krea 2 has no path to read
-    them. Naming the LoRAs that would work beats a silently ignored input."""
+def test_krea_one_reference_without_a_lora_is_img2img(tmp_path, cfg):
+    """A reference with no edit LoRA used to be refused; it is meaningful as
+    img2img — the reference is the starting latent, no conditioning
+    involved — so it selects the i2i graph with the strength as denoise."""
     from llamanager.engines import krea_comfy as k
     from llamanager.config import Profile
 
@@ -825,15 +826,49 @@ def test_krea_refuses_to_edit_without_an_edit_lora(tmp_path, cfg):
     root = _krea_model(tmp_path)
     img = tmp_path / "ref.png"
     img.write_bytes(b"x")
-    with pytest.raises(RuntimeError, match="edit LoRA"):
+
+    req = _image_request("a snowy version of this", [img])
+    req.strength = 0.55
+    argv, _ = k.build_command(cfg, root, Profile(name="p"), req,
+                              tmp_path / "o.png")
+    joined = " ".join(argv)
+    assert "krea2_i2i_gguf" in joined
+    tok = _argv_tokens(argv)
+    assert tok["DENOISE"] == "0.55"
+    assert any(a == f"REF_IMAGE={img}" for a in argv)
+
+
+def test_krea_img2img_requires_an_explicit_strength(tmp_path, cfg):
+    """0.0 returns the reference and 1.0 ignores it — a silent default
+    would be a decision made for the caller."""
+    from llamanager.engines import krea_comfy as k
+    from llamanager.config import Profile
+
+    _fake_comfy_install(cfg, tmp_path)
+    root = _krea_model(tmp_path)
+    img = tmp_path / "ref.png"
+    img.write_bytes(b"x")
+
+    with pytest.raises(RuntimeError, match="strength"):
         k.build_command(cfg, root, Profile(name="p"),
                         _image_request("x", [img]), tmp_path / "o.png")
 
 
-def test_krea_refuses_to_edit_with_an_unknown_lora(tmp_path, cfg):
-    """The two node packs place the reference differently and a LoRA in the
-    wrong one still renders — wrongly. So an unknown LoRA plus a reference is
-    an error, never a guess."""
+def test_krea_two_references_without_a_lora_still_refuse(tmp_path, cfg):
+    """img2img has one starting point; a second image has no reading
+    without an edit recipe."""
+    from llamanager.engines import krea_comfy as k
+
+    with pytest.raises(RuntimeError, match="only be one"):
+        k.resolve_recipe("", 2)
+
+
+def test_krea_a_style_lora_with_one_reference_is_img2img(tmp_path, cfg):
+    """A LoRA outside LORA_RECIPES is a style LoRA, and one reference makes
+    the run img2img with the LoRA riding along (realism + a reference photo
+    is the canonical case). The wrong-pack danger this used to refuse
+    applies to edit semantics, which img2img never touches — the reference
+    is a latent, not conditioning."""
     from llamanager.engines import krea_comfy as k
     from llamanager.config import Profile
 
@@ -841,15 +876,14 @@ def test_krea_refuses_to_edit_with_an_unknown_lora(tmp_path, cfg):
     root = _krea_model(tmp_path, "somebody_elses_lora.safetensors")
     img = tmp_path / "ref.png"
     img.write_bytes(b"x")
-    prof = Profile(name="p",
+    prof = Profile(name="p", image_strength=0.7,
                    image_lora_weights="somebody_elses_lora.safetensors")
-    with pytest.raises(RuntimeError, match="no safe guess"):
-        k.build_command(cfg, root, prof, _image_request("x", [img]),
-                        tmp_path / "o.png")
-    # ...but the same LoRA is fine for plain text-to-image.
-    argv, _ = k.build_command(cfg, root, prof, _image_request("x", []),
+    argv, _ = k.build_command(cfg, root, prof, _image_request("x", [img]),
                               tmp_path / "o.png")
-    assert "krea2_t2i_gguf.json" in " ".join(argv)
+    tok = _argv_tokens(argv)
+    assert "krea2_i2i_gguf" in " ".join(argv)
+    assert tok["LORA"] == "somebody_elses_lora.safetensors"
+    assert tok["DENOISE"] == "0.7"
 
 
 def test_krea_edit_lora_requires_its_reference(tmp_path, cfg):
@@ -1117,7 +1151,10 @@ def test_every_comfy_workflow_template_is_valid_json_and_fully_tokenised():
                 if k not in ("INIT_IMAGE", "LORA", "LORA_STRENGTH")},
              "REF_DETAIL": "match",
              **{f"REF{i}": f"r{i}.png" for i in range(1, 10)}}
+    i2i = {**{k: v for k, v in _KREA_VALUES.items()},
+           "REF_IMAGE": "ref.png", "DENOISE": 0.6}
     known = {"minimax_h3_i2v_gguf": _WORKFLOW_VALUES,
+             "krea2_i2i_gguf": i2i, "krea2_i2i_gguf_te": i2i,
              "minimax_h3_ref2v_gguf": ref2v, "krea2_t2i_gguf": _KREA_VALUES,
              "krea2_t2i_gguf_te": _KREA_VALUES,
              "krea2_edit_a_gguf": edit_a, "krea2_edit_a_gguf_te": edit_a,
@@ -1865,17 +1902,18 @@ def test_an_unknown_soundtrack_value_is_refused(tmp_path, cfg):
 # ------------------------------------- capabilities, once the profile is known
 
 
-def test_a_plain_profile_offers_no_reference_slots():
-    """The engine map has to promise the most permissive LoRA's three slots,
-    which is how the composer came to show an attach button on a
-    text-to-image profile and only refuse at generation time."""
+def test_a_plain_profile_offers_one_optional_img2img_slot():
+    """Not zero and not the engine map's three: a plain profile takes one
+    OPTIONAL reference as an img2img starting point, with the strength dial
+    exposed."""
     from llamanager import engines
     from llamanager.config import Profile
 
     caps = engines.profile_capabilities(
         "krea_comfy", Profile(name="kreac-best"))
-    assert caps["ref_images_max"] == 0
-    assert "no edit LoRA" in caps["ref_note"]
+    assert (caps["ref_images_min"], caps["ref_images_max"]) == (0, 1)
+    assert caps["strength"] is True
+    assert caps["mode"] == "new"
 
 
 @pytest.mark.parametrize("lora,expected", [
@@ -1911,7 +1949,7 @@ def test_the_refusal_names_profiles_not_a_wall_of_filenames():
     from llamanager.engines import krea_comfy as k
 
     with _pytest.raises(RuntimeError) as ei:
-        k.resolve_recipe("", n_refs=1)
+        k.resolve_recipe("", n_refs=2)
     msg = str(ei.value)
     assert "kreac-edit" in msg and "kreac-style-ref" in msg
     assert ".safetensors" not in msg
@@ -2016,8 +2054,10 @@ def test_the_blank_profile_answer_is_the_empty_profile_not_the_engine():
     from llamanager import engines
     from llamanager.config import Profile
 
-    assert engines.profile_capabilities(
-        "krea_comfy", Profile(name=""))["ref_images_max"] == 0
+    blank = engines.profile_capabilities("krea_comfy", Profile(name=""))
+    # One OPTIONAL slot — img2img — where the engine-wide answer promised
+    # three required-style edit slots.
+    assert (blank["ref_images_min"], blank["ref_images_max"]) == (0, 1)
     h3 = engines.profile_capabilities(
         "minimax_h3_comfy", Profile(name=""))
     assert (h3["ref_images_min"], h3["ref_images_max"]) == (1, 1)

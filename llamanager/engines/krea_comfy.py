@@ -182,6 +182,9 @@ OPTIONAL_REF_NODES: dict[str, dict[int, tuple[str, ...]]] = {
     "krea2_edit_b": {1: ("12",), 2: ("13",)},
 }
 
+# img2img (no edit LoRA): one reference is the starting latent.
+I2I_MAX_REFS = 1
+
 # Pack A dials. 4.0 is what the pack's own reference workflow ships (the node
 # default is 1.0, i.e. off); 768 is the middle of the trained grounding range.
 _DEFAULT_REF_BOOST = 4.0
@@ -196,28 +199,21 @@ def resolve_recipe(lora_name: str, n_refs: int) -> EditRecipe | None:
     reference through a graph that was never trained to read one, produces a
     confident wrong image instead of an error.
     """
-    known = ", ".join(sorted(LORA_RECIPES))
-    if not lora_name:
-        if n_refs:
-            # Named by what they do, not by eleven filenames: this reaches a
-            # phone screen, where the file list filled it and said nothing
-            # about which one to pick.
+    if not lora_name or lora_name not in LORA_RECIPES:
+        # No edit recipe. One reference is still meaningful — img2img: the
+        # reference is VAE-encoded and partially re-noised, so it is the
+        # STARTING POINT rather than something the model attends to. That
+        # needs no edit LoRA (a style LoRA rides along fine); build_command
+        # selects the i2i graph. More than one reference has no such
+        # reading, so it stays an error.
+        if n_refs > I2I_MAX_REFS:
             raise RuntimeError(
-                "This profile generates from the prompt alone — reference "
-                "images do nothing without an edit LoRA, because stock "
-                "Krea 2 has no path to read them. Switch to a profile that "
-                "has one: identity editing (kreac-edit), style transfer "
-                "(kreac-style-ref) or pose control (kreac-pose).")
+                "Without an edit LoRA a reference image is an img2img "
+                f"starting point, and there can only be one; got {n_refs}. "
+                "For multi-image work switch to an edit profile: identity "
+                "editing (kreac-edit) or style transfer (kreac-style-ref).")
         return None
-    recipe = LORA_RECIPES.get(lora_name)
-    if recipe is None:
-        if n_refs:
-            raise RuntimeError(
-                f"{lora_name} is not a LoRA llamanager knows how to edit "
-                "with, and the two Krea 2 edit node packs need different "
-                "graphs — there is no safe guess. Use it without reference "
-                f"images for text-to-image, or pick one of: {known}")
-        return None
+    recipe = LORA_RECIPES[lora_name]
     if n_refs < recipe.refs_min:
         raise RuntimeError(
             f"{lora_name} is an edit LoRA: it needs at least "
@@ -356,7 +352,12 @@ def build_command(
     cfg_scale = _g if _g is not None else _DEFAULT_CFG
 
     clip_file, te_suffix = resolve_text_encoder(model_path)
-    graph = (recipe.graph if recipe is not None else "krea2_t2i") + te_suffix
+    # Three graphs: an edit recipe names its own; a reference with no recipe
+    # is img2img (the reference is the starting latent, no conditioning
+    # involved); neither is plain text-to-image.
+    i2i = recipe is None and bool(req.ref_images)
+    graph = ((recipe.graph if recipe is not None
+              else "krea2_i2i" if i2i else "krea2_t2i") + te_suffix)
     required = {"diffusion_models": unet, "text_encoders": clip_file,
                 "vae": VAE_FILE}
     if recipe is not None:
@@ -424,6 +425,22 @@ def build_command(
                      "--set", f"GROUNDING_PX={int(px)}",
                      # Not an operator choice: the LoRA version determines it.
                      "--set-str", f"FIT_MODE={recipe.fit_mode}"]
+    elif i2i:
+        # img2img: the reference and how far to move away from it. The
+        # strength is a real decision — 0.0 returns the reference, 1.0
+        # ignores it — so it is required rather than defaulted: the composer
+        # always sends its slider value, and an API caller who omits it is
+        # told which knob to set instead of getting a silent 0.6.
+        strength_in = (req.strength if req.strength is not None
+                       else profile.image_strength)
+        if strength_in is None:
+            raise RuntimeError(
+                "img2img needs a strength (0.0 keeps the reference "
+                "unchanged, 1.0 ignores it): send 'strength' with the "
+                "request or set Strength on the profile.")
+        denoise = min(1.0, max(0.0, float(strength_in)))
+        argv += ["--image", f"REF_IMAGE={req.ref_images[0]}",
+                 "--set", f"DENOISE={denoise}"]
 
     keep_warm = int(getattr(cfg, "comfy_keep_warm_s", 0) or 0)
     if keep_warm > 0:
@@ -567,15 +584,18 @@ def profile_capabilities(profile: Profile,
     recipe = LORA_RECIPES.get(lora)
     if recipe is None:
         return {
-            "ref_images_max": 0,
+            # One reference IS meaningful without an edit LoRA — as img2img,
+            # where it is the starting latent rather than something the
+            # model attends to. Optional, not required: the same profile
+            # generates from the prompt alone.
+            "ref_images_max": I2I_MAX_REFS,
             "ref_images_min": 0,
-            # The guided flow's chip for this kind of profile. "new" and not
-            # "edit" because stock Krea 2 has no image-conditioning path —
-            # the edit LoRA is what adds one.
+            "strength": True,
+            "strength_default": 0.6,
             "mode": "new",
             "mode_label": "New image",
-            "ref_note": ("this profile has no edit LoRA, so it generates "
-                         "from the prompt alone"),
+            "ref_note": ("optional — the image starts from the reference; "
+                         "Strength sets how far to move away from it"),
         }
     return {
         "ref_images_max": recipe.refs_max,
