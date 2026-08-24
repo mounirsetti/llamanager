@@ -1,0 +1,354 @@
+{# Guided generation flow: model → mode → the settings that follow.
+
+   Generation is a process — pick the model, then whether this is a new
+   image or an edit of an existing one — but the composer presented model,
+   profile and eleven settings as one flat surface, and whether a reference
+   image did anything depended on which profile happened to be selected.
+
+   The modes come from data the pages already load: every profile carries
+   ``caps`` (engines.profile_capabilities), and profiles whose caps name a
+   ``mode`` group into chips. Krea 2: "New image" / "Edit an image" — the
+   umbrella the user asked for needs no model merging, editing already IS
+   Krea 2 with an edit LoRA selected. MiniMax-H3: "Animate a photo"
+   (FL2VA, exactly one opening frame) / "From references" (REF2VA, 1–9).
+   Models with one mode show no chips at all.
+
+   Attaching a reference while in a no-reference mode switches to the
+   reference mode rather than ignoring the file: stock Krea 2 has no
+   image-conditioning path, so a reference IMPLIES the edit path. A notice
+   says so, and removing the last reference offers the way back.
+
+   Self-contained in the _composer_warm.html mold: boots on DOMContentLoaded
+   (the page's inline LM_IMAGES_CFG script runs first), observes the DOM the
+   four pages already build, edits none of their copy-pasted JS.
+#}
+<style>
+  .lm-flow {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    padding: 0 2px 6px;
+  }
+  .lm-flow[hidden] { display: none; }
+  .lm-flow__chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 12px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--bg-3); background: var(--bg-1);
+    color: var(--fg-2); font-size: 0.75rem; line-height: 1; user-select: none;
+    transition: color 120ms ease, border-color 120ms ease;
+  }
+  .lm-flow__chip[data-active="1"] {
+    border-color: var(--accent); color: var(--accent);
+    background: color-mix(in oklab, var(--accent) 8%, var(--bg-1));
+  }
+  .lm-flow__chip:hover { color: var(--fg-0); }
+  .lm-flow__note {
+    flex: 1 1 100%; display: flex; align-items: center; gap: 8px;
+    font-size: 0.75rem; color: var(--fg-2);
+    padding: 4px 8px; border: 1px solid var(--bg-3); border-radius: 8px;
+    background: var(--bg-2);
+  }
+  .lm-flow__note[hidden] { display: none; }
+  .lm-flow__note button {
+    margin-left: auto; border: none; background: none; cursor: pointer;
+    color: var(--accent); font-size: 0.75rem; padding: 2px 4px;
+  }
+  .lm-flow__req {
+    flex: 1 1 100%; font-size: 0.75rem; color: var(--accent);
+    padding: 0 2px;
+  }
+  .lm-flow__req[hidden] { display: none; }
+  @media (max-width: 760px) and (pointer: coarse) {
+    .lm-flow__chip { padding: 8px 14px; }
+  }
+</style>
+<div class="lm-flow" id="lm-flow" hidden>
+  <span id="lm-flow-chips" style="display: contents;"></span>
+  <span class="lm-flow__note" id="lm-flow-note" hidden>
+    <span id="lm-flow-note-text"></span>
+    <button type="button" id="lm-flow-note-btn"></button>
+  </span>
+  <span class="lm-flow__req" id="lm-flow-req" hidden></span>
+</div>
+<script>
+(function () {
+  function boot() {
+    const cfg = window.LM_IMAGES_CFG;
+    const flow = document.getElementById("lm-flow");
+    const chipsBox = document.getElementById("lm-flow-chips");
+    const note = document.getElementById("lm-flow-note");
+    const noteText = document.getElementById("lm-flow-note-text");
+    const noteBtn = document.getElementById("lm-flow-note-btn");
+    const req = document.getElementById("lm-flow-req");
+    const modelSel = document.getElementById("lm-img-model");
+    const profileSel = document.getElementById("lm-img-profile");
+    const modelBtnName = document.getElementById("gen-modelbtn-name");
+    if (!cfg || !flow || !modelSel || !profileSel) return;
+
+    // The chips belong to the main flow, not the settings sheet: move the
+    // strip into the dock, above the prompt bar.
+    const dock = document.querySelector(".gen-dock");
+    const bar = dock && dock.querySelector(".gen-bar");
+    if (dock && bar) dock.insertBefore(flow, bar);
+
+    // ---- mode model -----------------------------------------------------
+    const FAMILY_DEFAULTS = cfg.mediaKind === "video"
+      ? {ref: "From references", plain: "Animate a photo"}
+      : {ref: "Edit an image", plain: "New image"};
+
+    function capsOf(profileName) {
+      if (profileName) {
+        const p = (cfg.profiles || []).find(
+          x => x.name === profileName && x.model === modelSel.value);
+        if (p && p.caps && Object.keys(p.caps).length) return p.caps;
+      }
+      // The blank "(use engine defaults)" option: enginesCaps is the
+      // empty-profile answer server-side, so this is honest for it.
+      const m = (cfg.imageModels || []).find(
+        x => x.model_id === modelSel.value);
+      return (cfg.enginesCaps || {})[m ? m.engine : ""] || {ref_images_max: 0};
+    }
+
+    function modeOf(caps) {
+      if (caps.mode) return caps.mode;
+      return (caps.ref_images_max || 0) > 0 ? "ref-fallback" : "plain-fallback";
+    }
+
+    function labelOf(caps) {
+      if (caps.mode_label) return caps.mode_label;
+      return (caps.ref_images_max || 0) > 0
+        ? FAMILY_DEFAULTS.ref : FAMILY_DEFAULTS.plain;
+    }
+
+    /** The selected model's modes: ordered [{mode, label, profiles:[names]}].
+        The blank option belongs to the engine-default mode. */
+    function modelModes() {
+      const byMode = new Map();
+      const add = (mode, label, name) => {
+        if (!byMode.has(mode)) byMode.set(mode, {mode, label, profiles: []});
+        byMode.get(mode).profiles.push(name);
+      };
+      const blank = capsOf("");
+      add(modeOf(blank), labelOf(blank), "");
+      (cfg.profiles || [])
+        .filter(p => p.model === modelSel.value)
+        .forEach(p => add(modeOf(p.caps || {}), labelOf(p.caps || {}), p.name));
+      return Array.from(byMode.values());
+    }
+
+    function currentMode() {
+      return modeOf(capsOf(profileSel.value));
+    }
+
+    // ---- rendering ------------------------------------------------------
+    let lastAutoSwitch = null;   // {fromProfile} when we switched for a ref
+
+    function renderChips() {
+      const modes = modelModes();
+      chipsBox.innerHTML = "";
+      if (modes.length < 2) {
+        flow.hidden = true;
+        filterProfiles(null);
+        decorateModelBtn(null);
+        return;
+      }
+      flow.hidden = false;
+      const active = currentMode();
+      modes.forEach(m => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "lm-flow__chip";
+        chip.textContent = m.label;
+        chip.dataset.mode = m.mode;
+        chip.dataset.active = m.mode === active ? "1" : "0";
+        chip.addEventListener("click", () => {
+          if (m.mode === currentMode()) return;
+          lastAutoSwitch = null;
+          note.hidden = true;
+          switchToMode(m.mode);
+        });
+        chipsBox.appendChild(chip);
+      });
+      filterProfiles(active);
+      decorateModelBtn(modes.find(m => m.mode === active));
+      renderRequirement();
+    }
+
+    /** Hide+disable profile options outside the mode (Safari ignores hidden
+        on <option>, so both). Never rebuilds — the page owns the list. */
+    function filterProfiles(mode) {
+      Array.from(profileSel.options).forEach(opt => {
+        const outside = mode !== null
+          && modeOf(capsOf(opt.value)) !== mode;
+        opt.hidden = outside;
+        opt.disabled = outside;
+      });
+    }
+
+    function defaultProfileFor(mode) {
+      const modes = modelModes();
+      const m = modes.find(x => x.mode === mode);
+      if (!m) return null;
+      if (cfg.defaultProfile && m.profiles.includes(cfg.defaultProfile)) {
+        return cfg.defaultProfile;
+      }
+      return m.profiles.find(n => n !== "") ?? m.profiles[0] ?? null;
+    }
+
+    function switchToMode(mode) {
+      const target = defaultProfileFor(mode);
+      if (target === null) return;
+      profileSel.value = target;
+      profileSel.dispatchEvent(new Event("change", {bubbles: true}));
+      // The page's own change handler ran renderOverrides/applyCaps; ours
+      // (below) re-rendered the chips.
+    }
+
+    function decorateModelBtn(activeMode) {
+      if (!modelBtnName) return;
+      const base = modelBtnName.textContent.split(" · ")[0];
+      modelBtnName.textContent = activeMode
+        ? `${base} · ${activeMode.label}` : base;
+    }
+
+    // ---- requirement hint + client-side block ---------------------------
+    function refCount() {
+      const thumbs = document.getElementById("gen-refs-thumbs");
+      return thumbs ? thumbs.children.length : 0;
+    }
+
+    function requirementShort() {
+      const caps = capsOf(profileSel.value);
+      const min = caps.ref_images_min || 0;
+      if (min > 0 && refCount() < min) {
+        return caps.ref_note
+          ? `Attach a reference first — ${caps.ref_note}.`
+          : `Attach at least ${min} reference image(s) first.`;
+      }
+      return "";
+    }
+
+    function renderRequirement() {
+      const msg = requirementShort();
+      req.textContent = msg;
+      req.hidden = !msg;
+    }
+
+    function blockIfUnmet(e) {
+      const msg = requirementShort();
+      if (!msg) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      renderRequirement();
+      req.scrollIntoView({block: "nearest"});
+    }
+    // Capture phase: runs before the page's own submit handler, and before
+    // its Ctrl/Cmd+Enter keydown shortcut (which bypasses submit entirely).
+    document.addEventListener("submit", (e) => {
+      if (e.target && e.target.id === "lm-img-composer") blockIfUnmet(e);
+    }, true);
+    document.addEventListener("keydown", (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter"
+          && e.target && e.target.id === "lm-img-prompt") blockIfUnmet(e);
+    }, true);
+
+    // ---- auto-switch on reference intent --------------------------------
+    function refCapableMode() {
+      return modelModes().find(m => {
+        const c = capsOf(m.profiles.find(n => n !== "") ?? "");
+        return (c.ref_images_max || 0) > 0;
+      });
+    }
+
+    function maybeAutoSwitch() {
+      const caps = capsOf(profileSel.value);
+      if ((caps.ref_images_max || 0) > 0) return;   // already ref-capable
+      const target = refCapableMode();
+      if (!target) return;
+      const from = profileSel.value;
+      switchToMode(target.mode);
+      lastAutoSwitch = {fromProfile: from};
+      noteText.textContent =
+        `Switched to “${target.label}” — references need it.`;
+      noteBtn.textContent = "Dismiss";
+      noteBtn.onclick = () => { note.hidden = true; };
+      note.hidden = false;
+    }
+
+    // Capture phase, so the switch lands before the page's own handlers
+    // read caps() and decide whether to accept the files.
+    document.addEventListener("change", (e) => {
+      if (e.target && e.target.id === "gen-file"
+          && e.target.files && e.target.files.length) maybeAutoSwitch();
+    }, true);
+    document.addEventListener("drop", (e) => {
+      const dock2 = document.querySelector(".gen-dock");
+      if (dock2 && dock2.contains(e.target)
+          && e.dataTransfer && e.dataTransfer.files
+          && e.dataTransfer.files.length) maybeAutoSwitch();
+    }, true);
+    document.addEventListener("paste", (e) => {
+      if (e.target && e.target.id === "lm-img-prompt"
+          && e.clipboardData
+          && Array.from(e.clipboardData.items || [])
+              .some(i => i.type && i.type.startsWith("image/"))) {
+        maybeAutoSwitch();
+      }
+    }, true);
+
+    // In a no-reference mode the page hides #gen-attach; keep it visible
+    // when the model HAS a reference mode, so the affordance that triggers
+    // the auto-switch exists. Its click opens #gen-file, whose change we
+    // intercept above.
+    function keepAttachVisible() {
+      const attach = document.getElementById("gen-attach");
+      if (!attach) return;
+      if (attach.hidden && refCapableMode()
+          && (capsOf(profileSel.value).ref_images_max || 0) === 0) {
+        attach.hidden = false;
+      }
+    }
+
+    // ---- the way back ---------------------------------------------------
+    const thumbs = document.getElementById("gen-refs-thumbs");
+    if (thumbs) {
+      new MutationObserver(() => {
+        renderRequirement();
+        if (thumbs.children.length === 0 && lastAutoSwitch) {
+          const back = lastAutoSwitch;
+          lastAutoSwitch = null;
+          noteText.textContent = "Reference removed.";
+          noteBtn.textContent = "Back to " + FAMILY_DEFAULTS.plain;
+          noteBtn.onclick = () => {
+            note.hidden = true;
+            profileSel.value = back.fromProfile;
+            profileSel.dispatchEvent(new Event("change", {bubbles: true}));
+          };
+          note.hidden = false;
+        }
+      }).observe(thumbs, {childList: true});
+    }
+
+    // ---- wiring ---------------------------------------------------------
+    // The page rebuilds the profile dropdown on model change; observing it
+    // catches every rebuild without touching that code.
+    new MutationObserver(() => { renderChips(); keepAttachVisible(); })
+      .observe(profileSel, {childList: true});
+    // Registered at DOMContentLoaded — after the page's own listeners — so
+    // these run last and win the model-button text.
+    modelSel.addEventListener("change", () => {
+      lastAutoSwitch = null; note.hidden = true;
+      renderChips(); keepAttachVisible();
+    });
+    profileSel.addEventListener("change", () => {
+      renderChips(); keepAttachVisible();
+    });
+    renderChips();
+    keepAttachVisible();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
+  }
+})();
+</script>

@@ -1242,6 +1242,51 @@ async def audio_stream(websocket: WebSocket) -> None:
             await websocket.close()
 
 
+def _check_ref_arity(cfg: Config, engine: str, model_id: str | None,
+                     profile_name: str | None, n_refs: int) -> None:
+    """400 on a reference-count the selected profile cannot honour.
+
+    Profile-aware on purpose: the engine-wide map answers for the most
+    permissive profile (Krea 2's three edit slots, H3's nine), so checking
+    against it let requests through that the adapter then refused at
+    dispatch — after a queue slot was burned. The minimum matters as much as
+    the maximum: an image-to-video profile with no reference at all used to
+    travel the same way.
+
+    A profile name that does not resolve is left alone here — the routes
+    already answer that with their own unknown-profile 400.
+    """
+    from . import engines as _engines
+    caps: dict | None = None
+    try:
+        prof = (cfg.get_profile(model_id, profile_name)
+                if model_id and profile_name else None)
+        if prof is not None:
+            caps = _engines.profile_capabilities(
+                engine, prof, cfg.models_dir / model_id)
+        else:
+            caps = _engines.capabilities(engine)
+    except Exception:  # noqa: BLE001 — the guard must not 500 a request
+        return
+    ref_max = int(caps.get("ref_images_max", 0) or 0)
+    ref_min = int(caps.get("ref_images_min", 0) or 0)
+    note = str(caps.get("ref_note", "") or "")
+    if n_refs > ref_max:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{profile_name or engine} supports at most {ref_max} "
+                    f"reference image(s); got {n_refs}"
+                    + (f" — {note}" if note else "")),
+        )
+    if ref_min > 0 and n_refs < ref_min:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{profile_name or engine} needs at least {ref_min} "
+                    f"reference image(s); got {n_refs}"
+                    + (f" — {note}" if note else "")),
+        )
+
+
 def _profile_with_overrides(profile: "Profile | None", engine: str,
                             overrides: dict[str, Any] | None) -> "Profile | None":
     """A copy of ``profile`` carrying per-request profile-field overrides.
@@ -1501,21 +1546,12 @@ async def images_generations(request: Request) -> Response:
         # callers that send both probably meant the singular as primary.
         raw_ref_payloads = [single_ref] + raw_ref_payloads
 
-    # Engine-specific arity guard. Adapters re-check too, but we want a
-    # clear 400 before we burn a queue slot or decode bytes.
-    if raw_ref_payloads:
-        try:
-            from . import engines as _engines
-            ref_max = int(
-                _engines.get(engine).capabilities().get("ref_images_max", 0))
-        except Exception:
-            ref_max = None
-        if ref_max is not None and len(raw_ref_payloads) > ref_max:
-            raise HTTPException(
-                status_code=400,
-                detail=(f"{engine} supports at most {ref_max} reference "
-                        f"image(s); got {len(raw_ref_payloads)}"),
-            )
+    # Arity guard. Adapters re-check too, but we want a clear 400 before we
+    # burn a queue slot or decode bytes — and it runs even with zero refs,
+    # because a profile that REQUIRES one (H3's opening frame, Krea 2's edit
+    # LoRAs) used to fail only at dispatch.
+    _check_ref_arity(cfg, engine, model_required, profile_required,
+                     len(raw_ref_payloads))
 
     keep_original_aspect = bool(body.get("keep_original_aspect", False))
     layout_bboxes_raw = body.get("layout_bboxes")
@@ -1726,8 +1762,20 @@ async def videos_generations(request: Request) -> Response:
     num_frames_override = _opt_int("num_frames")
     fps_override = _opt_int("fps")
 
-    # Optional single reference image → image-to-video.
+    # Reference images → image-to-video. ``image`` (singular) is the
+    # original contract; ``images`` mirrors the images route for the heads
+    # that take several (MiniMax-H3 REF2VA composes from up to nine, which
+    # the singular field made unreachable).
     raw_ref_payloads: list[str] = []
+    multi_refs = body.get("images")
+    if multi_refs is not None:
+        if (not isinstance(multi_refs, list)
+                or not all(isinstance(x, str) for x in multi_refs)):
+            raise HTTPException(
+                status_code=400,
+                detail="'images' must be a list of base64 strings or data URLs",
+            )
+        raw_ref_payloads = list(multi_refs)
     single_ref = body.get("image")
     if single_ref is not None:
         if not isinstance(single_ref, str):
@@ -1735,7 +1783,15 @@ async def videos_generations(request: Request) -> Response:
                 status_code=400,
                 detail="'image' must be a base64 string or data URL",
             )
-        raw_ref_payloads = [single_ref]
+        # Both sent: the singular first, same stability rule as the images
+        # route — callers sending both probably meant it as primary.
+        raw_ref_payloads = [single_ref] + raw_ref_payloads
+
+    # Same pre-queue arity guard as the images route: FL2VA takes exactly
+    # one opening frame, REF2VA 1..9, and neither should fail only at
+    # dispatch after a queue slot was burned.
+    _check_ref_arity(cfg, engine, model_required, profile_required,
+                     len(raw_ref_payloads))
 
     try:
         qr = await qm.enqueue(

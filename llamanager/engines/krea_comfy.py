@@ -569,6 +569,11 @@ def profile_capabilities(profile: Profile,
         return {
             "ref_images_max": 0,
             "ref_images_min": 0,
+            # The guided flow's chip for this kind of profile. "new" and not
+            # "edit" because stock Krea 2 has no image-conditioning path —
+            # the edit LoRA is what adds one.
+            "mode": "new",
+            "mode_label": "New image",
             "ref_note": ("this profile has no edit LoRA, so it generates "
                          "from the prompt alone"),
         }
@@ -576,6 +581,8 @@ def profile_capabilities(profile: Profile,
         "ref_images_max": recipe.refs_max,
         "ref_images_min": recipe.refs_min,
         "ref_images_required": recipe.refs_min > 0,
+        "mode": "edit",
+        "mode_label": "Edit an image",
         "ref_note": recipe.note or "",
     }
 

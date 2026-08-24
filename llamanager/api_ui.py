@@ -3162,7 +3162,14 @@ def _build_image_page_context(cfg, reg) -> dict[str, Any]:
 
     # Per-engine reference-image capabilities, so the composer can show the
     # right attach / strength / keep-aspect controls for the chosen model.
-    engines_caps = {eng: image_engines.capabilities(eng)
+    # The empty-profile answer, not the engine-wide one: the composer's
+    # blank "(use engine defaults)" option falls back to this map, and the
+    # engine-wide map is the MOST permissive answer — on Krea 2 it offered
+    # three reference slots on a selection that cannot read any. A future
+    # profile_capabilities implementer changes its blank option's behaviour
+    # here implicitly.
+    engines_caps = {eng: image_engines.profile_capabilities(
+                        eng, Profile(name=""), None)
                     for eng in engines_in_use}
 
     # Files backing dir-backed fields (LoRAs), per model — the composer turns
@@ -3240,7 +3247,14 @@ def _build_video_page_context(cfg, reg) -> dict[str, Any]:
         default_model = video_models[0]["model_id"] if video_models else ""
     default_profile = cfg.default_image_profile or ""
 
-    engines_caps = {eng: image_engines.capabilities(eng)
+    # The empty-profile answer, not the engine-wide one: the composer's
+    # blank "(use engine defaults)" option falls back to this map, and the
+    # engine-wide map is the MOST permissive answer — on Krea 2 it offered
+    # three reference slots on a selection that cannot read any. A future
+    # profile_capabilities implementer changes its blank option's behaviour
+    # here implicitly.
+    engines_caps = {eng: image_engines.profile_capabilities(
+                        eng, Profile(name=""), None)
                     for eng in engines_in_use}
 
     # Same LoRA picker data as the image page (MiniMax-H3's turbo distill

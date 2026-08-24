@@ -183,6 +183,20 @@ def _resolved_steps(profile: Profile, req: ImageRequest) -> int:
     return _DEFAULT_STEPS
 
 
+def _quant_to_unet(quant: str) -> str | None:
+    """Filename for a quant name, or None when the name is unknown.
+
+    Blank means this entry's default transformer.
+    """
+    quant = (quant or "").strip()
+    if not quant:
+        return UNET_FILE
+    for name, (filename, _gb) in QUANT_FILES.items():
+        if name.upper() == quant.upper():
+            return filename
+    return None
+
+
 def _unet_for(profile: Profile, req: ImageRequest) -> str:
     """Transformer file for the profile's quant.
 
@@ -191,15 +205,49 @@ def _unet_for(profile: Profile, req: ImageRequest) -> str:
     quant names stopped being plain uppercase — renders at a quality and VRAM
     cost the caller never asked for, and says nothing about it.
     """
-    quant = pick_model_type(req, profile).strip()
-    if not quant:
-        return UNET_FILE
-    for name, (filename, _gb) in QUANT_FILES.items():
-        if name.upper() == quant.upper():
-            return filename
-    raise RuntimeError(
-        f"unknown MiniMax-H3 transformer quant {quant!r} — pick one of "
-        + ", ".join(sorted(QUANT_FILES)))
+    unet = _quant_to_unet(pick_model_type(req, profile))
+    if unet is None:
+        raise RuntimeError(
+            f"unknown MiniMax-H3 transformer quant "
+            f"{pick_model_type(req, profile)!r} — pick one of "
+            + ", ".join(sorted(QUANT_FILES)))
+    return unet
+
+
+def profile_capabilities(profile: Profile,
+                         model_dir: Path | None = None) -> dict[str, Any]:
+    """Capabilities once the profile is known — the quant selects the head.
+
+    FL2VA animates exactly one opening frame; REF2VA composes from up to
+    nine references. The engine-wide map has to answer for both, so it
+    reported nine everywhere — which let the video composer offer nine
+    slots on a profile whose head takes one, failing only at dispatch.
+
+    An unknown quant answers as FL2VA rather than raising: capabilities
+    feed page rendering and must not 500 it. ``build_command`` still
+    refuses the quant by name when the request is actually made.
+    """
+    unet = _quant_to_unet(
+        getattr(profile, "image_model_type", "") or "") or UNET_FILE
+    if unet in REF2VA_UNETS:
+        return {
+            "ref_images_max": MAX_REF_IMAGES,
+            "ref_images_min": 1,
+            "ref_images_required": True,
+            "mode": "refs",
+            "mode_label": "From references",
+            "ref_note": (f"1–{MAX_REF_IMAGES} reference images the prompt "
+                         "addresses as <Picture 1>…"
+                         f"<Picture {MAX_REF_IMAGES}>"),
+        }
+    return {
+        "ref_images_max": 1,
+        "ref_images_min": 1,
+        "ref_images_required": True,
+        "mode": "animate",
+        "mode_label": "Animate a photo",
+        "ref_note": "exactly one image — the clip's opening frame",
+    }
 
 
 def _audio_on(profile: Profile) -> bool:

@@ -1894,12 +1894,13 @@ def test_each_edit_lora_reports_its_own_slot_count(lora, expected):
 
 
 def test_engines_without_the_hook_keep_their_engine_capabilities():
+    """hidream has no profile_capabilities (H3 grew one for the guided
+    flow), so its per-profile answer must equal its engine answer."""
     from llamanager import engines
     from llamanager.config import Profile
 
-    plain = engines.capabilities("minimax_h3_comfy")
-    with_profile = engines.profile_capabilities(
-        "minimax_h3_comfy", Profile(name="p"))
+    plain = engines.capabilities("hidream")
+    with_profile = engines.profile_capabilities("hidream", Profile(name="p"))
     assert with_profile["ref_images_max"] == plain["ref_images_max"]
 
 
@@ -1959,3 +1960,64 @@ def test_the_mmproj_patch_renames_the_fused_qkv():
     text = patch.read_text()
     assert '"attn_qkv.": "attn.qkv.",' in text
     assert '"attn_out.": "attn.proj.",' in text, "the split-path rename too"
+
+
+# ----------------------------------------------- guided-flow capabilities
+
+
+def test_h3_profiles_report_the_head_their_quant_selects():
+    """The engine-wide map answers nine slots for both heads, which let the
+    video composer offer nine on a profile whose head takes exactly one."""
+    from llamanager import engines
+    from llamanager.config import Profile
+
+    for quant in ("", "Q4_K_M", "Q4_K_M-Turbo"):
+        caps = engines.profile_capabilities(
+            "minimax_h3_comfy", Profile(name="p", image_model_type=quant))
+        assert (caps["ref_images_min"], caps["ref_images_max"]) == (1, 1)
+        assert caps["mode"] == "animate"
+        assert "opening frame" in caps["ref_note"]
+
+    caps = engines.profile_capabilities(
+        "minimax_h3_comfy",
+        Profile(name="p", image_model_type="Q4_K_M-Ref-Turbo"))
+    assert (caps["ref_images_min"], caps["ref_images_max"]) == (1, 9)
+    assert caps["mode"] == "refs"
+
+
+def test_h3_capabilities_do_not_raise_on_an_unknown_quant():
+    """Capabilities feed page rendering and must not 500 it; build_command
+    still refuses the quant by name when the request is actually made."""
+    from llamanager import engines
+    from llamanager.config import Profile
+
+    caps = engines.profile_capabilities(
+        "minimax_h3_comfy", Profile(name="p", image_model_type="Q9_K"))
+    assert caps["mode"] == "animate"
+
+
+def test_krea_profiles_carry_their_flow_mode():
+    from llamanager import engines
+    from llamanager.config import Profile
+
+    plain = engines.profile_capabilities("krea_comfy", Profile(name="p"))
+    assert (plain["mode"], plain["mode_label"]) == ("new", "New image")
+    edit = engines.profile_capabilities(
+        "krea_comfy",
+        Profile(name="e",
+                image_lora_weights="krea2_identity_edit_v1_2.safetensors"))
+    assert (edit["mode"], edit["mode_label"]) == ("edit", "Edit an image")
+
+
+def test_the_blank_profile_answer_is_the_empty_profile_not_the_engine():
+    """The composer's "(use engine defaults)" option falls back to the
+    engine map, and the engine map is the MOST permissive answer — on Krea 2
+    it offered three reference slots on a selection that cannot read any."""
+    from llamanager import engines
+    from llamanager.config import Profile
+
+    assert engines.profile_capabilities(
+        "krea_comfy", Profile(name=""))["ref_images_max"] == 0
+    h3 = engines.profile_capabilities(
+        "minimax_h3_comfy", Profile(name=""))
+    assert (h3["ref_images_min"], h3["ref_images_max"]) == (1, 1)

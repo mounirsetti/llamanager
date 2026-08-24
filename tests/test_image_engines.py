@@ -959,3 +959,81 @@ def test_a_schema_key_profile_cannot_carry_is_named_not_a_500():
         engines.get = real
     assert ei.value.status_code == 400
     assert "image_not_a_real_field" in str(ei.value.detail)
+
+
+# ------------------------------------------------ profile-aware arity guard
+
+
+def _arity(engine="krea_comfy", model=None, profile=None, n=0):
+    from llamanager.api_v1 import _check_ref_arity
+    from llamanager.config import Config, Profile
+
+    class _Cfg(Config):
+        def __init__(self, prof):
+            super().__init__()
+            self._prof = prof
+
+        def get_profile(self, model_id, name):
+            return self._prof
+
+    return _check_ref_arity(_Cfg(profile), engine, model, "p" if profile else None, n)
+
+
+def test_arity_guard_enforces_the_profiles_maximum():
+    import pytest
+    from fastapi import HTTPException
+    from llamanager.config import Profile
+
+    prof = Profile(name="p",
+                   image_lora_weights="krea2_identity_edit_v1_2.safetensors")
+    with pytest.raises(HTTPException) as ei:
+        _arity(model="Krea-2-Turbo-Comfy", profile=prof, n=3)
+    assert ei.value.status_code == 400
+    assert "at most 2" in str(ei.value.detail)
+
+
+def test_arity_guard_enforces_the_minimum_even_with_zero_refs():
+    """An image-to-video profile with no reference used to burn a queue slot
+    and fail at dispatch."""
+    import pytest
+    from fastapi import HTTPException
+    from llamanager.config import Profile
+
+    prof = Profile(name="p", image_model_type="Q4_K_M-Turbo")
+    with pytest.raises(HTTPException) as ei:
+        _arity(engine="minimax_h3_comfy", model="MiniMax-H3-Comfy",
+               profile=prof, n=0)
+    assert ei.value.status_code == 400
+    assert "opening frame" in str(ei.value.detail)
+
+
+def test_arity_guard_refuses_a_ref_on_a_profile_that_cannot_read_one():
+    import pytest
+    from fastapi import HTTPException
+    from llamanager.config import Profile
+
+    with pytest.raises(HTTPException) as ei:
+        _arity(model="Krea-2-Turbo-Comfy", profile=Profile(name="p"), n=1)
+    assert "at most 0" in str(ei.value.detail)
+
+
+def test_arity_guard_accepts_what_the_profile_accepts():
+    from llamanager.config import Profile
+
+    prof = Profile(name="p", image_model_type="Q4_K_M-Ref-Turbo")
+    for n in (1, 5, 9):
+        assert _arity(engine="minimax_h3_comfy", model="MiniMax-H3-Comfy",
+                      profile=prof, n=n) is None
+
+
+def test_the_videos_route_accepts_a_list_of_images():
+    """REF2VA composes from up to nine references, which the singular
+    ``image`` field made unreachable."""
+    import inspect
+    from llamanager import api_v1
+
+    src = inspect.getsource(api_v1.videos_generations)
+    assert 'body.get("images")' in src
+    assert "_check_ref_arity" in src
+    # And the images route uses the same guard.
+    assert "_check_ref_arity" in inspect.getsource(api_v1.images_generations)

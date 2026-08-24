@@ -440,6 +440,7 @@
         {% include "_video_composer.html" %}
           {% with warm_controls = True %}{% include "_composer_warm.html" %}{% endwith %}
           {% include "_composer_advanced.html" %}
+          {% include "_composer_flow.html" %}
       </div>
 
       {# Prompt history popover #}
@@ -1221,6 +1222,9 @@
     // First-frame image → image-to-video (single reference).
     if (state.refs.length) {
       body.image = state.refs[0].dataUrl;
+      // REF2VA composes from up to nine references; the singular
+      // field alone made every slot past the first unreachable.
+      if (state.refs.length > 1) body.images = state.refs.map(r => r.dataUrl);
     }
     return body;
   }

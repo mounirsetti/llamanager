@@ -481,3 +481,52 @@ def test_the_feed_holds_still_while_a_popover_is_open():
     assert 'getElementById("gen-settings")' in css
     assert 'getElementById("gen-history")' in css
     assert 'classList.toggle("lm-pop-open"' in css
+
+
+# ------------------------------------------------------- the guided flow
+
+
+@pytest.mark.parametrize("page", ["images.html", "videos.html",
+                                  "images_public.html", "videos_public.html"])
+def test_every_generation_page_carries_the_flow_partial_once(page):
+    html = _partial(page)
+    assert html.count('{% include "_composer_flow.html" %}') == 1, page
+
+
+def test_the_flow_blocks_generation_before_the_server_would():
+    """H3 with no opening frame used to travel to the server and fail there;
+    the Ctrl/Cmd+Enter path bypasses submit entirely, so both are guarded."""
+    js = _partial("_composer_flow.html")
+    assert '"submit"' in js and "blockIfUnmet" in js
+    assert "metaKey || e.ctrlKey" in js
+    assert "stopImmediatePropagation" in js
+
+
+def test_the_flow_derives_modes_from_caps_not_heuristics():
+    js = _partial("_composer_flow.html")
+    assert "caps.mode" in js and "mode_label" in js
+    # And options are filtered, never rebuilt (Safari ignores hidden alone).
+    assert "opt.hidden = outside" in js
+    assert "opt.disabled = outside" in js
+
+
+@pytest.mark.parametrize("page", ["videos.html", "videos_public.html"])
+def test_the_video_pages_send_every_reference(page):
+    """REF2VA advertises nine slots; sending only state.refs[0] made every
+    slot past the first a silent no-op."""
+    html = _partial(page)
+    assert "body.images = state.refs.map(r => r.dataUrl)" in html, page
+
+
+def test_engines_caps_is_the_empty_profile_answer(app):
+    """The blank "(use engine defaults)" option falls back to this map, and
+    the engine-wide answer offered Krea reference slots that do nothing."""
+    import json
+    import re
+    _install_h3(app)
+    html = _admin(app).get("/ui/videos").text
+    m = re.search(r"enginesCaps:\s*(\{.*?\}),\n", html, re.S)
+    assert m, "enginesCaps missing from the page config"
+    caps = json.loads(m.group(1))
+    h3 = caps.get("minimax_h3_comfy")
+    assert h3 and h3["ref_images_max"] == 1, h3
