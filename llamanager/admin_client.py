@@ -285,9 +285,22 @@ class AdminClient:
         return self._get("/admin/models")
 
     def models_pull(self, source: str,
-                    files: list[str] | None = None) -> dict[str, Any]:
-        return self._post("/admin/models/pull",
-                          {"source": source, "files": files})
+                    files: list[str] | None = None,
+                    target_dir: str | None = None,
+                    family: str | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {"source": source, "files": files}
+        if target_dir is not None:
+            body["target_dir"] = target_dir
+        if family is not None:
+            body["family"] = family
+        return self._post("/admin/models/pull", body)
+
+    def diffusion_files(self, model_id: str,
+                        subdir: str = "") -> dict[str, Any]:
+        q = f"/admin/diffusion/files?model={quote(model_id)}"
+        if subdir:
+            q += f"&subdir={quote(subdir)}"
+        return self._get(q)
 
     def model_delete(self, model_id: str, *,
                      force: bool = False) -> dict[str, Any]:

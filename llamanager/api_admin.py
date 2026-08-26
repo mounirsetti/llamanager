@@ -313,6 +313,13 @@ class PullBody(BaseModel):
     # pull), 'image' or 'video'. Anything else is coerced to 'text' by the
     # registry.
     family: str = "text"
+    # Where the files land, relative to the models dir. This is how a
+    # ComfyUI-format model is assembled — transformer, encoder, VAEs and
+    # LoRAs come from different uploaders but must share one directory —
+    # and it was only reachable through the UI form, so the CLI could not
+    # drop a LoRA into <model>/loras/ at all. The registry validates the
+    # path (traversal is refused there).
+    target_dir: str | None = None
 
 
 @router.get("/models")
@@ -340,9 +347,18 @@ async def models_list(request: Request, _: Origin = Depends(admin_origin)) -> JS
 async def models_pull(request: Request, body: PullBody,
                       _: Origin = Depends(admin_origin)) -> JSONResponse:
     reg: Registry = request.app.state.registry
+    # Accept the same source spellings as the UI form: a full URL, hf://org/
+    # name, or a bare org/name. The registry itself only takes hf:// (and
+    # URLs), so a bare name passed through raw failed with "unsupported
+    # source" — while the CLI's help has always promised both forms.
+    source = body.source.strip()
+    if not source.startswith(("http://", "https://", "hf://")):
+        source = "hf://" + source.removeprefix("hf:")
     try:
-        did = reg.start_pull(source=body.source, files=body.files,
-                             family=body.family)
+        did = reg.start_pull(source=source, files=body.files,
+                             family=body.family,
+                             target_dir=(body.target_dir or "").strip()
+                                        .strip("/") or None)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     return JSONResponse({"download_id": did}, status_code=202)
@@ -1781,6 +1797,42 @@ async def setup_coexistence_admin(request: Request,
         "allow_concurrent": cfg.allow_concurrent,
         "comfy_keep_warm_s": int(getattr(cfg, "comfy_keep_warm_s", 0) or 0),
     })
+
+
+@router.get("/diffusion/files")
+async def diffusion_files(request: Request, model: str = "",
+                          subdir: str = "",
+                          _: Origin = Depends(admin_origin)) -> JSONResponse:
+    """The component files of one diffusion model, per subdirectory.
+
+    This is the listing the UI's model page renders as HTML and nothing
+    served as data: the only way to see which LoRAs were installed from a
+    terminal was to scrape that page. Weights only — sidecar .json/.txt
+    files are noise here.
+    """
+    cfg = request.app.state.cfg
+    mid = (model or "").strip()
+    if not mid:
+        raise HTTPException(status_code=400, detail="model is required")
+    root = (cfg.models_dir / mid).resolve()
+    try:
+        root.relative_to(cfg.models_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="model escapes models dir")
+    if not root.is_dir():
+        raise HTTPException(status_code=404, detail=f"no model dir {mid!r}")
+    weight_suffixes = (".safetensors", ".gguf", ".pt", ".ckpt", ".sft")
+    out: dict[str, list[dict[str, Any]]] = {}
+    wanted = (subdir or "").strip().strip("/")
+    for d in sorted(p for p in root.iterdir() if p.is_dir()):
+        if wanted and d.name != wanted:
+            continue
+        files = [{"name": f.name, "bytes": f.stat().st_size}
+                 for f in sorted(d.iterdir())
+                 if f.is_file() and f.suffix in weight_suffixes]
+        if files:
+            out[d.name] = files
+    return JSONResponse({"model": mid, "dirs": out})
 
 
 class PrewarmBody(BaseModel):

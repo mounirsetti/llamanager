@@ -263,3 +263,97 @@ def test_the_cli_exposes_the_warm_group():
     for needle in ('add_parser("warm"', '"prewarm"', '"release"',
                    "--comfy-keep-warm-s"):
         assert needle in src, needle
+
+
+# ------------------------------------------------- diffusion files + pulls
+
+
+def _bearer(app):
+    from fastapi.testclient import TestClient
+    am = app.state.auth
+    key = am.rotate_key(am.get_origin_by_name("bootstrap").id)
+    return TestClient(app), {"Authorization": f"Bearer {key}"}
+
+
+def test_diffusion_files_lists_weights_per_subdir(app, tmp_path):
+    """The UI's model page rendered this as HTML and nothing served it as
+    data — listing installed LoRAs from a terminal meant scraping."""
+    client, h = _bearer(app)
+    root = app.state.cfg.models_dir / "Krea-2-Turbo-Comfy"
+    (root / "loras").mkdir(parents=True)
+    (root / "diffusion_models").mkdir()
+    (root / "loras" / "a_lora.safetensors").write_bytes(b"x" * 10)
+    (root / "loras" / "notes.txt").write_text("not a weight")
+    (root / "diffusion_models" / "t.gguf").write_bytes(b"x" * 20)
+
+    r = client.get("/admin/diffusion/files",
+                   params={"model": "Krea-2-Turbo-Comfy"}, headers=h)
+    assert r.status_code == 200
+    dirs = r.json()["dirs"]
+    assert [f["name"] for f in dirs["loras"]] == ["a_lora.safetensors"]
+    assert dirs["loras"][0]["bytes"] == 10
+    assert "notes.txt" not in str(dirs), "sidecars are noise"
+
+    r = client.get("/admin/diffusion/files",
+                   params={"model": "Krea-2-Turbo-Comfy", "subdir": "loras"},
+                   headers=h)
+    assert list(r.json()["dirs"]) == ["loras"]
+
+
+def test_diffusion_files_refuses_traversal_and_unknown_models(app):
+    client, h = _bearer(app)
+    r = client.get("/admin/diffusion/files",
+                   params={"model": "../etc"}, headers=h)
+    assert r.status_code == 400
+    r = client.get("/admin/diffusion/files",
+                   params={"model": "no-such-model"}, headers=h)
+    assert r.status_code == 404
+
+
+def test_models_pull_forwards_target_dir_and_family(app, monkeypatch):
+    """The registry always supported target_dir; only the admin endpoint
+    dropped it, which made <model>/loras/ unreachable except by the UI."""
+    client, h = _bearer(app)
+    seen = {}
+
+    def fake_start_pull(**kw):
+        seen.update(kw)
+        return "dl_test"
+
+    monkeypatch.setattr(app.state.registry, "start_pull", fake_start_pull)
+    r = client.post("/admin/models/pull", headers=h,
+                    json={"source": "hf://org/repo",
+                          "files": ["l.safetensors"],
+                          "target_dir": "Krea-2-Turbo-Comfy/loras/",
+                          "family": "image"})
+    assert r.status_code == 202
+    assert seen["target_dir"] == "Krea-2-Turbo-Comfy/loras"
+    assert seen["family"] == "image"
+
+
+def test_the_cli_exposes_files_and_the_pull_flags():
+    import inspect
+    import llamanager.cli as cli
+    src = inspect.getsource(cli)
+    for needle in ('add_parser("files"', "--target-dir", '"--subdir"',
+                   "cmd_diffusion_files"):
+        assert needle in src, needle
+
+
+def test_models_pull_accepts_a_bare_repo_name(app, monkeypatch):
+    """The CLI's help has always promised `hf://org/repo or org/repo`, but a
+    bare name reached the registry raw and failed with "unsupported
+    source" — found by actually running the documented form."""
+    client, h = _bearer(app)
+    seen = {}
+
+    def fake_start_pull(**kw):
+        seen.update(kw)
+        return "dl_test"
+
+    monkeypatch.setattr(app.state.registry, "start_pull", fake_start_pull)
+    r = client.post("/admin/models/pull", headers=h,
+                    json={"source": "gokaygokay/Krea-2-Realism-LoRA",
+                          "files": ["l.safetensors"]})
+    assert r.status_code == 202
+    assert seen["source"] == "hf://gokaygokay/Krea-2-Realism-LoRA"

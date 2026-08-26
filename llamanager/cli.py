@@ -818,7 +818,9 @@ def cmd_models_list(args):
 
 def cmd_models_pull(args):
     c = _make_admin_client(args)
-    return _run_admin(lambda: c.models_pull(args.source, args.file))
+    return _run_admin(lambda: c.models_pull(
+        args.source, args.file,
+        target_dir=args.target_dir, family=args.family))
 
 
 def cmd_models_delete(args):
@@ -1603,6 +1605,12 @@ def cmd_setup_coexistence(args):
     ))
 
 
+def cmd_diffusion_files(args):
+    c = _make_admin_client(args)
+    return _run_admin(lambda: c.diffusion_files(args.model_id,
+                                                subdir=args.subdir))
+
+
 def cmd_comfy_warm_status(args):
     c = _make_admin_client(args)
     return _run_admin(lambda: c.comfy_warm_status(args.model_id))
@@ -1839,11 +1847,18 @@ def main(argv: list[str] | None = None) -> int:
                          "audio models, attachments (mmproj, MTP drafters) "
                          "and split-GGUF shards")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_models_list)
-    sp = msp.add_parser("pull", help="start a HuggingFace GGUF download")
+    sp = msp.add_parser("pull", help="start a HuggingFace download")
     sp.add_argument("source",
                     help="hf://<user>/<repo> or <user>/<repo>")
     sp.add_argument("--file", action="append", default=None,
                     help="specific file inside the repo (may be repeated)")
+    sp.add_argument("--target-dir", default=None, metavar="DIR",
+                    help="where the files land, relative to the models dir "
+                         "— how ComfyUI models are assembled from several "
+                         "repos (e.g. Krea-2-Turbo-Comfy/loras)")
+    sp.add_argument("--family", default=None,
+                    choices=["text", "image", "video"],
+                    help="which downloads list owns the row (default text)")
     _add_admin_flags(sp); sp.set_defaults(func=cmd_models_pull)
     sp = msp.add_parser("delete", help="delete a model from disk")
     sp.add_argument("model_id", help="<repo>/<file>.gguf")
@@ -1997,6 +2012,14 @@ def main(argv: list[str] | None = None) -> int:
     _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_activate)
 
     # diffusion profiles (nested under diffusion to keep verbs short)
+    sp = dfp.add_parser("files",
+                        help="list a model's component files (LoRAs, "
+                             "transformers, encoders, VAEs) with sizes")
+    sp.add_argument("model_id")
+    sp.add_argument("--subdir", default="",
+                    help="only this subdirectory (e.g. loras)")
+    _add_admin_flags(sp); sp.set_defaults(func=cmd_diffusion_files)
+
     wp = dfp.add_parser("warm",
                         help="warm ComfyUI servers: status, prewarm, release"
                         ).add_subparsers(dest="warm_cmd", required=True)
