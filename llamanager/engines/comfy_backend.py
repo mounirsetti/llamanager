@@ -240,15 +240,23 @@ def read_live_server(model_dir: Path) -> dict[str, Any] | None:
 
 
 def write_server_state(model_dir: Path, pid: int, port: int,
-                       output_dir: Path, input_dir: Path) -> Path:
+                       output_dir: Path, input_dir: Path,
+                       log_file: Path | None = None) -> Path:
     """Record a warm server. The directories matter as much as the port: a
     reusing run must collect results from, and upload images to, the ones the
-    server was actually started with."""
+    server was actually started with.
+
+    ``log_file`` is the log the server PROCESS writes — a reusing run must
+    read that one, not its own empty work-dir log, or the LoRA-binding check
+    has nothing to look at and a zero-binding LoRA sails through as
+    "could not verify" on every warm request.
+    """
     state = server_state_path(model_dir)
     state.write_text(json.dumps({
         "pid": pid, "port": port,
         "model_dir": str(model_dir.resolve()),
         "output_dir": str(output_dir), "input_dir": str(input_dir),
+        "log_file": str(log_file) if log_file else None,
         "started": time.time(),
     }))
     heartbeat_path(state).write_text(str(time.time()))

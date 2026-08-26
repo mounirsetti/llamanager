@@ -2389,7 +2389,11 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--unload-text-on-arrival", choices=["on", "off"],
                     default=None, dest="unload_text_on_arrival")
     sp.add_argument("--restart-text-after-image", choices=["on", "off"],
-                    default=None, dest="restart_text_after_image")
+                    default=None, dest="restart_text_after_image",
+                    help="off = stay in image mode after a generation: the "
+                         "warm ComfyUI server survives between images and "
+                         "the LLM loads on the next text request instead "
+                         "of after every image")
     sp.add_argument("--allow-concurrent", choices=["on", "off"],
                     default=None, dest="allow_concurrent")
     sp.add_argument("--comfy-keep-warm-s", type=int, default=None,

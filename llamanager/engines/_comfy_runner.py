@@ -611,11 +611,17 @@ def main() -> int:
             # them rather than the ones prepared above.
             out_dir = Path(warm["output_dir"])
             in_dir = Path(warm["input_dir"])
+            # The ORIGINAL process's log, not a fresh work-dir one: the
+            # warm server keeps appending there, and the LoRA-binding check
+            # reads what this request appended to it.
+            warm_log = warm.get("log_file")
             server = ComfyServer(
                 python=Path(sys.executable), repo=args.comfy_repo,
                 port=int(warm["port"]), output_dir=out_dir, input_dir=in_dir,
                 temp_dir=tmp_dir, extra_paths=paths_yaml,
-                log_file=work / "comfyui.log", extra_args=args.comfy_arg)
+                log_file=(Path(warm_log) if warm_log
+                          else work / "comfyui.log"),
+                extra_args=args.comfy_arg)
             server.adopted = True
             log(f"reusing warm server pid={warm['pid']} port={warm['port']}")
         else:
@@ -629,7 +635,8 @@ def main() -> int:
             if args.keep_warm:
                 server.adopted = True   # leave it running for the next request
                 cb.write_server_state(args.model_path, server.proc.pid,
-                                      server.port, out_dir, in_dir)
+                                      server.port, out_dir, in_dir,
+                                      log_file=server.log_file)
                 st = cb.server_state_path(args.model_path)
                 _spawn_reaper(st, cb.heartbeat_path(st), server.proc.pid,
                               args.keep_warm)

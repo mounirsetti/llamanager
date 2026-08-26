@@ -1806,17 +1806,20 @@ def test_stopping_warm_servers_clears_dead_records(tmp_path, monkeypatch):
     assert not cb.heartbeat_path(state).exists()
 
 
-def test_the_text_engine_restart_stops_warm_servers_first(tmp_path):
-    """Two resident models do not fit on a 32 GB card: keep-warm must not
-    cost the operator an LLM that will not start."""
+def test_every_text_engine_start_stops_warm_servers_first(tmp_path):
+    """Two resident models do not fit on a 32 GB card. The stop lives in
+    start() itself — the restart after an image, a LATER text request when
+    restart_text_after_image is off, and a manual Load all pass through it.
+    The restore branch used to carry its own copy, which missed the
+    restart-off case entirely."""
     import inspect
     from llamanager import server_manager
 
-    src = inspect.getsource(server_manager.ServerManager.yield_to_image)
+    src = inspect.getsource(server_manager.ServerManager.start)
     stop = src.find("stop_warm_servers")
-    start = src.find("await self.start(saved_spec)", src.find("finally:"))
+    spawn = src.find("cmdline")
     assert stop != -1, "warm servers are never stopped"
-    assert stop < start, "warm server must yield before the LLM starts"
+    assert spawn == -1 or stop < spawn, "must yield before the spawn"
 
 
 # ------------------------------------------------------- the soundtrack
@@ -2061,3 +2064,24 @@ def test_the_blank_profile_answer_is_the_empty_profile_not_the_engine():
     h3 = engines.profile_capabilities(
         "minimax_h3_comfy", Profile(name=""))
     assert (h3["ref_images_min"], h3["ref_images_max"]) == (1, 1)
+
+
+def test_warm_state_carries_the_servers_log_path(tmp_path, monkeypatch):
+    """A reusing run must read the log the warm server PROCESS writes, not
+    its own empty work-dir log — otherwise the LoRA-binding check has
+    nothing to look at, and a zero-binding LoRA sails through as "could not
+    verify" on every warm request. That is exactly how a PEFT-keyed LoRA
+    produced "prompt-craft only" images for a morning."""
+    import json
+    import os
+    from llamanager.engines import comfy_backend as cb
+
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    model_dir = tmp_path / "m"
+    model_dir.mkdir()
+    log = tmp_path / "server.log"
+    log.write_text("x")
+    cb.write_server_state(model_dir, os.getpid(), 1234,
+                          tmp_path, tmp_path, log_file=log)
+    state = json.loads(cb.server_state_path(model_dir).read_text())
+    assert state["log_file"] == str(log)

@@ -293,8 +293,12 @@ CATALOG: list[CatalogEntry] = [
              "does not extract skeletons — supply one."),
             ("gokaygokay/Krea-2-Realism-LoRA",
              "krea2_realism_lora.safetensors", "loras", 0.47,
-             "Photorealism style LoRA for plain text-to-image. No reference "
-             "image, no extra nodes."),
+             "Photorealism style LoRA for plain text-to-image. CAUTION: the "
+             "upstream file ships PEFT-style keys (base_model.model.*) that "
+             "ComfyUI cannot map — as downloaded it binds zero keys and the "
+             "request fails. Rewrite the prefix to diffusion_model.* once "
+             "after download (safetensors load/save, one line) or use "
+             "Krea2-realism-V2 below, which binds as shipped."),
             ("RudySen/Krea2-realism-V2", "Krea2-realism-V2.safetensors",
              "loras", 1.56,
              "A second photorealism LoRA (MIT), heavier than the one above "

@@ -212,7 +212,13 @@
         <span>
           <strong>Restart text engine after image completes</strong>
           <span style="display: block; color: var(--fg-2); font-size: 0.8125rem;">
-            Re-launches the text engine from its prior spec. Disable to stay in image-only mode after a generation.
+            Re-launches the text engine from its prior spec. <strong>Off</strong>
+            keeps the box in image mode after a generation: with a keep-warm
+            window set, the ComfyUI server stays loaded between images (fast
+            next image), and the LLM only loads again when a text request
+            actually arrives (slower next chat). On restarts the LLM after
+            every image — between two images in a batch it stops and reloads
+            the LLM each time, and the warm server with it.
           </span>
         </span>
       </label>
