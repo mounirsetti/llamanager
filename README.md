@@ -583,7 +583,7 @@ the UI toggle, which orchestrate the transition correctly.
 
 ## Diffusion models
 
-Two pages cover setup and inventory for both the image and video lanes. The **Diffusion engines** page (`/ui/setup-diffusion`) is the one-stop shop for setup: per-engine setup cards, dependency installer, model downloader with progress, and the coexistence policy at the bottom. The **Diffusion models** page (`/ui/diffusion-models`) is where you manage what's actually installed: a catalog of known-good models joined against what's on disk, an Activate button to pick the dashboard/API default, and the per-image-model profile editor (CRUD + clone + materialize built-in defaults). The catalog rows for not-yet-installed entries link back to the engines page with the canonical HF repo pre-suggested.
+One page covers setup and inventory for both the image and video lanes: **Diffusion** (`/ui/diffusion`; the old `/ui/setup-diffusion` and `/ui/diffusion-models` URLs redirect there). Engine tiles open a modal with the dependency installer and setup fields; model tiles open a modal with downloads (including per-component downloads for ComfyUI-format models), an Activate button to pick the dashboard/API default, and the per-model profile editor (CRUD + clone + materialize built-in defaults — the modal also lists built-ins shipped after a model was registered, with one click to add them). The coexistence policy, including the ComfyUI keep-warm window, lives at the bottom of the page.
 
 Both pages also have CLI counterparts under `llamanager diffusion` — see [CLI](#cli).
 
@@ -599,11 +599,19 @@ Five image engines are wired today. Video models live on their own page — see 
 
 Z-Image's adapter also handles fine-tunes that ship the same Diffusers layout, including [SeeSee21/Z-Anime](https://huggingface.co/SeeSee21/Z-Anime). Z-Anime's full repo is 203 GB, so the download form lets you specify a `diffusers/` subfolder and pull only the runnable variant (~12-20 GB).
 
-Krea 2 Turbo runs only through ComfyUI. The 26 GB bf16 checkpoint has a diffusers pipeline, but on a 32 GB card it cannot reach 1024x1024 — Krea's masked attention falls back to the math SDPA backend on ROCm, so activations grow with tokens² — and its Qwen3-VL-4B conditioner takes ~12 minutes to reach the GPU from safetensors. The GGUF route loads the same conditioner in about a second and renders 1024x1024 at 8 steps in ~30 s, so that is the route llamanager ships. Guidance-distilled: 8 steps, cfg 1.0, no negative prompt. Style LoRAs are listed live from Krea's Hugging Face collection on the engines page and download into the model's own `loras/` folder.
+Krea 2 Turbo runs only through ComfyUI. The 26 GB bf16 checkpoint has a diffusers pipeline, but on a 32 GB card it cannot reach 1024x1024 — Krea's masked attention falls back to the math SDPA backend on ROCm, so activations grow with tokens² — and its Qwen3-VL-4B conditioner takes ~12 minutes to reach the GPU from safetensors. The GGUF route loads the same conditioner in about a second and renders 1024x1024 at 8 steps in ~30 s, so that is the route llamanager ships. Guidance-distilled: 8 steps, cfg 1.0, no negative prompt. Style LoRAs are listed live from Krea's Hugging Face collection on the Diffusion page and download into the model's own `loras/` folder.
+
+Krea 2 takes reference images three ways, and the profile decides which:
+
+- **img2img** (any plain profile): one optional reference is the *starting point* — VAE-encoded, partially re-noised, denoised from there. `strength` is the dial (0.0 returns the reference, 1.0 ignores it) and is required with a reference, not defaulted. Style LoRAs ride along.
+- **Instruction editing** (`kreac-edit`): 1–2 references through the community identity-edit LoRA — "make her wear a red coat" keeps the face and scene. Needs the edit LoRA downloaded; the profile ships with the model card's downloads.
+- **Style / pose transfer** (`kreac-style-ref`, `kreac-pose`): up to 3 references supply the look (or an OpenPose skeleton), the prompt the content.
+
+A LoRA that is applied on every request costs real time — patching onto quantised weights is paid once per ComfyUI server, measured at ~450 s for a 1.5 GB LoRA on Q6_K. Two remedies ship: the **keep-warm window** (below) amortises it across a batch, and `llamanager/engines/_lora_bake.py` merges a LoRA into the weights offline (~70 s) and writes a Q8_0 GGUF that generates at no-LoRA speed; point a profile's *Transformer file* field (`image_unet_file`) at the result.
 
 ### Install dependencies
 
-Each engine card on the Diffusion engines page has an `Install dependencies` button when an auto-install plan exists. Clicking it creates a fresh Python venv under `~/.llamanager/venvs/<engine>/`, runs `pip install` for the engine's package set, and writes the resulting interpreter path back to your config so the engine is ready to use immediately.
+Each engine tile on the Diffusion page opens a modal with an `Install dependencies` button when an auto-install plan exists. Clicking it creates a fresh Python venv under `~/.llamanager/venvs/<engine>/`, runs `pip install` for the engine's package set, and writes the resulting interpreter path back to your config so the engine is ready to use immediately.
 
 | engine | what gets installed | rough size |
 |--------|---------------------|------------|
@@ -696,25 +704,32 @@ Omit `model` to use the saved default diffusion model from the top bar. Streamin
 | FLUX 2 / sd.cpp  | 2+ | Rejected with 400. sd-cli's init-image path is single-slot. |
 | Z-Image          | exactly 1 | img2img. `strength` sets how much of the init image survives. |
 | Ideogram 4       | any | Currently ignored — text-to-image only. |
-| Krea 2 Turbo     | any | Currently ignored. ComfyUI runs the text-to-image graph. |
+| Krea 2 Turbo     | 0–1 (plain profile) | img2img: the reference is the starting latent; `strength` is required with a reference. |
+| Krea 2 Turbo     | 1–3 (edit profile) | The profile's edit LoRA decides: identity editing (1–2), style transfer (1–3), pose (exactly 1, an OpenPose skeleton). |
 
 Video models take references on `/v1/videos/generations` in the same shape:
 
 | engine | refs | what it does |
 |---|---|---|
 | Wan 2.2 | 0 or 1 | With no image, text→video. With one, it becomes the first frame. |
-| MiniMax-H3 (ComfyUI) | exactly 1 | The opening frame. **Required** — the model is image-to-video, and a request without one is rejected before the GPU is touched. |
+| MiniMax-H3 (ComfyUI), FL2VA profiles | exactly 1 | The opening frame. **Required** — a request without one is rejected before the GPU is touched. |
+| MiniMax-H3 (ComfyUI), `h3-ref2va-4step` | 1–9 | The REF2VA head composes from references the prompt addresses as `<Picture 1>`…`<Picture 9>` — subjects and scenes carried into the clip, rather than an opening frame. |
 | MiniMax-H3 (diffusers) | 1–2 | First and optional last keyframe. |
+
+The reference-count limits are enforced **per profile**, before a queue slot is
+taken: the request 400s with the profile's own note (e.g. "exactly one image —
+the clip's opening frame") instead of failing at dispatch.
 
 Request fields (alongside the usual `prompt`, `model`, `size`, `n`, `seed`, `profile`, `response_format`, `stream`):
 
 | field | type | meaning |
 |---|---|---|
 | `image` | base64 string or `data:image/...;base64,...` URL | Single reference image. Shorthand for `images: [image]`. |
-| `images` | array of base64 strings / data URLs | Up to 8 reference images (HiDream); exactly 1 (Flux2). |
+| `images` | array of base64 strings / data URLs | Up to 8 reference images (HiDream), 3 (Krea 2 edit LoRAs), 9 (`/v1/videos/generations`, MiniMax-H3 REF2VA); exactly 1 (Flux2, img2img). |
 | `keep_original_aspect` | bool | HiDream only. With exactly one ref, resize it to max 2048 on the long side and use those dimensions for the output. |
 | `layout_bboxes` | string (JSON) | HiDream only. Forwarded to `--layout_bboxes`, e.g. `"[[0.1,0.4,0.2,0.6]]"` (relative `x1,x2,y1,y2` per box). |
-| `strength` | float in `[0, 1]` | Flux2 only. sd-cli img2img denoise strength. Default `0.75`. |
+| `strength` | float in `[0, 1]` | img2img denoise strength (Flux2, Z-Image, Krea 2). `0.0` keeps the init exactly, `1.0` regenerates fully. Flux2 defaults to `0.75`; Krea 2 requires it whenever a reference is sent. |
+| `overrides` | object | Any of the engine's profile-schema fields, applied per-request on top of the selected profile (e.g. `{"image_lora_weights": "krea2_realism_lora.safetensors"}`). Unknown keys 400. |
 
 Reference bytes are decoded server-side and sniffed against PNG / JPEG / WebP magic bytes (a request 400s if the bytes don't match), capped at 20 MiB per image and 8 images per request, and staged to `~/.llamanager/refs/<request_id>/` for the duration of the run. A `finally` block deletes the staging directory regardless of how the run terminates (success, engine crash, queue cancel, timeout). Refs are not copied into the gallery, only the sidecar JSON next to each output preserves the prompt-and-ref provenance.
 
@@ -762,10 +777,24 @@ newest first, with the composer docked at the bottom. Tiles are shaped to the
 media rather than cropped to squares, so portrait, square and landscape sit
 side by side.
 
+The composer reads as a process. Pick a model; where the model has more than
+one way to work, **mode chips** above the prompt make the choice visible —
+Krea 2 gets *New image* / *Edit an image*, MiniMax-H3 gets *Animate a photo* /
+*From references* — and the profile picker filters to the chosen mode. On
+"New image", attaching a reference means img2img and simply shows the strength
+slider; a mode that *requires* a reference blocks Generate with the reason
+next to the button instead of a server round-trip. Models with only one way
+of working show no chips at all. A warm/cold badge under the settings shows
+whether the model's weights are already loaded, with Prewarm/Release buttons
+on the admin pages.
+
 The composer auto-renders the right fields per engine by walking each adapter's
-`profile_schema()` — the same mechanism the Diffusion models page uses for
-profile editing. Pick a model, optionally pick one of its profiles to pre-fill
-the override placeholders, then override any individual field per-request.
+`profile_schema()` — the same mechanism the model modal uses for profile
+editing. The handful of fields that decide a generation (resolution, steps,
+LoRA, clip length, soundtrack) sit first; everything else (quant, sampler,
+scheduler, seed…) folds behind **Advanced**. Pick a model, optionally pick one
+of its profiles to pre-fill the override placeholders, then override any
+individual field per-request — every rendered control reaches the engine.
 ⌘/Ctrl+Enter generates without reaching for the button, and the prompt box
 empties on submit (the text stays on the live tile and in the history popover,
 so nothing is lost).
@@ -777,7 +806,10 @@ prompt, and carries the **cancel** button — cancelling from any tile of a batc
 stops the run. When the image lands it replaces its own tile in place, so the
 answer to "where will it appear?" is always "right here". Progress streams over
 SSE, and because a generation is a queued job rather than a property of the
-page, reloading re-attaches to a run already in flight instead of losing it.
+page, reloading — or closing the page entirely and coming back — re-attaches
+to a run already in flight instead of losing it, on all four pages (admin and
+public, image and video). The public pages also get a ⟳ page-refresh button in
+their top bar, since they have no menu.
 
 Clicking a tile opens it full-size with its sidecar: model, profile, engine,
 size, steps, guidance, seed, **generation time** and when it was saved, plus
@@ -809,7 +841,7 @@ A single GPU usually can't hold a large LLM and a diffusion model at the same ti
 
 This is the single-slot invariant. The dashboard "Now serving" hero shows one engine at a time, the same way LLM swaps work. The queue enforces it: when `allow_concurrent` is off, the text and image families are mutually exclusive at the dispatcher level, so no image starts while a text request is in flight and vice versa.
 
-Two toggles on the Diffusion engines page change the behaviour:
+Toggles under Coexistence on the Diffusion page change the behaviour:
 
 - **Restart text engine after image completes** (default on). Turn off to stay in image-only mode after a generation.
 - **Allow concurrent text + image** (default off). Lets both families run in parallel up to their per-family caps (`max_concurrent` for text, 1 for image). Risks VRAM OOM on cards with less than ~48 GB; enable only when you know both fit.
@@ -827,6 +859,27 @@ equivalent is `[coexistence].allow_diffusion_with_slots` (also
 toggleable from the Slots page) which leaves every LLM slot loaded
 when an image task arrives.
 
+**Keeping the ComfyUI server warm.** The ComfyUI-backed engines start a
+private server per request and shut it down after — nothing stays resident.
+`comfy_keep_warm_s` (Diffusion page → Coexistence, or `llamanager setup
+coexistence --comfy-keep-warm-s N`) leaves that server running for N idle
+seconds instead, so the next request skips the model load — and, decisively,
+any LoRA patch, which is paid once per server: a Krea 2 request with a 1.5 GB
+LoRA measures 498 s cold and 24 s warm; a MiniMax-H3 clip 278 s cold and
+170 s warm. The composer shows a warm/cold badge per model with **Prewarm**
+and **Release** buttons (admin pages), and the CLI mirrors them as
+`llamanager diffusion warm status|prewarm|release`. Prewarm loads the
+*selected profile's* weights — the profile picks the transformer, so warming
+the wrong one still pays the load on the real request. The trade: a warm
+server holds 11–16 GB of VRAM until the window expires, so warm servers are
+stopped automatically before the text engine restarts (they yield the card),
+released by the button, or reaped by the idle window.
+
+```toml
+[image]
+comfy_keep_warm_s = 600   # 0 (default) = a fresh server per request
+```
+
 Cancellation: cancelling a queued image request removes it before it starts. Cancelling an in-flight one terminates the subprocess (SIGTERM, escalating to SIGKILL after 5 s) so the GPU is freed promptly.
 
 ## Video models
@@ -842,12 +895,25 @@ the gallery plays them on hover and in the lightbox.
 | engine | model | reference input | typical disk | notes |
 |--------|-------|-----------------|--------------|-------|
 | `wan` | [Wan 2.2 TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers) | 1 first frame (optional) | ~28 GB | text→video and image→video through `diffusers` |
-| `minimax_h3_comfy` | [MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) | 1 opening frame (**required**) | ~39 GB | image→video with audio, through ComfyUI |
+| `minimax_h3_comfy` | [MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) | 1 opening frame (FL2VA, **required**) or 1–9 references (REF2VA) | ~39 GB | video **with a synchronised soundtrack**, through ComfyUI |
 | `minimax_h3` | MiniMax-H3, diffusers route | 2 keyframes (first, last) | ~140 GB | bf16 only — see the ComfyUI note under [Supported engines](#supported-engines) |
 
-MiniMax-H3 is an image-to-video model: a request without a reference image is
-rejected before it reaches the GPU. Wan runs from a prompt alone, and takes an
-optional first frame.
+MiniMax-H3 has two heads sharing one model directory, selected by the
+profile's transformer quant. **FL2VA** animates exactly one opening frame;
+**REF2VA** (`h3-ref2va-4step`) composes from up to nine reference images the
+prompt addresses as `<Picture 1>`…`<Picture 9>`. The community **turbo bakes**
+(`Q4_K_M-Turbo` / `Q4_K_M-Ref-Turbo`, on the model card as downloads) carry
+the distill fused into the weights — same per-step cost, but no runtime LoRA
+patch (~600 s saved per server start) and 8 GB less resident VRAM. The
+measured sweet spot is `h3-turbo-baked-fast` (1152x640, 4 steps): ~214 s per
+5-second clip against ~613 s at the native canvas and 8 steps. One caveat: at
+4 steps the audio branch renders quiet (-31 dB against -15 dB at 8 steps) —
+pay the 8 steps when the soundtrack matters.
+
+H3 samples picture and sound from one latent, so audio costs nothing extra to
+generate; the profile field `video_audio = "off"` drops the audio decode and
+mux for clips going under other audio anyway (it does not make sampling
+cheaper). Wan runs from a prompt alone, and takes an optional first frame.
 
 ### Generating video
 
@@ -1493,7 +1559,7 @@ llamanager server restart [--profile P | --model M]
 llamanager server swap --profile P [--arg key=value ...]
 
 llamanager models list
-llamanager models pull <hf://user/repo> [--file Q4_K_M.gguf ...]
+llamanager models pull <hf://user/repo | user/repo> [--file F ...] [--target-dir Krea-2-Turbo-Comfy/loras] [--family image|video]
 llamanager models delete <repo/file.gguf> [--force]
 
 llamanager downloads list
@@ -1535,7 +1601,7 @@ llamanager setup llama-binary <path>                      # llama-server binary 
 llamanager setup hidream [--python PATH] [--repo PATH]
 llamanager setup z-image <python_path>
 llamanager setup flux2 [--sd-cli PATH] [--device-index N | --clear-device-index]
-llamanager setup coexistence [--unload-text-on-arrival on|off]
+llamanager setup coexistence [--unload-text-on-arrival on|off] [--comfy-keep-warm-s N]
                               [--restart-text-after-image on|off]
                               [--allow-concurrent on|off]
 llamanager setup default-args <llama|mlx> --arg KEY=VALUE ...
@@ -1563,6 +1629,10 @@ llamanager diffusion profiles delete <model_id> <name>
 llamanager diffusion profiles clone <model_id> <name> <new_name>
 llamanager diffusion profiles set-default <model_id> [--profile NAME]
 llamanager diffusion profiles materialize-defaults <model_id> <engine>
+llamanager diffusion files <model_id> [--subdir loras]    # component files (LoRAs, transformers, …) with sizes
+llamanager diffusion warm status <model_id>               # is a warm ComfyUI server holding this model?
+llamanager diffusion warm prewarm <model_id> [--profile NAME]   # load the weights now (needs keep-warm > 0)
+llamanager diffusion warm release                         # stop warm servers, give the VRAM back
 
 llamanager asr transcribe <file> --model M [--language ar] [--task transcribe|translate]
         [--profile NAME] [--format text|json|words] [--word-timestamps] [--stream] [--key ORIGIN_KEY]
@@ -1600,7 +1670,7 @@ llamanager slots unload <slot_id>                         # stop the model in a 
 llamanager slots coex on|off                              # diffusion-coexistence (on = image keeps LLMs loaded)
 ```
 
-The CLI mirrors the web UI feature-for-feature: every page that lets you click something has a `llamanager` verb that does the same thing against `/admin/*`. `llamanager profiles` covers the LLM-profile editor on `/ui/models`, `llamanager diffusion` covers the Diffusion engines + Diffusion models pages, `llamanager asr` covers the ASR engines page (install/build/setup, GPU budget) and the ASR models page (catalog/pull/convert, model list, profiles) and adds `transcribe` for one-shot speech-to-text, `llamanager setup` covers paths/coexistence/autolaunch and the llama-server installer, `llamanager slots` (beta, see [Multi-slot LLM (beta)](#multi-slot-llm-beta)) covers the parallel-model dashboard, `llamanager models {set-default,add-existing,set-dir}` covers the LLM-model housekeeping rows, and `llamanager queue cancel-all` + `llamanager origins update` round out the existing groups. `update` runs `pip install --upgrade llamanager` against the service's venv and SIGTERMs so the supervisor restarts it — exactly what the `/ui/about` Update button does. `--check` reports the latest GitHub tag plus the detected install mode without doing anything. If the service was installed in editable / developer mode (`pip install -e .` from a git checkout), the auto-update refuses with instructions to run `git pull && pip install -e .` in the checkout yourself — the operator's checkout is the source of truth in that case.
+The CLI mirrors the web UI feature-for-feature: every page that lets you click something has a `llamanager` verb that does the same thing against `/admin/*`. `llamanager profiles` covers the LLM-profile editor on `/ui/models`, `llamanager diffusion` covers the merged Diffusion page, `llamanager asr` covers the ASR engines page (install/build/setup, GPU budget) and the ASR models page (catalog/pull/convert, model list, profiles) and adds `transcribe` for one-shot speech-to-text, `llamanager setup` covers paths/coexistence/autolaunch and the llama-server installer, `llamanager slots` (beta, see [Multi-slot LLM (beta)](#multi-slot-llm-beta)) covers the parallel-model dashboard, `llamanager models {set-default,add-existing,set-dir}` covers the LLM-model housekeeping rows, and `llamanager queue cancel-all` + `llamanager origins update` round out the existing groups. `update` runs `pip install --upgrade llamanager` against the service's venv and SIGTERMs so the supervisor restarts it — exactly what the `/ui/about` Update button does. `--check` reports the latest GitHub tag plus the detected install mode without doing anything. If the service was installed in editable / developer mode (`pip install -e .` from a git checkout), the auto-update refuses with instructions to run `git pull && pip install -e .` in the checkout yourself — the operator's checkout is the source of truth in that case.
 
 Example, an agent that wants to swap models before a long batch and revert after:
 
@@ -1689,7 +1759,7 @@ check_interval_seconds = 21600  # how often each enabled engine checks upstream 
 
 > **Windows paths in TOML.** Backslashes inside double-quoted strings are escape sequences; `"C:\Users\..."` will fail to parse (the `\U` looks like a Unicode escape). Use TOML literal strings (single quotes), e.g. `'C:\Soulthread\Models'`, or escape every backslash: `"C:\\Soulthread\\Models"`.
 
-Per-model profiles are auto-created when you pull a model. You can edit them on the LLM models or Diffusion engines page, or write them by hand:
+Per-model profiles are auto-created when you pull a model. You can edit them on the LLM models page or the Diffusion page, or write them by hand:
 
 ```toml
 [models."your-model.gguf"]
@@ -1769,7 +1839,7 @@ On Windows, `~` resolves to `%USERPROFILE%`, e.g. `C:\Users\<you>\.llamanager`.
 
 **Z-Image `Install dependencies` finishes but `pipe(...)` fails at runtime.** The Z-Image auto-install picks a generic torch wheel. For AMD ROCm, Apple Silicon, or specific CUDA versions, build the venv yourself with the vendor wheels and point the engine at it, then skip the install button. (HiDream's auto-installer does this for you on AMD — that path is generic only for Z-Image and FLUX 2 today.)
 
-**HiDream errors with `AssertionError: CUDA is required for inference.` on AMD.** PyTorch keeps the `torch.cuda.*` namespace even when built against ROCm/HIP; the assertion really means "no HIP device visible." Usually this is the `render` group — the llamanager process needs gid `render` to open `/dev/kfd`. Add the user (`sudo usermod -aG render <user>`) and log out / in. The Diffusion engines page surfaces this as a warning on the HiDream card when it's wrong.
+**HiDream errors with `AssertionError: CUDA is required for inference.` on AMD.** PyTorch keeps the `torch.cuda.*` namespace even when built against ROCm/HIP; the assertion really means "no HIP device visible." Usually this is the `render` group — the llamanager process needs gid `render` to open `/dev/kfd`. Add the user (`sudo usermod -aG render <user>`) and log out / in. The Diffusion page surfaces this as a warning on the HiDream card when it's wrong.
 
 **HiDream errors with `AssertionError: Flash attention is not available.` on AMD.** The upstream hidream-source pipeline hardcodes flash-attn, which isn't shipped for AMD. The HiDream install card has a checkbox that patches `<hidream_repo>/models/pipeline.py` (`"use_flash_attn": True` → `False`); it's pre-checked on AMD hosts. The non-flash path uses a 4D attention mask — somewhat slower at large image sizes, but functional.
 
