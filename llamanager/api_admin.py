@@ -1845,6 +1845,7 @@ async def comfy_warm_admin(request: Request, model: str = "",
                            _: Origin = Depends(admin_origin)) -> JSONResponse:
     """Bearer-auth twin of the UI's warm-status route, for the CLI."""
     from .engines import comfy_backend as cb
+    from .api_ui import _engine_keeps_warm
     cfg = request.app.state.cfg
     mid = (model or "").strip()
     if not mid:
@@ -1852,13 +1853,16 @@ async def comfy_warm_admin(request: Request, model: str = "",
     model_dir = cfg.models_dir / mid
     info = cb.read_live_server(model_dir) if model_dir.is_dir() else None
     window = int(getattr(cfg, "comfy_keep_warm_s", 0) or 0)
+    from .config import detect_engine_for_id
+    engine = detect_engine_for_id(mid, cfg.models_dir)
     return JSONResponse({
         "model": mid,
         "warm": bool(info),
         "since": (info or {}).get("started"),
         "port": (info or {}).get("port"),
         "keep_warm_s": window,
-        "can_prewarm": window > 0,
+        "can_prewarm": window > 0 and _engine_keeps_warm(engine),
+        "keeps_warm": _engine_keeps_warm(engine),
         # Servers no record accounts for: same VRAM cost as a warm one, but
         # unreachable and unreaped. The CLI prints them as a warning.
         "untracked": [{"pid": u["pid"], "port": u["port"]}

@@ -150,6 +150,19 @@ def _install_h3(app):
     return root
 
 
+def _install_krea(app):
+    """Enough of a ComfyUI Krea 2 tree for detect() to claim it: a krea
+    transformer plus a text encoder."""
+    root = app.state.cfg.models_dir / "Krea-2-Turbo-Comfy"
+    for sub in ("diffusion_models", "text_encoders", "vae", "loras"):
+        (root / sub).mkdir(parents=True, exist_ok=True)
+    (root / "diffusion_models" / "krea2_turbo_Q4_K_M.gguf").write_bytes(b"x")
+    (root / "text_encoders" / "qwen3vl.safetensors").write_bytes(b"x")
+    # detect_engine_for_path needs a VAE before it will claim a comfy tree.
+    (root / "vae" / "qwen_image_vae.safetensors").write_bytes(b"x")
+    return root
+
+
 def _save_profile(app, model_id, name, fields):
     """Save one profile and reload it into the app, as the UI routes do."""
     from llamanager.config import Profile, load_config, save_profile
@@ -286,20 +299,31 @@ def test_unwarm_gives_the_card_back(app):
 
 
 def test_warm_status_says_whether_prewarming_can_work(app):
-    """can_prewarm is the window, not the server: the page uses it to
+    """can_prewarm answers two questions, not one: is a window configured,
+    and does this engine reuse a warm server at all? The page uses it to
     explain why the button is disabled instead of just disabling it."""
     from llamanager.config import load_config, update_image_config
     _install_h3(app)
+    _install_krea(app)
     client = _admin(app)
     assert client.get("/ui/comfy/warm",
-                      params={"model": "MiniMax-H3-Comfy"}
-                      ).json()["can_prewarm"] is False
+                      params={"model": "Krea-2-Turbo-Comfy"}
+                      ).json()["can_prewarm"] is False        # no window yet
 
     update_image_config(app.state.cfg.config_path, comfy_keep_warm_s=300)
     app.state.cfg = load_config(app.state.cfg.config_path)
     body = client.get("/ui/comfy/warm",
-                      params={"model": "MiniMax-H3-Comfy"}).json()
+                      params={"model": "Krea-2-Turbo-Comfy"}).json()
     assert body["can_prewarm"] is True and body["keep_warm_s"] == 300
+    assert body["keeps_warm"] is True
+
+    # MiniMax-H3 never reuses a server — a second clip in one process has
+    # never completed here — so no window makes it prewarmable.
+    h3 = client.get("/ui/comfy/warm",
+                    params={"model": "MiniMax-H3-Comfy"}).json()
+    assert h3["keeps_warm"] is False
+    assert h3["can_prewarm"] is False, "offered to prewarm an engine that " \
+        "cannot reuse the result"
 
 
 # ------------------------------------------------- reattaching to a job

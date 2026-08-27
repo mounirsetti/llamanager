@@ -2258,3 +2258,41 @@ def test_a_new_server_never_replaces_a_live_recorded_one():
 
     src = inspect.getsource(cr.main)
     assert "stop_recorded_server" in src
+
+
+def test_minimax_h3_never_asks_to_keep_a_server_warm(tmp_path, cfg):
+    """A SECOND clip in one MiniMax-H3 process has never completed on this
+    hardware. On 2026-08-27 five separate warm servers each finished their
+    first clip in ~13 min and then wedged at the second prompt's
+    "Requested to load MiniMaxH3TEModel_", pegging a core at 46 GB RSS with
+    the box in swap until something killed them — including one that ran 6h52m
+    and had to be killed by hand.
+
+    It is not the prompt or the seed: it is the reload. This engine's
+    components cannot be cycled a second time inside one process here, so it
+    must never pass --keep-warm, whatever comfy_keep_warm_s says. Krea 2 is
+    unaffected and keeps its window, which is why the decision is per engine.
+    """
+    from llamanager.config import Profile
+    from llamanager.engines import minimax_h3_comfy as m
+
+    _fake_comfy_install(cfg, tmp_path)
+    cfg.comfy_keep_warm_s = 600
+    model = _complete_model(tmp_path)
+
+    frame = tmp_path / "frame.png"
+    frame.write_bytes(b"x")            # H3 is image-to-video: it needs one
+    argv, _env = m.build_command(cfg, model, Profile(name="p"),
+                                 _image_request("a clip", [frame]),
+                                 tmp_path / "out.mp4")
+    assert "--keep-warm" not in argv, (
+        "H3 asked for a warm server; the second clip on one will wedge")
+
+    # Krea 2 in the same configuration still keeps its window: two of its
+    # warm servers completed 2/2 on the day H3 failed 5/5.
+    from llamanager.engines import krea_comfy as k
+    krea = _krea_model(tmp_path)
+    kargv, _ = k.build_command(cfg, krea, Profile(name="p"),
+                               _image_request("a picture", []),
+                               tmp_path / "out.png")
+    assert "--keep-warm" in kargv, "Krea lost its warm window"

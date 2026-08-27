@@ -3558,6 +3558,16 @@ async def images_gallery(request: Request,
     return _JSONResponse(payload)
 
 
+# Engines that reuse a warm ComfyUI server between requests. MiniMax-H3 is
+# absent by design, not by omission: a second clip in the same process has
+# never completed on this hardware (see minimax_h3_comfy.build_command).
+_KEEPS_WARM = {"krea_comfy"}
+
+
+def _engine_keeps_warm(engine: str) -> bool:
+    return str(engine) in _KEEPS_WARM
+
+
 async def _spawn_prewarm(cfg, model_id: str,
                          profile_name: str) -> int:
     """Run one minimal generation so the weights are resident, and detach.
@@ -3583,6 +3593,13 @@ async def _spawn_prewarm(cfg, model_id: str,
         raise ValueError(f"unknown engine for {model_id!r}")
     if not str(engine).endswith("_comfy"):
         raise ValueError(f"{engine} has no warm server to fill")
+    if not _engine_keeps_warm(engine):
+        # Prewarming an engine that never adopts a warm server would leave a
+        # loaded process nothing can reuse — for MiniMax-H3 that is 46 GB of
+        # resident weights waiting to be reaped. Refuse and say why.
+        raise ValueError(
+            f"{engine} does not reuse warm servers, so there is nothing to "
+            "prewarm: every generation starts its own")
 
     profile = None
     if profile_name:
@@ -3663,6 +3680,8 @@ async def comfy_warm_status(request: Request, model: str = "",
     model_dir = cfg.models_dir / mid
     info = cb.read_live_server(model_dir) if model_dir.is_dir() else None
     window = int(getattr(cfg, "comfy_keep_warm_s", 0) or 0)
+    from .config import detect_engine_for_id
+    engine = detect_engine_for_id(mid, cfg.models_dir)
     # Servers no state file accounts for. They hold the same 11-16 GB as a
     # warm one but answer no request and have no reaper measuring them, so
     # "warm: false" alone would describe a card that is anything but free.
@@ -3675,7 +3694,10 @@ async def comfy_warm_status(request: Request, model: str = "",
         "keep_warm_s": window,
         # Without a window a prewarmed server is reaped straight away, so the
         # page can say that instead of offering a button that does nothing.
-        "can_prewarm": window > 0,
+        # An engine that never reuses a server can never be prewarmed, no
+        # matter how generous the window is.
+        "can_prewarm": window > 0 and _engine_keeps_warm(engine),
+        "keeps_warm": _engine_keeps_warm(engine),
         "untracked": [{"pid": u["pid"], "port": u["port"]} for u in untracked],
     })
 

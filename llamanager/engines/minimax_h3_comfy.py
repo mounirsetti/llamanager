@@ -425,9 +425,22 @@ def build_command(
         for node in _AUDIO_NODES:
             argv += ["--drop-node", node]
 
-    keep_warm = int(getattr(cfg, "comfy_keep_warm_s", 0) or 0)
-    if keep_warm > 0:
-        argv += ["--keep-warm", str(keep_warm)]
+    # NO --keep-warm, whatever comfy_keep_warm_s says. Reusing a warm server
+    # for a SECOND MiniMax-H3 clip has never once worked on this hardware:
+    # five separate servers on 2026-08-27 each completed their first clip in
+    # ~13 min and then wedged at the second prompt's "Requested to load
+    # MiniMaxH3TEModel_", pegging a core at 46 GB RSS with the box in swap
+    # until something killed them. It is not seed- or prompt-dependent — it is
+    # the reload itself. This engine's components (15 GB text encoder + 19 GB
+    # transformer + two VAEs) cannot be cycled a second time inside one
+    # process here: the first clip leaves nothing free to load the second
+    # into, so the load thrashes instead of finishing. ComfyUI's interrupt
+    # cannot even end it, because weight loading is not a step boundary where
+    # the flag is polled.
+    #
+    # Krea 2 is unaffected (two of its warm servers completed 2/2 the same
+    # day) and keeps its 498 s -> 24 s win, which is why this is decided per
+    # engine rather than by turning the setting off for everyone.
 
     for k, v in (profile.args or {}).items():
         flag = "--" + str(k).replace("_", "-")
