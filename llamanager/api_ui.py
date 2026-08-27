@@ -3663,6 +3663,10 @@ async def comfy_warm_status(request: Request, model: str = "",
     model_dir = cfg.models_dir / mid
     info = cb.read_live_server(model_dir) if model_dir.is_dir() else None
     window = int(getattr(cfg, "comfy_keep_warm_s", 0) or 0)
+    # Servers no state file accounts for. They hold the same 11-16 GB as a
+    # warm one but answer no request and have no reaper measuring them, so
+    # "warm: false" alone would describe a card that is anything but free.
+    untracked = cb.untracked_servers()
     return _JSONResponse({
         "model": mid,
         "warm": bool(info),
@@ -3672,6 +3676,7 @@ async def comfy_warm_status(request: Request, model: str = "",
         # Without a window a prewarmed server is reaped straight away, so the
         # page can say that instead of offering a button that does nothing.
         "can_prewarm": window > 0,
+        "untracked": [{"pid": u["pid"], "port": u["port"]} for u in untracked],
     })
 
 

@@ -1859,6 +1859,10 @@ async def comfy_warm_admin(request: Request, model: str = "",
         "port": (info or {}).get("port"),
         "keep_warm_s": window,
         "can_prewarm": window > 0,
+        # Servers no record accounts for: same VRAM cost as a warm one, but
+        # unreachable and unreaped. The CLI prints them as a warning.
+        "untracked": [{"pid": u["pid"], "port": u["port"]}
+                      for u in cb.untracked_servers()],
     })
 
 

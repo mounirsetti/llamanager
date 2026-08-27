@@ -1627,6 +1627,7 @@ def test_a_prompt_outlasting_the_idle_window_is_not_reaped(tmp_path):
     """The bug this covers: a 448 s first LoRA step went quiet, its own
     reaper SIGTERMed the server mid-generation, and the runner then waited
     on a dead port until its hour-long timeout."""
+    import json
     import subprocess
     import sys
     import threading
@@ -1636,11 +1637,14 @@ def test_a_prompt_outlasting_the_idle_window_is_not_reaped(tmp_path):
 
     beat = tmp_path / "warm.beat"
     state = tmp_path / "warm.json"
-    state.write_text("{}")
     beat.write_text(str(time.time()))
 
     victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
                               start_new_session=True)
+    # The record has to NAME this server, as a real one does: the reaper now
+    # reads it every poll, and a record that names someone else (or nobody)
+    # is what tells it the server has been orphaned.
+    state.write_text(json.dumps({"pid": victim.pid, "port": 1}))
     try:
         cb = type("CB", (), {"touch_heartbeat": staticmethod(
             lambda _p: beat.write_text(str(time.time())))})()
@@ -2085,3 +2089,172 @@ def test_warm_state_carries_the_servers_log_path(tmp_path, monkeypatch):
                           tmp_path, tmp_path, log_file=log)
     state = json.loads(cb.server_state_path(model_dir).read_text())
     assert state["log_file"] == str(log)
+
+
+# ---------------------------------------------------------------------------
+# Orphaned warm servers (the 2026-08-27 leak: PID 3085009, 46 GB, 6h52m)
+#
+# Reconstructed sequence, every step reproduced below:
+#   04:21  run A starts server S1, records it, spawns reaper R1
+#   04:37  run B adopts S1, submits a prompt, is CANCELLED at 05:09
+#          -> S1 keeps executing the abandoned prompt (nothing interrupts it)
+#   05:07  run C cannot reach the wedged S1, starts S2, and write_server_state
+#          OVERWRITES the record -> S1 is now untracked
+#   06:09  S2 dies; the state+beat files are cleaned up
+#          -> R1 sees no record, idle_for() returns None forever, and R1
+#             never reaps S1. Immortal.
+# ---------------------------------------------------------------------------
+
+def _write_state(tmp_path, pid, port=1):
+    import json
+    state = tmp_path / "llamanager-comfy-warm-abc.json"
+    state.write_text(json.dumps({"pid": pid, "port": port}))
+    return state
+
+
+def test_reaper_reaps_a_server_whose_record_was_taken_over(tmp_path, monkeypatch):
+    """Superseded == orphaned. The record names a newer server, so ours can
+    never be adopted again and no other reaper is watching it."""
+    from llamanager.engines import _comfy_reaper as r
+
+    state = _write_state(tmp_path, pid=999)          # someone else's now
+    beat = tmp_path / "b.beat"
+    beat.write_text("x")                             # and it is FRESH
+    killed = []
+    monkeypatch.setattr(r, "alive", lambda pid: pid not in killed)
+    monkeypatch.setattr(r.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(r.os, "killpg", lambda pg, sig: killed.append(pg))
+
+    reason = r.reap(pid=123, beat=beat, idle=999.0, state=state, poll=0.01)
+    assert 123 in killed
+    assert "superseded" in reason
+
+
+def test_reaper_reaps_an_untracked_server_despite_a_fresh_heartbeat(
+        tmp_path, monkeypatch):
+    """THE immortality bug. The heartbeat file is shared per model, so a
+    replacement server's traffic kept touching it while the orphan's own
+    record was gone — idle_for() never went stale and the orphan lived for
+    hours. Idleness must come from this reaper's own clock once the record
+    stops naming it."""
+    from llamanager.engines import _comfy_reaper as r
+
+    state = tmp_path / "gone.json"                   # no record at all
+    beat = tmp_path / "b.beat"
+    killed = []
+    monkeypatch.setattr(r, "alive", lambda pid: pid not in killed)
+    monkeypatch.setattr(r.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(r.os, "killpg", lambda pg, sig: killed.append(pg))
+
+    def keep_touching(*_a, **_kw):
+        beat.write_text(str(time.time()))            # the other server's traffic
+        return 0.0
+    monkeypatch.setattr(r, "idle_for", keep_touching)
+
+    reason = r.reap(pid=123, beat=beat, idle=0.05, state=state, poll=0.01)
+    assert 123 in killed, "an untracked server must not be immortal"
+    assert "untracked" in reason
+
+
+def test_reaper_leaves_a_live_server_alone(tmp_path, monkeypatch):
+    from llamanager.engines import _comfy_reaper as r
+
+    state = _write_state(tmp_path, pid=123)
+    beat = tmp_path / "b.beat"
+    beat.write_text("x")
+    killed, seen = [], []
+    monkeypatch.setattr(r, "alive", lambda pid: len(seen) < 4)
+    monkeypatch.setattr(r.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(r.os, "killpg", lambda pg, sig: killed.append(pg))
+    monkeypatch.setattr(r, "idle_for", lambda *a: seen.append(1) or 0.0)
+
+    r.reap(pid=123, beat=beat, idle=999.0, state=state, poll=0.01)
+    assert killed == [], "a busy server was reaped"
+
+
+def test_reaper_does_not_delete_the_record_of_the_server_that_replaced_it(
+        tmp_path, monkeypatch):
+    """reap() used to unlink state+beat unconditionally when it stopped
+    watching — including when ITS server had simply exited. That erased the
+    replacement's record and untracked it in turn, which is how the state
+    file went missing entirely."""
+    from llamanager.engines import _comfy_reaper as r
+
+    state = _write_state(tmp_path, pid=999)          # the replacement's record
+    beat = tmp_path / "b.beat"
+    beat.write_text("x")
+    monkeypatch.setattr(r, "alive", lambda pid: False)   # ours already exited
+
+    r.reap(pid=123, beat=beat, idle=1.0, state=state, poll=0.01)
+    assert state.exists(), "erased the replacement server's record"
+    assert beat.exists()
+
+
+def test_untracked_servers_finds_what_no_state_file_mentions(monkeypatch):
+    from llamanager.engines import comfy_backend as cb
+
+    procs = [{"pid": 111, "port": 1, "output_dir": "/tmp/llamanager-comfy-x/out"},
+             {"pid": 222, "port": 2, "output_dir": "/tmp/llamanager-comfy-y/out"}]
+    monkeypatch.setattr(cb, "find_server_processes", lambda: procs)
+    monkeypatch.setattr(cb, "warm_servers", lambda: [{"pid": 111}])
+    assert [u["pid"] for u in cb.untracked_servers()] == [222]
+
+
+def test_find_server_processes_ignores_a_foreign_comfyui(tmp_path):
+    """An operator's own ComfyUI must never be a candidate for killing. The
+    signature that separates ours is our mkdtemp work dir in
+    --output-directory."""
+    from llamanager.engines import comfy_backend as cb
+
+    def fake_proc(pid, out_dir):
+        d = tmp_path / str(pid)
+        d.mkdir()
+        (d / "cmdline").write_bytes(b"\0".join([
+            b"python", b"main.py", b"--listen", b"127.0.0.1",
+            b"--port", b"8188", b"--output-directory", out_dir.encode()]) + b"\0")
+
+    fake_proc(4242, "/home/someone/ComfyUI/output")            # theirs
+    fake_proc(4243, "/tmp/llamanager-comfy-abcd/out")           # ours
+    (tmp_path / "not-a-pid").mkdir()
+
+    found = cb.find_server_processes(proc_root=tmp_path)
+    assert [p["pid"] for p in found] == [4243]
+    assert found[0]["port"] == 8188
+
+
+def test_stop_warm_servers_sweeps_untracked_ones(monkeypatch):
+    """The orphan survived a text-engine start because stop_warm_servers only
+    walked state files. It has to sweep what the process table shows too."""
+    from llamanager.engines import comfy_backend as cb
+
+    monkeypatch.setattr(cb, "warm_servers", lambda: [{"pid": 111}])
+    monkeypatch.setattr(cb, "untracked_servers",
+                        lambda: [{"pid": 222, "port": 2}])
+    asked = []
+    monkeypatch.setattr(cb, "_term_then_kill",
+                        lambda pids, grace_seconds: asked.extend(pids) or pids)
+    monkeypatch.setattr(cb.Path, "glob", lambda self, pat: [])
+    stopped = cb.stop_warm_servers()
+    assert 222 in stopped, "an untracked server survived the sweep"
+    assert 111 in stopped
+
+
+def test_a_cancelled_run_interrupts_the_warm_servers_prompt():
+    """Leaving a server warm is not the same as leaving it working. The
+    cancelled 04:37 clip kept a CPU pegged for 6h47m with the box in swap."""
+    import inspect
+    from llamanager.engines import _comfy_runner as cr
+
+    src = inspect.getsource(cr.main)
+    assert "server.interrupt()" in src, "cancellation never interrupts"
+    assert src.count("interrupt()") >= 2, "signal and failure paths both need it"
+
+
+def test_a_new_server_never_replaces_a_live_recorded_one():
+    """Overwriting the record of a server that is still alive is what made
+    the orphan invisible."""
+    import inspect
+    from llamanager.engines import _comfy_runner as cr
+
+    src = inspect.getsource(cr.main)
+    assert "stop_recorded_server" in src

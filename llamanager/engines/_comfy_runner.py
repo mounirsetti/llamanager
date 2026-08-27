@@ -205,6 +205,28 @@ class ComfyServer:
 
     # ---- HTTP helpers -------------------------------------------------
 
+    def interrupt(self) -> bool:
+        """Ask the server to abandon whatever it is executing. True if sent.
+
+        A warm server outlives the run that submitted the prompt, so when
+        that run is cancelled the server carries on regardless — nobody is
+        left to collect the result, and it keeps the GPU and the CPU for as
+        long as the work takes. One cancelled MiniMax-H3 clip burned 6h47m of
+        CPU and 46 GB of RSS this way, with the machine in swap, hours after
+        its request was cancelled.
+
+        Best-effort and short-timeout on purpose: this runs from a signal
+        handler, where blocking is the worse failure.
+        """
+        req = urllib.request.Request(f"{self.base}/interrupt", data=b"{}",
+                                     headers={"Content-Type": "application/json"},
+                                     method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=5):
+                return True
+        except Exception:  # noqa: BLE001 — a dying run must not raise here
+            return False
+
     def post_json(self, path: str, payload: dict) -> dict:
         body = json.dumps(payload).encode()
         req = urllib.request.Request(
@@ -586,6 +608,13 @@ def main() -> int:
         # loaded models the next request is meant to reuse.
         log(f"received signal {signum}; shutting down")
         if server is not None:
+            # Whatever it is computing is for THIS run, and this run is over.
+            # Leaving a warm server is not the same as leaving it working:
+            # without this the abandoned prompt runs to completion (or for
+            # hours) with nobody to collect it.
+            if getattr(server, "adopted", False):
+                if server.interrupt():
+                    log("asked the warm server to interrupt the prompt")
             server.stop()
         if server is None or not getattr(server, "adopted", False):
             shutil.rmtree(work, ignore_errors=True)
@@ -625,6 +654,17 @@ def main() -> int:
             server.adopted = True
             log(f"reusing warm server pid={warm['pid']} port={warm['port']}")
         else:
+            if args.keep_warm:
+                # A record we could not adopt means a server that is alive but
+                # unusable — unreachable, or wedged on a prompt whose caller
+                # is long gone. Starting a second one for the same model would
+                # put two copies of the weights on one card AND overwrite the
+                # record below, leaving the first with no state file and no
+                # reaper that can see it. That is exactly the 2026-08-27 leak.
+                orphan = cb.stop_recorded_server(args.model_path)
+                if orphan:
+                    log(f"stopped an unusable recorded server (pid={orphan}) "
+                        "before starting a fresh one")
             server = ComfyServer(
                 python=Path(sys.executable), repo=args.comfy_repo,
                 port=_free_port(), output_dir=out_dir, input_dir=in_dir,
@@ -702,6 +742,12 @@ def main() -> int:
     except Exception as e:
         log(f"ERROR: {type(e).__name__}: {e}")
         if server is not None:
+            # Same reasoning as the signal handler: a timeout or a transport
+            # failure ends OUR interest in the prompt, but a warm server keeps
+            # executing it — the run that timed out at an hour left a server
+            # computing for six more.
+            if getattr(server, "adopted", False) and server.interrupt():
+                log("asked the warm server to interrupt the prompt")
             log("server log tail:\n" + server.tail_log())
         return 1
     finally:

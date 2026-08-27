@@ -252,13 +252,19 @@ def write_server_state(model_dir: Path, pid: int, port: int,
     "could not verify" on every warm request.
     """
     state = server_state_path(model_dir)
-    state.write_text(json.dumps({
+    payload = json.dumps({
         "pid": pid, "port": port,
         "model_dir": str(model_dir.resolve()),
         "output_dir": str(output_dir), "input_dir": str(input_dir),
         "log_file": str(log_file) if log_file else None,
         "started": time.time(),
-    }))
+    })
+    # Atomic: the reaper now reads this file every few seconds to check the
+    # record still names IT, and a half-written file reads as "no record",
+    # which is a state it acts on. os.replace makes a torn read impossible.
+    tmp = state.with_suffix(".json.tmp")
+    tmp.write_text(payload)
+    os.replace(tmp, state)
     heartbeat_path(state).write_text(str(time.time()))
     return state
 
@@ -294,6 +300,125 @@ def warm_servers() -> list[dict[str, Any]]:
     return out
 
 
+# Every work dir this project makes for a ComfyUI server is a mkdtemp with
+# this prefix, and it appears in the server's own --output-directory. That is
+# the signature that separates OUR servers from an operator's own ComfyUI,
+# which must never be touched.
+_WORKDIR_PREFIX = "llamanager-comfy-"
+
+
+def find_server_processes(proc_root: Path | None = None) -> list[dict[str, Any]]:
+    """Every ComfyUI server process this project started, found by /proc scan.
+
+    Independent of the state files on purpose. A state file is a *pointer to
+    the current* warm server for a model, and it has been observed to stop
+    naming a server that was still running: a run that could not reach a hung
+    server started a second one and overwrote the record, leaving 46 GB of
+    ComfyUI that no state file mentioned and nothing could reap (2026-08-27,
+    PID 3085009, alive 6h52m at 100% CPU with the box in swap).
+
+    Matching is deliberately narrow — the process must be a ``main.py
+    --listen`` whose ``--output-directory`` sits inside one of our mkdtemp
+    work dirs — so an operator's own ComfyUI is never a candidate.
+    """
+    out: list[dict[str, Any]] = []
+    root = proc_root if proc_root is not None else Path("/proc")
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return out
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().decode(
+                "utf-8", errors="replace").split("\0")
+        except OSError:      # the process ended mid-scan
+            continue
+        if "main.py" not in argv or "--listen" not in argv:
+            continue
+        try:
+            out_dir = argv[argv.index("--output-directory") + 1]
+            port = int(argv[argv.index("--port") + 1])
+        except (ValueError, IndexError):
+            continue
+        if _WORKDIR_PREFIX not in out_dir:
+            continue
+        out.append({"pid": int(entry.name), "port": port,
+                    "output_dir": out_dir})
+    return out
+
+
+def untracked_servers() -> list[dict[str, Any]]:
+    """Our ComfyUI servers that no state file accounts for.
+
+    These are the dangerous ones: unreachable by ``warm_servers()``, so the
+    UI cannot list them, ``stop_warm_servers`` could not stop them, and no
+    reaper is measuring their idleness.
+    """
+    known = {int(i["pid"]) for i in warm_servers()}
+    return [p for p in find_server_processes() if p["pid"] not in known]
+
+
+def stop_recorded_server(model_dir: Path) -> int | None:
+    """Stop the server the state file names, if it is alive. Returns its pid.
+
+    Called when a recorded server exists but cannot be used (unreachable or
+    wedged). Starting a second server for the same model instead would put
+    two copies of the weights on one card and orphan the first — which is
+    precisely how the 2026-08-27 leak happened.
+    """
+    state = server_state_path(model_dir)
+    try:
+        info = json.loads(state.read_text())
+        pid = int(info["pid"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        pid = None
+    if pid is not None:
+        _term_then_kill([pid], grace_seconds=20.0)
+    for p in (heartbeat_path(state), state):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    return pid
+
+
+def _term_then_kill(pids: list[int], grace_seconds: float) -> list[int]:
+    """SIGTERM each process GROUP, escalating to SIGKILL after the grace.
+
+    Group, because ComfyUI spawns helpers that would otherwise keep the GPU.
+    SIGKILL only at the end: killing a process holding a KFD context leaked
+    26 GB of VRAM on this hardware on 2026-07-16, recoverable only by a
+    reboot this box cannot afford.
+    """
+    signalled: list[int] = []
+    for pid in pids:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            signalled.append(pid)
+        except OSError:
+            continue
+    deadline = time.time() + grace_seconds
+    for pid in signalled:
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.5)
+        else:
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except OSError:
+                pass
+    return signalled
+
+
 def stop_warm_servers(grace_seconds: float = 20.0) -> list[int]:
     """Stop every warm server and return the pids that were signalled.
 
@@ -307,27 +432,11 @@ def stop_warm_servers(grace_seconds: float = 20.0) -> list[int]:
     otherwise keep the GPU. SIGKILL only after the grace period: killing a
     process that holds a KFD context has leaked GPU memory on this hardware.
     """
-    stopped: list[int] = []
-    for info in warm_servers():
-        pid = int(info["pid"])
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
-            stopped.append(pid)
-        except OSError:
-            continue
-    deadline = time.time() + grace_seconds
-    for pid in stopped:
-        while time.time() < deadline:
-            try:
-                os.kill(pid, 0)
-            except OSError:
-                break
-            time.sleep(0.5)
-        else:
-            try:
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
-            except OSError:
-                pass
+    # Recorded servers AND the ones no record mentions. Enumerating only the
+    # state files is what let an orphan survive the LLM starting on top of it.
+    pids = [int(i["pid"]) for i in warm_servers()]
+    pids += [i["pid"] for i in untracked_servers()]
+    stopped = _term_then_kill(pids, grace_seconds)
     # Clear the records of servers that are now gone, so a later request
     # does not try to adopt one. Survivors keep theirs.
     for state in Path(os.environ.get("TMPDIR", "/tmp")).glob(
