@@ -45,6 +45,26 @@ GENERATION_HARD_TIMEOUT_S = 30 * 60   # 30 min — covers FLUX 2 quality runs
 # a whole clip) and can legitimately exceed the image budget on a single card.
 VIDEO_GENERATION_HARD_TIMEOUT_S = 90 * 60   # 90 min — Wan 720p / 121-frame runs
 
+# Per-engine ceilings that override the family default above.
+ENGINE_HARD_TIMEOUT_S = {
+    # Krea 2 is GPU-bound and fast: 58 s warm (measured at 99-100% GPU busy
+    # and 1.0 CPU core), and ~15 min for its worst cold path, where
+    # ComfyUI-GGUF patches an edit LoRA into the quantised transformer on the
+    # CPU. Past twenty minutes it is not a slow image, it is a stuck one — and
+    # it holds the single image slot for every other origin while it burns.
+    "krea_comfy": 20 * 60,
+}
+
+
+def hard_timeout_for(engine: str) -> float:
+    """Seconds a single generation on ``engine`` may take before it is ended."""
+    from .config import engine_family
+    if engine in ENGINE_HARD_TIMEOUT_S:
+        return float(ENGINE_HARD_TIMEOUT_S[engine])
+    return float(VIDEO_GENERATION_HARD_TIMEOUT_S
+                 if engine_family(engine) == "video"
+                 else GENERATION_HARD_TIMEOUT_S)
+
 
 class ImageError(Exception):
     """Recoverable failure during image generation."""
@@ -654,20 +674,35 @@ class ImageTaskRunner:
         if cancel_event is not None:
             cancel_watcher = asyncio.create_task(_watch_cancel())
 
-        from .config import engine_family
-        hard_timeout = (VIDEO_GENERATION_HARD_TIMEOUT_S
-                        if engine_family(engine) == "video"
-                        else GENERATION_HARD_TIMEOUT_S)
+        hard_timeout = hard_timeout_for(engine)
         try:
             rc = await asyncio.wait_for(
                 proc.wait(), timeout=hard_timeout,
             )
         except asyncio.TimeoutError:
+            # SIGTERM, not kill: the runner's handler is what tells a warm
+            # ComfyUI server to interrupt the prompt. Killing outright skips
+            # it, and the server then computes an abandoned prompt for as long
+            # as it takes — one such orphan ran 6h47m at 46 GB with the box in
+            # swap. Only escalate if the handler does not get it done.
             with contextlib.suppress(ProcessLookupError):
-                proc.kill()
+                proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=30.0)
+            except asyncio.TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
             await asyncio.gather(drain_out, drain_err, return_exceptions=True)
             self._reset_runtime_state(failed=True)
-            raise ImageError("image generation timed out")
+            self.db.log_event("image_generate_timeout", {
+                "request_id": request_id, "engine": engine,
+                "limit_s": hard_timeout,
+            })
+            limit = (f"{hard_timeout / 60:.0f}-minute" if hard_timeout >= 60
+                     else f"{hard_timeout:.0f}-second")
+            raise ImageError(
+                f"{engine} generation exceeded its {limit} limit and was "
+                "stopped")
         finally:
             if cancel_watcher is not None:
                 cancel_watcher.cancel()

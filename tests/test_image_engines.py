@@ -1062,3 +1062,34 @@ def test_url_response_points_at_the_route_a_bearer_client_can_read(tmp_path):
     url = payload["data"][0]["url"]
     assert url == "/images/file/2026-08-27/Hermes/clip.mp4"
     assert not url.startswith("/ui/"), "cookie-gated route handed to an API caller"
+
+
+def test_krea_generations_are_capped_at_twenty_minutes():
+    """Krea 2 is GPU-bound and fast — 58 s warm, measured at 99-100% GPU busy
+    and 1.0 CPU core; its worst cold path is ~15 min, where ComfyUI-GGUF
+    patches an edit LoRA into the quantised transformer on the CPU. Past
+    twenty minutes it is stuck, not slow, and it holds the single image slot
+    for every other origin while it burns. The 30-minute family default was
+    too generous to catch that."""
+    from llamanager.image_runner import hard_timeout_for
+
+    assert hard_timeout_for("krea_comfy") == 20 * 60
+    # Other engines keep their family limits: an H3 clip legitimately takes
+    # ~13 min and a Wan 720p run far longer.
+    assert hard_timeout_for("minimax_h3_comfy") == 90 * 60
+    assert hard_timeout_for("hidream") == 30 * 60
+
+
+def test_a_timed_out_generation_is_asked_to_stop_before_it_is_killed():
+    """The timeout used to SIGKILL the runner. That skips the runner's signal
+    handler — the only thing that tells a warm ComfyUI server to interrupt the
+    prompt — so the server carried on computing work nobody would collect. One
+    such orphan ran 6h47m at 46 GB with the box in swap."""
+    import inspect
+    from llamanager import image_runner
+
+    src = inspect.getsource(image_runner.ImageTaskRunner._run_one)
+    block = src[src.index("hard_timeout = hard_timeout_for(engine)"):]
+    term = block.index("proc.terminate()")
+    kill = block.index("proc.kill()")
+    assert term < kill, "killed the runner without letting it interrupt first"
