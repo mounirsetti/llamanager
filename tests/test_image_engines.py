@@ -1037,3 +1037,28 @@ def test_the_videos_route_accepts_a_list_of_images():
     assert "_check_ref_arity" in src
     # And the images route uses the same guard.
     assert "_check_ref_arity" in inspect.getsource(api_v1.images_generations)
+
+
+def test_url_response_points_at_the_route_a_bearer_client_can_read(tmp_path):
+    """The generations response is only ever read by a bearer client — the
+    browser pages refresh the gallery instead of using this field. It used to
+    hand back the /ui twin, which is gated by the admin session cookie, so a
+    CLI or agent following the url got a 302 to the login page and saved the
+    redirect body as if it were the image.
+
+    The gallery listing already learned this ("emitting admin URLs to a bearer
+    client sent every tile to the login redirect"); this path had not.
+    """
+    from llamanager import api_v1
+
+    out = tmp_path / "2026-08-27" / "Hermes" / "clip.mp4"
+    out.parent.mkdir(parents=True)
+    out.write_bytes(b"x")
+    result = type("R", (), {
+        "output_path": out, "sidecar": {"prompt": "p"}, "engine": "e",
+        "model_id": "m", "profile_name": "pr", "seed": 1, "duration_s": 1.0,
+    })()
+    payload = api_v1._build_image_response(result, "url", request=None)
+    url = payload["data"][0]["url"]
+    assert url == "/images/file/2026-08-27/Hermes/clip.mp4"
+    assert not url.startswith("/ui/"), "cookie-gated route handed to an API caller"

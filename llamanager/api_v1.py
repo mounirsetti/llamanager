@@ -2185,8 +2185,13 @@ def _build_image_response(result, response_format: str, request: Request) -> dic
             except OSError:
                 continue
         else:
-            # Authenticated UI route, gated by the same session as the rest.
-            item["url"] = f"/ui/images/file/{p.parent.parent.name}/{p.parent.name}/{p.name}"
+            # The BEARER-authenticated route, because this response only ever
+            # reaches a bearer client: the browser pages refresh the gallery
+            # after a generation instead of reading this field. The /ui twin
+            # serves the same bytes but is gated by the admin session cookie,
+            # so an API or CLI caller following it got a 302 to the login page
+            # — a download that "succeeded" with an 18-byte redirect body.
+            item["url"] = f"/images/file/{p.parent.parent.name}/{p.parent.name}/{p.name}"
         item["revised_prompt"] = result.sidecar.get("prompt")
         items.append(item)
     return {
