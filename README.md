@@ -830,6 +830,28 @@ Same layout; instead of the admin session cookie they accept a bearer key
 (pasted on a login screen, stored in localStorage) and scope the gallery to that
 origin's own directory.
 
+#### Browsing by origin (admin pages)
+
+On disk the gallery is `<images_dir>/<day>/<origin>/<file>`, so an origin is
+already a folder — and the admin pages browse it as one. `/ui/images` and
+`/ui/videos` open **inside the session origin's own folder**, the only folder
+they generate into, rather than in one undifferentiated stream of everybody's
+output. The breadcrumb above the feed steps *up*: **↑ All origins** replaces the
+tiles with one card per origin folder — cover thumbnail, item count, size on
+disk and last activity — and clicking one browses that origin's media, with a
+reminder that anything you generate still lands in your own folder. Counts and
+covers are per media kind, so an origin with images but no clips has no folder
+in the video view; your own folder is always listed, at an honest zero, even
+before you have generated anything.
+
+Navigation is frozen while a generation is in flight — the live placeholder
+tiles resolve into the finished media in place, and swapping the feed under them
+would strand them — and pressing Generate from somebody else's folder returns
+you to your own first. Under the hood: `GET /ui/images/gallery?origin=<name>`
+scopes the listing (pagination included) and `GET /ui/images/gallery/origins`
+returns the folder list. Both are admin-only; the public pages remain pinned to
+the bearer's own origin and cannot name another.
+
 ### Sharing the GPU with the text engine
 
 A single GPU usually can't hold a large LLM and a diffusion model at the same time. When an image request lands while a text engine is running, llamanager by default:

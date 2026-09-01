@@ -35,7 +35,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from .auth import AuthManager, Origin
+from .auth import AuthManager, Origin, validate_origin_name
 from .config import (
     ENGINE_FAMILY, Profile, SHARD_RE, VALID_FLASH_ATTN, VALID_KV_CACHE_TYPES,
     VALID_RAM_SPILL_POLICIES,
@@ -3279,7 +3279,7 @@ def _build_video_page_context(cfg, reg) -> dict[str, Any]:
 
 @router.get("/videos", response_class=HTMLResponse)
 async def videos_view(request: Request,
-                      _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+                      origin: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     cfg = request.app.state.cfg
     reg: Registry = request.app.state.registry
     sess = _current_session(request)
@@ -3291,13 +3291,16 @@ async def videos_view(request: Request,
         # Admin session by construction (require_admin_ui): the composer
         # may offer incognito. The public pages never set this.
         incognito_available=True,
+        # The folder the feed opens in: this admin's own gallery directory.
+        # Stepping up from it browses the other origins' folders.
+        session_origin=origin.name,
         **ctx,
     ))
 
 
 @router.get("/images", response_class=HTMLResponse)
 async def images_view(request: Request,
-                      _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+                      origin: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     cfg = request.app.state.cfg
     reg: Registry = request.app.state.registry
     sess = _current_session(request)
@@ -3306,6 +3309,7 @@ async def images_view(request: Request,
         request,
         api_key=sess["key"] if sess else "",
         incognito_available=True,
+        session_origin=origin.name,
         **ctx,
     ))
 
@@ -3533,20 +3537,143 @@ def _list_gallery(images_dir: Path, *, origin_filter: str | None = None,
     return {"items": out, "next_before": next_before}
 
 
+
+def _list_gallery_origins(images_dir: Path, *, kind: str | None = None,
+                          always_include: str | None = None,
+                          url_prefix: str = "/ui/images") -> dict[str, Any]:
+    """One entry per origin folder under ``images_dir``, newest activity first.
+
+    This is the *parent* level of the admin gallery. An admin lands inside
+    their own origin's folder (the only one they generate into) and can step
+    up to here to browse what every other origin has produced. Each entry
+    carries a cover — that origin's newest item of this ``kind`` — so a
+    folder is recognisable before it is opened.
+
+    Layout on disk is ``<images_dir>/<day>/<origin>/<name>``, i.e. the origin
+    level is *below* the day, so the folder list is the union of the origin
+    directories across every day.
+
+    ``always_include`` names one origin that is listed even when it has
+    nothing of this kind on disk, so the admin's own folder never disappears
+    from the parent view just because it is still empty. Its entry is a real
+    zero — count 0 and no cover — not a guess.
+    """
+    groups: dict[str, dict[str, Any]] = {}
+    if always_include:
+        groups[always_include] = {"origin": always_include, "count": 0,
+                                  "bytes": 0, "latest": None, "_cover": None}
+    if images_dir.exists():
+        try:
+            # Dot-dirs are ours (``.thumbs`` — see thumbs.py), never days.
+            day_dirs = [p for p in images_dir.iterdir()
+                        if p.is_dir() and not p.name.startswith(".")]
+        except OSError:
+            day_dirs = []
+        for day_dir in day_dirs:
+            try:
+                origin_dirs = [p for p in day_dir.iterdir() if p.is_dir()]
+            except OSError:
+                continue
+            for origin_dir in origin_dirs:
+                try:
+                    files = list(origin_dir.iterdir())
+                except OSError:
+                    continue
+                for f in files:
+                    if not f.is_file() or f.suffix.lower() not in (".png", ".mp4"):
+                        continue
+                    item_kind = "video" if f.suffix.lower() == ".mp4" else "image"
+                    if kind and item_kind != kind:
+                        continue
+                    try:
+                        st = f.stat()
+                    except OSError:
+                        continue
+                    g = groups.setdefault(origin_dir.name, {
+                        "origin": origin_dir.name, "count": 0, "bytes": 0,
+                        "latest": None, "_cover": None})
+                    g["count"] += 1
+                    g["bytes"] += st.st_size
+                    if g["latest"] is None or st.st_mtime > g["latest"]:
+                        g["latest"] = st.st_mtime
+                        g["_cover"] = (day_dir.name, f, item_kind)
+    out: list[dict[str, Any]] = []
+    for g in groups.values():
+        cover = None
+        if g["_cover"] is not None:
+            day, path, item_kind = g["_cover"]
+            sidecar: dict[str, Any] = {}
+            sc = path.with_suffix(path.suffix + ".json")
+            if sc.is_file():
+                try:
+                    sidecar = json.loads(sc.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    sidecar = {}
+            cover = {
+                "day": day,
+                "origin": g["origin"],
+                "name": path.name,
+                "kind": item_kind,
+                "url": f"{url_prefix}/file/{day}/{g['origin']}/{path.name}",
+                "thumb_url": (f"{url_prefix}/thumb/{day}/{g['origin']}/"
+                              f"{path.name}"),
+                "width": sidecar.get("width"),
+                "height": sidecar.get("height"),
+            }
+        out.append({"origin": g["origin"], "count": g["count"],
+                    "bytes": g["bytes"], "latest": g["latest"],
+                    "cover": cover})
+    # Busiest-most-recently first; an empty folder (latest None) sorts last
+    # but keeps a stable place by name.
+    out.sort(key=lambda e: (e["latest"] is not None, e["latest"] or 0.0,
+                            e["origin"]), reverse=True)
+    return {"origins": out}
+
+
+@router.get("/images/gallery/origins")
+async def images_gallery_origins(
+        request: Request,
+        kind: str | None = None,
+        origin: Origin = Depends(require_admin_ui)) -> Response:
+    """The parent level of the admin gallery: one entry per origin folder.
+
+    The admin pages open inside the session origin's own folder (that is the
+    only folder they generate into) and step up to this listing to browse
+    what other origins have made. ``kind`` (``image`` | ``video``) scopes the
+    counts and covers to the page asking, so the video page's folder view
+    does not count PNGs.
+
+    The caller's own origin is always present, even at zero, so their folder
+    cannot go missing from the view they came from.
+    """
+    from fastapi.responses import JSONResponse as _JSONResponse
+    cfg = request.app.state.cfg
+    if kind is not None and kind not in ("image", "video"):
+        raise HTTPException(status_code=400, detail="kind must be image or video")
+    payload = _list_gallery_origins(cfg.images_dir, kind=kind,
+                                    always_include=origin.name)
+    payload["self"] = origin.name
+    return _JSONResponse(payload)
+
+
 @router.get("/images/gallery")
 async def images_gallery(request: Request,
                          limit: int = 60,
                          before: float | None = None,
                          kind: str | None = None,
+                         origin: str | None = None,
                          _: Origin = Depends(require_admin_ui)) -> Response:
     """JSON listing of every image (and video) on disk, newest first.
 
     Pagination uses an mtime cursor (``before=<float>``) so the client can
     request the next page once the previous page's last item has been
     rendered. ``kind`` (``image`` | ``video``) filters the listing so the
-    image and video pages each show only their own media. The admin endpoint
-    sees every origin's gallery; the public variant in ``app.py`` scopes by
-    the bearer's origin name.
+    image and video pages each show only their own media. ``origin`` scopes
+    the listing to one origin's folder — the admin pages pass their own
+    origin on load, and whichever folder the operator has stepped into after
+    that; with no ``origin`` the listing spans every folder, as it always
+    did. The admin endpoint may read any origin's gallery; the public variant
+    in ``app.py`` is pinned to the bearer's own origin name.
     """
     from fastapi.responses import JSONResponse as _JSONResponse
     cfg = request.app.state.cfg
@@ -3554,7 +3681,15 @@ async def images_gallery(request: Request,
         raise HTTPException(status_code=400, detail="limit must be 1..500")
     if kind is not None and kind not in ("image", "video"):
         raise HTTPException(status_code=400, detail="kind must be image or video")
-    payload = _list_gallery(cfg.images_dir, limit=limit, before=before, kind=kind)
+    if origin is not None:
+        # The name IS the directory, so anything that is not a legal origin
+        # name is a 400 rather than a walk of some other path.
+        try:
+            validate_origin_name(origin)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    payload = _list_gallery(cfg.images_dir, origin_filter=origin,
+                            limit=limit, before=before, kind=kind)
     return _JSONResponse(payload)
 
 

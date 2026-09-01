@@ -1,0 +1,276 @@
+{# Origin folder navigation for the admin image / video feeds.
+
+   The gallery on disk is <images_dir>/<day>/<origin>/<file>, so "origin" is
+   a real folder, not a tag. The admin pages used to show every origin's
+   output in one undifferentiated stream; this partial turns that stream
+   into a two-level browse:
+
+     * the page opens INSIDE the session origin's own folder — the only
+       folder an admin ever generates into;
+     * stepping up shows one card per origin folder (cover, count, size,
+       last activity), and opening one browses that origin's media.
+
+   Navigation is frozen while a generation is in flight: the live
+   placeholder tiles live in this same grid and resolve into the finished
+   media in place, so swapping the feed underneath them would strand them.
+   The composer also snaps back to the admin's own folder when Generate is
+   pressed, because that is where the result will land.
+
+   API: LMGalleryScope.create(opts) -> controller
+     opts.bar         element        the breadcrumb strip
+     opts.grid        element        the feed grid (folder cards go here)
+     opts.selfOrigin  string         the session origin — the opening folder
+     opts.kind        "image"|"video"
+     opts.originsUrl  string         /ui/images/gallery/origins
+     opts.authHeaders () => headers | null
+     opts.onChange    (origin|null) => void   reload the feed for this scope
+     opts.onError     (message) => void
+     opts.spanCard    (card) => void          the page's masonry sizer
+
+   controller.current()  -> origin name, or null at the parent level
+   controller.isRoot()   -> true at the parent level
+   controller.goTo(name|null) -> Promise, resolved once onChange has
+   controller.setBusy(bool)   disable navigation during a generation
+   controller.renderFolders() fetch + draw the folder cards into the grid
+   controller.render()        redraw the breadcrumb only
+#}
+<style>
+  .gen-scopebar {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+    padding: 6px 2px 10px; font-size: 0.75rem; color: var(--fg-2);
+  }
+  .gen-scopebar__up, .gen-scopebar__home {
+    font: inherit; display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 9px; border-radius: 6px; cursor: pointer;
+    color: var(--fg-1); background: var(--bg-2);
+    border: 1px solid var(--bg-3);
+  }
+  .gen-scopebar__up:hover, .gen-scopebar__home:hover {
+    color: var(--fg-0); border-color: var(--fg-3);
+  }
+  .gen-scopebar__up[disabled], .gen-scopebar__home[disabled] {
+    opacity: 0.45; cursor: not-allowed;
+  }
+  .gen-scopebar__sep { color: var(--fg-3); }
+  .gen-scopebar__crumb {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--fg-0); font-weight: 500;
+  }
+  .gen-scopebar__meta { color: var(--fg-3); font-variant-numeric: tabular-nums; }
+  .gen-scopebar__badge {
+    font-size: 0.5625rem; letter-spacing: 0.1em; text-transform: uppercase;
+    font-weight: 600; padding: 2px 6px; border-radius: 4px;
+    color: var(--accent);
+    border: 1px solid color-mix(in oklab, var(--accent) 45%, transparent);
+  }
+  .gen-scopebar__note {
+    margin-left: auto; color: var(--fg-2);
+    border-left: 2px solid var(--accent); padding-left: 8px;
+  }
+
+  /* ---- Folder card ----
+     Shares .gen-card so the page's masonry sizing, hover and empty-state
+     logic apply to it unchanged. */
+  .gen-folder {
+    display: flex; flex-direction: column; text-align: left;
+    padding: 0; font: inherit; cursor: pointer;
+    aspect-ratio: auto;      /* sized by its own content, not --card-ar */
+  }
+  .gen-folder__cover {
+    position: relative; display: block; width: 100%;
+    aspect-ratio: 4 / 3; overflow: hidden; background: var(--bg-1);
+  }
+  .gen-folder__cover img {
+    width: 100%; height: 100%; object-fit: cover; display: block;
+    opacity: 0; transition: opacity 260ms ease;
+  }
+  .gen-folder__cover img.is-loaded { opacity: 1; }
+  .gen-folder__cover--empty {
+    display: flex; align-items: center; justify-content: center;
+    color: var(--fg-3); font-size: 1.75rem;
+  }
+  .gen-folder__meta {
+    display: flex; flex-direction: column; gap: 3px;
+    padding: 9px 11px 11px;
+  }
+  .gen-folder__name {
+    display: flex; align-items: center; gap: 6px;
+    color: var(--fg-0); font-weight: 500; font-size: 0.875rem;
+    word-break: break-word;
+  }
+  .gen-folder__count {
+    color: var(--fg-2); font-size: 0.6875rem;
+    font-variant-numeric: tabular-nums;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .gen-folder__cover img { transition: none; }
+  }
+</style>
+<script>
+window.LMGalleryScope = (function () {
+  "use strict";
+
+  function fmtBytes(n) {
+    if (!isFinite(n) || n <= 0) return "0 B";
+    var u = ["B", "KB", "MB", "GB", "TB"], i = 0, v = n;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return (v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)) + " " + u[i];
+  }
+  function fmtAgo(ts) {
+    if (!ts) return "never";
+    var s = Date.now() / 1000 - ts;
+    if (s < 90) return "just now";
+    if (s < 3600) return Math.round(s / 60) + " min ago";
+    if (s < 172800) return Math.round(s / 3600) + " h ago";
+    return Math.round(s / 86400) + " d ago";
+  }
+
+  function create(opts) {
+    var bar = opts.bar, grid = opts.grid;
+    var noun = opts.kind === "video" ? "clip" : "image";
+    // Starts in the admin's own folder — the one they generate into.
+    var scope = opts.selfOrigin;
+    var busy = false;
+    var lastCounts = null;   // {folders, items} from the most recent listing
+
+    function headers() {
+      var h = opts.authHeaders ? opts.authHeaders() : null;
+      return h || {};
+    }
+
+    function el(tag, cls, text) {
+      var e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (text != null) e.textContent = text;
+      return e;
+    }
+
+    function render() {
+      bar.innerHTML = "";
+      if (scope === null) {
+        bar.appendChild(el("span", "gen-scopebar__crumb", "All origins"));
+        if (lastCounts) {
+          bar.appendChild(el("span", "gen-scopebar__meta",
+            lastCounts.folders + (lastCounts.folders === 1 ? " folder · " : " folders · ") +
+            lastCounts.items + " " + noun + (lastCounts.items === 1 ? "" : "s")));
+        }
+        var home = el("button", "gen-scopebar__home", "↩ " + opts.selfOrigin);
+        home.type = "button";
+        home.title = "Back to your own folder";
+        home.disabled = busy;
+        home.addEventListener("click", function () { goTo(opts.selfOrigin); });
+        bar.appendChild(home);
+        return;
+      }
+      var up = el("button", "gen-scopebar__up", "↑ All origins");
+      up.type = "button";
+      up.title = busy
+        ? "Finish or cancel the generation before browsing other origins"
+        : "Browse every origin's folder";
+      up.disabled = busy;
+      up.addEventListener("click", function () { goTo(null); });
+      bar.appendChild(up);
+      bar.appendChild(el("span", "gen-scopebar__sep", "/"));
+      var crumb = el("span", "gen-scopebar__crumb");
+      crumb.appendChild(el("span", null, scope));
+      if (scope === opts.selfOrigin) {
+        crumb.appendChild(el("span", "gen-scopebar__badge", "yours"));
+      }
+      bar.appendChild(crumb);
+      if (scope !== opts.selfOrigin) {
+        bar.appendChild(el("span", "gen-scopebar__note",
+          "Read-only browse — anything you generate lands in " +
+          opts.selfOrigin + "."));
+      }
+    }
+
+    // Returns whatever onChange returns, so a caller that must not race the
+    // refill (generate(), which builds live tiles into this grid) can await
+    // the move.
+    function goTo(origin) {
+      if (busy) return Promise.resolve();
+      if (origin === scope) return Promise.resolve();
+      scope = origin;
+      render();
+      return Promise.resolve(opts.onChange(scope));
+    }
+
+    function folderCard(entry) {
+      var card = el("button", "gen-card gen-folder");
+      card.type = "button";
+      card.dataset.origin = entry.origin;
+      var cover = el("span", "gen-folder__cover");
+      if (entry.cover) {
+        var img = document.createElement("img");
+        img.loading = "lazy";
+        img.decoding = "async";
+        img.alt = "";
+        img.addEventListener("load", function () {
+          img.classList.add("is-loaded");
+          opts.spanCard(card);
+        });
+        // Cookie-authenticated page: the thumbnail route can be hit
+        // directly, no blob round-trip.
+        img.src = entry.cover.thumb_url;
+        cover.appendChild(img);
+      } else {
+        cover.className = "gen-folder__cover gen-folder__cover--empty";
+        cover.textContent = opts.kind === "video" ? "🎞" : "🖼";
+      }
+      card.appendChild(cover);
+      var meta = el("span", "gen-folder__meta");
+      var name = el("span", "gen-folder__name");
+      name.appendChild(el("span", null, entry.origin));
+      if (entry.origin === opts.selfOrigin) {
+        name.appendChild(el("span", "gen-scopebar__badge", "yours"));
+      }
+      meta.appendChild(name);
+      meta.appendChild(el("span", "gen-folder__count",
+        entry.count + " " + noun + (entry.count === 1 ? "" : "s") +
+        " · " + fmtBytes(entry.bytes) + " · " + fmtAgo(entry.latest)));
+      card.appendChild(meta);
+      card.addEventListener("click", function () { goTo(entry.origin); });
+      return card;
+    }
+
+    async function renderFolders() {
+      var url = opts.originsUrl + (opts.kind ? "?kind=" + encodeURIComponent(opts.kind) : "");
+      var r;
+      try {
+        r = await fetch(url, {headers: headers(), credentials: "same-origin"});
+      } catch (e) {
+        opts.onError("Could not list origins: " + e.message);
+        return;
+      }
+      if (!r.ok) {
+        opts.onError("Could not list origins: HTTP " + r.status);
+        return;
+      }
+      var payload = await r.json();
+      var entries = payload.origins || [];
+      lastCounts = {
+        folders: entries.length,
+        items: entries.reduce(function (a, e) { return a + e.count; }, 0),
+      };
+      entries.forEach(function (entry) {
+        var card = folderCard(entry);
+        grid.appendChild(card);
+        opts.spanCard(card);
+      });
+      render();
+    }
+
+    render();
+    return {
+      current: function () { return scope; },
+      isRoot: function () { return scope === null; },
+      goTo: goTo,
+      setBusy: function (b) { busy = !!b; render(); },
+      renderFolders: renderFolders,
+      render: render,
+    };
+  }
+
+  return { create: create };
+})();
+</script>

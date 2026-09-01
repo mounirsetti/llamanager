@@ -421,6 +421,8 @@
     <div class="gen-feed" id="gen-feed">
       {% include "_composer_reattach.html" %}
       {% include "_composer_page.html" %}
+      {# Origin folder breadcrumb — filled by _gallery_scope.html. #}
+      <div class="gen-scopebar" id="gen-scopebar"></div>
       <div class="gen-grid" id="gen-grid">
         <p class="gen-empty" id="gen-empty">
           A blank reel.
@@ -513,6 +515,7 @@
 </div>
 
 {% include "_gallery_media.html" %}
+{% include "_gallery_scope.html" %}
 <script>
   window.LM_IMAGES_CFG = {
     imageModels: {{ image_models_json | safe }},
@@ -526,6 +529,10 @@
     apiKey: "{{ api_key }}",
     mediaKind: "video",
     galleryUrl: "/ui/images/gallery",
+    // The admin's own gallery folder: where the feed opens, and the only
+    // folder this page ever generates into.
+    selfOrigin: {{ session_origin | tojson }},
+    originsUrl: "/ui/images/gallery/origins",
     fileUrlPrefix: "/ui/images/file/",
     statusUrl: "/ui/images/status",
     generationsUrl: "/v1/videos/generations",
@@ -560,6 +567,7 @@
   const engineHint = $("lm-img-engine-hint");
 
   const grid       = $("gen-grid");
+  const scopeBar   = $("gen-scopebar");
   const emptyEl    = $("gen-empty");
   const loadMore   = $("gen-loadmore");
   const modelBtn   = $("gen-modelbtn");
@@ -1000,9 +1008,34 @@
     emptyEl.hidden = !!hasCards || !!liveCard;
   }
 
+  // ---------- Origin folders ----------
+  // The feed opens inside this admin's own folder and can step up to browse
+  // every origin's. See _gallery_scope.html for the navigation rules.
+  const scope = LMGalleryScope.create({
+    bar: scopeBar, grid, selfOrigin: cfg.selfOrigin, kind: cfg.mediaKind,
+    originsUrl: cfg.originsUrl,
+    authHeaders: () => (cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : null),
+    spanCard, onError: showError,
+    onChange: () => reloadFeed(),
+  });
+
+  /** Empty the feed and refill it for the current scope: clip tiles inside
+   *  an origin's folder, folder cards at the parent level. No live tile can
+   *  be present — navigation is frozen while a render is in flight. */
+  async function reloadFeed() {
+    state.seenUrls.clear();
+    state.nextBefore = null;
+    grid.querySelectorAll(".gen-card").forEach(c => c.remove());
+    loadMore.hidden = true;
+    if (scope.isRoot()) { await scope.renderFolders(); updateEmpty(); return; }
+    await loadInitial();
+  }
+
   async function fetchGallery({reset=false} = {}) {
     const params = new URLSearchParams({limit: "60"});
     if (cfg.mediaKind) params.set("kind", cfg.mediaKind);
+    // Scoped to the folder being browsed; the parent level never gets here.
+    if (!scope.isRoot()) params.set("origin", scope.current());
     if (!reset && state.nextBefore != null) params.set("before", String(state.nextBefore));
     const r = await fetch(`${cfg.galleryUrl}?${params.toString()}`, {
       headers: cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : {},
@@ -1273,8 +1306,11 @@
 
   function setBusy(busy) {
     state.inFlight = busy;
+    // The live placeholder lives in this grid and is replaced by the
+    // finished clip in place, so the feed must not be swapped under it.
+    scope.setBusy(busy);
     submitBtn.disabled = busy;
-    hintEl.innerHTML = busy ? "Generating — you can keep browsing the feed." : "&nbsp;";
+    hintEl.innerHTML = busy ? "Generating — you can keep browsing this folder." : "&nbsp;";
   }
   /* Cancel must reach the server: aborting our own stream only stops the
      page listening, and a video render is minutes of GPU time. */
@@ -1368,7 +1404,10 @@
   async function refreshFront() {
     try {
       const _kq = cfg.mediaKind ? `&kind=${cfg.mediaKind}` : "";
-      const r = await fetch(`${cfg.galleryUrl}?limit=12${_kq}`, {
+      // Always this admin's own folder: a render started here lands there
+      // and nowhere else, whatever the feed was last showing.
+      const _oq = `&origin=${encodeURIComponent(cfg.selfOrigin)}`;
+      const r = await fetch(`${cfg.galleryUrl}?limit=12${_kq}${_oq}`, {
         headers: cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : {},
         credentials: "same-origin",
       });
@@ -1383,6 +1422,10 @@
     clearError(); closePops();
     if (!modelSel.value) { showError("Pick a model first."); return; }
     if (!promptEl.value.trim()) { showError("Prompt is empty."); return; }
+
+    // The clip lands in this admin's own folder, so go there before the live
+    // tile is made — otherwise it would sit in someone else's.
+    if (scope.current() !== cfg.selfOrigin) await scope.goTo(cfg.selfOrigin);
 
     const promptText = promptEl.value.trim();
     incognitoRun = isIncognito(); incognitoPrompt = promptText;
@@ -1455,7 +1498,7 @@
     renderOverrides();
     applyCaps();
   }
-  loadInitial();
+  reloadFeed();
   autosize();
 })();
 </script>

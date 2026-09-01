@@ -524,13 +524,15 @@
     <div class="gen-feed" id="gen-feed">
       {% include "_composer_reattach.html" %}
       {% include "_composer_page.html" %}
-      <div class="gen-feedhead">
+      <div class="gen-feedhead" id="gen-feedhead">
         <span class="gen-feedhead__label">Newest first</span>
         <span>New results land at the top ↑</span>
         <span class="gen-feedhead__live" id="gen-feedhead-live" hidden>
           <span class="gen-live__dot"></span><span id="gen-feedhead-live-text">Generating…</span>
         </span>
       </div>
+      {# Origin folder breadcrumb — filled by _gallery_scope.html. #}
+      <div class="gen-scopebar" id="gen-scopebar"></div>
       <div class="gen-grid" id="gen-grid">
         <p class="gen-empty" id="gen-empty">
           A blank canvas.
@@ -615,6 +617,7 @@
 </div>
 
 {% include "_gallery_media.html" %}
+{% include "_gallery_scope.html" %}
 <script>
   window.LM_IMAGES_CFG = {
     imageModels: {{ image_models_json | safe }},
@@ -628,6 +631,10 @@
     apiKey: "{{ api_key }}",
     mediaKind: "image",
     galleryUrl: "/ui/images/gallery",
+    // The admin's own gallery folder: where the feed opens, and the only
+    // folder this page ever generates into.
+    selfOrigin: {{ session_origin | tojson }},
+    originsUrl: "/ui/images/gallery/origins",
     statusUrl: "/ui/images/status",
     cancelUrlTpl: "/admin/queue/{id}/cancel",
     // Admin pages only: permanent removal of a gallery item.
@@ -670,6 +677,7 @@
   const engineHint = $("lm-img-engine-hint");
 
   const grid       = $("gen-grid");
+  const scopeBar   = $("gen-scopebar");
   const emptyEl    = $("gen-empty");
   const loadMore   = $("gen-loadmore");
   const modelBtn   = $("gen-modelbtn");
@@ -681,6 +689,7 @@
   const hintEl     = $("gen-hint");
   const genSpin    = $("gen-generate-spin");
   const genLabel   = $("gen-generate-label");
+  const feedHead   = $("gen-feedhead");
   const feedLive   = $("gen-feedhead-live");
   const feedLiveTx = $("gen-feedhead-live-text");
   const baseTitle  = document.title;
@@ -1053,9 +1062,35 @@
     emptyEl.hidden = !!hasCards || live.cards.length > 0;
   }
 
+  // ---------- Origin folders ----------
+  // The feed opens inside this admin's own folder and can step up to browse
+  // every origin's. See _gallery_scope.html for the navigation rules.
+  const scope = LMGalleryScope.create({
+    bar: scopeBar, grid, selfOrigin: cfg.selfOrigin, kind: cfg.mediaKind,
+    originsUrl: cfg.originsUrl,
+    authHeaders: () => (cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : null),
+    spanCard, onError: showError,
+    onChange: () => reloadFeed(),
+  });
+
+  /** Empty the feed and refill it for the current scope: media tiles inside
+   *  an origin's folder, folder cards at the parent level. No live tile can
+   *  be present — navigation is frozen while a generation is in flight. */
+  async function reloadFeed() {
+    state.seenUrls.clear();
+    state.nextBefore = null;
+    grid.querySelectorAll(".gen-card").forEach(c => c.remove());
+    loadMore.hidden = true;
+    feedHead.hidden = scope.isRoot();
+    if (scope.isRoot()) { await scope.renderFolders(); updateEmpty(); return; }
+    await loadInitial();
+  }
+
   async function fetchGallery({reset=false} = {}) {
     const params = new URLSearchParams({limit: "60"});
     if (cfg.mediaKind) params.set("kind", cfg.mediaKind);
+    // Scoped to the folder being browsed; the parent level never gets here.
+    if (!scope.isRoot()) params.set("origin", scope.current());
     if (!reset && state.nextBefore != null) params.set("before", String(state.nextBefore));
     const r = await fetch(`${cfg.galleryUrl}?${params.toString()}`, {
       headers: cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : {},
@@ -1491,6 +1526,9 @@
 
   function setBusy(busy) {
     state.inFlight = busy;
+    // The live placeholders live in this grid and resolve into the finished
+    // images in place, so the feed must not be swapped under them.
+    scope.setBusy(busy);
     submitBtn.disabled = busy;
     submitBtn.classList.toggle("is-busy", busy);
     genSpin.hidden = !busy;
@@ -1616,7 +1654,10 @@
   async function refreshFront({resolve = false} = {}) {
     try {
       const _kq = cfg.mediaKind ? `&kind=${cfg.mediaKind}` : "";
-      const r = await fetch(`${cfg.galleryUrl}?limit=12${_kq}`, {
+      // Always this admin's own folder: a generation started here lands
+      // there and nowhere else, whatever the feed was last showing.
+      const _oq = `&origin=${encodeURIComponent(cfg.selfOrigin)}`;
+      const r = await fetch(`${cfg.galleryUrl}?limit=12${_kq}${_oq}`, {
         headers: cfg.apiKey ? {"Authorization": `Bearer ${cfg.apiKey}`} : {},
         credentials: "same-origin",
       });
@@ -1635,6 +1676,10 @@
     clearError(); closePops();
     if (!modelSel.value) { showError("Pick a model first."); return; }
     if (!promptEl.value.trim()) { showError("Prompt is empty."); return; }
+
+    // The result lands in this admin's own folder, so go there before the
+    // live tiles are made — otherwise they would sit in someone else's.
+    if (scope.current() !== cfg.selfOrigin) await scope.goTo(cfg.selfOrigin);
 
     const promptText = promptEl.value.trim();
     incognitoRun = isIncognito();
@@ -1739,7 +1784,7 @@
     renderOverrides();
     applyCaps();
   }
-  loadInitial().then(reattachIfBusy);
+  reloadFeed().then(reattachIfBusy);
   autosize();
 })();
 </script>
