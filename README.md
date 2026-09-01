@@ -74,6 +74,7 @@ The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silic
   - [Profiles](#asr-profiles)
 - [Calling the API](#calling-the-api)
   - [Anthropic-compatible API](#anthropic-compatible-api)
+  - [MCP (Model Context Protocol)](#mcp-model-context-protocol)
   - [Reasoning / thinking control](#reasoning--thinking-control)
 - [Chat in the browser](#chat-in-the-browser)
 - [Auto-start at boot or login](#auto-start-at-boot-or-login)
@@ -96,6 +97,7 @@ What you get out of the box:
 
 - **OpenAI-compatible `/v1/*` proxy** for chat, completions, image generations, and audio transcriptions. Any existing OpenAI client library works.
 - **Anthropic-compatible `/anthropic/v1/*` proxy** for the Messages API, token counting, and model listing. Point the official `anthropic` SDK at llamanager via `base_url` and it just works — including streaming, tool use, and base64 image inputs.
+- **MCP server at `/mcp`** so an agent can drive the box, not just talk to a model — list and load models, watch VRAM, pull weights, generate images, transcribe audio. Works with Claude Code, Claude Desktop (one-click `.mcpb`), Cursor and VS Code; ChatGPT reaches it through OpenAI's tunnel. See [MCP (Model Context Protocol)](#mcp-model-context-protocol).
 - **Per-engine install flow** in the web UI. Click `Install dependencies` for HiDream or Z-Image and llamanager creates a Python venv under `~/.llamanager/venvs/<engine>/` and pip-installs the right packages. The disk footprint and live install log are visible on the page.
 - **Model download manager** that pulls whole HF repos (or a single subfolder, useful for monster repos like SeeSee21/Z-Anime where only the `diffusers/` subtree is needed). Progress streams to the UI every 2 s.
 - **Per-origin priority queue** with cancellation that propagates all the way to the running subprocess. A long batch can't block your editor; cancelling a queued or in-flight image task actually stops the work.
@@ -1358,6 +1360,79 @@ Supported features:
 
 Not implemented: `document` content blocks (PDFs), Anthropic server-side tools, prompt caching markers, and the Batches API.
 
+### MCP (Model Context Protocol)
+
+The `/v1` and `/anthropic/v1` proxies let an agent *talk to* a model on this
+machine. They don't let it *drive the machine* — see what's loaded, notice that
+VRAM is nearly full, swap a model, pull weights, kick off a generation. That is
+what llamanager knows, and MCP is how hosts ask for it.
+
+llamanager serves MCP over Streamable HTTP at `POST /mcp`, on the same port as
+everything else, authenticated with the same bearer keys. Mint one on
+**Configure → Connect** in the web UI; that page also prints the exact snippet
+for each client, with your host, port and key already filled in.
+
+```bash
+# Claude Code
+claude mcp add --transport http llamanager http://127.0.0.1:7200/mcp \
+  --header "Authorization: Bearer lm_your_key"
+```
+
+Hosts that launch a child process instead of dialling a URL (Claude Desktop,
+anything installed from an `.mcpb`) use the stdio verb, which proxies the
+running daemon rather than starting a second one:
+
+```bash
+llamanager mcp-stdio          # on this machine, needs no key at all
+```
+
+It resolves its credentials like every other CLI verb: `--admin-key`, then
+`$LLAMANAGER_ADMIN_KEY`, then `[cli].admin_key`, then the 0600 local control
+key in the data dir. Same for the URL via `--url` / `$LLAMANAGER_URL`.
+
+**Claude Desktop, one click.** `python tools/build_mcpb.py` writes
+`dist/llamanager.mcpb`. Double-click it and Claude Desktop installs the server;
+the key field can stay empty on the machine running the daemon. The bundle
+carries no code — it runs the `llamanager` you already have.
+
+**ChatGPT.** It runs in OpenAI's cloud and cannot reach `127.0.0.1` here. Run
+OpenAI's `tunnel-client` on this machine pointed at `http://127.0.0.1:7200/mcp`
+and pick the tunnel under *Connection* in a developer-mode app. The tunnel is
+outbound-only; nothing is exposed to the internet.
+
+#### Tools
+
+| tool | needs admin | what it does |
+|------|-------------|--------------|
+| `list_models` | yes | registry entries with family, engine, role, size |
+| `server_status` | yes | slots, queue, intake, RAM/swap, VRAM per card, pressure class |
+| `load_model` / `unload_model` | yes | load or hot-swap a slot; free its VRAM |
+| `pull_model` / `get_download` / `cancel_download` | yes | fetch weights from HF, poll, cancel |
+| `queue_status` / `set_queue_paused` / `cancel_request` | yes | inspect and steer the queue |
+| `ask_local_model` | no | run a prompt through a local model, get the completion |
+| `generate_image` / `generate_video` | no | submit a generation, get a `job_id` |
+| `get_generation_job` / `cancel_generation_job` | no | poll or stop a submitted job |
+| `get_generation_image` | no | the finished image inline, to look at |
+| `transcribe_audio` | no | local ASR from a file path or base64 |
+
+Generation is **submit-and-poll**, the same shape as weights downloads: a
+20-minute Krea run would time out every host if the tool call blocked, so
+`generate_image` returns a `job_id` immediately and `get_generation_job`
+reports queue position, the live diffusion step, and finally the output path
+and URL. Jobs live in memory — a daemon restart loses them, though finished
+images stay in the gallery. `get_generation_image` returns a finished still
+inline when the agent should actually look at what it made.
+
+The admin split is the origin's `is_admin` flag, so a key minted without it can
+still generate and transcribe but is refused — by name — when it tries to load
+a model or pause the queue. Revoke or rotate an MCP key on the **Origins** page
+like any other.
+
+**Access.** There is no anonymous mode: `/mcp` answers `401` without a valid
+key. If an `Origin` header is present it must be loopback or match the `Host`,
+so a web page cannot drive your daemon through the browser. The local control
+key stays loopback-only here as everywhere else.
+
 ### Reasoning / thinking control
 
 Thinking-capable models (Qwen3, GLM, MiniCPM, …) emit a `<think>…</think>` preamble that wastes leading tokens when you don't want it. llamanager lets you turn it off two ways:
@@ -1810,6 +1885,7 @@ ignores them.
 |-------------|-----------------------------------------|--------------------|
 | `/v1/*`     | OpenAI-compatible inference (queued)    | bearer (any key)   |
 | `/admin/*`  | control plane (lifecycle, models, etc.) | bearer (admin key) |
+| `/mcp`      | MCP server (Streamable HTTP)            | bearer (any key)   |
 | `/ui/*`     | web UI                                  | cookie session     |
 | `/health`   | liveness check                          | none               |
 

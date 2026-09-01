@@ -399,23 +399,36 @@ def create_app(config_path: Path | None = None,
         except (NotImplementedError, RuntimeError):
             pass
 
-        try:
-            yield
-        finally:
-            prune_task.cancel()
-            vram_task.cancel()
-            boot_sweep_task.cancel()
-            excl_stop.set()
-            excl_task.cancel()
-            au_stop.set()
-            au_task.cancel()
-            await mem_watchdog.stop()
-            await queue.stop()
-            await supervisor.stop()
-            with contextlib.suppress(Exception):
-                await audio_runner.stop()
-            await sm.stop()
-            db.close()
+        # The MCP transport keeps its own task group; a sub-app mounted on
+        # Starlette never has its lifespan entered, so the daemon owns it.
+        # Without this every /mcp request fails with an opaque 500.
+        async with contextlib.AsyncExitStack() as stack:
+            await stack.enter_async_context(app.state.mcp.session_manager.run())
+            try:
+                yield
+            finally:
+                # Suppressed like audio_runner below: nothing about MCP
+                # cleanup may prevent sm.stop() from reaping llama-server or
+                # db.close() from running. An orphaned engine is far worse
+                # than a leaked job task in a process that is exiting.
+                with contextlib.suppress(Exception):
+                    await app.state.mcp_jobs.shutdown()
+                with contextlib.suppress(Exception):
+                    await app.state.mcp_http.aclose()
+                prune_task.cancel()
+                vram_task.cancel()
+                boot_sweep_task.cancel()
+                excl_stop.set()
+                excl_task.cancel()
+                au_stop.set()
+                au_task.cancel()
+                await mem_watchdog.stop()
+                await queue.stop()
+                await supervisor.stop()
+                with contextlib.suppress(Exception):
+                    await audio_runner.stop()
+                await sm.stop()
+                db.close()
 
     app = FastAPI(title="llamanager", version=__version__, lifespan=lifespan)
 
@@ -529,6 +542,12 @@ def create_app(config_path: Path | None = None,
     app.include_router(anthropic_router)
     app.include_router(admin_router)
     app.include_router(ui_router)
+
+    # Mounted last so it sits beside the routers rather than shadowing one.
+    # mount_mcp also builds app.state.mcp / app.state.mcp_jobs, which the
+    # lifespan above depends on.
+    from .mcp_server import mount_mcp
+    mount_mcp(app)
 
     _assets_dir = Path(__file__).resolve().parent.parent / "assets"
 

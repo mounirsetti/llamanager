@@ -44,6 +44,33 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mcp_stdio(args: argparse.Namespace) -> int:
+    """Bridge a stdio-only MCP host to the running daemon's /mcp endpoint.
+
+    The daemon is the one process that owns the GPU and the queue, so this
+    verb proxies to it rather than starting a second copy of the app. On
+    the same machine it needs no configuration: the 0600 local control key
+    in the data dir is picked up by ``resolve_admin_key``.
+    """
+    from .admin_client import (AdminClientError, resolve_admin_key,
+                               resolve_base_url)
+    from .mcp_stdio import run_stdio_proxy
+
+    try:
+        cfg = load_config(Path(args.config) if args.config else None)
+    except Exception:
+        # Same rule as the other admin verbs: flags and env can carry
+        # everything, so a missing config is not fatal here.
+        cfg = None
+    try:
+        base = resolve_base_url(cfg, getattr(args, "url", None))
+        key = resolve_admin_key(cfg, getattr(args, "admin_key", None))
+    except AdminClientError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    return run_stdio_proxy(base, key)
+
+
 def cmd_tray(args: argparse.Namespace) -> int:
     """Run the system-tray / menu-bar app (thin client over /admin/*).
 
@@ -1714,6 +1741,18 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--port", type=int, default=None)
     sp.add_argument("--log-level", default="info")
     sp.set_defaults(func=cmd_serve)
+
+    sp = sub.add_parser(
+        "mcp-stdio",
+        help="serve llamanager's MCP tools on stdin/stdout (proxies the "
+             "running daemon; for hosts that launch a child process)")
+    sp.add_argument("--url", default=None,
+                    help="daemon base URL (default: from config, or "
+                         "$LLAMANAGER_URL, or http://127.0.0.1:7200)")
+    sp.add_argument("--admin-key", default=None,
+                    help="origin API key (default: $LLAMANAGER_ADMIN_KEY, "
+                         "[cli].admin_key, or the local control key)")
+    sp.set_defaults(func=cmd_mcp_stdio)
 
     sp = sub.add_parser("tray",
                         help="run the system-tray / menu-bar app "

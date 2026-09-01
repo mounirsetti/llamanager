@@ -656,8 +656,17 @@ class SlotsCoexBody(BaseModel):
 
 
 def _slots_payload(request: Request) -> dict[str, Any]:
-    cfg = request.app.state.cfg
-    sm = request.app.state.sm
+    return slots_payload_for_app(request.app)
+
+
+def slots_payload_for_app(app: Any) -> dict[str, Any]:
+    """Slot fleet snapshot, addressed by app rather than by request.
+
+    Split out of :func:`_slots_payload` so the MCP tools (which have no
+    ``Request``) report exactly what the dashboard and CLI report.
+    """
+    cfg = app.state.cfg
+    sm = app.state.sm
     slot_views: list[dict[str, Any]] = []
     total_loaded_gb = 0.0
     if hasattr(sm, "slots"):

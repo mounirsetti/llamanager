@@ -24,6 +24,9 @@ dependencies = [
     "aiosqlite>=0.19",
     # Gallery thumbnails (thumbs.py) and reference-image sidecar previews.
     "pillow>=10",
+    # The MCP endpoint at /mcp and the `mcp-stdio` verb (mcp_server.py,
+    # mcp_stdio.py). 2.x renamed FastMCP to MCPServer, so the floor is 2.0.
+    "mcp>=2.0",
 ]
 
 [project.optional-dependencies]

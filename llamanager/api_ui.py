@@ -2351,6 +2351,68 @@ def _parse_allowed_models(allow_all: bool, allowed_models: list[str]) -> list[st
     return picked or ["*"]
 
 
+# ---------- connect (MCP) ----------
+
+def _connect_ctx(request: Request, *, new_key: dict[str, Any] | None = None,
+                 error: str | None = None) -> dict[str, Any]:
+    """Everything connect.html needs to render a paste-ready client config.
+
+    The snippets carry the real host and port this daemon answers on, so a
+    user on a non-default port does not silently copy a config pointing at
+    7200. Right after minting, they carry the real key too — the only
+    moment it can be shown.
+    """
+    cfg = request.app.state.cfg
+    am: AuthManager = request.app.state.auth
+    host = cfg.bind if cfg.bind not in ("0.0.0.0", "::") else "127.0.0.1"
+    return _ctx(
+        request,
+        base_url=f"http://{host}:{cfg.port}",
+        mcp_url=f"http://{host}:{cfg.port}/mcp",
+        origins=[o.to_public() for o in am.list_origins()],
+        new_key=new_key,
+        error=error,
+    )
+
+
+@router.get("/connect", response_class=HTMLResponse)
+async def connect_view(request: Request,
+                       _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
+    return templates.TemplateResponse(request, "connect.html",
+                                      _connect_ctx(request))
+
+
+@router.post("/connect/create-key", response_class=HTMLResponse)
+async def connect_create_key(request: Request, name: str = Form("mcp"),
+                             is_admin: bool = Form(False),
+                             _: None = Depends(require_csrf)) -> HTMLResponse:
+    """Mint an origin key for an MCP client.
+
+    This is the same credential the rest of llamanager uses — an origin row
+    with an argon2id hash — so it can be rotated, disabled or deleted from
+    the Origins page like any other. No separate MCP token type exists.
+    """
+    am: AuthManager = request.app.state.auth
+    if am.get_origin_by_name(name):
+        return templates.TemplateResponse(
+            request, "connect.html",
+            _connect_ctx(request, error=f"origin '{name}' already exists"),
+            status_code=409)
+    try:
+        origin, key = am.create_origin(name=name, allowed_models=["*"],
+                                       is_admin=is_admin)
+    except ValueError as e:
+        return templates.TemplateResponse(
+            request, "connect.html", _connect_ctx(request, error=str(e)),
+            status_code=400)
+    return templates.TemplateResponse(
+        request, "connect.html",
+        _connect_ctx(request, new_key={"name": origin.name, "key": key,
+                                       "is_admin": origin.is_admin}))
+
+
+# ---------- origins ----------
+
 @router.get("/origins", response_class=HTMLResponse)
 async def origins_view(request: Request, _: Origin = Depends(require_admin_ui)) -> HTMLResponse:
     am: AuthManager = request.app.state.auth

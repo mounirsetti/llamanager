@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% set active = 'connect' %}
+{% block title %}Connect - llamanager{% endblock %}
+{% block content %}
+<div class="lm-eyebrow">Configure</div>
+<h1 class="lm-page-title">Connect</h1>
+<p class="lm-page-lede">llamanager speaks the Model Context Protocol, so an agent can drive this machine directly &mdash; list and load models, watch VRAM, pull weights, generate images, transcribe audio. Mint a key below, then paste one of the snippets into your MCP host. Everything stays on this box; nothing is sent anywhere else.</p>
+
+{% if error %}
+<div class="lm-error">{{ error }}</div>
+{% endif %}
+
+{% if new_key and new_key.key %}
+{# data-lm-reveal: base.html scrolls this into view after the swap, so a key
+   minted from the form below can't be missed. Shown once, never re-readable. #}
+<aside class="lm-callout" data-lm-reveal>
+  <div class="lm-callout-eyebrow">Shown once</div>
+  <div class="lm-callout-title">New API key for &ldquo;{{ new_key.name }}&rdquo;</div>
+  <p style="margin: 0; color: var(--fg-1); font-size: 0.875rem;">
+    The snippets below already contain it. Only the argon2id hash is stored &mdash; if you don&rsquo;t copy this now, rotate the origin to get a fresh one.
+  </p>
+  <div class="lm-key">{{ new_key.key }}</div>
+</aside>
+{% endif %}
+
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Key</span>
+    <span class="lm-section-meta">{{ origins|length }} origin{{ '' if origins|length == 1 else 's' }} exist</span>
+  </header>
+  <p style="margin-bottom: 18px; font-size: 0.875rem; color: var(--fg-1); max-width: 72ch;">
+    An MCP client authenticates exactly like any other llamanager client: one origin, one bearer key. Manage or revoke it later on the <a href="/ui/origins">Origins</a> page.
+    Tools that change the machine &mdash; loading a model, unloading, pulling weights, pausing the queue &mdash; need an <strong style="color: var(--fg-0); font-weight: 500;">admin</strong> origin. Generation, inference and transcription do not.
+  </p>
+  <form method="post" action="/ui/connect/create-key" class="lm-profile-form"
+        style="display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="lm-field" style="flex: 0 1 240px;">
+      <label class="lm-field-label" for="mcp-name">Origin name
+        <span class="lm-field-hint">Shown in the queue and the gallery, so name it after the client: claude-desktop, cursor, chatgpt.</span>
+      </label>
+      <input class="lm-input" id="mcp-name" name="name" value="mcp" required>
+    </div>
+    <label class="lm-checkbox-row" style="margin-bottom: 10px;">
+      <input type="checkbox" name="is_admin" value="true" checked>
+      <span>Admin (allows load, unload, pull, queue control)</span>
+    </label>
+    <button class="lm-btn lm-btn--primary" type="submit" style="margin-bottom: 4px;">Mint key</button>
+  </form>
+</section>
+
+{% set key = new_key.key if new_key and new_key.key else 'YOUR_KEY' %}
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Claude Code</span>
+    <span class="lm-section-meta">HTTP</span>
+  </header>
+  <div class="lm-snippet">
+    <button class="lm-copy-btn" type="button" data-copy="claude mcp add --transport http llamanager {{ mcp_url }} --header &quot;Authorization: Bearer {{ key }}&quot;">Copy</button>
+    <pre><code>claude mcp add --transport http llamanager {{ mcp_url }} \
+  --header "Authorization: Bearer {{ key }}"</code></pre>
+  </div>
+</section>
+
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Claude Desktop</span>
+    <span class="lm-section-meta">stdio</span>
+  </header>
+  <p style="margin-bottom: 14px; font-size: 0.875rem; color: var(--fg-1); max-width: 72ch;">
+    Claude Desktop launches a child process rather than dialling a URL, so it uses the <code>mcp-stdio</code> verb, which proxies this daemon. On this machine the key is optional &mdash; llamanager falls back to the loopback-only control key in its data directory.
+  </p>
+  <div class="lm-snippet">
+    <button class="lm-copy-btn" type="button" data-copy='{"mcpServers":{"llamanager":{"command":"llamanager","args":["mcp-stdio"],"env":{"LLAMANAGER_ADMIN_KEY":"{{ key }}"}}}}'>Copy</button>
+<pre><code>{
+  "mcpServers": {
+    "llamanager": {
+      "command": "llamanager",
+      "args": ["mcp-stdio"],
+      "env": { "LLAMANAGER_ADMIN_KEY": "{{ key }}" }
+    }
+  }
+}</code></pre>
+  </div>
+</section>
+
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">Cursor / VS Code</span>
+    <span class="lm-section-meta">HTTP</span>
+  </header>
+  <div class="lm-snippet">
+    <button class="lm-copy-btn" type="button" data-copy='{"mcpServers":{"llamanager":{"url":"{{ mcp_url }}","headers":{"Authorization":"Bearer {{ key }}"}}}}'>Copy</button>
+<pre><code>{
+  "mcpServers": {
+    "llamanager": {
+      "url": "{{ mcp_url }}",
+      "headers": { "Authorization": "Bearer {{ key }}" }
+    }
+  }
+}</code></pre>
+  </div>
+</section>
+
+<section class="lm-section">
+  <header class="lm-section-head">
+    <span class="lm-section-marker">ChatGPT</span>
+    <span class="lm-section-meta">tunnel</span>
+  </header>
+  <p style="margin: 0; font-size: 0.875rem; color: var(--fg-1); max-width: 72ch;">
+    ChatGPT runs in OpenAI&rsquo;s cloud and cannot reach <code>127.0.0.1</code> on this machine. Run OpenAI&rsquo;s <code>tunnel-client</code> here, point it at <code>{{ mcp_url }}</code>, and select the tunnel under Connection in a developer-mode app. The tunnel is outbound-only &mdash; nothing is exposed to the internet.
+  </p>
+</section>
+
+<style>
+  .lm-snippet { position: relative; }
+  .lm-snippet pre {
+    background: var(--bg-1);
+    border: 1px solid var(--bg-3);
+    border-radius: 6px;
+    padding: 14px 88px 14px 14px;
+    overflow-x: auto;
+    margin: 0;
+  }
+  .lm-snippet code {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.8125rem;
+    color: var(--fg-0);
+    white-space: pre;
+  }
+  .lm-copy-btn {
+    position: absolute; top: 10px; right: 10px;
+    background: var(--bg-2); color: var(--fg-1);
+    border: 1px solid var(--bg-3); border-radius: 4px;
+    padding: 4px 10px; font-size: 0.75rem; cursor: pointer;
+    font-family: inherit;
+  }
+  .lm-copy-btn:hover { color: var(--fg-0); border-color: var(--fg-3); }
+</style>
+<script>
+  // Guarded because hx-boost re-runs inline scripts on every body swap;
+  // without the flag each navigation stacks another listener and one click
+  // copies several times. Same pattern as base.html's __lm*Init flags.
+  if (!window.__lmConnectInit) {
+    window.__lmConnectInit = true;
+    document.addEventListener('click', function (e) {
+      var btn = e.target.closest('.lm-copy-btn');
+      if (!btn) return;
+      navigator.clipboard.writeText(btn.getAttribute('data-copy')).then(function () {
+        var original = btn.textContent;
+        btn.textContent = 'Copied';
+        btn.style.color = 'var(--accent)';
+        setTimeout(function () { btn.textContent = original; btn.style.color = ''; }, 1500);
+      });
+    });
+  }
+</script>
+{% endblock %}

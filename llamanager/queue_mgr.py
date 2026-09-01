@@ -62,6 +62,10 @@ class QueuedRequest:
     enqueued_at: float
     seq: int
     profile_required: str | None = None  # optional per-request profile selection
+    # Opaque caller-supplied correlation id. The MCP generation tools set it
+    # to their job id so a submitted job can find its own request_id (and
+    # cancel *only* that one) without guessing from timing. See mcp_jobs.py.
+    client_ref: str | None = None
     # "text" or "image" — set at enqueue time based on the model's engine
     # family. Text requests proxy through llama-server; image requests
     # are dispatched to ImageTaskRunner.
@@ -188,6 +192,7 @@ class QueueManager:
                       task_type: str | None = None,
                       caller: dict[str, Any] | None = None,
                       incognito: bool = False,
+                      client_ref: str | None = None,
                       ) -> QueuedRequest:
         active_pending = len(self._heap) - self._cancelled_in_heap
         if active_pending + len(self._in_flight) >= self.cfg.max_queue_depth:
@@ -204,6 +209,7 @@ class QueueManager:
             enqueued_at=time.time(),
             seq=next(self._seq),
             incognito=incognito,
+            client_ref=client_ref,
         )
         self.db.insert_request(
             request_id=req.request_id,
@@ -987,6 +993,7 @@ def _request_public(req: QueuedRequest | None) -> dict[str, Any] | None:
         return None
     return {
         "id": req.request_id,
+        "client_ref": req.client_ref,
         "origin": req.origin.name,
         "priority": req.priority,
         "model_required": req.model_required,

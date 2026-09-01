@@ -1381,6 +1381,24 @@ async def images_status(request: Request) -> Response:
     return _JSONResponse(payload)
 
 
+def _pop_client_ref(body: dict) -> str | None:
+    """Take the optional ``client_ref`` correlation id off an image/video body.
+
+    A caller that submits work and then wants to watch or cancel *that* run
+    needs a handle on it before the response (which carries the request id)
+    arrives. Guessing from timing is not good enough — cancelling the wrong
+    generation costs someone else their GPU minutes. The MCP generation
+    tools set this to their job id; see mcp_jobs.py.
+    """
+    raw = body.pop("client_ref", None)
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw.strip():
+        raise HTTPException(status_code=400,
+                            detail="client_ref must be a non-empty string")
+    return raw.strip()
+
+
 @router.post("/images/generations")
 async def images_generations(request: Request) -> Response:
     """Generate one or more images.
@@ -1396,6 +1414,9 @@ async def images_generations(request: Request) -> Response:
                                data event carrying the result.
         seed:                  int (optional)
         profile:               llamanager-specific — selects an image profile by name.
+        client_ref:            llamanager-specific — an opaque id echoed back on
+                               the queue entry, so a caller can find and cancel
+                               its own run before the response arrives.
 
     Reference-image fields (llamanager extension):
         image:                 str — single base64-encoded image (data URL or
@@ -1422,6 +1443,7 @@ async def images_generations(request: Request) -> Response:
     # on which model it asked for. Same for the format rule: a URL would
     # have to point at a file we keep, and incognito keeps none.
     incognito = _pop_incognito(body, origin)
+    client_ref = _pop_client_ref(body)
     if incognito and str(body.get("response_format") or "b64_json").lower() != "b64_json":
         raise HTTPException(
             status_code=400,
@@ -1592,6 +1614,7 @@ async def images_generations(request: Request) -> Response:
             task_type="image",
             caller=await describe_caller(request),
             incognito=incognito,
+            client_ref=client_ref,
         )
     except QueueFull:
         raise HTTPException(status_code=503, detail="queue full")
@@ -1686,6 +1709,7 @@ async def videos_generations(request: Request) -> Response:
     # on which model it asked for. Same for the format rule: a URL would
     # have to point at a file we keep, and incognito keeps none.
     incognito = _pop_incognito(body, origin)
+    client_ref = _pop_client_ref(body)
     if incognito and str(body.get("response_format") or "url").lower() != "b64_json":
         raise HTTPException(
             status_code=400,
@@ -1804,6 +1828,7 @@ async def videos_generations(request: Request) -> Response:
             task_type="image",
             caller=await describe_caller(request),
             incognito=incognito,
+            client_ref=client_ref,
         )
     except QueueFull:
         raise HTTPException(status_code=503, detail="queue full")
