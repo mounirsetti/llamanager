@@ -311,15 +311,20 @@ def _register_management_tools(mcp: MCPServer, app) -> None:
         name="pull_model",
         description=(
             "Start downloading model weights from Hugging Face. Accepts "
-            "'org/name', 'hf://org/name' or a full URL. Returns a download_id "
-            "immediately — poll get_download for progress. A daemon restart "
-            "cancels an in-flight pull."
+            "'org/name', 'hf://org/name' or a full URL. Choose exactly one "
+            "of: files (specific filenames — the usual choice for GGUF), "
+            "whole_repo (every file, for diffusers-style models where the "
+            "layout matters), or subfolder (only that subtree). Returns a "
+            "download_id immediately — poll get_download for progress. A "
+            "daemon restart cancels an in-flight pull."
         ),
         annotations=ToolAnnotations(read_only_hint=False, open_world_hint=True),
     )
     async def pull_model(ctx: Context, source: str,
                          files: list[str] | None = None,
-                         family: str | None = None,
+                         whole_repo: bool = False,
+                         subfolder: str | None = None,
+                         family: str = "text",
                          target_dir: str | None = None) -> dict[str, Any]:
         origin, _ = await _caller(app, ctx)
         _require_admin(origin, "pull_model")
@@ -327,9 +332,22 @@ def _register_management_tools(mcp: MCPServer, app) -> None:
         src = source.strip()
         if not src.startswith(("http://", "https://", "hf://")):
             src = "hf://" + src.removeprefix("hf:")
+        # Picking a mode for the caller would either fetch one file when they
+        # wanted a pipeline, or pull hundreds of gigabytes when they wanted
+        # one GGUF. Make them say which.
+        chosen = [bool(files), bool(whole_repo), bool(subfolder)]
+        if sum(chosen) != 1:
+            raise ToolError(
+                "choose exactly one of files, whole_repo or subfolder "
+                f"(got files={files!r}, whole_repo={whole_repo}, "
+                f"subfolder={subfolder!r}). Use files=['model.gguf'] for a "
+                "single GGUF, whole_repo=true for a diffusers pipeline.")
         try:
-            did = reg.start_pull(source=src, files=files, family=family,
-                                 target_dir=(target_dir or "").strip().strip("/") or None)
+            did = reg.start_pull(
+                source=src, files=files, whole_repo=whole_repo,
+                subfolder=(subfolder or "").strip().strip("/") or None,
+                family=family,
+                target_dir=(target_dir or "").strip().strip("/") or None)
         except Exception as e:  # noqa: BLE001 — bad source is a user error
             raise ToolError(f"pull failed: {e}")
         return {"download_id": did,
@@ -453,26 +471,42 @@ def _register_generation_tools(mcp: MCPServer, app) -> None:
         name="generate_video",
         description=(
             "Start a local video generation. Returns a job_id immediately; "
-            "poll get_generation_job. Video runs are long (many minutes)."
+            "poll get_generation_job. Video runs are long (many minutes). "
+            "Some models are image-to-video and REQUIRE an opening frame — "
+            "pass one as image_path (a file on this machine) or image_base64; "
+            "a text-only call to such a model is refused. Frame count and fps "
+            "come from the model's profile, not from here."
         ),
         annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False),
     )
     async def generate_video(ctx: Context, prompt: str, model: str | None = None,
-                             size: str | None = None, seconds: float | None = None,
+                             image_path: str | None = None,
+                             image_base64: str | None = None,
+                             size: str | None = None,
                              seed: int | None = None,
                              profile: str | None = None) -> dict[str, Any]:
+        import base64 as _b64
+        from pathlib import Path as _Path
+
         origin, key = await _caller(app, ctx)
         body: dict[str, Any] = {"prompt": prompt}
         if model:
             body["model"] = model
         if size:
             body["size"] = size
-        if seconds is not None:
-            body["seconds"] = seconds
         if seed is not None:
             body["seed"] = seed
         if profile:
             body["profile"] = profile
+        if image_path and image_base64:
+            raise ToolError("give at most one of image_path or image_base64")
+        if image_path:
+            src = _Path(image_path).expanduser()
+            if not src.is_file():
+                raise ToolError(f"no such image file: {src}")
+            body["image"] = _b64.b64encode(src.read_bytes()).decode("ascii")
+        elif image_base64:
+            body["image"] = image_base64
         job = await _jobs().submit("video", body, origin=origin, key=key)
         return {"job_id": job.job_id, "status": job.status,
                 "note": "poll get_generation_job with this job_id"}
@@ -566,6 +600,14 @@ def _register_inference_tools(mcp: MCPServer, app) -> None:
             # The route served a different model than asked for; say so rather
             # than letting the caller believe it got what it requested.
             out["model_substituted"] = note
+        if not text.strip() and choice.get("finish_reason") == "length":
+            # A reasoning model can spend the whole budget thinking and return
+            # no visible answer. An empty string reads as "it had nothing to
+            # say", which would send the caller down the wrong path.
+            out["warning"] = (
+                f"the model hit the {max_tokens}-token cap before producing "
+                f"any answer text (reasoning models spend budget thinking "
+                f"first) — retry with a larger max_tokens")
         return out
 
     @mcp.tool(

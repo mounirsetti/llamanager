@@ -116,7 +116,10 @@ class GenJobRegistry:
                    key: str) -> None:
         from .mcp_server import call_v1, _detail_of
 
-        job.status = "running"
+        # A cancel can land before this task gets its first slice; don't
+        # walk it back to "running".
+        if job.status != "cancelled":
+            job.status = "running"
         try:
             resp = await call_v1(self._app, key, path, json_body=payload)
         except asyncio.CancelledError:
@@ -132,6 +135,13 @@ class GenJobRegistry:
 
         job.request_id = resp.headers.get("x-llamanager-request-id") or job.request_id
         job.finished_at = time.time()
+        if job.status == "cancelled":
+            # Someone cancelled this job while it was running. Whatever the
+            # route answered on the way out — a 499, or a 502 because the
+            # engine was torn down mid-step — the job was cancelled, and
+            # relabelling it "failed" here would send the caller looking for
+            # a bug that is really their own cancel.
+            return
         if resp.status_code == 499:
             job.status = "cancelled"
             return

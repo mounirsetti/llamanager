@@ -17,8 +17,10 @@ Optional dependency: install with ``pip install 'llamanager[tray]'``
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -126,6 +128,64 @@ def _open_path(path: Path) -> None:
             subprocess.Popen(["xdg-open", str(path)])
     except Exception as e:
         log.warning("could not open %s: %s", path, e)
+
+
+def _copy_to_clipboard(text: str) -> str | None:
+    """Put ``text`` on the system clipboard. Returns an error message or None.
+
+    The tray's whole value for MCP is handing over a config line without
+    making the operator go find the web UI, and that needs a clipboard.
+    There is no Python clipboard in llamanager's dependencies, so this
+    shells out to whatever the desktop provides. If nothing does, say so —
+    a silent no-op looks exactly like a successful copy, and the operator
+    would paste stale content into their MCP client.
+
+    Two traps, both learned the hard way:
+
+    * ``wl-copy`` (and ``xclip``) **stay alive** holding the selection —
+      that is how X11/Wayland clipboards work, the owner serves the data.
+      Capturing their output therefore waits on pipes that never close, so
+      output goes to /dev/null and we only wait for the fork to return.
+    * Tools can be installed on a machine with no display at all (an SSH
+      session, a headless service). Pick by the session actually present
+      rather than by which binary exists.
+    """
+    if sys.platform == "win32":
+        candidates = [["clip"]]
+    elif sys.platform == "darwin":
+        candidates = [["pbcopy"]]
+    elif os.environ.get("WAYLAND_DISPLAY"):
+        candidates = [["wl-copy"], ["xclip", "-selection", "clipboard"],
+                      ["xsel", "--clipboard", "--input"]]
+    elif os.environ.get("DISPLAY"):
+        candidates = [["xclip", "-selection", "clipboard"],
+                      ["xsel", "--clipboard", "--input"], ["wl-copy"]]
+    else:
+        return ("no graphical session (no DISPLAY or WAYLAND_DISPLAY), so "
+                "there is no clipboard to copy to")
+
+    tried = []
+    for cmd in candidates:
+        if shutil.which(cmd[0]) is None:
+            tried.append(cmd[0])
+            continue
+        try:
+            proc = subprocess.run(
+                cmd, input=text.encode("utf-8"),
+                # Not capture_output: these tools keep running to serve the
+                # selection, and reading their pipes to EOF would block.
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired:
+            return f"{cmd[0]} did not return within 5s"
+        except Exception as e:  # noqa: BLE001 — reported, not raised
+            return f"{cmd[0]} failed: {e}"
+        if proc.returncode == 0:
+            return None
+        return f"{cmd[0]} exited {proc.returncode}"
+    return ("no clipboard tool found (tried " + ", ".join(tried) +
+            ") — install one, or copy from the Connect page in the web UI")
 
 
 def _autorun_label() -> str:
@@ -452,6 +512,59 @@ class TrayApp:
     def _act_open_models(self, *_: Any) -> None:
         _open_path(self.cfg.models_dir)
 
+    # ---- MCP ----------------------------------------------------------
+    #
+    # The tray is where someone is standing when they want to point an
+    # agent at this machine, so the snippets live one click away here as
+    # well as on the Connect page. The key is deliberately NOT included:
+    # origin keys are shown once at mint time and only hashed after that,
+    # so the tray cannot know one. The snippets carry a placeholder and
+    # the Connect page is one item below.
+
+    @property
+    def _mcp_url(self) -> str:
+        return resolve_base_url(self.cfg).rstrip("/") + "/mcp"
+
+    @property
+    def _mcp_connect_url(self) -> str:
+        return resolve_base_url(self.cfg).rstrip("/") + "/ui/connect"
+
+    def _act_open_connect(self, *_: Any) -> None:
+        webbrowser.open(self._mcp_connect_url)
+
+    def _copy(self, what: str, text: str) -> None:
+        err = _copy_to_clipboard(text)
+        self._notify(f"Could not copy {what}: {err}" if err
+                     else f"Copied {what} to the clipboard")
+
+    def _act_copy_mcp_url(self, *_: Any) -> None:
+        self._copy("the MCP endpoint", self._mcp_url)
+
+    def _act_copy_mcp_claude_code(self, *_: Any) -> None:
+        self._copy("the Claude Code command", (
+            f'claude mcp add --transport http llamanager {self._mcp_url} '
+            f'--header "Authorization: Bearer YOUR_KEY"'))
+
+    def _act_copy_mcp_stdio(self, *_: Any) -> None:
+        self._copy("the Claude Desktop config", json.dumps({
+            "mcpServers": {
+                "llamanager": {
+                    "command": "llamanager",
+                    "args": ["mcp-stdio"],
+                }
+            }
+        }, indent=2))
+
+    def _act_copy_mcp_http(self, *_: Any) -> None:
+        self._copy("the Cursor / VS Code config", json.dumps({
+            "mcpServers": {
+                "llamanager": {
+                    "url": self._mcp_url,
+                    "headers": {"Authorization": "Bearer YOUR_KEY"},
+                }
+            }
+        }, indent=2))
+
     def _act_quit(self, *_: Any) -> None:
         # Quitting the tray tears the whole stack down: stop the LLM, then the
         # daemon service, then exit the icon loop. We notify first because the
@@ -582,6 +695,20 @@ class TrayApp:
                  enabled=up and llm_state == "running"),
         )
 
+        # MCP submenu. The endpoint is up exactly when the daemon is, so
+        # the items follow `up` rather than probing separately — a tray
+        # poll should not cost an MCP handshake every few seconds.
+        mcp_menu = Menu(
+            Item(lambda i: f"Endpoint: {self._mcp_url}", None, enabled=False),
+            Item("Connect page (mint a key)…", self._act_open_connect,
+                 enabled=up),
+            Menu.SEPARATOR,
+            Item("Copy endpoint URL", self._act_copy_mcp_url),
+            Item("Copy Claude Code command", self._act_copy_mcp_claude_code),
+            Item("Copy Claude Desktop config (stdio)", self._act_copy_mcp_stdio),
+            Item("Copy Cursor / VS Code config", self._act_copy_mcp_http),
+        )
+
         return Menu(
             Item(header, None, enabled=False),
             Item(queue_line, None, enabled=False),
@@ -603,6 +730,7 @@ class TrayApp:
             Menu.SEPARATOR,
             Item("Service", service_menu),
             Item("LLM", llm_menu),
+            Item("MCP", mcp_menu),
             Item(f"Autorun at startup  ({cur_autorun})", autorun_menu),
             Menu.SEPARATOR,
             Item("Open logs folder", self._act_open_logs),

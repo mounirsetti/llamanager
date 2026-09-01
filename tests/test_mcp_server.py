@@ -6,6 +6,8 @@ fails these tests rather than surviving to a live client.
 """
 from __future__ import annotations
 
+import asyncio
+
 import httpx2
 import pytest
 from mcp.client.client import Client
@@ -287,3 +289,217 @@ def test_video_is_not_shown_inline(app, tmp_path):
                  model="m", status="done",
                  result=[{"path": str(mp4), "url": "/images/file/d/o/clip.mp4"}])
     assert GenJobRegistry(app)._image_blocks(job) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args", [
+    {"source": "openai/whisper-tiny"},                       # no mode
+    {"source": "o/r", "whole_repo": True, "files": ["a.gguf"]},  # two modes
+    {"source": "o/r", "whole_repo": True, "subfolder": "d"},     # two modes
+])
+async def test_pull_model_requires_exactly_one_mode(app, args):
+    """Guessing costs either the wrong file or hundreds of gigabytes.
+
+    The registry rejects a bare HF source, so a tool that only offered
+    `files` could never pull a diffusers pipeline at all.
+    """
+    async with app.router.lifespan_context(app):
+        admin, _ = _keys(app)
+        hc, transport = _connected(app, admin)
+        async with hc, Client(transport) as cl:
+            r = await cl.call_tool("pull_model", args)
+
+    assert r.is_error
+    assert "exactly one of files, whole_repo or subfolder" in r.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_pull_model_passes_each_mode_through(app):
+    """Each mode reaches Registry.start_pull as the mode the caller chose."""
+    async with app.router.lifespan_context(app):
+        admin, _ = _keys(app)
+        seen = []
+        app.state.registry.start_pull = lambda **kw: (seen.append(kw), "dl1")[1]
+
+        hc, transport = _connected(app, admin)
+        async with hc, Client(transport) as cl:
+            await cl.call_tool("pull_model",
+                               {"source": "org/repo", "files": ["m.gguf"]})
+            await cl.call_tool("pull_model",
+                               {"source": "org/repo", "whole_repo": True,
+                                "family": "image"})
+            await cl.call_tool("pull_model",
+                               {"source": "org/repo", "subfolder": "diffusers"})
+
+    assert seen[0]["files"] == ["m.gguf"] and not seen[0]["whole_repo"]
+    assert seen[1]["whole_repo"] is True and seen[1]["family"] == "image"
+    assert seen[2]["subfolder"] == "diffusers"
+    # A bare name is normalised to an hf:// source, as the admin route does.
+    assert all(k["source"] == "hf://org/repo" for k in seen)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_job_is_not_relabelled_failed(app, monkeypatch):
+    """The engine's teardown error must not overwrite the user's cancel.
+
+    Cancelling tears the engine down mid-step, so the route can answer 502
+    rather than 499. Reporting that as "failed" sends the caller hunting a
+    bug that is really their own cancel.
+    """
+    import httpx
+
+    from llamanager import mcp_server
+    from llamanager.mcp_jobs import GenJob, GenJobRegistry
+
+    reg = GenJobRegistry(app)
+    job = GenJob(job_id="img_c", kind="image", origin_name="o",
+                 prompt="p", model="m")
+
+    async def _cancelled_mid_flight(*a, **kw):
+        # What really happens: the run is in flight, the user cancels, and
+        # only then does the route answer.
+        job.status = "cancelled"
+        return httpx.Response(502, json={"detail": "engine torn down"})
+
+    monkeypatch.setattr(mcp_server, "call_v1", _cancelled_mid_flight)
+
+    await reg._run(job, "/v1/images/generations", {}, "key")
+    assert job.status == "cancelled", "a late error overwrote the cancel"
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_landing_before_the_task_starts_also_holds(app, monkeypatch):
+    """A cancel between submit and the task's first slice must stick too."""
+    import httpx
+
+    from llamanager import mcp_server
+    from llamanager.mcp_jobs import GenJob, GenJobRegistry
+
+    async def _late_502(*a, **kw):
+        return httpx.Response(502, json={"detail": "engine torn down"})
+
+    monkeypatch.setattr(mcp_server, "call_v1", _late_502)
+
+    reg = GenJobRegistry(app)
+    job = GenJob(job_id="img_c2", kind="image", origin_name="o",
+                 prompt="p", model="m", status="cancelled")
+    await reg._run(job, "/v1/images/generations", {}, "key")
+    assert job.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_genuine_failure_is_still_reported(app, monkeypatch):
+    """The guard above must not swallow real failures."""
+    import httpx
+
+    from llamanager import mcp_server
+    from llamanager.mcp_jobs import GenJob, GenJobRegistry
+
+    async def _fails(*a, **kw):
+        return httpx.Response(502, json={"detail": "no such model"})
+
+    monkeypatch.setattr(mcp_server, "call_v1", _fails)
+
+    reg = GenJobRegistry(app)
+    job = GenJob(job_id="img_f", kind="image", origin_name="o",
+                 prompt="p", model="m")
+    await reg._run(job, "/v1/images/generations", {}, "key")
+    assert job.status == "failed"
+    assert "no such model" in (job.error or "")
+
+
+@pytest.mark.asyncio
+async def test_video_rejects_two_opening_frames(app):
+    async with app.router.lifespan_context(app):
+        admin, _ = _keys(app)
+        hc, transport = _connected(app, admin)
+        async with hc, Client(transport) as cl:
+            r = await cl.call_tool("generate_video",
+                                   {"prompt": "p", "image_path": "/a",
+                                    "image_base64": "aGk="})
+    assert r.is_error
+    assert "at most one" in r.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_video_reports_a_missing_opening_frame_file(app):
+    async with app.router.lifespan_context(app):
+        admin, _ = _keys(app)
+        hc, transport = _connected(app, admin)
+        async with hc, Client(transport) as cl:
+            r = await cl.call_tool("generate_video",
+                                   {"prompt": "p",
+                                    "image_path": "/definitely/missing.png"})
+    assert r.is_error
+    assert "no such image file" in r.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_video_sends_the_opening_frame_as_base64(app, tmp_path):
+    """The only installed video model here is image-to-video, so a tool
+    that cannot carry an opening frame cannot drive it at all."""
+    import base64
+
+    from PIL import Image
+
+    from llamanager import mcp_server
+
+    frame = tmp_path / "first.png"
+    Image.new("RGB", (8, 8), (1, 2, 3)).save(frame)
+
+    async with app.router.lifespan_context(app):
+        admin, _ = _keys(app)
+        sent = {}
+
+        async def _capture(app_, key, path, *, json_body=None, **kw):
+            sent.update(path=path, body=json_body)
+            import httpx
+            return httpx.Response(200, json={"data": []},
+                                  headers={"x-llamanager-request-id": "r1"})
+
+        mcp_server.call_v1, original = _capture, mcp_server.call_v1
+        try:
+            hc, transport = _connected(app, admin)
+            async with hc, Client(transport) as cl:
+                r = await cl.call_tool("generate_video",
+                                       {"prompt": "p",
+                                        "image_path": str(frame)})
+                assert not r.is_error
+                await asyncio.sleep(0.2)   # let the job task run
+        finally:
+            mcp_server.call_v1 = original
+
+    assert sent["path"] == "/v1/videos/generations"
+    assert sent["body"]["image"] == base64.b64encode(
+        frame.read_bytes()).decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_an_all_thinking_answer_is_flagged_not_returned_blank(app, monkeypatch):
+    """A reasoning model can burn the whole cap thinking and answer nothing.
+
+    Returning "" reads as 'the model had nothing to say', which sends the
+    caller down the wrong path; say what actually happened.
+    """
+    import httpx
+
+    from llamanager import mcp_server
+
+    async def _capped(app_, key, path, *, json_body=None, **kw):
+        return httpx.Response(200, json={
+            "model": "m", "usage": {},
+            "choices": [{"message": {"content": ""}, "finish_reason": "length"}],
+        })
+
+    monkeypatch.setattr(mcp_server, "call_v1", _capped)
+
+    async with app.router.lifespan_context(app):
+        admin, _ = _keys(app)
+        hc, transport = _connected(app, admin)
+        async with hc, Client(transport) as cl:
+            r = await cl.call_tool("ask_local_model",
+                                   {"prompt": "hi", "max_tokens": 24})
+
+    sc = r.structured_content or {}
+    assert sc.get("text") == ""
+    assert "24-token cap" in (sc.get("warning") or "")

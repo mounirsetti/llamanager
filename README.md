@@ -75,6 +75,10 @@ The text side wraps `llama-server` (from llama.cpp) plus `mlx-lm` on Apple Silic
 - [Calling the API](#calling-the-api)
   - [Anthropic-compatible API](#anthropic-compatible-api)
   - [MCP (Model Context Protocol)](#mcp-model-context-protocol)
+    - [Connecting a client](#connecting-a-client)
+    - [Tools](#tools)
+    - [Using it](#using-it)
+    - [When it doesn't work](#when-it-doesnt-work)
   - [Reasoning / thinking control](#reasoning--thinking-control)
 - [Chat in the browser](#chat-in-the-browser)
 - [Auto-start at boot or login](#auto-start-at-boot-or-login)
@@ -1364,13 +1368,24 @@ Not implemented: `document` content blocks (PDFs), Anthropic server-side tools, 
 
 The `/v1` and `/anthropic/v1` proxies let an agent *talk to* a model on this
 machine. They don't let it *drive the machine* — see what's loaded, notice that
-VRAM is nearly full, swap a model, pull weights, kick off a generation. That is
-what llamanager knows, and MCP is how hosts ask for it.
+VRAM is nearly full, swap a model, pull weights, kick off a generation and come
+back for it. That is what llamanager knows, and MCP is how hosts ask for it.
 
 llamanager serves MCP over Streamable HTTP at `POST /mcp`, on the same port as
-everything else, authenticated with the same bearer keys. Mint one on
-**Configure → Connect** in the web UI; that page also prints the exact snippet
-for each client, with your host, port and key already filled in.
+everything else, authenticated with the same bearer keys.
+
+#### Connecting a client
+
+Mint a key on **Configure → Connect** in the web UI. That page prints the exact
+snippet for each client with your host, port and key already filled in.
+
+The tray icon has the same thing one click away, under **MCP**: it shows the
+endpoint this daemon answers on, opens the Connect page, and copies the
+endpoint URL, the `claude mcp add` command, or a ready-made Claude Desktop /
+Cursor / VS Code config to the clipboard. Those copies carry `YOUR_KEY` as a
+placeholder — a key is shown once at mint time and only hashed afterwards, so
+the tray has none to embed. (The `mcp-stdio` config needs no key on this
+machine anyway.)
 
 ```bash
 # Claude Code
@@ -1378,27 +1393,42 @@ claude mcp add --transport http llamanager http://127.0.0.1:7200/mcp \
   --header "Authorization: Bearer lm_your_key"
 ```
 
-Hosts that launch a child process instead of dialling a URL (Claude Desktop,
-anything installed from an `.mcpb`) use the stdio verb, which proxies the
-running daemon rather than starting a second one:
+Cursor, VS Code, Zed and anything else that takes a URL want the same two
+values:
 
-```bash
-llamanager mcp-stdio          # on this machine, needs no key at all
+```json
+{ "mcpServers": { "llamanager": {
+    "url": "http://127.0.0.1:7200/mcp",
+    "headers": { "Authorization": "Bearer lm_your_key" } } } }
 ```
 
-It resolves its credentials like every other CLI verb: `--admin-key`, then
+Hosts that launch a child process instead of dialling a URL (Claude Desktop,
+anything installed from an `.mcpb`) use the stdio verb. It proxies the running
+daemon rather than starting a second one, so there is still exactly one process
+holding the GPU:
+
+```json
+{ "mcpServers": { "llamanager": {
+    "command": "llamanager", "args": ["mcp-stdio"] } } }
+```
+
+On the machine running the daemon that needs no key at all: `mcp-stdio`
+resolves credentials like every other CLI verb — `--admin-key`, then
 `$LLAMANAGER_ADMIN_KEY`, then `[cli].admin_key`, then the 0600 local control
-key in the data dir. Same for the URL via `--url` / `$LLAMANAGER_URL`.
+key in the data dir. Same for the URL via `--url` / `$LLAMANAGER_URL`. Point it
+at another box by setting those.
 
 **Claude Desktop, one click.** `python tools/build_mcpb.py` writes
 `dist/llamanager.mcpb`. Double-click it and Claude Desktop installs the server;
-the key field can stay empty on the machine running the daemon. The bundle
-carries no code — it runs the `llamanager` you already have.
+leave the key field empty on the machine running the daemon. The bundle carries
+no code — it runs the `llamanager` you already have.
 
 **ChatGPT.** It runs in OpenAI's cloud and cannot reach `127.0.0.1` here. Run
-OpenAI's `tunnel-client` on this machine pointed at `http://127.0.0.1:7200/mcp`
-and pick the tunnel under *Connection* in a developer-mode app. The tunnel is
-outbound-only; nothing is exposed to the internet.
+OpenAI's `tunnel-client` on this machine pointed at
+`http://127.0.0.1:7200/mcp`, then pick the tunnel under *Connection* in a
+developer-mode app. The tunnel is outbound-only; nothing is exposed to the
+internet. The same applies to claude.ai in a browser — desktop and CLI hosts
+reach a local daemon directly, cloud UIs need a tunnel.
 
 #### Tools
 
@@ -1415,23 +1445,79 @@ outbound-only; nothing is exposed to the internet.
 | `get_generation_image` | no | the finished image inline, to look at |
 | `transcribe_audio` | no | local ASR from a file path or base64 |
 
-Generation is **submit-and-poll**, the same shape as weights downloads: a
+#### Using it
+
+Once connected, ask for the thing rather than the tool — the descriptions are
+written so the host picks. In practice:
+
+> *"What's loaded on the box and how much VRAM is free?"* — one `server_status`
+> call, which is also the right thing to check before asking for a big model.
+>
+> *"Load Qwen3.8-27B and ask it to summarise this file."* — `load_model`, then
+> `ask_local_model`. If nothing is loaded, `ask_local_model` alone will load the
+> default model first, which takes as long as a cold start normally does.
+>
+> *"Generate a picture of X and show me."* — `generate_image` returns a
+> `job_id` immediately, the host polls `get_generation_job` until it reports
+> `done`, then `get_generation_image` brings the picture back to look at.
+
+**Generation is submit-and-poll**, the same shape as weights downloads: a
 20-minute Krea run would time out every host if the tool call blocked, so
-`generate_image` returns a `job_id` immediately and `get_generation_job`
-reports queue position, the live diffusion step, and finally the output path
-and URL. Jobs live in memory — a daemon restart loses them, though finished
-images stay in the gallery. `get_generation_image` returns a finished still
-inline when the agent should actually look at what it made.
+`generate_image` returns a `job_id` and `get_generation_job` reports queue
+position, the live diffusion step, and finally the output path and URL. The
+full-resolution file stays on disk; `get_generation_image` returns a downscaled
+copy so the agent can see it without filling its context with a 2048-square
+PNG. Jobs live in memory — a daemon restart loses them, though finished images
+stay in the gallery.
 
-The admin split is the origin's `is_admin` flag, so a key minted without it can
-still generate and transcribe but is refused — by name — when it tries to load
-a model or pause the queue. Revoke or rotate an MCP key on the **Origins** page
-like any other.
+**`pull_model` makes you choose a mode**: `files=["model.gguf"]` for a single
+GGUF, `whole_repo=true` for a diffusers-style pipeline where the layout
+matters, or `subfolder="diffusers"` for one subtree. There is no default,
+because guessing costs either the wrong file or several hundred gigabytes.
 
-**Access.** There is no anonymous mode: `/mcp` answers `401` without a valid
-key. If an `Origin` header is present it must be loopback or match the `Host`,
-so a web page cannot drive your daemon through the browser. The local control
-key stays loopback-only here as everywhere else.
+**Image-to-video models need an opening frame.** MiniMax-H3 and friends refuse
+a text-only prompt, so `generate_video` takes `image_path` (a file on this
+machine) or `image_base64`. A natural pairing is to generate a still first and
+hand its path — which `get_generation_job` already reports — to the video call.
+
+**Give a reasoning model room to answer.** `ask_local_model` defaults to 1024
+output tokens; a thinking model can spend a small budget entirely on reasoning
+and return no answer text at all. When that happens the tool says so in a
+`warning` field rather than handing back an empty string that reads as "the
+model had nothing to say".
+
+**Long or heavy work runs in llamanager's queue**, not the host's. Cancelling
+from the agent (`cancel_generation_job`, `cancel_request`) propagates to the
+subprocess, exactly as cancelling from the web UI does. A cancelled job stays
+`cancelled` even though tearing the engine down mid-step makes the underlying
+request error out.
+
+#### Access and scope
+
+There is no anonymous mode: `/mcp` answers `401` without a valid key. Tools
+that change the machine need an origin marked **admin**; a key minted without
+it can still generate, infer and transcribe, and is refused *by name* when it
+reaches for `load_model` or `set_queue_paused`. Revoke or rotate an MCP key on
+the **Origins** page like any other credential, or flip its enabled switch to
+park a client without deleting it.
+
+If an `Origin` header is present it must be loopback or match the `Host`, so a
+web page cannot drive your daemon through the browser. The local control key
+stays loopback-only here as everywhere else.
+
+#### When it doesn't work
+
+| symptom | cause |
+|---------|-------|
+| `401 missing bearer token` | the client sent no `Authorization` header — check the `--header` argument or the `headers` block |
+| `401 invalid api key` | the key was rotated or deleted; mint a new one on **Connect** |
+| `403 origin ... is disabled` | the origin's enabled switch is off (**Origins** page) |
+| `mcp-stdio` exits 1 saying it cannot reach llamanager | the daemon isn't running — `llamanager serve`, or start the user service |
+| a tool answers *"needs an admin origin"* | the key isn't admin; mint an admin key on **Connect** |
+| `generate_video` fails with *"image-to-video model"* | that model needs an opening frame — pass `image_path` or `image_base64` |
+| `ask_local_model` returns empty text with a `warning` | the token cap was spent on reasoning; raise `max_tokens` |
+| `transcribe_audio` fails with *"ASR worker failed to become healthy"* | the ASR engine could not start — check **ASR** in the UI and `logs/llamanager.log`; heavy swap makes the worker miss its startup window |
+| the host lists no tools | it connected to `/` rather than `/mcp`, or to the SSE path — the endpoint is `http://host:port/mcp` |
 
 ### Reasoning / thinking control
 
