@@ -844,10 +844,13 @@ covers are per media kind, so an origin with images but no clips has no folder
 in the video view; your own folder is always listed, at an honest zero, even
 before you have generated anything.
 
-Navigation is frozen while a generation is in flight — the live placeholder
-tiles resolve into the finished media in place, and swapping the feed under them
-would strand them — and pressing Generate from somebody else's folder returns
-you to your own first. Under the hood: `GET /ui/images/gallery?origin=<name>`
+Browsing is never blocked, generation included. The live placeholder tiles
+belong to your own folder — that is where the result lands — so they are held
+out of the feed while another folder is on screen and come back at its head when
+you return; the run carries on regardless, and the dock hint, the feed pill and
+the tab title keep reporting it from wherever you are looking. Pressing Generate
+from somebody else's folder steps back into your own first, so the tiles appear
+where you are. Under the hood: `GET /ui/images/gallery?origin=<name>`
 scopes the listing (pagination included) and `GET /ui/images/gallery/origins`
 returns the folder list. Both are admin-only; the public pages remain pinned to
 the bearer's own origin and cannot name another.

@@ -10,11 +10,13 @@
      * stepping up shows one card per origin folder (cover, count, size,
        last activity), and opening one browses that origin's media.
 
-   Navigation is frozen while a generation is in flight: the live
-   placeholder tiles live in this same grid and resolve into the finished
-   media in place, so swapping the feed underneath them would strand them.
-   The composer also snaps back to the admin's own folder when Generate is
-   pressed, because that is where the result will land.
+   Browsing is never blocked, generation included. The live placeholder
+   tiles belong to the admin's own folder — that is where the result lands —
+   so the page holds them out of the DOM while another folder is on screen
+   and puts them back at the head of the feed on return; the run keeps going
+   either way, and the dock hint and feed header keep reporting it. Pressing
+   Generate from somebody else's folder steps back into your own first, so
+   the tiles appear where you are looking.
 
    API: LMGalleryScope.create(opts) -> controller
      opts.bar         element        the breadcrumb strip
@@ -30,7 +32,6 @@
    controller.current()  -> origin name, or null at the parent level
    controller.isRoot()   -> true at the parent level
    controller.goTo(name|null) -> Promise, resolved once onChange has
-   controller.setBusy(bool)   disable navigation during a generation
    controller.renderFolders() fetch + draw the folder cards into the grid
    controller.render()        redraw the breadcrumb only
 #}
@@ -47,9 +48,6 @@
   }
   .gen-scopebar__up:hover, .gen-scopebar__home:hover {
     color: var(--fg-0); border-color: var(--fg-3);
-  }
-  .gen-scopebar__up[disabled], .gen-scopebar__home[disabled] {
-    opacity: 0.45; cursor: not-allowed;
   }
   .gen-scopebar__sep { color: var(--fg-3); }
   .gen-scopebar__crumb {
@@ -130,7 +128,6 @@ window.LMGalleryScope = (function () {
     var noun = opts.kind === "video" ? "clip" : "image";
     // Starts in the admin's own folder — the one they generate into.
     var scope = opts.selfOrigin;
-    var busy = false;
     var lastCounts = null;   // {folders, items} from the most recent listing
 
     function headers() {
@@ -157,17 +154,13 @@ window.LMGalleryScope = (function () {
         var home = el("button", "gen-scopebar__home", "↩ " + opts.selfOrigin);
         home.type = "button";
         home.title = "Back to your own folder";
-        home.disabled = busy;
         home.addEventListener("click", function () { goTo(opts.selfOrigin); });
         bar.appendChild(home);
         return;
       }
       var up = el("button", "gen-scopebar__up", "↑ All origins");
       up.type = "button";
-      up.title = busy
-        ? "Finish or cancel the generation before browsing other origins"
-        : "Browse every origin's folder";
-      up.disabled = busy;
+      up.title = "Browse every origin's folder";
       up.addEventListener("click", function () { goTo(null); });
       bar.appendChild(up);
       bar.appendChild(el("span", "gen-scopebar__sep", "/"));
@@ -188,7 +181,6 @@ window.LMGalleryScope = (function () {
     // refill (generate(), which builds live tiles into this grid) can await
     // the move.
     function goTo(origin) {
-      if (busy) return Promise.resolve();
       if (origin === scope) return Promise.resolve();
       scope = origin;
       render();
@@ -265,7 +257,6 @@ window.LMGalleryScope = (function () {
       current: function () { return scope; },
       isRoot: function () { return scope === null; },
       goTo: goTo,
-      setBusy: function (b) { busy = !!b; render(); },
       renderFolders: renderFolders,
       render: render,
     };

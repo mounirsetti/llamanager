@@ -1005,7 +1005,10 @@
   function updateEmpty() {
     requestAnimationFrame(relayoutMasonry);
     const hasCards = grid.querySelector(".gen-card");
-    emptyEl.hidden = !!hasCards || !!liveCard;
+    // A placeholder held out of the DOM (another folder is on screen) is not
+    // something this folder is showing, so it must not suppress the empty
+    // state for a folder that really is empty.
+    emptyEl.hidden = !!hasCards || !!(liveCard && liveCard.isConnected);
   }
 
   // ---------- Origin folders ----------
@@ -1019,14 +1022,35 @@
     onChange: () => reloadFeed(),
   });
 
+  /** True while the feed is showing the folder this page renders into. */
+  const inOwnFolder = () => scope.current() === cfg.selfOrigin;
+
+  /** The live placeholder belongs to the admin's own folder — that is where
+   *  the clip will land. While another folder (or the folder list) is on
+   *  screen it is held out of the DOM rather than pinned over somebody
+   *  else's media, and goes back at the head of the feed on return. The
+   *  render itself is untouched: the dock hint keeps reporting it from
+   *  wherever the operator is browsing. */
+  function syncLiveVisibility() {
+    if (!liveCard) return;
+    if (inOwnFolder()) {
+      if (!liveCard.isConnected) {
+        grid.insertBefore(liveCard, grid.firstChild);
+        spanCard(liveCard);
+      }
+    } else {
+      liveCard.remove();
+    }
+  }
+
   /** Empty the feed and refill it for the current scope: clip tiles inside
-   *  an origin's folder, folder cards at the parent level. No live tile can
-   *  be present — navigation is frozen while a render is in flight. */
+   *  an origin's folder, folder cards at the parent level. */
   async function reloadFeed() {
     state.seenUrls.clear();
     state.nextBefore = null;
     grid.querySelectorAll(".gen-card").forEach(c => c.remove());
     loadMore.hidden = true;
+    syncLiveVisibility();
     if (scope.isRoot()) { await scope.renderFolders(); updateEmpty(); return; }
     await loadInitial();
   }
@@ -1306,11 +1330,8 @@
 
   function setBusy(busy) {
     state.inFlight = busy;
-    // The live placeholder lives in this grid and is replaced by the
-    // finished clip in place, so the feed must not be swapped under it.
-    scope.setBusy(busy);
     submitBtn.disabled = busy;
-    hintEl.innerHTML = busy ? "Generating — you can keep browsing this folder." : "&nbsp;";
+    hintEl.innerHTML = busy ? "Generating — you can keep browsing the gallery." : "&nbsp;";
   }
   /* Cancel must reach the server: aborting our own stream only stops the
      page listening, and a video render is minutes of GPU time. */
@@ -1389,8 +1410,14 @@
       if (incognitoRun) {
         // Nothing on disk to refresh from: the clip is in this payload and
         // lives only in this tab.
+        // Unlike a normal render there is no file to come back to: these
+        // bytes live in this tab only. If the operator has wandered into
+        // another folder, step home so the clip is shown, not dropped.
         LMGalleryMedia.itemsFromB64Payload(payload, { kind: "video", prompt: incognitoPrompt })
-          .then(items => { prependItems(items); removeLive(); })
+          .then(async (items) => {
+            if (!inOwnFolder()) await scope.goTo(cfg.selfOrigin);
+            prependItems(items); removeLive();
+          })
           .catch(e => showError(`Could not display the incognito clip: ${e.message}`));
       } else {
         refreshFront();
@@ -1414,7 +1441,10 @@
       if (!r.ok) return;
       const payload = await r.json();
       const fresh = payload.items.filter(it => !state.seenUrls.has(it.url));
-      if (fresh.length) prependItems(fresh);
+      // Our own folder's files. When another folder is on screen the clip
+      // stays on disk and shows up on the way back, rather than being
+      // pinned over somebody else's media.
+      if (fresh.length && inOwnFolder()) prependItems(fresh);
     } catch (e) { console.warn("front refresh failed", e); }
   }
 
@@ -1423,9 +1453,10 @@
     if (!modelSel.value) { showError("Pick a model first."); return; }
     if (!promptEl.value.trim()) { showError("Prompt is empty."); return; }
 
-    // The clip lands in this admin's own folder, so go there before the live
-    // tile is made — otherwise it would sit in someone else's.
-    if (scope.current() !== cfg.selfOrigin) await scope.goTo(cfg.selfOrigin);
+    // The clip lands in this admin's own folder, so show it: the live tile
+    // then appears where the operator is looking. Nothing stops them
+    // wandering off again while it renders.
+    if (!inOwnFolder()) await scope.goTo(cfg.selfOrigin);
 
     const promptText = promptEl.value.trim();
     incognitoRun = isIncognito(); incognitoPrompt = promptText;

@@ -525,8 +525,8 @@
       {% include "_composer_reattach.html" %}
       {% include "_composer_page.html" %}
       <div class="gen-feedhead" id="gen-feedhead">
-        <span class="gen-feedhead__label">Newest first</span>
-        <span>New results land at the top ↑</span>
+        <span class="gen-feedhead__label gen-feedhead__static">Newest first</span>
+        <span class="gen-feedhead__static">New results land at the top ↑</span>
         <span class="gen-feedhead__live" id="gen-feedhead-live" hidden>
           <span class="gen-live__dot"></span><span id="gen-feedhead-live-text">Generating…</span>
         </span>
@@ -689,7 +689,7 @@
   const hintEl     = $("gen-hint");
   const genSpin    = $("gen-generate-spin");
   const genLabel   = $("gen-generate-label");
-  const feedHead   = $("gen-feedhead");
+  const feedStatic = document.querySelectorAll(".gen-feedhead__static");
   const feedLive   = $("gen-feedhead-live");
   const feedLiveTx = $("gen-feedhead-live-text");
   const baseTitle  = document.title;
@@ -1059,7 +1059,10 @@
     // Any mutation can add tiles; re-span so none is left at one 4px row.
     requestAnimationFrame(relayoutMasonry);
     const hasCards = grid.querySelector(".gen-card");
-    emptyEl.hidden = !!hasCards || live.cards.length > 0;
+    // A placeholder held out of the DOM (another folder is on screen) is not
+    // something this folder is showing, so it must not suppress the empty
+    // state for a folder that really is empty.
+    emptyEl.hidden = !!hasCards || live.cards.some(c => c.isConnected);
   }
 
   // ---------- Origin folders ----------
@@ -1073,15 +1076,36 @@
     onChange: () => reloadFeed(),
   });
 
+  /** True while the feed is showing the folder this page generates into. */
+  const inOwnFolder = () => scope.current() === cfg.selfOrigin;
+
+  /** The live placeholders belong to the admin's own folder — that is where
+   *  the result will land. While another folder (or the folder list) is on
+   *  screen they are held out of the DOM rather than pinned over somebody
+   *  else's media, and they go back at the head of the feed on return. The
+   *  run itself is untouched: the dock hint, the feed pill and the tab title
+   *  keep reporting it from wherever the operator is browsing. */
+  function syncLiveVisibility() {
+    if (!live.cards.length) return;
+    if (inOwnFolder()) {
+      const anchor = grid.firstChild;
+      live.cards.forEach(c => {
+        if (!c.isConnected) { grid.insertBefore(c, anchor); spanCard(c); }
+      });
+    } else {
+      live.cards.forEach(c => c.remove());
+    }
+  }
+
   /** Empty the feed and refill it for the current scope: media tiles inside
-   *  an origin's folder, folder cards at the parent level. No live tile can
-   *  be present — navigation is frozen while a generation is in flight. */
+   *  an origin's folder, folder cards at the parent level. */
   async function reloadFeed() {
     state.seenUrls.clear();
     state.nextBefore = null;
     grid.querySelectorAll(".gen-card").forEach(c => c.remove());
     loadMore.hidden = true;
-    feedHead.hidden = scope.isRoot();
+    feedStatic.forEach(el => { el.hidden = scope.isRoot(); });
+    syncLiveVisibility();
     if (scope.isRoot()) { await scope.renderFolders(); updateEmpty(); return; }
     await loadInitial();
   }
@@ -1417,11 +1441,17 @@
    *  Anything past the placeholder count is inserted above the rest of
    *  the feed, still newest-first. */
   function resolveLiveWith(items) {
+    const mine = inOwnFolder();
     items.forEach(it => {
       if (state.seenUrls.has(it.url)) return;
+      // Another origin's folder is on screen. The file is on disk and this
+      // run's placeholders are held out of the DOM (syncLiveVisibility), so
+      // consume the slot and let the image appear when the operator steps
+      // back into their own folder — never over somebody else's media.
+      const slot = live.cards.shift();
+      if (!mine) return;
       state.seenUrls.add(it.url);
       const card = cardFor(it, {fresh: true});
-      const slot = live.cards.shift();
       if (slot) slot.replaceWith(card);
       else {
         const next = live.cards[0] || grid.firstChild;
@@ -1526,9 +1556,6 @@
 
   function setBusy(busy) {
     state.inFlight = busy;
-    // The live placeholders live in this grid and resolve into the finished
-    // images in place, so the feed must not be swapped under them.
-    scope.setBusy(busy);
     submitBtn.disabled = busy;
     submitBtn.classList.toggle("is-busy", busy);
     genSpin.hidden = !busy;
@@ -1668,7 +1695,9 @@
       const fresh = payload.items.filter(it => !state.seenUrls.has(it.url));
       if (!fresh.length) return;
       if (resolve) resolveLiveWith(fresh);
-      else prependItems(fresh);
+      // These are our own folder's files; only push them onto the feed when
+      // that is the folder being shown.
+      else if (inOwnFolder()) prependItems(fresh);
     } catch (e) { console.warn("front refresh failed", e); }
   }
 
@@ -1677,9 +1706,10 @@
     if (!modelSel.value) { showError("Pick a model first."); return; }
     if (!promptEl.value.trim()) { showError("Prompt is empty."); return; }
 
-    // The result lands in this admin's own folder, so go there before the
-    // live tiles are made — otherwise they would sit in someone else's.
-    if (scope.current() !== cfg.selfOrigin) await scope.goTo(cfg.selfOrigin);
+    // The result lands in this admin's own folder, so show it: the live
+    // tiles then appear where the operator is looking. Nothing stops them
+    // wandering off again while it runs.
+    if (!inOwnFolder()) await scope.goTo(cfg.selfOrigin);
 
     const promptText = promptEl.value.trim();
     incognitoRun = isIncognito();
@@ -1744,6 +1774,10 @@
           const items = await LMGalleryMedia.itemsFromB64Payload(incognitoPayload || {}, {
             kind: "image", prompt: promptText,
           });
+          // Unlike a normal run there is no file to come back to: these bytes
+          // live in this tab only. If the operator has wandered into another
+          // folder, step home so the result is shown instead of dropped.
+          if (!inOwnFolder()) await scope.goTo(cfg.selfOrigin);
           resolveLiveWith(items);
         } catch (e) { showError(`Could not display the incognito result: ${e.message}`); }
       } else if (sawResult) {
