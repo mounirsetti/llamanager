@@ -34,6 +34,11 @@ from .server_manager import ServerError, ServerManager, StartSpec, resolve_spec
 log = logging.getLogger(__name__)
 
 
+#: Slot states in which a llama-server process exists and its weights are
+#: resident. "stopped" and "crashed" have no process, so they hold nothing.
+_STATES_HOLDING_VRAM = frozenset({"starting", "running", "swapping", "degraded"})
+
+
 @dataclass
 class SlotView:
     """Read-only snapshot of one slot — used by /admin/slots and the UI.
@@ -222,8 +227,17 @@ class ServerPool:
             # Best-effort file size for the running model. We read it
             # from spec.model_path's stat() — same path the engine is
             # serving. None for empty slots or if the file is gone.
+            #
+            # ``spec`` outlives a stop (it is the last spec the slot ran,
+            # which is what a restart reuses), so it cannot stand in for
+            # "a model is loaded". Without the state check a stopped slot
+            # kept reporting the size of the model it used to hold, and
+            # total_loaded_size_gb — the dashboard's VRAM-pressure proxy
+            # and an admission input — never came back down after an
+            # unload.
             size_gb: float | None = None
-            if sm.spec is not None and sm.spec.model_path is not None:
+            if (sm.runtime.state in _STATES_HOLDING_VRAM
+                    and sm.spec is not None and sm.spec.model_path is not None):
                 try:
                     size_b = sm.spec.model_path.stat().st_size
                     size_gb = round(size_b / (1024 ** 3), 2)
