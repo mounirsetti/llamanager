@@ -1516,7 +1516,7 @@ stays loopback-only here as everywhere else.
 | a tool answers *"needs an admin origin"* | the key isn't admin; mint an admin key on **Connect** |
 | `generate_video` fails with *"image-to-video model"* | that model needs an opening frame — pass `image_path` or `image_base64` |
 | `ask_local_model` returns empty text with a `warning` | the token cap was spent on reasoning; raise `max_tokens` |
-| `transcribe_audio` fails with *"ASR worker failed to become healthy"* | the ASR engine could not start — check **ASR** in the UI and `logs/llamanager.log`; heavy swap makes the worker miss its startup window |
+| `transcribe_audio` fails with *"ASR worker failed to become healthy"* | the error now carries the reason — `exited early rc=N` means a crash (see `logs/asr.log`), `health timeout` means it was still loading. Fixed in this version for ROCm hosts, where mmapped weights made the GPU copy take ~20 minutes |
 | the host lists no tools | it connected to `/` rather than `/mcp`, or to the SSE path — the endpoint is `http://host:port/mcp` |
 
 ### Reasoning / thinking control

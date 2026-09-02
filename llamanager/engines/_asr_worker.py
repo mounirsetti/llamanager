@@ -341,6 +341,27 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(500, {"error": str(e)})
 
 
+def _unmap(model):
+    """Lift every tensor out of its memory-mapped file backing.
+
+    ``from_pretrained`` mmaps the safetensors file, so each parameter is a
+    view onto page cache. On ROCm, copying a *file-backed* page to the GPU
+    costs ~1-2 s per tensor regardless of its size, while the identical
+    bytes copied from ordinary heap memory move in microseconds. Whisper
+    large-v3 has 587 tensors, so ``.to(device)`` took roughly twenty
+    minutes and the worker never answered ``/healthz`` inside its start
+    window — it looked like a hang, with no traceback, because it was
+    still making progress the whole time.
+
+    Cloning the whole model off the mapping costs ~0.15 s. Do that first,
+    then move. Harmless off ROCm: one extra host-side copy of a model that
+    is about to be copied to the GPU anyway.
+    """
+    for _, t in list(model.named_parameters()) + list(model.named_buffers()):
+        t.data = t.data.clone()
+    return model
+
+
 def main() -> int:
     global _model, _processor, _device, _dtype, _sem, _model_name
     p = argparse.ArgumentParser(description="Persistent ASR worker")
@@ -364,8 +385,8 @@ def main() -> int:
     _log(f"[asr-worker] loading {args.model_path} on {_device}/{dtype_name} "
          f"(max_concurrent={args.max_concurrent})")
     _processor = WhisperProcessor.from_pretrained(str(args.model_path))
-    _model = WhisperForConditionalGeneration.from_pretrained(
-        str(args.model_path), torch_dtype=_dtype).to(_device)
+    _model = _unmap(WhisperForConditionalGeneration.from_pretrained(
+        str(args.model_path), torch_dtype=_dtype)).to(_device)
     _model.eval()
     _inject_alignment_heads()
 

@@ -403,10 +403,17 @@ class AudioTaskRunner:
                      engine, model_id, self._base_url)
             try:
                 await self._wait_healthy(WORKER_START_TIMEOUT_S)
-            except Exception:
+            except Exception as e:
                 await self._stop_worker_locked()
                 self._record_failure()
-                raise AudioError("ASR worker failed to become healthy in time")
+                # Carry the specific reason: "exited early rc=1" (a crash,
+                # look in asr.log) and "health timeout" (still loading, or
+                # wedged) send you to different places, and collapsing both
+                # into one sentence cost real debugging time.
+                raise AudioError(
+                    f"ASR worker failed to become healthy: {e}. "
+                    f"See {self.cfg.logs_dir / 'asr.log'} for the worker's "
+                    f"own output.")
             if self._idle_task is None or self._idle_task.done():
                 self._idle_task = asyncio.create_task(self._idle_monitor())
 
