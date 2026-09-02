@@ -49,6 +49,16 @@ class AudioError(Exception):
     """Recoverable failure during transcription."""
 
 
+class AudioWorkerDied(AudioError):
+    """The worker process went away mid-request, without answering.
+
+    Distinct from a worker that *replies* with an error: that is the
+    engine telling us something, and repeating it would just fail again.
+    This one is the process dying under us, which a fresh worker survives
+    (see the retry in ``transcribe``).
+    """
+
+
 @dataclass
 class AudioResult:
     request_id: str
@@ -259,8 +269,8 @@ class AudioTaskRunner:
         # for this task) instead of stacking on top of it.
         if self.cfg.asr_coexist and self._coexist_feasible():
             # Warm, concurrent: keep the worker loaded alongside the LLM.
-            await self._ensure_worker(model_id, model_path, engine)
-            return await self._proxy(model_id, engine, profile, req, request_id, word_ts)
+            return await self._ensure_and_proxy(
+                model_id, model_path, engine, profile, req, request_id, word_ts)
         if self.cfg.asr_coexist:
             log.info("asr: coexist requested but host memory is tight — "
                      "unloading the LLM for this transcription instead")
@@ -270,11 +280,50 @@ class AudioTaskRunner:
         # when the last concurrent task finishes (or the worker idle-stops).
         await self._acquire_llm_yield()
         try:
-            await self._ensure_worker(model_id, model_path, engine)
-            return await self._proxy(model_id, engine, profile, req,
-                                     request_id, word_ts)
+            return await self._ensure_and_proxy(
+                model_id, model_path, engine, profile, req, request_id, word_ts)
         finally:
             await self._release_llm_yield()
+
+    async def _ensure_and_proxy(self, model_id, model_path, engine, profile,
+                                req, request_id, word_ts) -> AudioResult:
+        """One transcription, retried once if the worker dies mid-request.
+
+        ROCm ships no MIOpen kernel database for gfx1201, so the first
+        inference ever run for a given model's tensor shapes compiles
+        kernels on the spot — and that path can take the worker process
+        down natively: the connection closes with no reply and no Python
+        traceback. It is a once-per-new-model event; the compiled kernels
+        land in the MIOpen user cache, so a fresh worker gets through and
+        every later start is fine. Measured after the shapes are cached:
+        8 cold starts, 8 successes.
+
+        The retry is deliberately narrow. Only :class:`AudioWorkerDied`
+        (the process vanished) is retried, exactly once, and it is logged
+        at warning level. A worker that *answers* with an error, a model
+        that will not load, or a second death all propagate — this must
+        not turn a repeatable failure into a silent one.
+        """
+        for attempt in (1, 2):
+            await self._ensure_worker(model_id, model_path, engine)
+            try:
+                return await self._proxy(model_id, engine, profile, req,
+                                         request_id, word_ts)
+            except AudioWorkerDied:
+                if attempt == 2:
+                    raise
+                # State what happened; offer the usual cause as a lead, not
+                # as a diagnosis. The worker can die for other reasons (it
+                # was killed, the host OOMed), and a log line that asserts
+                # the wrong cause sends the next person the wrong way.
+                log.warning(
+                    "asr: the worker for %s died mid-request — retrying once "
+                    "with a fresh one. On this GPU the usual cause is the "
+                    "one-off MIOpen kernel build the first time a model's "
+                    "shapes are seen. [id=%s]", model_id, request_id)
+                async with self._start_lock:
+                    await self._stop_worker_locked()
+        raise AssertionError("unreachable")   # the loop always returns or raises
 
     async def _proxy(self, model_id, engine, profile, req, request_id,
                      word_ts) -> AudioResult:
@@ -303,6 +352,17 @@ class AudioTaskRunner:
                 segments=env.get("segments") or [], raw=env)
         except AudioError:
             self._record_failure(); raise
+        except httpx.TransportError as e:
+            # The connection died rather than answering. Several of these
+            # stringify to "" (ReadError especially), which is how this
+            # surfaced as a bare "502:" with no cause attached — so name the
+            # exception class in the message.
+            self._record_failure()
+            log.warning("asr worker died mid-request for %s: %s",
+                        request_id, type(e).__name__)
+            raise AudioWorkerDied(
+                f"the ASR worker died while transcribing "
+                f"({type(e).__name__})") from e
         except Exception as e:  # noqa: BLE001
             self._record_failure()
             log.exception("transcription proxy failed for %s", request_id)
